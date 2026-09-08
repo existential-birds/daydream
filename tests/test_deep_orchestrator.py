@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -1435,6 +1435,59 @@ def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
     _git(project, "add", "api.py")
     _commit(project, "change")
     return project
+
+
+class _PromptHookStub(_StubBackend):
+    """``_StubBackend`` whose ``intercept`` hook may answer one prompt itself.
+
+    Returning ``None`` (the default) falls through to the base stub's stream;
+    returning a sequence of events replaces that turn's stream entirely.
+    """
+
+    def intercept(self, cwd: Path, prompt: str) -> Sequence[AgentEvent] | None:
+        return None
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        own = self.intercept(cwd, prompt)
+        if own is not None:
+            for event in own:
+                yield event
+            return
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+
+
+def _prompt_ref(prompt: str, label: str) -> str:
+    """The value named by the prompt's single ``- <label>: <value>`` pointer line."""
+    return next(
+        line.removeprefix(f"- {label}: ")
+        for line in prompt.splitlines()
+        if line.startswith(f"- {label}: ")
+    )
+
+
+def _sanctioned_inputs(prompt: str) -> dict[str, Path]:
+    """The label -> path map the rendered sanctioned-inputs block enumerates."""
+    lines = prompt.splitlines()
+    start = lines.index("Sanctioned phase inputs (read only these exact files):") + 1
+    sanctioned: dict[str, Path] = {}
+    for line in lines[start:]:
+        if not line.startswith("- "):
+            break
+        label, path = line.removeprefix("- ").split(": ", 1)
+        sanctioned[label] = Path(path)
+    return sanctioned
 
 
 class _SecondaryEditBackend(_StubBackend):
@@ -2964,34 +3017,12 @@ async def test_confirmed_intent_reaches_fix_prompt(
 
     observed_intent: list[str] = []
 
-    class _IntentReadingStub(_StubBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-        ) -> AsyncIterator[AgentEvent]:
+    class _IntentReadingStub(_PromptHookStub):
+        def intercept(self, cwd: Path, prompt: str) -> None:
             if prompt.lower().startswith(("fix this issue", "fix these")):
-                intent_ref = next(
-                    line.removeprefix("- intent: ")
-                    for line in prompt.splitlines()
-                    if line.startswith("- intent: ")
-                )
-                observed_intent.append(Path(intent_ref).read_text(encoding="utf-8"))
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-            ):
-                yield event
+                intent_ref = Path(_prompt_ref(prompt, "intent"))
+                observed_intent.append(intent_ref.read_text(encoding="utf-8"))
+            return None
 
     stub = _IntentReadingStub(multi_stack_target)
     monkeypatch.setattr(
@@ -6738,99 +6769,57 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     summarizer_observations: list[dict[str, str]] = []
     private_partial_payloads: list[bytes] = []
 
-    class _HandoffReadingStub(_StubBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-        ) -> AsyncIterator[AgentEvent]:
+    class _HandoffReadingStub(_PromptHookStub):
+        def intercept(self, cwd: Path, prompt: str) -> Sequence[AgentEvent] | None:
             if (
                 response_kind == "unknown-private"
                 and "run the project's test suite" in prompt.lower()
             ):
                 self.test_suite_calls += 1
-                yield TextEvent(
-                    text=f"1 failed at {cwd / '.daydream' / 'unreported.log'}"
+                return [
+                    TextEvent(text=f"1 failed at {cwd / '.daydream' / 'unreported.log'}"),
+                    ResultEvent(structured_output=None, continuation=None),
+                ]
+            if "read-only failure-summarizer" not in prompt.lower():
+                return None
+            private_partial = Path(_prompt_ref(prompt, "trajectory-partial"))
+            partial_payload = json.loads(private_partial.read_text(encoding="utf-8"))
+            changed_relative = Path(".daydream-heal-fix-applied")
+            sanctioned = _sanctioned_inputs(prompt)
+            assert sanctioned["trajectory-partial"] == private_partial
+            assert all(path.is_file() for path in sanctioned.values())
+            future_trajectory = _prompt_ref(prompt, "trajectory")
+            future_children = _prompt_ref(prompt, "sub-trajectories")
+            model_body = (
+                "# Daydream handoff\n\nHANDOFF_STRUCTURED_SUCCESS\n\n"
+                "## Artifacts\n\n"
+                f"- trajectory: {future_trajectory}\n"
+                f"- sub-trajectories: {future_children}\n\n"
+                "## Changed files\n\n"
+                f"- {multi_stack_target / changed_relative}\n"
+            )
+            if response_kind == "known-leaf":
+                model_body += f"\nExact evidence: {private_partial}\n"
+            elif response_kind == "unknown-private":
+                model_body += f"\nUnknown evidence: {private_partial}.unknown\n"
+            private_partial_payloads.append(private_partial.read_bytes())
+            summarizer_observations.append(
+                {
+                    "private_partial": str(private_partial),
+                    "cwd": str(cwd),
+                    "session_id": str(partial_payload["session_id"]),
+                    "changed_body": (cwd / changed_relative).read_text(encoding="utf-8"),
+                    "prompt": prompt,
+                    "future_trajectory": future_trajectory,
+                    "future_children": future_children,
+                    "model_body": model_body,
+                }
+            )
+            return [
+                ResultEvent(
+                    structured_output={"handoff_prompt": model_body}, continuation=None
                 )
-                yield ResultEvent(structured_output=None, continuation=None)
-                return
-            if "read-only failure-summarizer" in prompt.lower():
-                private_partial = Path(
-                    next(
-                        line.removeprefix("- trajectory-partial: ")
-                        for line in prompt.splitlines()
-                        if line.startswith("- trajectory-partial: ")
-                    )
-                )
-                partial_payload = json.loads(private_partial.read_text(encoding="utf-8"))
-                changed_relative = Path(".daydream-heal-fix-applied")
-                changed_body = (cwd / changed_relative).read_text(encoding="utf-8")
-                sanctioned_header = "Sanctioned phase inputs (read only these exact files):"
-                rendered_lines = prompt.splitlines()
-                sanctioned_index = rendered_lines.index(sanctioned_header)
-                sanctioned: dict[str, Path] = {}
-                for line in rendered_lines[sanctioned_index + 1 :]:
-                    if not line.startswith("- "):
-                        break
-                    label, path = line.removeprefix("- ").split(": ", 1)
-                    sanctioned[label] = Path(path)
-                assert sanctioned["trajectory-partial"] == private_partial
-                assert all(path.is_file() for path in sanctioned.values())
-                future_trajectory = next(
-                    line.removeprefix("- trajectory: ")
-                    for line in prompt.splitlines()
-                    if line.startswith("- trajectory: ")
-                )
-                future_children = next(
-                    line.removeprefix("- sub-trajectories: ")
-                    for line in prompt.splitlines()
-                    if line.startswith("- sub-trajectories: ")
-                )
-                model_body = (
-                    "# Daydream handoff\n\nHANDOFF_STRUCTURED_SUCCESS\n\n"
-                    "## Artifacts\n\n"
-                    f"- trajectory: {future_trajectory}\n"
-                    f"- sub-trajectories: {future_children}\n\n"
-                    "## Changed files\n\n"
-                    f"- {multi_stack_target / changed_relative}\n"
-                )
-                if response_kind == "known-leaf":
-                    model_body += f"\nExact evidence: {private_partial}\n"
-                elif response_kind == "unknown-private":
-                    model_body += f"\nUnknown evidence: {private_partial}.unknown\n"
-                private_partial_payloads.append(private_partial.read_bytes())
-                summarizer_observations.append(
-                    {
-                        "private_partial": str(private_partial),
-                        "cwd": str(cwd),
-                        "session_id": str(partial_payload["session_id"]),
-                        "changed_body": changed_body,
-                        "prompt": prompt,
-                        "future_trajectory": future_trajectory,
-                        "future_children": future_children,
-                        "model_body": model_body,
-                    }
-                )
-                yield ResultEvent(
-                    structured_output={"handoff_prompt": model_body},
-                    continuation=None,
-                )
-                return
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-            ):
-                yield event
+            ]
 
     stub = _HandoffReadingStub(multi_stack_target)
     monkeypatch.setattr(
@@ -6851,14 +6840,12 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         if trajectory_mode == "custom-public"
         else None
     )
-    config = make_config(
-        multi_stack_target,
-        assume="yes",
-        output_mode="loop",
-        force_worktree=True,
-        trajectory_path=trajectory_path,
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop",
+            force_worktree=True, trajectory_path=trajectory_path,
+        )
     )
-    exit_code = await run(config)
 
     assert exit_code != 0
     handoffs = list(multi_stack_target.glob(".daydream/runs/*/handoff.md"))
@@ -6868,9 +6855,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     expected_trajectory = (
         trajectory_path if trajectory_path is not None else public_run / "trajectory.json"
     )
-    expected_partial = expected_trajectory.with_suffix(
-        expected_trajectory.suffix + ".partial"
-    )
+    expected_partial = expected_trajectory.with_suffix(expected_trajectory.suffix + ".partial")
     assert str(expected_trajectory) in body
     assert expected_trajectory.is_file()
     assert str(artifact_runtime_root.parent) not in body
@@ -6893,10 +6878,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     if response_kind == "clean":
         assert body == observation["model_body"]
     elif response_kind == "known-leaf":
-        assert body == observation["model_body"].replace(
-            private_partial,
-            str(expected_partial),
-        )
+        assert body == observation["model_body"].replace(private_partial, str(expected_partial))
         assert expected_partial.is_file()
         assert expected_partial.read_bytes() == private_partial_payloads[0]
     else:
@@ -7576,29 +7558,19 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
 
     target = tmp_path / "host-only-merge"
     target.mkdir()
-    (target / "README.md").write_text("# host-only fixture\n", encoding="utf-8")
+    readme = target / "README.md"
+    readme.write_text("# host-only fixture\n", encoding="utf-8")
     _init_repo(target)
     _git(target, "add", ".")
     _commit(target, "initial")
     _git(target, "checkout", "-b", "feature")
-    (target / "README.md").write_text(
-        "# host-only fixture\n\nchanged\n",
-        encoding="utf-8",
-    )
+    readme.write_text("# host-only fixture\n\nchanged\n", encoding="utf-8")
     _git(target, "add", ".")
     _commit(target, "change")
 
-    host_payload = {
-        "items": [
-            {
-                "id": 1,
-                "description": "deterministic host-only finding",
-            }
-        ]
-    }
+    host_payload = {"items": [{"id": 1, "description": "deterministic host-only finding"}]}
     expected_items = (json.dumps(host_payload, indent=2) + "\n").encode()
     ext_dir.write_module(
-        "import json\n"
         "from daydream.extensions import FlowStep\n"
         "\n"
         "async def _host_only_merge(ctx):\n"
@@ -7607,17 +7579,7 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
         "    async with phase_scope(DaydreamPhase.MERGE, stage='host-only-fixture'):\n"
         "        deep = artifact_dir_for(ctx.work.repo) / 'deep'\n"
         "        deep.mkdir(parents=True, exist_ok=True)\n"
-        "        payload = {\n"
-        "            'items': [\n"
-        "                {\n"
-        "                    'id': 1,\n"
-        "                    'description': 'deterministic host-only finding',\n"
-        "                }\n"
-        "            ]\n"
-        "        }\n"
-        "        (deep / 'merged-items.json').write_text(\n"
-        "            json.dumps(payload, indent=2) + '\\n', encoding='utf-8'\n"
-        "        )\n"
+        f"        (deep / 'merged-items.json').write_bytes({expected_items!r})\n"
         "\n"
         "def register(registry):\n"
         "    registry.register_phase(\n"
@@ -7632,28 +7594,15 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     monkeypatch.setattr(runner, "create_backend", fail_backend_construction)
 
     rc = await runner.run(
-        make_config(
-            target,
-            flow_name="host-only-flow",
-            archive=True,
-            run_eval=False,
-        )
+        make_config(target, flow_name="host-only-flow", archive=True, run_eval=False)
     )
 
     public_items = target / ".daydream" / "deep" / "merged-items.json"
     public_runs = list((target / ".daydream" / "runs").glob("*"))
     archived_runs = list((archive_dir / "runs").glob("*"))
-    assert (
-        rc == 0
-        and public_items.is_file()
-        and len(public_runs) == 1
-        and len(archived_runs) == 1
-    ), (
-        rc,
-        public_items.is_file(),
-        len(public_runs),
-        len(archived_runs),
-    )
+    assert rc == 0
+    assert public_items.is_file()
+    assert len(public_runs) == len(archived_runs) == 1, (public_runs, archived_runs)
 
     public_run = public_runs[0]
     archived_run = archived_runs[0]
@@ -7684,20 +7633,12 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     assert trajectory["extra"].get("subtrajectories", []) == []
 
     merge_events = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "merge"
+        event for event in trajectory["extra"]["phase_events"] if event["phase"] == "merge"
     ]
-    assert [event["event"] for event in merge_events] == [
-        "phase_start",
-        "phase_end",
-    ]
+    assert [event["event"] for event in merge_events] == ["phase_start", "phase_end"]
     assert all(event["session_id"] == public_run.name for event in merge_events)
     assert merge_events[0]["scope_id"] == merge_events[1]["scope_id"]
-    assert all(
-        event["metadata"] == {"stage": "host-only-fixture"}
-        for event in merge_events
-    )
+    assert all(event["metadata"] == {"stage": "host-only-fixture"} for event in merge_events)
     assert merge_events[-1]["status"] == "succeeded"
 
     manifest = json.loads((archived_run / "manifest.json").read_text(encoding="utf-8"))

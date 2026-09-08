@@ -36,8 +36,9 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -396,25 +397,19 @@ RESUME_CACHE_CANARY = "RESUME_CACHE_CANARY"
 SANCTIONED_INPUT_CANARY = "SANCTIONED_INPUT_CANARY"
 PRIVATE_ROOT_CANARY = "PRIVATE_ROOT_CANARY"
 RUNTIME_STATE_CANARY = "RUNTIME_STATE_CANARY"
-_OBSERVED_CANARIES = (
-    SOURCE_CANARY,
-    PRIOR_REASONING_CANARY,
-    CURRENT_REASONING_CANARY,
-    SIBLING_REASONING_CANARY,
-    RESUME_CACHE_CANARY,
-    SANCTIONED_INPUT_CANARY,
-    PRIVATE_ROOT_CANARY,
-    RUNTIME_STATE_CANARY,
+# Everything that must stay dark in the model's cwd for the whole run.
+_DARK_CANARIES = (
+    PRIOR_REASONING_CANARY, CURRENT_REASONING_CANARY, SIBLING_REASONING_CANARY,
+    RESUME_CACHE_CANARY, SANCTIONED_INPUT_CANARY, PRIVATE_ROOT_CANARY, RUNTIME_STATE_CANARY,
 )
-
-MakeConfig = Callable[..., Any]
+# Shared argv tail: the probe flow on the real Codex fixture executable.
+_PROBE_ARGV = ("--flow", "artifact-visibility-probe", "--backend", "codex", "--model", "fixture-model")
+# One byte beyond the 12,288-byte inline sanctioned-input budget.
+_OVERSIZE_PAYLOAD = ("OVERSIZE-1234" * 1000)[:12_289]
 
 
 def _write_visibility_probe_extension(
-    ext_dir: Any,
-    sanctioned_path: Path,
-    *,
-    oversize: bool = False,
+    ext_dir: Any, sanctioned_path: Path, *, oversize: bool = False
 ) -> None:
     """Register the ``artifact-visibility-probe`` extension flow.
 
@@ -469,10 +464,7 @@ def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
 
     prior = repo / ".daydream" / "runs" / "prior-public-run"
     prior.mkdir(parents=True)
-    (prior / "trajectory.json").write_text(
-        json.dumps({"reasoning": PRIOR_REASONING_CANARY}),
-        encoding="utf-8",
-    )
+    (prior / "trajectory.json").write_text(json.dumps({"reasoning": PRIOR_REASONING_CANARY}))
     legacy = repo / ".daydream" / "resume" / "legacy cache.json"
     legacy.parent.mkdir(parents=True)
     legacy.write_text(RESUME_CACHE_CANARY, encoding="utf-8")
@@ -480,99 +472,108 @@ def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
     # Private-root canaries under the redirected default private base: never
     # part of any model cwd, and never visible to the external executable.
     private_base.mkdir(mode=0o700, exist_ok=True)
-    (private_base / "private sentinel.txt").write_text(
-        PRIVATE_ROOT_CANARY,
-        encoding="utf-8",
-    )
     runtime_root = private_base / "runtime"
     runtime_root.mkdir(mode=0o700, exist_ok=True)
     sibling = runtime_root / "sibling-owner" / "runs" / "sibling-run"
     sibling.mkdir(parents=True, exist_ok=True)
-    (sibling / "reasoning.txt").write_text(
-        SIBLING_REASONING_CANARY,
-        encoding="utf-8",
-    )
-    (runtime_root / "runtime state.txt").write_text(
-        RUNTIME_STATE_CANARY,
-        encoding="utf-8",
-    )
+    for path, canary in (
+        (private_base / "private sentinel.txt", PRIVATE_ROOT_CANARY),
+        (runtime_root / "runtime state.txt", RUNTIME_STATE_CANARY),
+        (sibling / "reasoning.txt", SIBLING_REASONING_CANARY),
+    ):
+        path.write_text(canary, encoding="utf-8")
 
 
-def _install_codex_fixture(
-    root: Path,
-    sanctioned_path: Path,
+@dataclass(frozen=True)
+class _VisibilityCase:
+    """One seeded repo + probe extension + real Codex executable on ``PATH``."""
+
+    repo: Path
+    private_base: Path
+    sanctioned_path: Path
+    fixture: ProtocolCli
+
+
+@pytest.fixture
+def visibility_case(
+    tiny_diff_target: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    response_mode: str = "success",
-) -> ProtocolCli:
-    """Install the real Codex executable fixture and prepend its bin to PATH."""
-    fixture = install_protocol_cli(
-        root,
-        "codex",
-        response_mode=response_mode,  # type: ignore[arg-type]
-        sanctioned_files=(sanctioned_path,),
-    )
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    return fixture
+    ext_dir: Any,
+    artifact_runtime_root: Path,
+) -> Callable[..., _VisibilityCase]:
+    """Seed the canaries, register the probe flow, install the Codex fixture."""
+
+    def _setup(
+        *,
+        oversize: bool = False,
+        response_mode: Literal["success", "model_error", "process_error", "block"] = "success",
+        payload: str = SANCTIONED_INPUT_CANARY,
+    ) -> _VisibilityCase:
+        repo = tiny_diff_target
+        private_base = artifact_runtime_root.parent
+        _seed_visibility_canaries(repo, private_base)
+        sanctioned_dir = tmp_path / "external sanctioned artifacts"
+        sanctioned_dir.mkdir()
+        sanctioned_path = (sanctioned_dir / "evidence artifact.txt").resolve()
+        sanctioned_path.write_text(payload, encoding="utf-8")
+        _write_visibility_probe_extension(ext_dir, sanctioned_path, oversize=oversize)
+        fixture = install_protocol_cli(
+            tmp_path / "codex protocol fixture with spaces",
+            "codex",
+            response_mode=response_mode,
+            sanctioned_files=(sanctioned_path,),
+        )
+        monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+        _silence_cli_and_runner(monkeypatch)
+        return _VisibilityCase(repo, private_base, sanctioned_path, fixture)
+
+    return _setup
 
 
 def _assert_no_hidden_reasoning(observation: dict[str, Any]) -> None:
     """During the model calls, nothing but the committed source may be visible."""
     assert observation["cwd_canaries"][SOURCE_CANARY] is True
-    for canary in (
-        PRIOR_REASONING_CANARY,
-        CURRENT_REASONING_CANARY,
-        SIBLING_REASONING_CANARY,
-        RESUME_CACHE_CANARY,
-        SANCTIONED_INPUT_CANARY,
-        PRIVATE_ROOT_CANARY,
-        RUNTIME_STATE_CANARY,
-    ):
-        assert observation["cwd_canaries"][canary] is False
+    assert not any(observation["cwd_canaries"][canary] for canary in _DARK_CANARIES)
     assert observation["prompt_canaries"][CURRENT_REASONING_CANARY] is False
     assert observation["prompt_canaries"][SANCTIONED_INPUT_CANARY] is False
-    assert "private sentinel.txt" not in observation["cwd_entries"]
-    assert "runtime state.txt" not in observation["cwd_entries"]
+    entries = observation["cwd_entries"]
+    assert "private sentinel.txt" not in entries
+    assert "runtime state.txt" not in entries
     # Publication happens only after the model: no run state existed in the
     # model cwd while the external executable was searching it.
-    assert not any(
-        entry == ".daydream" or entry.startswith(".daydream/")
-        for entry in observation["cwd_entries"]
-    )
+    assert not any(entry == ".daydream" or entry.startswith(".daydream/") for entry in entries)
 
 
 def _assert_codex_observations(
-    observations: list[dict[str, Any]],
-    *,
-    sanctioned_path: Path,
-    expected_cwd: Path | None,
-    sandbox_mode: str = "danger-full-access",
-) -> None:
-    """External observation is the authority for what the child really saw."""
-    expected_digest = hashlib.sha256(sanctioned_path.read_bytes()).hexdigest()
+    case: _VisibilityCase, *, expected_cwd: Path | None = None
+) -> set[Path]:
+    """External observation is the authority for what the child really saw.
+
+    Returns the distinct model cwds the two invocations actually ran in.
+    """
+    expected_digest = hashlib.sha256(case.sanctioned_path.read_bytes()).hexdigest()
+    observations = case.fixture.read_observations()
     assert len(observations) == 2
+    model_cwds: set[Path] = set()
     for observation in observations:
         assert observation["backend"] == "codex"
         assert observation["response_mode"] == "success"
         assert observation["process_outcome"] == "success"
         argv = observation["argv"]
-        assert argv[argv.index("--sandbox") + 1] == sandbox_mode
+        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+        cwd = Path(observation["effective_cwd"])
+        model_cwds.add(cwd)
+        assert argv[argv.index("--cd") + 1] == str(cwd)
         if expected_cwd is not None:
-            assert Path(observation["effective_cwd"]) == Path(expected_cwd).resolve()
-            assert argv[argv.index("--cd") + 1] == str(Path(expected_cwd).resolve())
-        assert observation["sanctioned_reads"] == {
-            str(sanctioned_path): expected_digest
-        }
+            assert cwd == expected_cwd.resolve()
+        assert observation["sanctioned_reads"] == {str(case.sanctioned_path): expected_digest}
         _assert_no_hidden_reasoning(observation)
+    return model_cwds
 
 
 def _assert_frozen_outputs(
-    repo: Path,
-    archive_dir: Path,
-    explicit_trajectory: Path,
-    dump_dir: Path,
-    *,
-    model: str,
+    repo: Path, archive_dir: Path, explicit_trajectory: Path, dump_dir: Path, *, model: str
 ) -> str:
     """Explicit, public-run, archive, eval, and dump share one frozen identity."""
     explicit_bytes = explicit_trajectory.read_bytes()
@@ -619,13 +620,8 @@ def _tracked_source_state(repo: Path) -> dict[str, Any]:
 
 
 def _replace_destination_after_entered(
-    fixture: ProtocolCli,
-    destination: Path,
-    replacement: bytes,
-    *,
-    expected_pids: int,
-    stop: threading.Event,
-    failures: list[BaseException],
+    fixture: ProtocolCli, destination: Path, replacement: bytes, *,
+    expected_pids: int, stop: threading.Event, failures: list[BaseException],
 ) -> None:
     """Host helper thread: coordinate with the blocked executable over its FIFO.
 
@@ -662,12 +658,7 @@ def _replace_destination_after_entered(
 
 
 def test_artifact_visibility_cli_codex_in_place_publishes_after_model(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    artifact_runtime_root: Path,
-    archive_dir: Path,
+    visibility_case: Callable[..., _VisibilityCase], tmp_path: Path, archive_dir: Path
 ) -> None:
     """In-place CLI run: publication happens only after the model, and every
     final output shares one frozen identity.
@@ -679,73 +670,31 @@ def test_artifact_visibility_cli_codex_in_place_publishes_after_model(
     the post-run assertions prove explicit/public/archive/eval/dump are
     byte-bound to one session.
     """
-    repo = tiny_diff_target
-    private_base = artifact_runtime_root.parent
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "external sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "evidence artifact.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
-    _write_visibility_probe_extension(ext_dir, sanctioned_path)
-
-    fixture = _install_codex_fixture(
-        tmp_path / "codex protocol fixture",
-        sanctioned_path,
-        monkeypatch,
-    )
-
+    case = visibility_case()
     explicit_trajectory = tmp_path / "explicit trajectory output.json"
     dump_dir = tmp_path / "explicit artifact dump"
-    _silence_cli_and_runner(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                str(repo),
-                "--flow",
-                "artifact-visibility-probe",
-                "--backend",
-                "codex",
-                "--model",
-                "fixture-model",
-                "--trajectory",
-                str(explicit_trajectory),
-                "--dump-artifacts",
-                str(dump_dir),
-            ]
-        )
+        cli.main([
+            str(case.repo), *_PROBE_ARGV,
+            "--trajectory", str(explicit_trajectory), "--dump-artifacts", str(dump_dir),
+        ])
     assert exc.value.code == 0
 
-    observations = fixture.read_observations()
-    _assert_codex_observations(
-        observations,
-        sanctioned_path=sanctioned_path,
-        expected_cwd=repo,
-    )
+    _assert_codex_observations(case, expected_cwd=case.repo)
     _assert_frozen_outputs(
-        repo,
-        archive_dir,
-        explicit_trajectory,
-        dump_dir,
-        model="fixture-model",
+        case.repo, archive_dir, explicit_trajectory, dump_dir, model="fixture-model"
     )
 
 
 def test_artifact_visibility_cli_codex_worktree_branch_and_paths_with_spaces(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    artifact_runtime_root: Path,
-    archive_dir: Path,
+    visibility_case: Callable[..., _VisibilityCase], tmp_path: Path, archive_dir: Path
 ) -> None:
     """``--worktree --branch <feature-ref>`` reviews a disposable worktree and
     leaves the source checkout byte-for-byte unchanged; destinations with
     spaces route through the real publication pipeline."""
-    repo = tiny_diff_target
-    private_base = artifact_runtime_root.parent
-    _seed_visibility_canaries(repo, private_base)
+    case = visibility_case()
+    repo = case.repo
     # ``--branch`` resolves the feature ref against a real origin: publish a
     # bare remote and push both branches (real Git, no fakes).
     origin = bare_remote(tmp_path / "origin.git")
@@ -754,88 +703,35 @@ def test_artifact_visibility_cli_codex_worktree_branch_and_paths_with_spaces(
     git(repo, "push", "-u", "origin", "feature")
     git(repo, "fetch", "origin")
     source_before = _tracked_source_state(repo)
-
-    sanctioned_dir = tmp_path / "worktree sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "worktree evidence.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
-    _write_visibility_probe_extension(ext_dir, sanctioned_path)
-
-    fixture = _install_codex_fixture(
-        tmp_path / "codex worktree protocol fixture with spaces",
-        sanctioned_path,
-        monkeypatch,
-    )
-
     explicit_trajectory = tmp_path / "worktree trajectory output with spaces.json"
     dump_dir = tmp_path / "worktree artifact dump with spaces"
-    _silence_cli_and_runner(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                str(repo),
-                "--flow",
-                "artifact-visibility-probe",
-                "--backend",
-                "codex",
-                "--model",
-                "fixture-model",
-                "--worktree",
-                "--branch",
-                "feature",
-                "--trajectory",
-                str(explicit_trajectory),
-                "--dump-artifacts",
-                str(dump_dir),
-            ]
-        )
+        cli.main([
+            str(repo), *_PROBE_ARGV, "--worktree", "--branch", "feature",
+            "--trajectory", str(explicit_trajectory), "--dump-artifacts", str(dump_dir),
+        ])
     assert exc.value.code == 0
 
     # Source Git refs, index, and tracked bytes are exactly as before.
     assert _tracked_source_state(repo) == source_before
 
-    observations = fixture.read_observations()
-    expected_digest = hashlib.sha256(sanctioned_path.read_bytes()).hexdigest()
-    assert len(observations) == 2
-    model_cwds: set[Path] = set()
-    for observation in observations:
-        assert observation["backend"] == "codex"
-        assert observation["response_mode"] == "success"
-        assert observation["process_outcome"] == "success"
-        argv = observation["argv"]
-        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-        clone = Path(observation["effective_cwd"])
-        model_cwds.add(clone)
-        assert argv[argv.index("--cd") + 1] == str(clone)
-        assert clone != repo.resolve()
-        assert clone.is_relative_to(private_base / "workspaces")
-        assert observation["sanctioned_reads"] == {
-            str(sanctioned_path): expected_digest
-        }
-        _assert_no_hidden_reasoning(observation)
+    model_cwds = _assert_codex_observations(case)
     assert len(model_cwds) == 1
     model_cwd = model_cwds.pop()
+    assert model_cwd != repo.resolve()
+    assert model_cwd.is_relative_to(case.private_base / "workspaces")
     assert not model_cwd.exists(), "ephemeral worktree must be gone after the run"
 
     session_id = _assert_frozen_outputs(
-        repo,
-        archive_dir,
-        explicit_trajectory,
-        dump_dir,
-        model="fixture-model",
+        repo, archive_dir, explicit_trajectory, dump_dir, model="fixture-model"
     )
     # The public run is published to the SOURCE checkout, not the worktree.
     assert (repo / ".daydream" / "runs" / session_id / "trajectory.json").exists()
 
 
 def test_artifact_visibility_cli_codex_oversize_inline_input_fails_before_spawn(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    artifact_runtime_root: Path,
-    archive_dir: Path,
+    visibility_case: Callable[..., _VisibilityCase],
 ) -> None:
     """A 12,289-byte sanctioned input exceeds the 12,288-byte inline budget.
 
@@ -843,51 +739,20 @@ def test_artifact_visibility_cli_codex_oversize_inline_input_fails_before_spawn(
     ``prepare_sanctioned_inputs`` must fail closed before any model process is
     spawned: ``cli.main`` exits 1 and the observation directory stays empty.
     """
-    repo = tiny_diff_target
-    private_base = artifact_runtime_root.parent
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "oversize sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "oversize evidence.txt").resolve()
-    oversize_bytes = ("OVERSIZE-1234" * 1000)[:12_289]
-    assert len(oversize_bytes.encode("utf-8")) == 12_289
-    sanctioned_path.write_text(oversize_bytes, encoding="utf-8")
-    _write_visibility_probe_extension(ext_dir, sanctioned_path, oversize=True)
-
-    fixture = _install_codex_fixture(
-        tmp_path / "codex oversize protocol fixture",
-        sanctioned_path,
-        monkeypatch,
-    )
-    _silence_cli_and_runner(monkeypatch)
+    assert len(_OVERSIZE_PAYLOAD.encode("utf-8")) == 12_289
+    case = visibility_case(oversize=True, payload=_OVERSIZE_PAYLOAD)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                str(repo),
-                "--flow",
-                "artifact-visibility-probe",
-                "--backend",
-                "codex",
-                "--model",
-                "fixture-model",
-            ]
-        )
+        cli.main([str(case.repo), *_PROBE_ARGV])
     assert exc.value.code == 1
 
     # Nothing was spawned: no observation, no entered marker.
-    assert list(fixture.observations.iterdir()) == []
-    assert not fixture.entered.exists()
+    assert list(case.fixture.observations.iterdir()) == []
+    assert not case.fixture.entered.exists()
 
 
 def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_one(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    artifact_runtime_root: Path,
-    archive_dir: Path,
+    visibility_case: Callable[..., _VisibilityCase], tmp_path: Path
 ) -> None:
     """A destination replaced while the model runs must never be clobbered.
 
@@ -898,23 +763,7 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
     exercised). Publication must detect the collision, exit 1, and preserve
     the concurrent replacement exactly.
     """
-    repo = tiny_diff_target
-    private_base = artifact_runtime_root.parent
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "collision sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "collision evidence.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
-    _write_visibility_probe_extension(ext_dir, sanctioned_path)
-
-    fixture = _install_codex_fixture(
-        tmp_path / "codex collision protocol fixture",
-        sanctioned_path,
-        monkeypatch,
-        response_mode="block",
-    )
-
+    case = visibility_case(response_mode="block")
     explicit_trajectory = tmp_path / "collision trajectory output.json"
     explicit_trajectory.write_bytes(b"pre-existing published trajectory bytes")
     replacement = b"concurrent replacement trajectory bytes"
@@ -922,28 +771,15 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
     failures: list[BaseException] = []
     releaser = threading.Thread(
         target=_replace_destination_after_entered,
-        args=(fixture, explicit_trajectory, replacement),
+        args=(case.fixture, explicit_trajectory, replacement),
         kwargs={"expected_pids": 2, "stop": stop, "failures": failures},
         name="artifact-visibility-cli-collision",
         daemon=True,
     )
     releaser.start()
-    _silence_cli_and_runner(monkeypatch)
     try:
         with pytest.raises(SystemExit) as exc:
-            cli.main(
-                [
-                    str(repo),
-                    "--flow",
-                    "artifact-visibility-probe",
-                    "--backend",
-                    "codex",
-                    "--model",
-                    "fixture-model",
-                    "--trajectory",
-                    str(explicit_trajectory),
-                ]
-            )
+            cli.main([str(case.repo), *_PROBE_ARGV, "--trajectory", str(explicit_trajectory)])
     finally:
         stop.set()
         releaser.join(timeout=15)
@@ -952,7 +788,7 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
     assert failures == []
 
     # Both blocked invocations were observed and released.
-    observations = fixture.read_observations()
+    observations = case.fixture.read_observations()
     assert len(observations) == 2
     for observation in observations:
         assert observation["response_mode"] == "block"

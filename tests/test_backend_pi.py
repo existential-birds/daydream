@@ -96,10 +96,10 @@ async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd
     assert "--append-system-prompt" in argv and "--no-skills" in argv
     from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
+    # Neither the prompt nor the preamble is recorded verbatim -- only digests.
     observation_bytes = next(fixture.observations.glob("*.json")).read_bytes()
     assert prompt.encode() not in observation_bytes
-    system_content_recorded = json.dumps(_PI_SYSTEM_PREAMBLE).encode() in observation_bytes
-    assert system_content_recorded is False
+    assert json.dumps(_PI_SYSTEM_PREAMBLE).encode() not in observation_bytes
     assert argv[argv.index("--append-system-prompt") + 1] == "[content omitted]"
     assert observation["content_arguments"]["--append-system-prompt"] == [{
         "bytes": len(_PI_SYSTEM_PREAMBLE.encode()),

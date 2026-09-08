@@ -475,10 +475,7 @@ class RunWriteSnapshot:
 
 
 TrajectoryWriteCallback = Callable[["TrajectoryRecorder", RunWriteSnapshot], None]
-TrajectoryDocumentWriter = Callable[
-    [TrajectoryDocumentSnapshot, Literal["complete", "partial"]],
-    None,
-]
+TrajectoryDocumentWriter = Callable[[TrajectoryDocumentSnapshot, Literal["complete", "partial"]], None]
 
 
 @dataclass(frozen=True)
@@ -1372,16 +1369,7 @@ class _SignalFlushRegistry:
         )
         for document in prepared:
             try:
-                if root.document_writer is not None:
-                    root.document_writer(document, status)
-                elif status == "complete":
-                    atomic_write_json(document.path, json.loads(document.json_bytes))
-                else:
-                    document.path.parent.mkdir(parents=True, exist_ok=True)
-                    document.path.write_text(
-                        document.json_bytes.decode("utf-8"),
-                        encoding="utf-8",
-                    )
+                root._write_document(document, status)
             except Exception as exc:  # noqa: BLE001 - isolate every recorder write
                 if status == "complete":
                     raise
@@ -2700,10 +2688,8 @@ class TrajectoryRecorder:
                     f"{type(exc).__name__}: {exc}",
                 )
                 if exc_val is not None:
-                    exc_val.add_note(
-                        "trajectory finalization retained a secondary failure "
-                        f"({type(exc).__name__})"
-                    )
+                    # An in-flight failure owns the exit; do not mask it with SystemExit.
+                    exc_val.add_note(f"trajectory finalization also failed ({type(exc).__name__})")
                     return
                 raise SystemExit(2) from exc
             # Implicit/default path — degrade with warning per CORE-09 / D-11
@@ -3171,9 +3157,7 @@ class TrajectoryRecorder:
                         SubagentTrajectoryRef(
                             trajectory_id=completed.trajectory_id,
                             session_id=self.session_id,
-                            trajectory_path=self._logical_child_trajectory_ref(
-                                completed.path
-                            ),
+                            trajectory_path=self._logical_child_trajectory_ref(completed.path),
                         )
                     ],
                 )
@@ -3292,12 +3276,21 @@ class TrajectoryRecorder:
         )
         if document is None:
             return
-        if self.document_writer is not None:
-            self.document_writer(document, "complete")
-        else:
-            atomic_write_json(document.path, json.loads(document.json_bytes))
+        self._write_document(document, "complete")
         if registry is not None:
             registry.retain(document)
+
+    def _write_document(
+        self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
+    ) -> None:
+        """Write one frozen document through the host sink, or straight to disk."""
+        if self.document_writer is not None:
+            self.document_writer(document, status)
+        elif status == "complete":
+            atomic_write_json(document.path, json.loads(document.json_bytes))
+        else:
+            document.path.parent.mkdir(parents=True, exist_ok=True)
+            document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
 
     def _partial_state_key(self) -> str:
         """Return a stable digest of this recorder's current partial state."""
@@ -3316,37 +3309,24 @@ class TrajectoryRecorder:
         if not steps:
             if self.parent is not None or not allow_empty_root:
                 return None
-            if status == "partial":
-                # ATIF requires at least one Step. An early signal can arrive while
-                # child agents are already running but before the root has emitted a
-                # dispatch or agent Step. Represent the real host snapshot event as
-                # a system Step in the immutable partial only; do not mutate the live
-                # recorder or fabricate an agent invocation.
-                steps = [
-                    Step(
-                        step_id=1,
-                        timestamp=cutoff_at,
-                        source="system",
-                        message="Daydream run snapshot",
-                        extra={
-                            "daydream_run_flow": self.run_flow.value,
-                            "host_event": "partial_snapshot",
-                        },
-                    )
-                ]
-            else:
-                steps = [
-                    Step(
-                        step_id=1,
-                        timestamp=cutoff_at,
-                        source="system",
-                        message="Daydream host-only run snapshot",
-                        extra={
-                            "daydream_run_flow": self.run_flow.value,
-                            "host_event": "host_only_final_snapshot",
-                        },
-                    )
-                ]
+            # ATIF requires at least one Step. An early signal can arrive while
+            # child agents are already running -- or a whole run can end host-only --
+            # before the root emitted a dispatch or agent Step. Represent the real
+            # host event as a system Step in the immutable document only; do not
+            # mutate the live recorder or fabricate an agent invocation.
+            partial = status == "partial"
+            steps = [
+                Step(
+                    step_id=1,
+                    timestamp=cutoff_at,
+                    source="system",
+                    message="Daydream run snapshot" if partial else "Daydream host-only run snapshot",
+                    extra={
+                        "daydream_run_flow": self.run_flow.value,
+                        "host_event": "partial_snapshot" if partial else "host_only_final_snapshot",
+                    },
+                )
+            ]
         trajectory = self.build_trajectory(
             steps=list(steps),
             snapshot_at=cutoff_at if status == "partial" else None,
@@ -3436,14 +3416,7 @@ class TrajectoryRecorder:
             if document is None:
                 return False
             try:
-                if self.document_writer is not None:
-                    self.document_writer(document, "partial")
-                else:
-                    document.path.parent.mkdir(parents=True, exist_ok=True)
-                    document.path.write_text(
-                        document.json_bytes.decode("utf-8"),
-                        encoding="utf-8",
-                    )
+                self._write_document(document, "partial")
             except Exception as exc:  # noqa: BLE001 - capture still receives prepared bytes
                 print_warning(
                     _console,

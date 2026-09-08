@@ -65,6 +65,7 @@ from tests.harness.improve_backend import (
     install_capable_improve_backend,
     install_improve_stub,
     install_per_phase_improve_stubs,
+    stub_recon_commands,
 )
 
 MakeConfig = Callable[..., RunConfig]
@@ -939,43 +940,7 @@ async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
         "daydream.artifact_visibility._default_private_base",
         lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
     )
-
-    class HeadAdvancingPlanBackend(ImproveStubBackend):
-        def __init__(self, target: Path, active_repo: Path) -> None:
-            super().__init__(target)
-            self._active_repo = active_repo
-            self.advanced = False
-
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            if "You are writing a self-contained implementation plan" in prompt and not self.advanced:
-                (self._active_repo / "concurrent.txt").write_text(
-                    "advanced after plan session opened\n",
-                    encoding="utf-8",
-                )
-                git(self._active_repo, "add", "concurrent.txt")
-                commit(self._active_repo, "advance active ephemeral checkout")
-                self.advanced = True
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
-            ):
-                yield event
+    advanced: list[Path] = []
 
     async with open_workspace(
         source,
@@ -986,7 +951,18 @@ async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
         skip_tests=True,
         private_owner=owner,
     ) as work:
-        backend = HeadAdvancingPlanBackend(work.repo, work.repo)
+
+        def advance_active_checkout() -> None:
+            """Move the active ephemeral checkout's HEAD off the planned-at sha."""
+            (work.repo / "concurrent.txt").write_text(
+                "advanced after plan session opened\n", encoding="utf-8"
+            )
+            git(work.repo, "add", "concurrent.txt")
+            commit(work.repo, "advance active ephemeral checkout")
+            advanced.append(work.repo)
+
+        backend = ImproveStubBackend(work.repo)
+        backend.on_first_plan_write = advance_active_checkout
         backend.plan_gate_on_first_menu_id = True
         install_capable_improve_backend(monkeypatch, backend)
         async with open_audit_workspace(work.repo, run_id="owner-reanchor") as audit:
@@ -1004,54 +980,9 @@ async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
             improve_dir = work.repo / ".daydream" / "improve"
             improve_dir.mkdir(parents=True)
             pyproject = work.repo / "pyproject.toml"
-            test_line = improve_fixture_test_command_anchor(pyproject)
-            commands = [
-                {
-                    "id": "test-suite",
-                    "purpose": "Run the repository Python test suite",
-                    "command": "uv run pytest",
-                    "working_directory": ".",
-                    "expected_success": {
-                        "exit_code": 0,
-                        "observable_result": "exit 0 and the repository tests pass",
-                    },
-                    "applicability": {
-                        "scope": {"kind": "whole-repository"},
-                        "preconditions": [],
-                        "rationale": "The repository config declares this test entry point.",
-                    },
-                    "evidence": {
-                        "kind": "literal-command",
-                        "source_path": "pyproject.toml",
-                        "line_anchor": {"start_line": test_line, "end_line": test_line},
-                        "verbatim_excerpt": 'test-command = "uv run pytest"',
-                    },
-                },
-                {
-                    "id": "git-diff",
-                    "purpose": "Check that unrelated paths remain unchanged",
-                    "command": "git diff --exit-code",
-                    "working_directory": ".",
-                    "expected_success": {
-                        "exit_code": 0,
-                        "observable_result": "exit 0 and no unexpected diff is reported",
-                    },
-                    "applicability": {
-                        "scope": {"kind": "whole-repository"},
-                        "preconditions": [],
-                        "rationale": "The repository config declares this scope check.",
-                    },
-                    "evidence": {
-                        "kind": "literal-command",
-                        "source_path": "pyproject.toml",
-                        "line_anchor": {
-                            "start_line": test_line + 1,
-                            "end_line": test_line + 1,
-                        },
-                        "verbatim_excerpt": 'scope-command = "git diff --exit-code"',
-                    },
-                },
-            ]
+            commands = stub_recon_commands(
+                start_line=improve_fixture_test_command_anchor(pyproject)
+            )
             accepted, errors = validate_recon_commands(
                 {"commands": commands},
                 repo=work.repo,
@@ -1073,7 +1004,7 @@ async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
 
             await _step_write_plans(context)
 
-            assert backend.advanced is True
+            assert advanced == [work.repo]
             written = context.data["plan_write"]["written"]
             assert len(written) == 1
             landed = Path(written[0]["path"])

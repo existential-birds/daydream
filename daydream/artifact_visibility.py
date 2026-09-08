@@ -19,7 +19,7 @@ import stat
 import sys
 import unicodedata
 from collections.abc import Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -41,22 +41,35 @@ _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
 _LEGACY_ANCHORS = frozenset(("runs", "deep", "exploration", "partial-fixes", "diff.patch", "hunk-index.json"))
 _OPERATIONAL_NAMES = frozenset(("worktrees", "audit"))
-_TRANSITIONS = frozenset(
-    (
-        "DETACH_STAGED",
-        "DETACH_CANONICAL",
-        "DETACH_REMOVING",
-        "DETACHED",
-        "PUBLISH_STAGED",
-        "PUBLISH_BACKED_UP",
-        "PUBLISH_INSTALLED",
-        "PUBLISH_VERIFIED",
-    )
-)
 
 
 class ArtifactVisibilityError(RuntimeError):
     """A live artifact namespace could not be opened or used safely."""
+
+
+class _Transition(str, Enum):
+    """Journalled in-flight transaction state; ``PUBLISH_*`` members publish."""
+
+    DETACH_STAGED = "DETACH_STAGED"
+    DETACH_CANONICAL = "DETACH_CANONICAL"
+    DETACH_REMOVING = "DETACH_REMOVING"
+    DETACHED = "DETACHED"
+    PUBLISH_STAGED = "PUBLISH_STAGED"
+    PUBLISH_BACKED_UP = "PUBLISH_BACKED_UP"
+    PUBLISH_INSTALLED = "PUBLISH_INSTALLED"
+    PUBLISH_VERIFIED = "PUBLISH_VERIFIED"
+
+    @property
+    def is_publish(self) -> bool:
+        return self.name.startswith("PUBLISH_")
+
+
+class _TerminalState(str, Enum):
+    """Journalled outcome a retired transaction's cleanup ticket records."""
+
+    DETACHED_RECONCILED = "DETACHED_RECONCILED"
+    PUBLISH_RECONCILED = "PUBLISH_RECONCILED"
+    PUBLISH_VERIFIED = "PUBLISH_VERIFIED"
 
 
 class OutputLabel(str, Enum):
@@ -152,13 +165,7 @@ class _AtomicNameExchange:
         for name in (staged_name, target_name):
             _validate_exchange_name(name, message="atomic exchange name is invalid")
         ctypes.set_errno(0)
-        result = self._function(
-            parent_fd,
-            os.fsencode(staged_name),
-            parent_fd,
-            os.fsencode(target_name),
-            self._flags,
-        )
+        result = self._function(parent_fd, os.fsencode(staged_name), parent_fd, os.fsencode(target_name), self._flags)
         if result == 0:
             return _NameExchangeResult(0, None)
         if result == -1:
@@ -179,21 +186,44 @@ class ArtifactManifestEntry:
 
 @dataclass(frozen=True)
 class ArtifactLayout:
+    """One run's private namespace; every derived path is a property."""
+
     repo: Path
     source: Path
     git_common_dir: Path
     source_git_dir: Path
     repo_git_dir: Path
-    artifact_runtime_root: Path
     operational_workspaces_root: Path
     session_id: str
     state_root: Path
-    live_root: Path
-    daydream_dir: Path
-    review_output: Path
-    public_daydream_dir: Path
-    public_review_output: Path
-    workspace_key: str
+
+    @property
+    def artifact_runtime_root(self) -> Path:
+        return self.state_root.parent
+
+    @property
+    def workspace_key(self) -> str:
+        return self.state_root.name
+
+    @property
+    def live_root(self) -> Path:
+        return self.state_root / "runs" / self.session_id / "live"
+
+    @property
+    def daydream_dir(self) -> Path:
+        return self.live_root / _DAYDREAM
+
+    @property
+    def review_output(self) -> Path:
+        return self.live_root / _REVIEW_OUTPUT
+
+    @property
+    def public_daydream_dir(self) -> Path:
+        return self.source / _DAYDREAM
+
+    @property
+    def public_review_output(self) -> Path:
+        return self.source / _REVIEW_OUTPUT
 
 
 @dataclass(frozen=True)
@@ -205,8 +235,6 @@ class ArtifactWorkspaceIdentity:
     git_common_dir: Path
     source_git_dir: Path
     repo_git_dir: Path
-    runtime_root: Path
-    operational_workspaces_root: Path
     operational_state_root: Path
     state_root: Path
     workspace_key: str
@@ -277,14 +305,35 @@ class ArtifactTreeSnapshot:
     destinations: tuple[RoutedDestination, ...]
 
 
+@dataclass
+class _RoutedRecord:
+    """One registered route paired with the destination ledger row it owns."""
+
+    route: RoutedDestination
+    record: _DestinationRecord
+    late: Path | None = None
+
+
 @dataclass(frozen=True)
 class ArtifactEvidenceProvenance:
+    """Where one run's evidence lived, as paths the consumer must not rebuild."""
+
     workspace_key: str
     session_id: str
     public_source: Path
-    live_components: tuple[str, ...]
+    live_root: Path
+
+    @property
+    def public_daydream_dir(self) -> Path:
+        return self.public_source / _DAYDREAM
+
+    @property
+    def public_review_output(self) -> Path:
+        return self.public_source / _REVIEW_OUTPUT
 
 
+_PUBLIC_LABELS = (OutputLabel.PUBLIC_DAYDREAM, OutputLabel.PUBLIC_REVIEW_OUTPUT)
+_TRAJECTORY_LABELS = (OutputLabel.EXPLICIT_TRAJECTORY, OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL)
 _SESSION: ContextVar[ArtifactSession | None] = ContextVar("daydream_artifact_session", default=None)
 
 
@@ -298,10 +347,7 @@ def private_root_locations(*, base: Path | None = None) -> PrivateRootLocations:
     selected = _default_private_base() if base is None else base
     if not selected.is_absolute() or _absolute_lexical(selected) != selected:
         raise ArtifactVisibilityError("private storage base must be an absolute lexical path")
-    return PrivateRootLocations(
-        artifact_runtime=selected / "runtime",
-        operational_workspaces=selected / "workspaces",
-    )
+    return PrivateRootLocations(artifact_runtime=selected / "runtime", operational_workspaces=selected / "workspaces")
 
 
 def _absolute_lexical(path: Path) -> Path:
@@ -336,10 +382,7 @@ def _declared_directory(path: Path, *, label: str) -> Path:
 
 def _open_directory_descriptor(path: Path, *, label: str) -> int:
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:
         raise ArtifactVisibilityError(f"{label} is not an accessible directory") from exc
     if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
@@ -350,24 +393,6 @@ def _open_directory_descriptor(path: Path, *, label: str) -> int:
 
 def _overlaps(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
-
-
-def _ensure_private_directory(path: Path) -> None:
-    missing: list[Path] = []
-    cursor = path
-    while not cursor.exists():
-        missing.append(cursor)
-        if cursor.parent == cursor:
-            break
-        cursor = cursor.parent
-    for existing in (cursor, *cursor.parents):
-        with suppress(OSError):
-            if stat.S_ISLNK(existing.lstat().st_mode):
-                raise ArtifactVisibilityError("artifact runtime ancestry contains a symlink")
-    path.mkdir(parents=True, exist_ok=True)
-    for created in reversed(missing):
-        os.chmod(created, 0o700)
-    os.chmod(path, 0o700)
 
 
 def _workspace_key(source: Path, common_dir: Path) -> str:
@@ -401,18 +426,10 @@ def _validate_private_root_declaration(path: Path, *, label: str) -> None:
             raise ArtifactVisibilityError(f"{label} ancestry is not a directory")
 
 
-def validate_private_directory(
-    path: Path,
-    *,
-    label: str,
-    require_mode: bool = True,
-    allow_absent: bool = False,
-) -> None:
-    """Refuse anything but a real, owner-private directory at ``path``.
+def validate_private_directory(path: Path, *, label: str, allow_absent: bool = False) -> None:
+    """Refuse anything but a real, mode-0700 directory at ``path``.
 
-    ``allow_absent`` accepts a path that does not exist yet, which discovery
-    roots need; ``require_mode`` drops the mode-0700 requirement for trees that
-    predate private storage.
+    ``allow_absent`` accepts a path that does not exist yet, which discovery roots need.
     """
     if allow_absent and not path.exists() and not path.is_symlink():
         return
@@ -422,16 +439,30 @@ def validate_private_directory(
         raise ArtifactVisibilityError(f"{label} is not an accessible directory") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise ArtifactVisibilityError(f"{label} must be a real directory")
-    if require_mode and stat.S_IMODE(metadata.st_mode) != 0o700:
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
         raise ArtifactVisibilityError(f"{label} must have mode 0700")
 
 
 def _create_private_directory(path: Path) -> None:
+    """Create ``path`` and every missing ancestor as a mode-0700 real directory."""
     missing: list[Path] = []
     cursor = path
     while not cursor.exists() and not cursor.is_symlink():
         missing.append(cursor)
+        if cursor.parent == cursor:
+            break
         cursor = cursor.parent
+    for existing in (cursor, *cursor.parents):
+        if existing == path:
+            # The leaf's own kind and mode are the storage root's, not its
+            # ancestry's; validate_private_directory below reports it as such.
+            continue
+        try:
+            metadata = existing.lstat()
+        except OSError as exc:
+            raise ArtifactVisibilityError("artifact runtime ancestry is not accessible") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ArtifactVisibilityError("artifact runtime ancestry contains a symlink")
     for directory in reversed(missing):
         directory.mkdir(mode=0o700)
         os.chmod(directory, 0o700)
@@ -457,24 +488,21 @@ def _preflight_owner_root(path: Path, expected: dict[str, object], *, label: str
     return True
 
 
-def resolve_private_workspace_owner(
-    source: Path,
-    *,
-    locations: PrivateRootLocations,
-) -> PrivateWorkspaceOwner:
-    """Resolve and durably validate the source-owned sibling namespaces."""
-    canonical_source = _declared_directory(source, label="private workspace source")
+def _source_git_identity(source: Path, *, action: str) -> tuple[Path, Path]:
+    """Resolve one canonical source directory together with its Git common dir."""
+    canonical = _declared_directory(source, label="private workspace source")
     try:
-        common_dir = git_ops.git_common_dir(canonical_source)
+        return canonical, git_ops.git_common_dir(canonical)
     except git_ops.GitError as exc:
-        raise ArtifactVisibilityError("could not resolve private workspace Git ownership") from exc
+        raise ArtifactVisibilityError(f"could not {action} private workspace Git ownership") from exc
+
+
+def resolve_private_workspace_owner(source: Path, *, locations: PrivateRootLocations) -> PrivateWorkspaceOwner:
+    """Resolve and durably validate the source-owned sibling namespaces."""
+    canonical_source, common_dir = _source_git_identity(source, action="resolve")
     _validate_private_root_declaration(locations.artifact_runtime, label="artifact runtime")
-    _validate_private_root_declaration(
-        locations.operational_workspaces,
-        label="operational workspace root",
-    )
-    declared_artifacts = locations.artifact_runtime
-    declared_operations = locations.operational_workspaces
+    _validate_private_root_declaration(locations.operational_workspaces, label="operational workspace root")
+    declared_artifacts, declared_operations = locations.artifact_runtime, locations.operational_workspaces
     if _overlaps(declared_artifacts, declared_operations):
         raise ArtifactVisibilityError("private storage roots overlap")
     for private_root in (declared_artifacts, declared_operations):
@@ -485,27 +513,17 @@ def resolve_private_workspace_owner(
     operational_state = declared_operations / workspace_key
     expected = _private_owner_payload(canonical_source, common_dir, workspace_key)
 
-    artifact_owned = _preflight_owner_root(
-        artifact_state,
-        expected,
-        label="artifact state root",
-    )
-    operational_owned = _preflight_owner_root(
-        operational_state,
-        expected,
-        label="operational state root",
-    )
+    artifact_owned = _preflight_owner_root(artifact_state, expected, label="artifact state root")
+    operational_owned = _preflight_owner_root(operational_state, expected, label="operational state root")
     for root in (declared_artifacts, declared_operations, artifact_state, operational_state):
         _create_private_directory(root)
     if not artifact_owned:
         _atomic_json(artifact_state / "owner.json", expected)
     if not operational_owned:
         _atomic_json(operational_state / "owner.json", expected)
-    artifact_owner = artifact_state / "owner.json"
-    operational_owner = operational_state / "owner.json"
     _preflight_owner_root(artifact_state, expected, label="artifact state root")
     _preflight_owner_root(operational_state, expected, label="operational state root")
-    if artifact_owner.read_bytes() != operational_owner.read_bytes():
+    if (artifact_state / "owner.json").read_bytes() != (operational_state / "owner.json").read_bytes():
         raise ArtifactVisibilityError("private peer owner metadata is not byte-identical")
     return PrivateWorkspaceOwner(
         source=canonical_source,
@@ -516,18 +534,9 @@ def resolve_private_workspace_owner(
     )
 
 
-def validate_private_workspace_owner(
-    owner: PrivateWorkspaceOwner,
-    *,
-    source: Path,
-    repo: Path | None = None,
-) -> None:
+def validate_private_workspace_owner(owner: PrivateWorkspaceOwner, *, source: Path, repo: Path | None = None) -> None:
     """Reattest one supplied owner at a consuming boundary."""
-    canonical_source = _declared_directory(source, label="private workspace source")
-    try:
-        common_dir = git_ops.git_common_dir(canonical_source)
-    except git_ops.GitError as exc:
-        raise ArtifactVisibilityError("could not validate private workspace Git ownership") from exc
+    canonical_source, common_dir = _source_git_identity(source, action="validate")
     expected_key = _workspace_key(canonical_source, common_dir)
     if (
         not isinstance(owner.source, Path)
@@ -590,11 +599,7 @@ def operational_worktree_root(owner: PrivateWorkspaceOwner) -> Path:
     return root
 
 
-def derive_workspace_identity(
-    work: WorkContext,
-    *,
-    owner: PrivateWorkspaceOwner,
-) -> ArtifactWorkspaceIdentity:
+def derive_workspace_identity(work: WorkContext, *, owner: PrivateWorkspaceOwner) -> ArtifactWorkspaceIdentity:
     """Validate a WorkContext against one pre-resolved private owner."""
     validate_private_workspace_owner(owner, source=work.source, repo=work.repo)
     repo = _declared_directory(work.repo, label="artifact repo")
@@ -609,8 +614,6 @@ def derive_workspace_identity(
         git_common_dir=owner.git_common_dir,
         source_git_dir=source_git_dir,
         repo_git_dir=repo_git_dir,
-        runtime_root=owner.artifact_state_root.parent,
-        operational_workspaces_root=owner.operational_state_root.parent,
         operational_state_root=owner.operational_state_root,
         state_root=owner.artifact_state_root,
         workspace_key=owner.workspace_key,
@@ -684,6 +687,36 @@ def _load_json(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def _load_ledger(
+    path: Path,
+    *,
+    items_key: str,
+    message: str,
+    identity: Sequence[tuple[str, object]] = (),
+    required: bool = False,
+) -> list[dict[str, object]]:
+    """Read one versioned ledger envelope, returning its still-unvalidated items.
+
+    An absent ledger reads as empty unless ``required``; per-entry validation
+    stays with the caller that knows the entry shape.
+    """
+    if not required and not path.exists() and not path.is_symlink():
+        return []
+    payload = _load_json(path)
+    if (
+        set(payload) != {"schema_version", items_key, *(key for key, _ in identity)}
+        or payload.get("schema_version") != _SCHEMA_VERSION
+        or any(payload.get(key) != value for key, value in identity)
+        or not isinstance(payload.get(items_key), list)
+    ):
+        raise ArtifactVisibilityError(message)
+    return cast(list[dict[str, object]], payload[items_key])
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
 def _validate_relative_name(name: str) -> None:
     raw_parts = name.split("/")
     if (
@@ -700,10 +733,7 @@ def _read_regular(path: Path, metadata: os.stat_result) -> bytes:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
-            metadata.st_dev,
-            metadata.st_ino,
-        ):
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
             raise ArtifactVisibilityError("artifact file changed during inspection")
         chunks: list[bytes] = []
         while chunk := os.read(fd, 64 * 1024):
@@ -756,9 +786,7 @@ def _walk(
         entries.append(ArtifactManifestEntry(relative, "file", metadata.st_size, mode, None))
         return
     content = _read_regular(path, metadata)
-    entries.append(
-        ArtifactManifestEntry(relative, "file", len(content), mode, hashlib.sha256(content).hexdigest())
-    )
+    entries.append(ArtifactManifestEntry(relative, "file", len(content), mode, hashlib.sha256(content).hexdigest()))
 
 
 def _manifest(
@@ -799,14 +827,12 @@ def _manifest_payload(entries: tuple[ArtifactManifestEntry, ...]) -> dict[str, o
 
 
 def _parse_manifest(path: Path) -> tuple[ArtifactManifestEntry, ...]:
-    payload = _load_json(path)
-    if set(payload) != {"schema_version", "entries"} or type(payload["schema_version"]) is not int or payload[
-        "schema_version"
-    ] != _SCHEMA_VERSION:
-        raise ArtifactVisibilityError("artifact manifest schema is unsupported")
-    raw_entries = payload["entries"]
-    if not isinstance(raw_entries, list):
-        raise ArtifactVisibilityError("artifact manifest is malformed")
+    raw_entries = _load_ledger(
+        path,
+        items_key="entries",
+        message="artifact manifest schema is unsupported",
+        required=True,
+    )
     result: list[ArtifactManifestEntry] = []
     seen: set[str] = set()
     normalized: set[str] = set()
@@ -849,10 +875,7 @@ def _entry_at(
 
 def _write_baseline_manifest(transaction: Path, index: int, record: _DestinationRecord) -> None:
     """Persist one record's baseline manifest, which never changes after capture."""
-    _atomic_json(
-        transaction / f"destination-{index:04d}-baseline-manifest.json",
-        _manifest_payload(record.baseline),
-    )
+    _atomic_json(transaction / f"destination-{index:04d}-baseline-manifest.json", _manifest_payload(record.baseline))
 
 
 def _write_destination_records(
@@ -904,42 +927,22 @@ def _write_destination_records(
     )
 
 
-def _load_destination_records(
-    transaction: Path,
-    *,
-    include_published: bool,
-) -> tuple[_DestinationRecord, ...]:
-    registry_path = transaction / "destinations.json"
-    if not registry_path.exists() and not registry_path.is_symlink():
-        return ()
-    payload = _load_json(registry_path)
-    if (
-        set(payload) != {"schema_version", "includes_published", "destinations"}
-        or type(payload["schema_version"]) is not int
-        or payload["schema_version"] != _SCHEMA_VERSION
-        or type(payload["includes_published"]) is not bool
-        or payload["includes_published"] is not include_published
-        or not isinstance(payload["destinations"], list)
-    ):
-        raise ArtifactVisibilityError("artifact destination registry is malformed")
+_DESTINATION_KEYS = frozenset(
+    "index record_id requested base relative label delivery expected_kind baseline_state "
+    "missing_parents expected_dev expected_ino prepared_sha256 installed_sha256".split()
+)
+
+
+def _load_destination_records(transaction: Path, *, include_published: bool) -> tuple[_DestinationRecord, ...]:
+    raw_destinations = _load_ledger(
+        transaction / "destinations.json",
+        items_key="destinations",
+        message="artifact destination registry is malformed",
+        identity=(("includes_published", include_published),),
+    )
     result: list[_DestinationRecord] = []
-    for expected_index, raw in enumerate(payload["destinations"]):
-        if not isinstance(raw, dict) or set(raw) != {
-            "index",
-            "record_id",
-            "requested",
-            "base",
-            "relative",
-            "label",
-            "delivery",
-            "expected_kind",
-            "baseline_state",
-            "missing_parents",
-            "expected_dev",
-            "expected_ino",
-            "prepared_sha256",
-            "installed_sha256",
-        }:
+    for expected_index, raw in enumerate(raw_destinations):
+        if not isinstance(raw, dict) or set(raw) != _DESTINATION_KEYS:
             raise ArtifactVisibilityError("artifact destination registry is malformed")
         index = raw["index"]
         record_id = raw["record_id"]
@@ -968,15 +971,7 @@ def _load_destination_records(
             or expected_kind not in ("file", "directory")
             or baseline_state not in ("absent", "file", "directory")
             or not all(value is None or type(value) is int for value in (expected_dev, expected_ino))
-            or not all(
-                value is None
-                or (
-                    isinstance(value, str)
-                    and len(value) == 64
-                    and all(char in "0123456789abcdef" for char in value)
-                )
-                for value in (prepared_sha256, installed_sha256)
-            )
+            or not all(value is None or _is_sha256(value) for value in (prepared_sha256, installed_sha256))
         ):
             raise ArtifactVisibilityError("artifact destination registry is malformed")
         _validate_relative_name(relative)
@@ -995,11 +990,9 @@ def _load_destination_records(
             delivery = DestinationDelivery(delivery_value)
         except (TypeError, ValueError) as exc:
             raise ArtifactVisibilityError("artifact destination registry is malformed") from exc
-        if label in (OutputLabel.PUBLIC_DAYDREAM, OutputLabel.PUBLIC_REVIEW_OUTPUT):
+        if label in _PUBLIC_LABELS:
             raise ArtifactVisibilityError("artifact destination registry is malformed")
-        baseline = _parse_manifest(
-            transaction / f"destination-{index:04d}-baseline-manifest.json"
-        )
+        baseline = _parse_manifest(transaction / f"destination-{index:04d}-baseline-manifest.json")
         published = (
             _parse_manifest(transaction / f"destination-{index:04d}-published-manifest.json")
             if include_published
@@ -1009,18 +1002,15 @@ def _load_destination_records(
             raise ArtifactVisibilityError("artifact destination manifest identity is malformed")
         if baseline_state == "absent" and baseline:
             raise ArtifactVisibilityError("artifact destination baseline identity is malformed")
-        root_entry = next((entry for entry in baseline if entry.path == relative), None)
-        if baseline_state != "absent" and (
-            root_entry is None or root_entry.kind != baseline_state
-        ):
+        root_entry = _entry_at(baseline, relative)
+        if baseline_state != "absent" and (root_entry is None or root_entry.kind != baseline_state):
             raise ArtifactVisibilityError("artifact destination baseline identity is malformed")
         missing_parents = tuple(cast(list[str], missing_raw))
         for missing in missing_parents:
             _validate_relative_name(missing)
             if Path(missing) not in Path(relative).parents:
                 raise ArtifactVisibilityError("artifact destination parent identity is malformed")
-        candidate = requested_path
-        if any(_overlaps(candidate, Path(existing.requested)) for existing in result):
+        if any(_overlaps(requested_path, Path(existing.requested)) for existing in result):
             raise ArtifactVisibilityError("artifact destination registry contains overlapping paths")
         result.append(
             _DestinationRecord(
@@ -1030,8 +1020,8 @@ def _load_destination_records(
                 relative,
                 label,
                 delivery,
-                cast(Literal["file", "directory"], expected_kind),
-                cast(Literal["absent", "file", "directory"], baseline_state),
+                expected_kind,
+                baseline_state,
                 baseline,
                 missing_parents,
                 cast(int | None, expected_dev),
@@ -1063,10 +1053,7 @@ def _copy_tree(source: Path, destination: Path, entries: tuple[ArtifactManifestE
                 handle.write(content)
                 handle.flush()
                 os.fchmod(fd, entry.mode)
-                os.utime(
-                    fd,
-                    ns=(source_metadata.st_atime_ns, source_metadata.st_mtime_ns),
-                )
+                os.utime(fd, ns=(source_metadata.st_atime_ns, source_metadata.st_mtime_ns))
                 os.fsync(handle.fileno())
         finally:
             os.close(fd)
@@ -1085,18 +1072,12 @@ _transfer_post_observer: Any | None = None
 
 
 def _stage_registry(transaction: Path) -> list[dict[str, object]]:
-    path = transaction / "stages.json"
-    if not path.exists() and not path.is_symlink():
-        return []
-    payload = _load_json(path)
-    if (
-        set(payload) != {"schema_version", "transaction_id", "stages"}
-        or payload.get("schema_version") != _SCHEMA_VERSION
-        or payload.get("transaction_id") != transaction.name
-        or not isinstance(payload.get("stages"), list)
-    ):
-        raise ArtifactVisibilityError("artifact transfer-stage registry is malformed")
-    result = cast(list[dict[str, object]], payload["stages"])
+    result = _load_ledger(
+        transaction / "stages.json",
+        items_key="stages",
+        message="artifact transfer-stage registry is malformed",
+        identity=(("transaction_id", transaction.name),),
+    )
     for index, entry in enumerate(result):
         if (
             not isinstance(entry, dict)
@@ -1113,6 +1094,20 @@ def _stage_registry(transaction: Path) -> list[dict[str, object]]:
     return result
 
 
+def _transfer_stage_owner(entry: dict[str, object], *, transaction: Path, workspace_key: str) -> dict[str, object]:
+    """Derive the owner attestation a transfer stage carries, from its registry row."""
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "workspace_key": workspace_key,
+        "transaction_id": transaction.name,
+        "stage_id": entry["stage_id"],
+        "purpose": entry["purpose"],
+        "record_id": entry["record_id"],
+        "parent_dev": entry["parent_dev"],
+        "parent_ino": entry["parent_ino"],
+    }
+
+
 def _create_transfer_stage(
     parent: Path,
     *,
@@ -1127,7 +1122,7 @@ def _create_transfer_stage(
     registry = _stage_registry(transaction)
     stage_id = f"stage-{len(registry):04d}"
     stage = parent / f".daydream-transfer-{transaction.name}-{stage_id}"
-    entry = {
+    entry: dict[str, object] = {
         "stage_id": stage_id,
         "path": str(stage),
         "purpose": purpose,
@@ -1146,57 +1141,28 @@ def _create_transfer_stage(
     if stage.exists() or stage.is_symlink():
         raise ArtifactVisibilityError("artifact transfer-stage collision")
     stage.mkdir(mode=0o700)
-    owner = {
-        "schema_version": _SCHEMA_VERSION,
-        "workspace_key": workspace_key,
-        "transaction_id": transaction.name,
-        "stage_id": stage_id,
-        "purpose": purpose,
-        "record_id": record_id,
-        "parent_dev": parent_metadata.st_dev,
-        "parent_ino": parent_metadata.st_ino,
-    }
-    _atomic_json(stage / "stage-owner.json", owner)
+    _atomic_json(
+        stage / "stage-owner.json",
+        _transfer_stage_owner(entry, transaction=transaction, workspace_key=workspace_key),
+    )
     _fsync_directory(parent)
     return stage
 
 
-def _validate_transfer_stage(
-    stage: Path,
-    *,
-    transaction: Path,
-    workspace_key: str,
-) -> None:
+def _validate_transfer_stage(stage: Path, *, transaction: Path, workspace_key: str) -> None:
     registry = _stage_registry(transaction)
     matching = next((entry for entry in registry if entry["path"] == str(stage)), None)
     if matching is None or stage.parent != Path(str(matching["path"])).parent:
         raise ArtifactVisibilityError("artifact transfer-stage ownership is missing")
     parent_metadata = stage.parent.lstat()
-    if (parent_metadata.st_dev, parent_metadata.st_ino) != (
-        matching["parent_dev"],
-        matching["parent_ino"],
-    ):
+    if (parent_metadata.st_dev, parent_metadata.st_ino) != (matching["parent_dev"], matching["parent_ino"]):
         raise ArtifactVisibilityError("artifact transfer-stage parent identity changed")
-    owner = _load_json(stage / "stage-owner.json")
-    expected = {
-        "schema_version": _SCHEMA_VERSION,
-        "workspace_key": workspace_key,
-        "transaction_id": transaction.name,
-        "stage_id": matching["stage_id"],
-        "purpose": matching["purpose"],
-        "record_id": matching["record_id"],
-        "parent_dev": matching["parent_dev"],
-        "parent_ino": matching["parent_ino"],
-    }
-    if owner != expected:
+    expected = _transfer_stage_owner(matching, transaction=transaction, workspace_key=workspace_key)
+    if _load_json(stage / "stage-owner.json") != expected:
         raise ArtifactVisibilityError("artifact transfer-stage owner is malformed")
 
 
-def _cleanup_registered_stages(
-    transaction: Path,
-    *,
-    workspace_key: str,
-) -> None:
+def _cleanup_registered_stages(transaction: Path, *, workspace_key: str) -> None:
     for entry in _stage_registry(transaction):
         stage = Path(cast(str, entry["path"]))
         if not stage.exists() and not stage.is_symlink():
@@ -1215,9 +1181,7 @@ def _cleanup_registered_stages(
                     observed=moved,
                     stage=stage,
                 )
-                raise ArtifactVisibilityError(
-                    "artifact recovery retained an unexpected transferred entry"
-                )
+                raise ArtifactVisibilityError("artifact recovery retained an unexpected transferred entry")
         _remove_owned_tree(stage, stage.parent)
 
 
@@ -1242,14 +1206,7 @@ def _manifest_entry_from_payload(
         or size < 0
         or not 0 <= mode <= 0o7777
         or (kind == "directory" and (size != 0 or digest is not None))
-        or (
-            kind == "file"
-            and (
-                not isinstance(digest, str)
-                or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-            )
-        )
+        or (kind == "file" and not _is_sha256(digest))
     ):
         raise ArtifactVisibilityError(message)
     _validate_relative_name(relative)
@@ -1268,15 +1225,13 @@ def _load_transfer_intents(stage: Path, *, owner: dict[str, Any] | None = None) 
         return []
     if owner is None:
         owner = _load_json(stage / "stage-owner.json")
-    payload = _load_json(path)
-    if (
-        set(payload) != {"schema_version", "stage_id", "intents"}
-        or payload.get("schema_version") != _SCHEMA_VERSION
-        or payload.get("stage_id") != owner.get("stage_id")
-        or not isinstance(payload.get("intents"), list)
-    ):
-        raise ArtifactVisibilityError("artifact transfer intent is malformed")
-    result = cast(list[dict[str, object]], payload["intents"])
+    result = _load_ledger(
+        path,
+        items_key="intents",
+        message="artifact transfer intent is malformed",
+        identity=(("stage_id", owner.get("stage_id")),),
+        required=True,
+    )
     for index, intent in enumerate(result):
         if (
             not isinstance(intent, dict)
@@ -1291,22 +1246,12 @@ def _load_transfer_intents(stage: Path, *, owner: dict[str, Any] | None = None) 
         source = Path(cast(str, intent["source"]))
         _validate_relative_name(relative)
         expected = _manifest_entry_from_payload(intent["expected"])
-        if (
-            expected.path != relative
-            or not source.is_absolute()
-            or _absolute_lexical(source) != source
-        ):
+        if expected.path != relative or not source.is_absolute() or _absolute_lexical(source) != source:
             raise ArtifactVisibilityError("artifact transfer intent is malformed")
     return result
 
 
-def _record_transfer_intent(
-    stage: Path,
-    *,
-    path: Path,
-    relative: str,
-    expected: ArtifactManifestEntry,
-) -> None:
+def _record_transfer_intent(stage: Path, *, path: Path, relative: str, expected: ArtifactManifestEntry) -> None:
     owner = _load_json(stage / "stage-owner.json")
     intents = _load_transfer_intents(stage, owner=owner)
     intents.append(
@@ -1341,17 +1286,12 @@ def _append_conflict(
 ) -> None:
     """Append one adjudication record to the transaction's conflict registry."""
     path = transaction / "conflicts.json"
-    conflicts: list[dict[str, object]] = []
-    if path.exists() or path.is_symlink():
-        payload = _load_json(path)
-        if (
-            set(payload) != {"schema_version", "transaction_id", "conflicts"}
-            or payload.get("schema_version") != _SCHEMA_VERSION
-            or payload.get("transaction_id") != transaction.name
-            or not isinstance(payload.get("conflicts"), list)
-        ):
-            raise ArtifactVisibilityError("artifact conflict registry is malformed")
-        conflicts = cast(list[dict[str, object]], payload["conflicts"])
+    conflicts = _load_ledger(
+        path,
+        items_key="conflicts",
+        message="artifact conflict registry is malformed",
+        identity=(("transaction_id", transaction.name),),
+    )
     conflicts.append(
         {
             "record_id": record_id,
@@ -1434,15 +1374,11 @@ def _transfer_entry(
         except FileExistsError:
             pass
         except OSError as exc:
-            raise ArtifactVisibilityError(
-                "artifact entry conflict could not be restored without clobbering"
-            ) from exc
+            raise ArtifactVisibilityError("artifact entry conflict could not be restored without clobbering") from exc
         raise ArtifactVisibilityError("artifact entry changed during ownership transfer conflict")
 
 
-def _deepest_first_directories(
-    entries: Sequence[ArtifactManifestEntry],
-) -> list[ArtifactManifestEntry]:
+def _deepest_first_directories(entries: Sequence[ArtifactManifestEntry]) -> list[ArtifactManifestEntry]:
     """Return the directory entries ordered so children always precede parents."""
     return sorted(
         (entry for entry in entries if entry.kind == "directory"),
@@ -1515,9 +1451,6 @@ def _remove_owned_tree(path: Path, owner: Path) -> None:
     _fsync_directory(owner)
 
 
-_CLEANUP_TERMINAL_STATES = frozenset(
-    {"DETACHED_RECONCILED", "PUBLISH_RECONCILED", "PUBLISH_VERIFIED"}
-)
 _cleanup_observer: Any | None = None
 _external_entry_observer: Any | None = None
 _name_exchange_factory: Any = _AtomicNameExchange
@@ -1530,39 +1463,32 @@ def _notify_external(state: str, purpose: _ExternalEntryPurpose, path: Path) -> 
         observer(state, purpose.value, path)
 
 
+_EXTERNAL_KEYS = frozenset(
+    "record_id purpose parent name parent_dev parent_ino expected_kind expected_mode "
+    "expected_sha256 lifecycle entry_dev entry_ino failure_reason destination_record_id".split()
+)
+_EXTERNAL_FAILURE_REASONS = (
+    None,
+    "unsupported",
+    "conflict",
+    "identity_changed",
+    "operational_refusal",
+    "ambiguous",
+    "abi_result",
+)
+
+
 def _external_records(transaction: Path) -> list[dict[str, object]]:
-    path = transaction / "external-entries.json"
-    if not path.exists() and not path.is_symlink():
-        return []
-    payload = _load_json(path)
-    if (
-        set(payload) != {"schema_version", "transaction_id", "entries"}
-        or payload.get("schema_version") != _SCHEMA_VERSION
-        or payload.get("transaction_id") != transaction.name
-        or not isinstance(payload.get("entries"), list)
-    ):
-        raise ArtifactVisibilityError("external entry ledger is malformed")
-    result = cast(list[dict[str, object]], payload["entries"])
-    required = {
-        "record_id",
-        "purpose",
-        "parent",
-        "name",
-        "parent_dev",
-        "parent_ino",
-        "expected_kind",
-        "expected_mode",
-        "expected_sha256",
-        "lifecycle",
-        "entry_dev",
-        "entry_ino",
-        "failure_reason",
-        "destination_record_id",
-    }
+    result = _load_ledger(
+        transaction / "external-entries.json",
+        items_key="entries",
+        message="external entry ledger is malformed",
+        identity=(("transaction_id", transaction.name),),
+    )
     for index, entry in enumerate(result):
         if (
             not isinstance(entry, dict)
-            or set(entry) != required
+            or set(entry) != _EXTERNAL_KEYS
             or entry.get("record_id") != f"external-{index:04d}"
             or entry.get("purpose") not in _EXTERNAL_PURPOSE_VALUES
             or entry.get("lifecycle") not in _EXTERNAL_LIFECYCLE_VALUES
@@ -1576,20 +1502,8 @@ def _external_records(transaction: Path) -> list[dict[str, object]]:
                 value is None or type(value) is int
                 for value in (entry.get("entry_dev"), entry.get("entry_ino"))
             )
-            or entry.get("failure_reason")
-            not in (
-                None,
-                "unsupported",
-                "conflict",
-                "identity_changed",
-                "operational_refusal",
-                "ambiguous",
-                "abi_result",
-            )
-            or not (
-                entry.get("destination_record_id") is None
-                or isinstance(entry.get("destination_record_id"), str)
-            )
+            or entry.get("failure_reason") not in _EXTERNAL_FAILURE_REASONS
+            or not (entry.get("destination_record_id") is None or isinstance(entry.get("destination_record_id"), str))
         ):
             raise ArtifactVisibilityError("external entry ledger is malformed")
         parent = Path(cast(str, entry["parent"]))
@@ -1598,11 +1512,7 @@ def _external_records(transaction: Path) -> list[dict[str, object]]:
             raise ArtifactVisibilityError("external entry ledger is malformed")
         _validate_exchange_name(name)
         digest = entry["expected_sha256"]
-        if digest is not None and (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
+        if digest is not None and not _is_sha256(digest):
             raise ArtifactVisibilityError("external entry ledger is malformed")
     return result
 
@@ -1677,9 +1587,15 @@ def _update_external_record(
     entry_ino: int | None = None,
     expected_mode: int | None = None,
     expected_sha256: str | None = None,
+    identity: tuple[int, int, int, str] | None = None,
     failure_reason: str | None = None,
 ) -> dict[str, object]:
-    """Persist one lifecycle transition and return the record as written."""
+    """Persist one lifecycle transition and return the record as written.
+
+    ``identity`` is the whole observed (dev, ino, mode, digest) tuple at once.
+    """
+    if identity is not None:
+        entry_dev, entry_ino, expected_mode, expected_sha256 = identity
     records = _external_records(transaction)
     if index >= len(records):
         raise ArtifactVisibilityError("external entry record identity is malformed")
@@ -1719,10 +1635,7 @@ def _open_parent_fd(parent: Path) -> tuple[int, os.stat_result]:
     return fd, metadata
 
 
-def _external_identity(
-    parent_fd: int,
-    name: str,
-) -> tuple[int, int, int, str] | _ExternalEntryIssue | None:
+def _external_identity(parent_fd: int, name: str) -> tuple[int, int, int, str] | _ExternalEntryIssue | None:
     _validate_exchange_name(name)
     try:
         fd = os.open(
@@ -1761,6 +1674,16 @@ def _external_identity(
         os.close(fd)
 
 
+def _ledger_identity(record: dict[str, object]) -> tuple[object, object, object, object]:
+    """Return the (dev, ino, mode, digest) identity one external ledger row attests."""
+    return record["entry_dev"], record["entry_ino"], record["expected_mode"], record["expected_sha256"]
+
+
+def _issue(*observations: object) -> _ExternalEntryIssue | None:
+    """Return the first observation that is a nonregular/unreadable entry, if any."""
+    return next((value for value in observations if isinstance(value, _ExternalEntryIssue)), None)
+
+
 def _create_attested_external_file(
     transaction: Path,
     *,
@@ -1783,12 +1706,7 @@ def _create_attested_external_file(
         expected_sha256=digest,
         destination_record_id=destination_record_id,
     )
-    fd = os.open(
-        name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        mode,
-        dir_fd=parent_fd,
-    )
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=parent_fd)
     try:
         os.fchmod(fd, mode)
         with os.fdopen(fd, "wb", closefd=False) as handle:
@@ -1802,12 +1720,7 @@ def _create_attested_external_file(
     _notify_external("ENTRY_CREATED", purpose, parent / name)
     identity = _external_identity(parent_fd, name)
     if identity != (metadata.st_dev, metadata.st_ino, mode, digest):
-        _mark_external_conflict(
-            transaction,
-            index,
-            reason="identity_changed",
-            observed=identity if isinstance(identity, _ExternalEntryIssue) else None,
-        )
+        _mark_external_conflict(transaction, index, reason="identity_changed", observed=_issue(identity))
         raise ArtifactVisibilityError("external output attestation failed")
     _update_external_record(
         transaction,
@@ -1822,25 +1735,11 @@ def _create_attested_external_file(
 def _cleanup_external_name(transaction: Path, index: int, parent_fd: int) -> None:
     record = _external_records(transaction)[index]
     name = cast(str, record["name"])
-    expected = (
-        record["entry_dev"],
-        record["entry_ino"],
-        record["expected_mode"],
-        record["expected_sha256"],
-    )
-    _update_external_record(
-        transaction,
-        index,
-        lifecycle=_ExternalEntryLifecycle.CLEANUP_PREPARED,
-    )
+    expected = _ledger_identity(record)
+    _update_external_record(transaction, index, lifecycle=_ExternalEntryLifecycle.CLEANUP_PREPARED)
     observed = _external_identity(parent_fd, name)
     if observed != expected:
-        _mark_external_conflict(
-            transaction,
-            index,
-            reason="identity_changed",
-            observed=observed if isinstance(observed, _ExternalEntryIssue) else None,
-        )
+        _mark_external_conflict(transaction, index, reason="identity_changed", observed=_issue(observed))
         raise ArtifactVisibilityError("external output cleanup identity changed")
     os.unlink(name, dir_fd=parent_fd)
     os.fsync(parent_fd)
@@ -1864,9 +1763,7 @@ def _external_failure_reason(result: _NameExchangeResult, *, probe: bool) -> str
     return "operational_refusal"
 
 
-def _expected_external_identity(
-    record: _DestinationRecord,
-) -> tuple[int | None, int | None, int, str | None]:
+def _expected_external_identity(record: _DestinationRecord) -> tuple[int | None, int | None, int, str | None]:
     """Return the (dev, ino, mode, digest) identity a live external entry must show."""
     digest = record.installed_sha256
     mode = 0o600
@@ -1926,11 +1823,7 @@ def _ensure_external_parent(transaction: Path, parent: Path) -> list[int]:
             )
             os.mkdir(directory.name, mode=0o700, dir_fd=parent_fd)
             os.fsync(parent_fd)
-            _notify_external(
-                "ENTRY_CREATED",
-                _ExternalEntryPurpose.MISSING_PARENT,
-                directory,
-            )
+            _notify_external("ENTRY_CREATED", _ExternalEntryPurpose.MISSING_PARENT, directory)
             fd = os.open(
                 directory.name,
                 os.O_RDONLY
@@ -1960,11 +1853,7 @@ def _ensure_external_parent(transaction: Path, parent: Path) -> list[int]:
     return created
 
 
-def _probe_external_parent(
-    transaction: Path,
-    parent: Path,
-    exchange: _AtomicNameExchange,
-) -> tuple[int, int]:
+def _probe_external_parent(transaction: Path, parent: Path, exchange: _AtomicNameExchange) -> tuple[int, int]:
     parent_fd, parent_metadata = _open_parent_fd(parent)
     token = secrets.token_hex(12)
     name_a = f".daydream-probe-{token}-a"
@@ -1993,19 +1882,11 @@ def _probe_external_parent(
         a_before = _external_identity(parent_fd, name_a)
         b_before = _external_identity(parent_fd, name_b)
         if not isinstance(a_before, tuple) or not isinstance(b_before, tuple):
-            observed = a_before if isinstance(a_before, _ExternalEntryIssue) else b_before
             _mark_external_conflict(
-                transaction,
-                a_index,
-                reason="identity_changed",
-                observed=observed if isinstance(observed, _ExternalEntryIssue) else None,
+                transaction, a_index, reason="identity_changed", observed=_issue(a_before, b_before)
             )
             raise ArtifactVisibilityError("live external atomic exchange probe entry changed")
-        _update_external_record(
-            transaction,
-            a_index,
-            lifecycle=_ExternalEntryLifecycle.OPERATION_PREPARED,
-        )
+        _update_external_record(transaction, a_index, lifecycle=_ExternalEntryLifecycle.OPERATION_PREPARED)
         result = exchange.call(parent_fd, name_a, name_b)
         _notify_external("PRIMARY_CALLED", _ExternalEntryPurpose.PROBE_EXCHANGE_A, parent / name_a)
         os.fsync(parent_fd)
@@ -2022,43 +1903,23 @@ def _probe_external_parent(
             )
             raise ArtifactVisibilityError("live external atomic exchange probe was refused")
         if result.result != 0 or a_after != b_before or b_after != a_before:
-            reason = _external_failure_reason(result, probe=True)
-            observed = a_after if isinstance(a_after, _ExternalEntryIssue) else b_after
             _mark_external_conflict(
                 transaction,
                 a_index,
-                reason=reason,
-                observed=observed if isinstance(observed, _ExternalEntryIssue) else None,
+                reason=_external_failure_reason(result, probe=True),
+                observed=_issue(a_after, b_after),
             )
             raise ArtifactVisibilityError("live external atomic exchange probe failed")
-        _update_external_record(
-            transaction,
-            a_index,
-            lifecycle=_ExternalEntryLifecycle.REVERSAL_ATTEMPTED,
-        )
+        _update_external_record(transaction, a_index, lifecycle=_ExternalEntryLifecycle.REVERSAL_ATTEMPTED)
         reverse = exchange.call(parent_fd, name_a, name_b)
         _notify_external("REVERSAL_CALLED", _ExternalEntryPurpose.PROBE_EXCHANGE_A, parent / name_a)
         os.fsync(parent_fd)
         reverse_a = _external_identity(parent_fd, name_a)
         reverse_b = _external_identity(parent_fd, name_b)
-        if (
-            reverse.result != 0
-            or reverse_a != a_before
-            or reverse_b != b_before
-        ):
-            observed = reverse_a if isinstance(reverse_a, _ExternalEntryIssue) else reverse_b
-            _mark_external_conflict(
-                transaction,
-                a_index,
-                reason="ambiguous",
-                observed=observed if isinstance(observed, _ExternalEntryIssue) else None,
-            )
+        if reverse.result != 0 or reverse_a != a_before or reverse_b != b_before:
+            _mark_external_conflict(transaction, a_index, reason="ambiguous", observed=_issue(reverse_a, reverse_b))
             raise ArtifactVisibilityError("live external atomic exchange reversal failed")
-        _update_external_record(
-            transaction,
-            a_index,
-            lifecycle=_ExternalEntryLifecycle.ATTESTED,
-        )
+        _update_external_record(transaction, a_index, lifecycle=_ExternalEntryLifecycle.ATTESTED)
         link_index = _new_external_record(
             transaction,
             purpose=_ExternalEntryPurpose.PROBE_LINK_TARGET,
@@ -2069,18 +1930,8 @@ def _probe_external_parent(
             expected_sha256=a_before[3],
         )
         try:
-            _external_link(
-                name_a,
-                name_link,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            _notify_external(
-                "LINK_CREATED",
-                _ExternalEntryPurpose.PROBE_LINK_TARGET,
-                parent / name_link,
-            )
+            _external_link(name_a, name_link, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+            _notify_external("LINK_CREATED", _ExternalEntryPurpose.PROBE_LINK_TARGET, parent / name_link)
         except OSError as exc:
             link_observation = _external_identity(parent_fd, name_link)
             if link_observation is None:
@@ -2091,26 +1942,12 @@ def _probe_external_parent(
                     failure_reason="operational_refusal",
                 )
             else:
-                _mark_external_conflict(
-                    transaction,
-                    link_index,
-                    reason="conflict",
-                    observed=(
-                        link_observation
-                        if isinstance(link_observation, _ExternalEntryIssue)
-                        else None
-                    ),
-                )
+                _mark_external_conflict(transaction, link_index, reason="conflict", observed=_issue(link_observation))
             raise ArtifactVisibilityError("live external no-clobber link probe failed") from exc
         os.fsync(parent_fd)
         linked = _external_identity(parent_fd, name_link)
         if linked != a_before:
-            _mark_external_conflict(
-                transaction,
-                link_index,
-                reason="identity_changed",
-                observed=linked if isinstance(linked, _ExternalEntryIssue) else None,
-            )
+            _mark_external_conflict(transaction, link_index, reason="identity_changed", observed=_issue(linked))
             raise ArtifactVisibilityError("live external no-clobber link attestation failed")
         assert isinstance(linked, tuple)
         _update_external_record(
@@ -2168,10 +2005,7 @@ def _cleanup_external_directories(transaction: Path, indexes: Sequence[int]) -> 
         _update_external_record(transaction, index, lifecycle=_ExternalEntryLifecycle.RETIRED)
 
 
-def _reconcile_external_entries(
-    transaction: Path,
-    destinations: Sequence[_DestinationRecord],
-) -> None:
+def _reconcile_external_entries(transaction: Path, destinations: Sequence[_DestinationRecord]) -> None:
     destination_by_id = {record.record_id: record for record in destinations}
     exchange: _AtomicNameExchange | None = None
     for index, record in enumerate(_external_records(transaction)):
@@ -2190,16 +2024,7 @@ def _reconcile_external_entries(
             finally:
                 os.close(intent_parent_fd)
             if intent_observation is not None:
-                _mark_external_conflict(
-                    transaction,
-                    index,
-                    reason="conflict",
-                    observed=(
-                        intent_observation
-                        if isinstance(intent_observation, _ExternalEntryIssue)
-                        else None
-                    ),
-                )
+                _mark_external_conflict(transaction, index, reason="conflict", observed=_issue(intent_observation))
                 raise ArtifactVisibilityError("external unattested entry is retained as conflict")
             _update_external_record(transaction, index, lifecycle=_ExternalEntryLifecycle.RETIRED)
             continue
@@ -2215,29 +2040,14 @@ def _reconcile_external_entries(
             continue
         parent_fd, parent_metadata = _open_parent_fd(parent)
         try:
-            if (parent_metadata.st_dev, parent_metadata.st_ino) != (
-                record["parent_dev"],
-                record["parent_ino"],
-            ):
+            if (parent_metadata.st_dev, parent_metadata.st_ino) != (record["parent_dev"], record["parent_ino"]):
                 _mark_external_conflict(transaction, index, reason="identity_changed")
                 raise ArtifactVisibilityError("external entry parent changed during recovery")
-            expected_stage = (
-                record["entry_dev"],
-                record["entry_ino"],
-                record["expected_mode"],
-                record["expected_sha256"],
-            )
+            expected_stage = _ledger_identity(record)
             observed_stage = _external_identity(parent_fd, name)
-            if lifecycle in (
-                _ExternalEntryLifecycle.ATTESTED,
-                _ExternalEntryLifecycle.CLEANUP_PREPARED,
-            ):
+            if lifecycle in (_ExternalEntryLifecycle.ATTESTED, _ExternalEntryLifecycle.CLEANUP_PREPARED):
                 if observed_stage is None:
-                    _update_external_record(
-                        transaction,
-                        index,
-                        lifecycle=_ExternalEntryLifecycle.RETIRED,
-                    )
+                    _update_external_record(transaction, index, lifecycle=_ExternalEntryLifecycle.RETIRED)
                 elif observed_stage == expected_stage:
                     _cleanup_external_name(transaction, index, parent_fd)
                 else:
@@ -2245,11 +2055,7 @@ def _reconcile_external_entries(
                         transaction,
                         index,
                         reason="identity_changed",
-                        observed=(
-                            observed_stage
-                            if isinstance(observed_stage, _ExternalEntryIssue)
-                            else None
-                        ),
+                        observed=_issue(observed_stage),
                     )
                     raise ArtifactVisibilityError("external attested entry changed during recovery")
                 continue
@@ -2274,12 +2080,7 @@ def _reconcile_external_entries(
                     _mark_external_conflict(transaction, index, reason="ambiguous")
                     raise ArtifactVisibilityError("external probe pair is incomplete")
                 target_name = cast(str, probe_b["name"])
-                expected_target = (
-                    probe_b["entry_dev"],
-                    probe_b["entry_ino"],
-                    probe_b["expected_mode"],
-                    probe_b["expected_sha256"],
-                )
+                expected_target = _ledger_identity(probe_b)
             elif destination is None:
                 _mark_external_conflict(transaction, index, reason="ambiguous")
                 raise ArtifactVisibilityError("external prepared entry has no destination identity")
@@ -2296,10 +2097,7 @@ def _reconcile_external_entries(
                     transaction,
                     index,
                     lifecycle=_ExternalEntryLifecycle.REVERSAL_ATTEMPTED,
-                    entry_dev=observed_stage[0],
-                    entry_ino=observed_stage[1],
-                    expected_mode=observed_stage[2],
-                    expected_sha256=observed_stage[3],
+                    identity=observed_stage,
                     failure_reason="ambiguous",
                 )
                 if exchange is None:
@@ -2311,23 +2109,11 @@ def _reconcile_external_entries(
                 if result.result == 0 and target_after == expected_target and stage_after == expected_stage:
                     assert isinstance(stage_after, tuple)
                     _update_external_record(
-                        transaction,
-                        index,
-                        lifecycle=_ExternalEntryLifecycle.ATTESTED,
-                        entry_dev=stage_after[0],
-                        entry_ino=stage_after[1],
-                        expected_mode=stage_after[2],
-                        expected_sha256=stage_after[3],
+                        transaction, index, lifecycle=_ExternalEntryLifecycle.ATTESTED, identity=stage_after
                     )
                     _cleanup_external_name(transaction, index, parent_fd)
                     continue
-                reverse_issue = (
-                    target_after
-                    if isinstance(target_after, _ExternalEntryIssue)
-                    else stage_after
-                    if isinstance(stage_after, _ExternalEntryIssue)
-                    else None
-                )
+                reverse_issue = _issue(target_after, stage_after)
                 _mark_external_conflict(
                     transaction,
                     index,
@@ -2335,13 +2121,7 @@ def _reconcile_external_entries(
                     observed=reverse_issue,
                 )
                 raise ArtifactVisibilityError("external prepared exchange was recovered as conflict")
-            observed_issue = (
-                observed_stage
-                if isinstance(observed_stage, _ExternalEntryIssue)
-                else observed_target
-                if isinstance(observed_target, _ExternalEntryIssue)
-                else None
-            )
+            observed_issue = _issue(observed_stage, observed_target)
             _mark_external_conflict(
                 transaction,
                 index,
@@ -2351,6 +2131,28 @@ def _reconcile_external_entries(
             raise ArtifactVisibilityError("external prepared entry arrangement is ambiguous")
         finally:
             os.close(parent_fd)
+
+
+def _finish_live_install(
+    transaction: Path,
+    record: _DestinationRecord,
+    installed: tuple[int, int, int, str],
+    digest: str,
+    *,
+    stage_index: int,
+    parent_fd: int,
+) -> _DestinationRecord:
+    """Persist and retire the stage after one live-external install succeeded."""
+    updated = replace(
+        record,
+        expected_dev=installed[0],
+        expected_ino=installed[1],
+        prepared_sha256=digest,
+        installed_sha256=digest,
+    )
+    _persist_live_destination_record(transaction, updated)
+    _cleanup_external_name(transaction, stage_index, parent_fd)
+    return updated
 
 
 def _publish_live_external(
@@ -2364,13 +2166,11 @@ def _publish_live_external(
 ) -> _DestinationRecord:
     requested = Path(record.requested)
     parent = requested.parent
-    parent_fd, parent_metadata = _open_parent_fd(parent)
-    if (parent_metadata.st_dev, parent_metadata.st_ino) != capability:
-        os.close(parent_fd)
-        raise ArtifactVisibilityError("live external output parent identity changed")
     stage_name = f".daydream-output-{secrets.token_hex(16)}"
-    stage_index: int | None = None
+    parent_fd, parent_metadata = _open_parent_fd(parent)
     try:
+        if (parent_metadata.st_dev, parent_metadata.st_ino) != capability:
+            raise ArtifactVisibilityError("live external output parent identity changed")
         stage_index = _create_attested_external_file(
             transaction,
             purpose=_ExternalEntryPurpose.PUBLICATION_STAGE,
@@ -2384,19 +2184,11 @@ def _publish_live_external(
         stage_identity = _external_identity(parent_fd, stage_name)
         if not isinstance(stage_identity, tuple):
             _mark_external_conflict(
-                transaction,
-                stage_index,
-                reason="identity_changed",
-                observed=(
-                    stage_identity
-                    if isinstance(stage_identity, _ExternalEntryIssue)
-                    else None
-                ),
+                transaction, stage_index, reason="identity_changed", observed=_issue(stage_identity)
             )
             raise ArtifactVisibilityError("live external publication stage changed")
         digest = stage_identity[3]
-        expected_present = record.installed_sha256 is not None or record.baseline_state == "file"
-        if not expected_present:
+        if record.installed_sha256 is None and record.baseline_state != "file":
             target_index = _new_external_record(
                 transaction,
                 purpose=_ExternalEntryPurpose.PUBLICATION_LINK_TARGET,
@@ -2415,11 +2207,7 @@ def _publish_live_external(
                     dst_dir_fd=parent_fd,
                     follow_symlinks=False,
                 )
-                _notify_external(
-                    "LINK_CREATED",
-                    _ExternalEntryPurpose.PUBLICATION_LINK_TARGET,
-                    requested,
-                )
+                _notify_external("LINK_CREATED", _ExternalEntryPurpose.PUBLICATION_LINK_TARGET, requested)
             except OSError as exc:
                 _mark_external_conflict(transaction, target_index, reason="conflict")
                 _mark_external_conflict(transaction, stage_index, reason="conflict")
@@ -2429,23 +2217,9 @@ def _publish_live_external(
             os.fsync(parent_fd)
             target_identity = _external_identity(parent_fd, requested.name)
             if target_identity != stage_identity:
-                observed_issue = (
-                    target_identity
-                    if isinstance(target_identity, _ExternalEntryIssue)
-                    else None
-                )
-                _mark_external_conflict(
-                    transaction,
-                    target_index,
-                    reason="identity_changed",
-                    observed=observed_issue,
-                )
-                _mark_external_conflict(
-                    transaction,
-                    stage_index,
-                    reason="identity_changed",
-                    observed=observed_issue,
-                )
+                observed_issue = _issue(target_identity)
+                _mark_external_conflict(transaction, target_index, reason="identity_changed", observed=observed_issue)
+                _mark_external_conflict(transaction, stage_index, reason="identity_changed", observed=observed_issue)
                 raise ArtifactVisibilityError("live external link installation identity changed")
             assert isinstance(target_identity, tuple)
             _update_external_record(
@@ -2455,34 +2229,15 @@ def _publish_live_external(
                 entry_dev=target_identity[0],
                 entry_ino=target_identity[1],
             )
-            _update_external_record(
-                transaction,
-                target_index,
-                lifecycle=_ExternalEntryLifecycle.INSTALLED,
+            _update_external_record(transaction, target_index, lifecycle=_ExternalEntryLifecycle.INSTALLED)
+            return _finish_live_install(
+                transaction, record, target_identity, digest, stage_index=stage_index, parent_fd=parent_fd
             )
-            updated = replace(
-                record,
-                expected_dev=target_identity[0],
-                expected_ino=target_identity[1],
-                prepared_sha256=digest,
-                installed_sha256=digest,
-            )
-            _persist_live_destination_record(transaction, updated)
-            _cleanup_external_name(transaction, stage_index, parent_fd)
-            return updated
 
         expected_identity = _expected_external_identity(record)
-        _update_external_record(
-            transaction,
-            stage_index,
-            lifecycle=_ExternalEntryLifecycle.OPERATION_PREPARED,
-        )
+        _update_external_record(transaction, stage_index, lifecycle=_ExternalEntryLifecycle.OPERATION_PREPARED)
         result = exchange.call(parent_fd, stage_name, requested.name)
-        _notify_external(
-            "PRIMARY_CALLED",
-            _ExternalEntryPurpose.PUBLICATION_STAGE,
-            parent / stage_name,
-        )
+        _notify_external("PRIMARY_CALLED", _ExternalEntryPurpose.PUBLICATION_STAGE, parent / stage_name)
         os.fsync(parent_fd)
         target_after = _external_identity(parent_fd, requested.name)
         stage_after = _external_identity(parent_fd, stage_name)
@@ -2491,24 +2246,11 @@ def _publish_live_external(
         if result.result == 0 and exact_swapped:
             assert isinstance(target_after, tuple) and isinstance(stage_after, tuple)
             _update_external_record(
-                transaction,
-                stage_index,
-                lifecycle=_ExternalEntryLifecycle.INSTALLED,
-                entry_dev=stage_after[0],
-                entry_ino=stage_after[1],
-                expected_mode=stage_after[2],
-                expected_sha256=stage_after[3],
+                transaction, stage_index, lifecycle=_ExternalEntryLifecycle.INSTALLED, identity=stage_after
             )
-            updated = replace(
-                record,
-                expected_dev=target_after[0],
-                expected_ino=target_after[1],
-                prepared_sha256=digest,
-                installed_sha256=digest,
+            return _finish_live_install(
+                transaction, record, target_after, digest, stage_index=stage_index, parent_fd=parent_fd
             )
-            _persist_live_destination_record(transaction, updated)
-            _cleanup_external_name(transaction, stage_index, parent_fd)
-            return updated
         if result.result != 0 and exact_pre:
             _cleanup_external_name(transaction, stage_index, parent_fd)
             _update_external_record(
@@ -2520,53 +2262,24 @@ def _publish_live_external(
             raise ArtifactVisibilityError("live external atomic exchange was refused")
         if target_after == stage_identity and stage_after is not None:
             if isinstance(stage_after, _ExternalEntryIssue):
-                _mark_external_conflict(
-                    transaction,
-                    stage_index,
-                    reason="identity_changed",
-                    observed=stage_after,
-                )
-                raise ArtifactVisibilityError(
-                    "live external atomic exchange displaced a nonregular entry"
-                )
-            failure_reason = (
-                "conflict"
-                if result.result == 0
-                else _external_failure_reason(result, probe=False)
-            )
+                _mark_external_conflict(transaction, stage_index, reason="identity_changed", observed=stage_after)
+                raise ArtifactVisibilityError("live external atomic exchange displaced a nonregular entry")
             _update_external_record(
                 transaction,
                 stage_index,
                 lifecycle=_ExternalEntryLifecycle.REVERSAL_ATTEMPTED,
-                entry_dev=stage_after[0],
-                entry_ino=stage_after[1],
-                expected_mode=stage_after[2],
-                expected_sha256=stage_after[3],
-                failure_reason=failure_reason,
+                identity=stage_after,
+                failure_reason=("conflict" if result.result == 0 else _external_failure_reason(result, probe=False)),
             )
             reverse = exchange.call(parent_fd, stage_name, requested.name)
-            _notify_external(
-                "REVERSAL_CALLED",
-                _ExternalEntryPurpose.PUBLICATION_STAGE,
-                parent / stage_name,
-            )
+            _notify_external("REVERSAL_CALLED", _ExternalEntryPurpose.PUBLICATION_STAGE, parent / stage_name)
             os.fsync(parent_fd)
             target_reversed = _external_identity(parent_fd, requested.name)
             stage_reversed = _external_identity(parent_fd, stage_name)
-            if (
-                reverse.result == 0
-                and target_reversed == stage_after
-                and stage_reversed == stage_identity
-            ):
+            if reverse.result == 0 and target_reversed == stage_after and stage_reversed == stage_identity:
                 _mark_external_conflict(transaction, stage_index, reason="ambiguous")
             else:
-                reverse_issue = (
-                    target_reversed
-                    if isinstance(target_reversed, _ExternalEntryIssue)
-                    else stage_reversed
-                    if isinstance(stage_reversed, _ExternalEntryIssue)
-                    else None
-                )
+                reverse_issue = _issue(target_reversed, stage_reversed)
                 _mark_external_conflict(
                     transaction,
                     stage_index,
@@ -2574,13 +2287,7 @@ def _publish_live_external(
                     observed=reverse_issue,
                 )
             raise ArtifactVisibilityError("live external atomic exchange failed after mutation")
-        observed_issue = (
-            target_after
-            if isinstance(target_after, _ExternalEntryIssue)
-            else stage_after
-            if isinstance(stage_after, _ExternalEntryIssue)
-            else None
-        )
+        observed_issue = _issue(target_after, stage_after)
         _mark_external_conflict(
             transaction,
             stage_index,
@@ -2598,25 +2305,8 @@ def _publish_live_external(
 
 def _cleanup_root(state_root: Path) -> Path:
     root = state_root / "cleanup"
-    _ensure_private_directory(root)
+    _create_private_directory(root)
     return root
-
-
-def _cleanup_ticket_payload(
-    *,
-    state_root: Path,
-    transaction: Path,
-    terminal_state: str,
-) -> dict[str, object]:
-    if terminal_state not in _CLEANUP_TERMINAL_STATES:
-        raise ArtifactVisibilityError("artifact cleanup terminal state is invalid")
-    return {
-        "schema_version": _SCHEMA_VERSION,
-        "workspace_key": state_root.name,
-        "transaction_id": transaction.name,
-        "terminal_state": terminal_state,
-        "stage_ids": [str(entry["stage_id"]) for entry in _stage_registry(transaction)],
-    }
 
 
 def _load_cleanup_ticket(path: Path, state_root: Path) -> dict[str, object]:
@@ -2627,15 +2317,13 @@ def _load_cleanup_ticket(path: Path, state_root: Path) -> dict[str, object]:
         or payload.get("schema_version") != _SCHEMA_VERSION
         or payload.get("workspace_key") != state_root.name
         or not isinstance(payload.get("transaction_id"), str)
-        or payload.get("terminal_state") not in _CLEANUP_TERMINAL_STATES
+        or payload.get("terminal_state") not in tuple(_TerminalState)
         or not isinstance(payload.get("stage_ids"), list)
         or not all(isinstance(value, str) for value in cast(list[object], payload["stage_ids"]))
     ):
         raise ArtifactVisibilityError("artifact cleanup ticket is malformed")
     transaction_id = cast(str, payload["transaction_id"])
-    if path.name != f"{transaction_id}.json" or any(
-        character in transaction_id for character in ("/", "\\", "\0")
-    ):
+    if path.name != f"{transaction_id}.json" or any(character in transaction_id for character in ("/", "\\", "\0")):
         raise ArtifactVisibilityError("artifact cleanup ticket identity is malformed")
     return payload
 
@@ -2685,12 +2373,7 @@ def _finish_cleanup_ticket(state_root: Path, ticket: Path) -> None:
     _notify_cleanup("SIDECAR_REMOVED", transaction_id)
 
 
-def _retire_transaction(
-    state_root: Path,
-    transaction: Path,
-    *,
-    terminal_state: str,
-) -> None:
+def _retire_transaction(state_root: Path, transaction: Path, *, terminal_state: _TerminalState) -> None:
     if (transaction / "conflicts.json").exists() or (transaction / "conflicts.json").is_symlink():
         raise ArtifactVisibilityError("artifact conflict transaction is not cleanup eligible")
     registry = transaction / "destinations.json"
@@ -2699,10 +2382,7 @@ def _retire_transaction(
         include_published = registry_payload.get("includes_published")
         if type(include_published) is not bool:
             raise ArtifactVisibilityError("artifact destination registry is malformed")
-        destinations = _load_destination_records(
-            transaction,
-            include_published=include_published,
-        )
+        destinations = _load_destination_records(transaction, include_published=include_published)
     else:
         destinations = ()
     _reconcile_external_entries(transaction, destinations)
@@ -2714,11 +2394,13 @@ def _retire_transaction(
         raise ArtifactVisibilityError("artifact cleanup ticket collision")
     _atomic_json(
         ticket,
-        _cleanup_ticket_payload(
-            state_root=state_root,
-            transaction=transaction,
-            terminal_state=terminal_state,
-        ),
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "workspace_key": state_root.name,
+            "transaction_id": transaction.name,
+            "terminal_state": terminal_state.value,
+            "stage_ids": [str(entry["stage_id"]) for entry in _stage_registry(transaction)],
+        },
     )
     _notify_cleanup("TICKET_FSYNCED", transaction.name)
     _finish_cleanup_ticket(state_root, ticket)
@@ -2752,27 +2434,25 @@ def _recover_cleanup(state_root: Path) -> None:
             _fsync_directory(cleanup)
 
 
-def _write_transition(journal: Path, *, transaction_id: str, session_id: str, state: str) -> None:
-    if state not in _TRANSITIONS:
-        raise ArtifactVisibilityError("invalid artifact transaction state")
+def _write_transition(journal: Path, *, transaction_id: str, session_id: str, state: _Transition) -> None:
     _atomic_json(
         journal,
         {
             "schema_version": _SCHEMA_VERSION,
             "transaction_id": transaction_id,
             "session_id": session_id,
-            "state": state,
+            "state": state.value,
         },
     )
     observer = _transition_observer
     if observer is not None:
-        observer(state)
+        observer(state.value)
 
 
 _transition_observer: Any | None = None
 
 
-def _load_transition(journal: Path, transaction_id: str) -> tuple[str, str]:
+def _load_transition(journal: Path, transaction_id: str) -> tuple[_Transition, str]:
     payload = _load_json(journal)
     if set(payload) != {"schema_version", "transaction_id", "session_id", "state"}:
         raise ArtifactVisibilityError("artifact journal schema is malformed")
@@ -2782,9 +2462,12 @@ def _load_transition(journal: Path, transaction_id: str) -> tuple[str, str]:
         or payload["transaction_id"] != transaction_id
     ):
         raise ArtifactVisibilityError("artifact journal identity is malformed")
-    state = payload["state"]
     session_id = payload["session_id"]
-    if not isinstance(state, str) or state not in _TRANSITIONS or not isinstance(session_id, str):
+    try:
+        state = _Transition(payload["state"])
+    except ValueError as exc:
+        raise ArtifactVisibilityError("artifact journal state is malformed") from exc
+    if not isinstance(session_id, str):
         raise ArtifactVisibilityError("artifact journal state is malformed")
     return state, session_id
 
@@ -2886,27 +2569,10 @@ def _manifest_is_subset(
     return all(expected_by_path.get(entry.path) == entry for entry in actual)
 
 
-def _replace_public_from_tree(
-    source: Path,
-    tree: Path,
-    entries: tuple[ArtifactManifestEntry, ...],
-    *,
-    allowed_existing: tuple[ArtifactManifestEntry, ...] = (),
-    transaction: Path,
-    workspace_key: str,
-) -> None:
-    existing = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
-    if not _manifest_is_subset(existing, allowed_existing):
+def _replace_public_from_tree(source: Path, tree: Path, entries: tuple[ArtifactManifestEntry, ...]) -> None:
+    """Install a staged public tree onto a source whose own tree is already detached."""
+    if _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT)):
         raise ArtifactVisibilityError("public artifacts changed before publication")
-    if existing:
-        _remove_manifested(
-            source,
-            existing,
-            transaction=transaction,
-            workspace_key=workspace_key,
-            purpose="replace-public",
-            stage_parent=source.parent,
-        )
     for name in (_DAYDREAM, _REVIEW_OUTPUT):
         staged = tree / name
         if staged.exists() or staged.is_symlink():
@@ -2933,20 +2599,11 @@ def _install_staged_path(staged: Path, target: Path) -> None:
         raise ArtifactVisibilityError("artifact destination changed during atomic install") from exc
 
 
-def _install_regular_noclobber(
-    source: Path,
-    target: Path,
-    entry: ArtifactManifestEntry,
-) -> None:
+def _install_regular_noclobber(source: Path, target: Path, entry: ArtifactManifestEntry) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = target.parent / f".{target.name}.{secrets.token_hex(8)}.install"
     try:
-        _copy_regular_entry(
-            source,
-            staged,
-            entry,
-            changed_message="artifact recovery source changed",
-        )
+        _copy_regular_entry(source, staged, entry, changed_message="artifact recovery source changed")
         try:
             os.link(staged, target, follow_symlinks=False)
         except FileExistsError as exc:
@@ -3005,45 +2662,10 @@ def _source_stage_path(source: Path, transaction_id: str, purpose: str) -> Path:
     return source.parent / f".{source.name}.daydream-{purpose}-{transaction_id}"
 
 
-def _create_source_stage(
-    source: Path,
-    transaction_id: str,
-    purpose: str,
-    *,
-    workspace_key: str,
-) -> Path:
-    stage = _source_stage_path(source, transaction_id, purpose)
-    if stage.exists() or stage.is_symlink():
-        raise ArtifactVisibilityError("artifact source-stage collision")
-    stage.mkdir(mode=0o700)
+def _source_stage_owner(source: Path, transaction_id: str, purpose: str, workspace_key: str) -> dict[str, object]:
+    """Derive the owner attestation a source stage carries, re-stat'ing its parent."""
     parent = source.parent.lstat()
-    _atomic_json(
-        stage / "stage-owner.json",
-        {
-            "schema_version": _SCHEMA_VERSION,
-            "workspace_key": workspace_key,
-            "transaction_id": transaction_id,
-            "purpose": purpose,
-            "parent_dev": parent.st_dev,
-            "parent_ino": parent.st_ino,
-        },
-    )
-    _fsync_directory(source.parent)
-    return stage
-
-
-def _validate_source_stage(
-    stage: Path,
-    *,
-    source: Path,
-    transaction_id: str,
-    purpose: str,
-    workspace_key: str,
-) -> None:
-    if stage != _source_stage_path(source, transaction_id, purpose):
-        raise ArtifactVisibilityError("artifact source-stage identity is invalid")
-    parent = source.parent.lstat()
-    expected = {
+    return {
         "schema_version": _SCHEMA_VERSION,
         "workspace_key": workspace_key,
         "transaction_id": transaction_id,
@@ -3051,8 +2673,25 @@ def _validate_source_stage(
         "parent_dev": parent.st_dev,
         "parent_ino": parent.st_ino,
     }
+
+
+def _create_source_stage(source: Path, transaction_id: str, purpose: str, *, workspace_key: str) -> Path:
+    stage = _source_stage_path(source, transaction_id, purpose)
+    if stage.exists() or stage.is_symlink():
+        raise ArtifactVisibilityError("artifact source-stage collision")
+    stage.mkdir(mode=0o700)
+    _atomic_json(stage / "stage-owner.json", _source_stage_owner(source, transaction_id, purpose, workspace_key))
+    _fsync_directory(source.parent)
+    return stage
+
+
+def _retire_source_stage(source: Path, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
+    """Re-attest this identity's source stage, then remove the tree it owns."""
+    stage = _source_stage_path(source, transaction_id, purpose)
+    expected = _source_stage_owner(source, transaction_id, purpose, workspace_key)
     if _load_json(stage / "stage-owner.json") != expected:
         raise ArtifactVisibilityError("artifact source-stage ownership is malformed")
+    _remove_owned_tree(stage, source.parent)
 
 
 def _copy_regular_entry(
@@ -3244,12 +2883,37 @@ def _merge_directory_from_tree(
             raise ArtifactVisibilityError("dump destination projection dropped a baseline file")
 
 
+def _wrote_recorded_session(actual: Sequence[ArtifactManifestEntry], record: _DestinationRecord) -> bool:
+    """Whether the live entry at ``record`` still holds bytes this session wrote."""
+    root_entry = _entry_at(actual, record.relative, kind="file")
+    return root_entry is not None and root_entry.sha256 in (record.prepared_sha256, record.installed_sha256)
+
+
+def _reinstall_external_baseline(
+    transaction: Path,
+    record: _DestinationRecord,
+    baseline_root: Path,
+    baseline_file: ArtifactManifestEntry,
+) -> None:
+    """Reinstall one external destination's baseline bytes through the live path."""
+    baseline_path = baseline_root / record.relative
+    _publish_live_external(
+        transaction,
+        record,
+        _read_regular(baseline_path, baseline_path.lstat()),
+        exchange=_name_exchange_factory(),
+        capability=_recorded_external_capability(transaction, Path(record.requested).parent),
+        content_mode=baseline_file.mode,
+    )
+
+
 def _restore_destination_records(
     source: Path,
     transaction: Path,
     records: Sequence[_DestinationRecord],
     source_stage: Path,
 ) -> None:
+    workspace_key = transaction.parent.parent.name
     for record in records:
         try:
             index = int(record.record_id.removeprefix("destination-"))
@@ -3263,23 +2927,9 @@ def _restore_destination_records(
         if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
             if actual == record.baseline:
                 continue
-            actual_root = next(
-                (entry for entry in actual if entry.path == record.relative),
-                None,
-            )
-            baseline_file = next(
-                (
-                    entry
-                    for entry in record.baseline
-                    if entry.path == record.relative and entry.kind == "file"
-                ),
-                None,
-            )
+            baseline_file = _entry_at(record.baseline, record.relative, kind="file")
             if not actual and baseline_file is not None:
-                baseline_path = baseline_root / record.relative
-                content = _read_regular(baseline_path, baseline_path.lstat())
-                parent = Path(record.requested).parent
-                _publish_live_external(
+                _reinstall_external_baseline(
                     transaction,
                     replace(
                         record,
@@ -3289,31 +2939,17 @@ def _restore_destination_records(
                         prepared_sha256=None,
                         installed_sha256=None,
                     ),
-                    content,
-                    exchange=_name_exchange_factory(),
-                    capability=_recorded_external_capability(transaction, parent),
-                    content_mode=baseline_file.mode,
+                    baseline_root,
+                    baseline_file,
                 )
                 continue
-            recorded_session = (
-                actual_root is not None
-                and actual_root.kind == "file"
-                and actual_root.sha256 in (record.prepared_sha256, record.installed_sha256)
-            )
-            if not recorded_session:
+            if not _wrote_recorded_session(actual, record):
                 raise ArtifactVisibilityError("external trajectory conflict during recovery")
-            expected_dev = record.expected_dev
-            expected_ino = record.expected_ino
-            if expected_dev is None or expected_ino is None:
-                expected_dev, expected_ino = _external_target_identity_from_ledger(
-                    transaction,
-                    record,
-                )
+            expected: tuple[int | None, int | None] = (record.expected_dev, record.expected_ino)
+            if None in expected:
+                expected = _external_target_identity_from_ledger(transaction, record)
             requested_metadata = Path(record.requested).lstat()
-            if (requested_metadata.st_dev, requested_metadata.st_ino) != (
-                expected_dev,
-                expected_ino,
-            ):
+            if (requested_metadata.st_dev, requested_metadata.st_ino) != expected:
                 raise ArtifactVisibilityError("external trajectory identity changed during recovery")
             if baseline_file is None:
                 _remove_manifested(
@@ -3321,34 +2957,18 @@ def _restore_destination_records(
                     actual,
                     (record.relative,),
                     transaction=transaction,
-                    workspace_key=transaction.parent.parent.name,
+                    workspace_key=workspace_key,
                     purpose="restore-live-external",
                     stage_parent=root,
                     record_id=record.record_id,
                 )
                 continue
-            baseline_path = baseline_root / record.relative
-            content = _read_regular(baseline_path, baseline_path.lstat())
-            parent = Path(record.requested).parent
-            capability = _recorded_external_capability(transaction, parent)
-            _publish_live_external(
-                transaction,
-                record,
-                content,
-                exchange=_name_exchange_factory(),
-                capability=capability,
-                content_mode=baseline_file.mode,
-            )
+            _reinstall_external_baseline(transaction, record, baseline_root, baseline_file)
             continue
         allowed = [record.baseline]
         if record.published:
             allowed.append(record.published)
-        actual_root = next((entry for entry in actual if entry.path == record.relative), None)
-        recorded_session = (
-            actual_root is not None
-            and actual_root.kind == "file"
-            and actual_root.sha256 in (record.prepared_sha256, record.installed_sha256)
-        )
+        recorded_session = _wrote_recorded_session(actual, record)
         if not any(_manifest_is_subset(actual, candidate) for candidate in allowed) and not recorded_session:
             raise ArtifactVisibilityError("explicit artifact destination changed during recovery")
         if recorded_session:
@@ -3359,7 +2979,7 @@ def _restore_destination_records(
             allowed=allowed,
             desired=record.baseline,
             transaction=transaction,
-            workspace_key=transaction.parent.parent.name,
+            workspace_key=workspace_key,
             source=source,
         )
     parent_indexes = [
@@ -3383,19 +3003,13 @@ def _recorded_external_capability(transaction: Path, parent: Path) -> tuple[int,
     raise ArtifactVisibilityError("live external output has no durable capability proof")
 
 
-def _external_target_identity_from_ledger(
-    transaction: Path,
-    destination: _DestinationRecord,
-) -> tuple[int, int]:
+def _external_target_identity_from_ledger(transaction: Path, destination: _DestinationRecord) -> tuple[int, int]:
     for record in reversed(_external_records(transaction)):
         if (
             record["destination_record_id"] == destination.record_id
             and record["purpose"] == _ExternalEntryPurpose.PUBLICATION_LINK_TARGET.value
             and record["lifecycle"]
-            in (
-                _ExternalEntryLifecycle.ATTESTED.value,
-                _ExternalEntryLifecycle.INSTALLED.value,
-            )
+            in (_ExternalEntryLifecycle.ATTESTED.value, _ExternalEntryLifecycle.INSTALLED.value)
             and type(record["entry_dev"]) is int
             and type(record["entry_ino"]) is int
         ):
@@ -3403,10 +3017,7 @@ def _external_target_identity_from_ledger(
     raise ArtifactVisibilityError("external target identity is not durably attested")
 
 
-def _persist_live_destination_record(
-    transaction: Path,
-    updated: _DestinationRecord,
-) -> None:
+def _persist_live_destination_record(transaction: Path, updated: _DestinationRecord) -> None:
     records = list(_load_destination_records(transaction, include_published=False))
     for index, record in enumerate(records):
         if record.record_id == updated.record_id:
@@ -3416,11 +3027,7 @@ def _persist_live_destination_record(
     raise ArtifactVisibilityError("live external destination ledger identity is missing")
 
 
-def _reconcile_failed_detach(
-    state_root: Path,
-    source: Path,
-    transaction: Path,
-) -> None:
+def _reconcile_failed_detach(state_root: Path, source: Path, transaction: Path) -> None:
     canonical = state_root / "canonical"
     canonical_manifest = state_root / "canonical-manifest.json"
     if not canonical.exists() or not canonical_manifest.exists():
@@ -3432,7 +3039,7 @@ def _reconcile_failed_detach(
     conflict_registry = transaction / "conflicts.json"
     if conflicts or conflict_registry.exists() or conflict_registry.is_symlink():
         raise ArtifactVisibilityError("artifact recovery retained a concurrent replacement conflict")
-    _retire_transaction(state_root, transaction, terminal_state="DETACHED_RECONCILED")
+    _retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
 
 
 def _recover_transactions(state_root: Path, source: Path) -> None:
@@ -3442,34 +3049,21 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
         return
     if transactions.is_symlink() or not transactions.is_dir():
         raise ArtifactVisibilityError("artifact transaction root is unsafe")
-    records: list[tuple[Path, str, str]] = []
+    records: list[tuple[Path, _Transition, str]] = []
     for transaction in sorted(transactions.iterdir(), key=lambda path: path.name):
         if transaction.is_symlink() or not transaction.is_dir():
             raise ArtifactVisibilityError("artifact transaction residue is unsafe")
         journal = transaction / "journal.json"
         if not journal.is_file():
-            owner = _load_transaction_owner(transaction, state_root)
-            source_stage = _source_stage_path(
-                source,
-                transaction.name,
-                "publish",
-            ) if owner["kind"] == "publish" else None
+            publishing = _load_transaction_owner(transaction, state_root)["kind"] == "publish"
+            source_stage = _source_stage_path(source, transaction.name, "publish") if publishing else None
             if source_stage is not None and (source_stage.exists() or source_stage.is_symlink()):
-                _validate_source_stage(
-                    source_stage,
-                    source=source,
-                    transaction_id=transaction.name,
-                    purpose="publish",
-                    workspace_key=state_root.name,
-                )
-                _remove_owned_tree(source_stage, source.parent)
+                _retire_source_stage(source, transaction.name, "publish", workspace_key=state_root.name)
             _retire_transaction(
                 state_root,
                 transaction,
                 terminal_state=(
-                    "PUBLISH_RECONCILED"
-                    if owner["kind"] == "publish"
-                    else "DETACHED_RECONCILED"
+                    _TerminalState.PUBLISH_RECONCILED if publishing else _TerminalState.DETACHED_RECONCILED
                 ),
             )
             continue
@@ -3477,35 +3071,24 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
         records.append((transaction, state, session_id))
 
     completed_sessions: set[str] = set()
-    records.sort(key=lambda item: (not item[1].startswith("PUBLISH_"), item[0].name))
+    records.sort(key=lambda item: (not item[1].is_publish, item[0].name))
     for transaction, state, session_id in records:
-        if (transaction / "conflicts.json").exists() or (
-            transaction / "conflicts.json"
-        ).is_symlink():
+        if (transaction / "conflicts.json").exists() or (transaction / "conflicts.json").is_symlink():
             raise ArtifactVisibilityError("artifact recovery retained a closed conflict")
-        if session_id in completed_sessions and (
-            state == "DETACHED" or state.startswith("DETACH_")
-        ):
-            _retire_transaction(state_root, transaction, terminal_state="DETACHED_RECONCILED")
+        if session_id in completed_sessions and not state.is_publish:
+            _retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
             continue
         canonical = state_root / "canonical"
         canonical_manifest = state_root / "canonical-manifest.json"
         transaction_manifest = transaction / "manifest.json"
         published_entries: tuple[ArtifactManifestEntry, ...] | None = None
-        destination_records = _load_destination_records(
-            transaction,
-            include_published=state.startswith("PUBLISH_"),
-        )
+        destination_records = _load_destination_records(transaction, include_published=state.is_publish)
         _reconcile_external_entries(transaction, destination_records)
-        publication_stage = (
-            _source_stage_path(source, transaction.name, "publish")
-            if state.startswith("PUBLISH_")
-            else None
-        )
+        publication_stage = (_source_stage_path(source, transaction.name, "publish") if state.is_publish else None)
         restore_stage: Path | None = None
-        if state.startswith("PUBLISH_"):
+        if state.is_publish:
             published_entries = _parse_manifest(transaction / "publish-manifest.json")
-        if state == "DETACH_STAGED":
+        if state is _Transition.DETACH_STAGED:
             entries = _parse_manifest(transaction_manifest)
             stage = transaction / "detach-stage"
             if not canonical.exists():
@@ -3520,7 +3103,7 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
                     raise ArtifactVisibilityError("staged detach ownership is ambiguous")
             if not canonical_manifest.exists():
                 _atomic_json(canonical_manifest, _manifest_payload(entries))
-        if state == "PUBLISH_INSTALLED" and not canonical.exists():
+        if state is _Transition.PUBLISH_INSTALLED and not canonical.exists():
             replacement = transaction / "canonical-stage"
             if published_entries is None or _manifest(replacement) != published_entries:
                 raise ArtifactVisibilityError("staged canonical publication copy is corrupt")
@@ -3531,11 +3114,11 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
         canonical_entries = _parse_manifest(canonical_manifest)
         canonical_actual = _manifest(canonical)
         if canonical_actual != canonical_entries and not (
-            state == "PUBLISH_INSTALLED" and canonical_actual == published_entries
+            state is _Transition.PUBLISH_INSTALLED and canonical_actual == published_entries
         ):
             raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
 
-        if state == "PUBLISH_INSTALLED":
+        if state is _Transition.PUBLISH_INSTALLED:
             assert published_entries is not None
             if _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT)) != published_entries:
                 raise ArtifactVisibilityError("installed public artifact recovery copy is corrupt")
@@ -3551,7 +3134,7 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
                 raise ArtifactVisibilityError("installed canonical publication copy is missing")
             _atomic_json(canonical_manifest, _manifest_payload(published_entries))
             canonical_entries = published_entries
-        elif state == "PUBLISH_VERIFIED":
+        elif state is _Transition.PUBLISH_VERIFIED:
             assert published_entries is not None
             if canonical_entries != published_entries:
                 raise ArtifactVisibilityError("verified canonical publication identity is corrupt")
@@ -3583,69 +3166,37 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
                     purpose="recover-public",
                     stage_parent=source.parent,
                 )
-            restore_stage = _create_source_stage(
-                source,
-                transaction.name,
-                "restore",
-                workspace_key=state_root.name,
-            )
+            restore_stage = _create_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
             public_stage = restore_stage / "public"
             _copy_tree(canonical, public_stage, canonical_entries)
-            _replace_public_from_tree(
-                source,
-                public_stage,
-                canonical_entries,
-                transaction=transaction,
-                workspace_key=state_root.name,
-            )
-        if state in ("PUBLISH_INSTALLED", "PUBLISH_VERIFIED"):
+            _replace_public_from_tree(source, public_stage, canonical_entries)
+        if state in (_Transition.PUBLISH_INSTALLED, _Transition.PUBLISH_VERIFIED):
             for record in destination_records:
                 if _manifest(Path(record.base), (record.relative,)) != record.published:
-                    raise ArtifactVisibilityError(
-                        "installed explicit artifact recovery copy is corrupt"
-                    )
+                    raise ArtifactVisibilityError("installed explicit artifact recovery copy is corrupt")
         else:
             if destination_records:
                 assert restore_stage is not None
-                _restore_destination_records(
-                    source,
-                    transaction,
-                    destination_records,
-                    restore_stage,
-                )
+                _restore_destination_records(source, transaction, destination_records, restore_stage)
             assert restore_stage is not None
-            _validate_source_stage(
-                restore_stage,
-                source=source,
-                transaction_id=transaction.name,
-                purpose="restore",
-                workspace_key=state_root.name,
-            )
-            _remove_owned_tree(restore_stage, source.parent)
-        if state.startswith("PUBLISH_"):
+            _retire_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
+        if state.is_publish:
             completed_sessions.add(session_id)
             if publication_stage is None:
                 raise ArtifactVisibilityError("artifact publication stage is missing")
             if publication_stage.exists() or publication_stage.is_symlink():
-                _validate_source_stage(
-                    publication_stage,
-                    source=source,
-                    transaction_id=transaction.name,
-                    purpose="publish",
-                    workspace_key=state_root.name,
-                )
-                _remove_owned_tree(publication_stage, source.parent)
-            elif state != "PUBLISH_VERIFIED":
+                _retire_source_stage(source, transaction.name, "publish", workspace_key=state_root.name)
+            elif state is not _Transition.PUBLISH_VERIFIED:
                 raise ArtifactVisibilityError("artifact publication stage is missing")
         _retire_transaction(
             state_root,
             transaction,
             terminal_state=(
-                "PUBLISH_VERIFIED"
-                if state == "PUBLISH_VERIFIED"
-                else "PUBLISH_RECONCILED"
-                if state.startswith("PUBLISH_")
-                else "DETACHED_RECONCILED"
+                _TerminalState.PUBLISH_VERIFIED
+                if state is _Transition.PUBLISH_VERIFIED
+                else _TerminalState.PUBLISH_RECONCILED
+                if state.is_publish
+                else _TerminalState.DETACHED_RECONCILED
             ),
         )
 
@@ -3659,22 +3210,18 @@ class ArtifactSession:
         *,
         lock_fd: int,
         repo_fd: int,
-        source_fd: int,
         canonical_entries: tuple[ArtifactManifestEntry, ...],
         detach_transaction: Path,
     ) -> None:
         self.layout = layout
         self._lock_fd = lock_fd
         self._repo_fd = repo_fd
-        self._source_fd = source_fd
         self._canonical_entries = canonical_entries
         self._detach_transaction = detach_transaction
         self._state: Literal["active", "frozen", "publishing", "published", "closed"] = "active"
         self._destinations: list[RoutedDestination] = []
-        self._destination_records: list[_DestinationRecord] = []
+        self._routed: list[_RoutedRecord] = []
         self._trajectory_route: TrajectoryOutputRoute | None = None
-        self._route_record_indexes: dict[int, int] = {}
-        self._late_paths: dict[int, Path] = {}
         self._frozen_snapshot: ArtifactTreeSnapshot | None = None
         self._name_exchange: _AtomicNameExchange | None = None
         self._external_capabilities: dict[Path, tuple[int, int]] = {}
@@ -3694,7 +3241,7 @@ class ArtifactSession:
             workspace_key=self.layout.workspace_key,
             session_id=self.layout.session_id,
             public_source=self.layout.source,
-            live_components=self.layout.live_root.parts,
+            live_root=self.layout.live_root,
         )
 
     def _require_active(self) -> None:
@@ -3738,10 +3285,7 @@ class ArtifactSession:
             raise ArtifactVisibilityError("artifact destination contains an unsafe path")
         declared = _absolute_lexical(requested)
         declared_inside_source = self.layout.source in declared.parents
-        if declared_inside_source and label not in (
-            OutputLabel.PUBLIC_DAYDREAM,
-            OutputLabel.PUBLIC_REVIEW_OUTPUT,
-        ):
+        if declared_inside_source and label not in _PUBLIC_LABELS:
             relative = declared.relative_to(self.layout.source).as_posix()
             try:
                 tracked = git_ops.tracked_path_collisions(self.layout.source, relative)
@@ -3786,14 +3330,10 @@ class ArtifactSession:
             raise ArtifactVisibilityError("artifact destination overlaps the active model repository")
         owned_public_subtree = (
             public_subtree_owner is not None
-            and label
-            in (
-                OutputLabel.EXPLICIT_TRAJECTORY,
-                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
-            )
+            and label in _TRAJECTORY_LABELS
             and self.layout.public_daydream_dir in canonical.parents
         )
-        if label not in (OutputLabel.PUBLIC_DAYDREAM, OutputLabel.PUBLIC_REVIEW_OUTPUT) and (
+        if label not in _PUBLIC_LABELS and (
             _overlaps(canonical, self.layout.public_daydream_dir)
             or canonical == self.layout.public_review_output
         ) and not owned_public_subtree:
@@ -3832,12 +3372,7 @@ class ArtifactSession:
             None,
         )
 
-    def _private_public_trajectory_path(
-        self,
-        canonical: Path,
-        *,
-        owner: RoutedDestination,
-    ) -> Path:
+    def _private_public_trajectory_path(self, canonical: Path, *, owner: RoutedDestination) -> Path:
         if not any(owner is destination for destination in self._destinations):
             raise ArtifactVisibilityError("public trajectory owner identity mismatch")
         try:
@@ -3855,9 +3390,7 @@ class ArtifactSession:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                raise ArtifactVisibilityError(
-                    "private trajectory path could not be inspected"
-                ) from exc
+                raise ArtifactVisibilityError("private trajectory path could not be inspected") from exc
             if stat.S_ISLNK(metadata.st_mode):
                 raise ArtifactVisibilityError("private trajectory ancestry contains a symlink")
             is_leaf = cursor == private
@@ -3867,16 +3400,8 @@ class ArtifactSession:
                 raise ArtifactVisibilityError("private trajectory ancestry is not a directory")
         return private
 
-    def _capture_destination_record(
-        self,
-        route: RoutedDestination,
-        *,
-        canonical: Path,
-        inside_source: bool,
-    ) -> int:
-        expected_kind: Literal["file", "directory"] = (
-            "directory" if route.label is OutputLabel.DUMP_DIRECTORY else "file"
-        )
+    def _capture_destination_record(self, route: RoutedDestination, *, canonical: Path, inside_source: bool) -> None:
+        dump = route.label is OutputLabel.DUMP_DIRECTORY
         if inside_source:
             base = self.layout.source
         else:
@@ -3887,9 +3412,7 @@ class ArtifactSession:
         _validate_relative_name(relative)
         baseline = _manifest(base, (relative,))
         root_entry = next((entry for entry in baseline if entry.path == relative), None)
-        baseline_state: Literal["absent", "file", "directory"] = (
-            "absent" if root_entry is None else root_entry.kind
-        )
+        baseline_state: Literal["absent", "file", "directory"] = ("absent" if root_entry is None else root_entry.kind)
         expected_dev: int | None = None
         expected_ino: int | None = None
         if not inside_source and root_entry is not None and root_entry.kind == "file":
@@ -3904,7 +3427,7 @@ class ArtifactSession:
             missing.append(cursor.relative_to(base).as_posix())
             cursor = cursor.parent
         missing.reverse()
-        index = len(self._destination_records)
+        index = len(self._routed)
         record = _DestinationRecord(
             record_id=f"destination-{index:04d}",
             requested=str(route.requested),
@@ -3912,7 +3435,7 @@ class ArtifactSession:
             relative=relative,
             label=route.label,
             delivery=route.delivery,
-            expected_kind=expected_kind,
+            expected_kind="directory" if dump else "file",
             baseline_state=baseline_state,
             baseline=baseline,
             missing_parents=tuple(missing),
@@ -3921,82 +3444,89 @@ class ArtifactSession:
         )
         baseline_root = self._detach_transaction / f"destination-{index:04d}-baseline"
         _copy_tree(base, baseline_root, baseline)
-        self._destination_records.append(record)
-        self._route_record_indexes[id(route)] = index
+        self._routed.append(_RoutedRecord(route, record))
         _write_baseline_manifest(self._detach_transaction, index, record)
-        _write_destination_records(
-            self._detach_transaction,
-            self._destination_records,
-            include_published=False,
-        )
+        self._persist_records()
         if inside_source and baseline:
-            if route.label is OutputLabel.DUMP_DIRECTORY:
-                _remove_manifested(
-                    base,
-                    baseline,
-                    (relative,),
-                    transaction=self._detach_transaction,
-                    workspace_key=self.layout.workspace_key,
-                    purpose="detach-dump",
-                    stage_parent=base,
-                    record_id=record.record_id,
-                    remove_directories=False,
-                    changed_message="explicit artifact destination changed during detach",
-                )
-            else:
-                _remove_manifested(
-                    base,
-                    baseline,
-                    (relative,),
-                    transaction=self._detach_transaction,
-                    workspace_key=self.layout.workspace_key,
-                    purpose="detach-destination",
-                    stage_parent=base,
-                    record_id=record.record_id,
-                )
-        return index
+            _remove_manifested(
+                base,
+                baseline,
+                (relative,),
+                transaction=self._detach_transaction,
+                workspace_key=self.layout.workspace_key,
+                purpose="detach-dump" if dump else "detach-destination",
+                stage_parent=base,
+                record_id=record.record_id,
+                remove_directories=not dump,
+                changed_message="explicit artifact destination changed during detach",
+            )
+
+    def _records(self) -> list[_DestinationRecord]:
+        return [item.record for item in self._routed]
+
+    def _persist_records(self) -> None:
+        _write_destination_records(self._detach_transaction, self._records(), include_published=False)
+
+    def _routed_for(self, route: RoutedDestination) -> _RoutedRecord:
+        item = next((entry for entry in self._routed if entry.route is route), None)
+        if item is None:
+            raise ArtifactVisibilityError("artifact destination ledger identity mismatch")
+        return item
 
     def register_destination(self, requested: Path, *, label: OutputLabel) -> RoutedDestination:
-        if label in (
-            OutputLabel.EXPLICIT_TRAJECTORY,
-            OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
-        ):
+        if label in _TRAJECTORY_LABELS:
             raise ArtifactVisibilityError("paired trajectory registration is required")
         declared, canonical, inside_source = self._validate_destination(requested, label=label)
         if label is OutputLabel.PUBLIC_DAYDREAM:
             if canonical != self.layout.public_daydream_dir:
                 raise ArtifactVisibilityError("public Daydream output has an invalid destination")
-            write_path = self.layout.daydream_dir
-            frozen_path = write_path
+            write_path: Path | None = self.layout.daydream_dir
             delivery = DestinationDelivery.DEFERRED
         elif label is OutputLabel.PUBLIC_REVIEW_OUTPUT:
             if canonical != self.layout.public_review_output:
                 raise ArtifactVisibilityError("public review output has an invalid destination")
             write_path = self.layout.review_output
-            frozen_path = write_path
             delivery = DestinationDelivery.DEFERRED
         elif _overlaps(canonical, self.layout.public_daydream_dir) or canonical == self.layout.public_review_output:
             raise ArtifactVisibilityError("artifact destination overlaps a public compatibility root")
         elif label is OutputLabel.DUMP_DIRECTORY:
             write_path = None
-            frozen_path = None
             delivery = DestinationDelivery.FINALIZATION_MERGE
         else:
             write_path = self.layout.live_root / ".explicit" / f"{len(self._destinations):04d}" / declared.name
-            frozen_path = write_path
             delivery = DestinationDelivery.DEFERRED
-        routed = RoutedDestination(label, declared, write_path, frozen_path, delivery)
+        routed = RoutedDestination(label, declared, write_path, write_path, delivery)
         self._destinations.append(routed)
-        if label not in (
-            OutputLabel.PUBLIC_DAYDREAM,
-            OutputLabel.PUBLIC_REVIEW_OUTPUT,
-        ):
-            self._capture_destination_record(
-                routed,
-                canonical=canonical,
-                inside_source=inside_source,
-            )
+        if label not in _PUBLIC_LABELS:
+            self._capture_destination_record(routed, canonical=canonical, inside_source=inside_source)
         return routed
+
+    @staticmethod
+    def _paired_trajectory(
+        full_requested: Path,
+        partial_requested: Path,
+        private_full: Path,
+        private_partial: Path,
+        delivery: DestinationDelivery,
+    ) -> tuple[RoutedDestination, RoutedDestination]:
+        """Build the full/partial pair; only a live-external pair writes in place."""
+        external = delivery is DestinationDelivery.LIVE_EXTERNAL
+        return (
+            RoutedDestination(
+                OutputLabel.EXPLICIT_TRAJECTORY,
+                full_requested,
+                full_requested if external else private_full,
+                private_full,
+                delivery,
+            ),
+            RoutedDestination(
+                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
+                partial_requested,
+                partial_requested if external else private_partial,
+                private_partial,
+                delivery,
+            ),
+        )
 
     def register_trajectory_output(self, requested: Path | None) -> TrajectoryOutputRoute:
         """Register the root trajectory and its P07 partial as one atomic route."""
@@ -4014,28 +3544,19 @@ class ArtifactSession:
         partial_requested = declared_requested.with_suffix(declared_requested.suffix + ".partial")
         private_full = run_dir / "trajectory.json"
         private_partial = run_dir / "trajectory.json.partial"
+        public_root = self.layout.public_daydream_dir
         if canonical_requested == canonical_default:
-            full = RoutedDestination(
-                OutputLabel.EXPLICIT_TRAJECTORY,
+            full, partial = self._paired_trajectory(
                 declared_requested,
-                private_full,
-                private_full,
-                DestinationDelivery.DEFERRED,
-            )
-            partial = RoutedDestination(
-                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
                 partial_requested,
-                private_partial,
+                private_full,
                 private_partial,
                 DestinationDelivery.DEFERRED,
             )
-        elif self.layout.public_daydream_dir in canonical_requested.parents:
+        elif public_root in canonical_requested.parents:
             owner = self._public_daydream_owner()
             if owner is None:
-                self._validate_destination(
-                    declared_requested,
-                    label=OutputLabel.EXPLICIT_TRAJECTORY,
-                )
+                self._validate_destination(declared_requested, label=OutputLabel.EXPLICIT_TRAJECTORY)
                 raise AssertionError("unreachable public trajectory validation")
             full_declared, full_canonical, _full_inside = self._validate_destination(
                 declared_requested,
@@ -4048,33 +3569,13 @@ class ArtifactSession:
                 additional=(full_canonical,),
                 public_subtree_owner=owner,
             )
-            if not (
-                self.layout.public_daydream_dir in full_canonical.parents
-                and self.layout.public_daydream_dir in partial_canonical.parents
-            ):
-                raise ArtifactVisibilityError(
-                    "paired trajectory destinations cross routing boundaries"
-                )
-            private_full = self._private_public_trajectory_path(
-                full_canonical,
-                owner=owner,
-            )
-            private_partial = self._private_public_trajectory_path(
-                partial_canonical,
-                owner=owner,
-            )
-            full = RoutedDestination(
-                OutputLabel.EXPLICIT_TRAJECTORY,
+            if not (public_root in full_canonical.parents and public_root in partial_canonical.parents):
+                raise ArtifactVisibilityError("paired trajectory destinations cross routing boundaries")
+            full, partial = self._paired_trajectory(
                 full_declared,
-                private_full,
-                private_full,
-                DestinationDelivery.DEFERRED,
-            )
-            partial = RoutedDestination(
-                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
                 partial_declared,
-                private_partial,
-                private_partial,
+                self._private_public_trajectory_path(full_canonical, owner=owner),
+                self._private_public_trajectory_path(partial_canonical, owner=owner),
                 DestinationDelivery.DEFERRED,
             )
         else:
@@ -4087,101 +3588,30 @@ class ArtifactSession:
                 label=OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
                 additional=(full_canonical,),
             )
-            delivery = (
-                DestinationDelivery.DEFERRED
-                if full_inside
-                else DestinationDelivery.LIVE_EXTERNAL
-            )
             if full_inside is not partial_inside:
                 raise ArtifactVisibilityError("paired trajectory destinations cross routing boundaries")
-            full = RoutedDestination(
-                OutputLabel.EXPLICIT_TRAJECTORY,
-                full_declared,
-                private_full if full_inside else full_declared,
-                private_full,
-                delivery,
-            )
-            partial = RoutedDestination(
-                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
-                partial_declared,
-                private_partial if partial_inside else partial_declared,
-                private_partial,
-                delivery,
+            delivery = (DestinationDelivery.DEFERRED if full_inside else DestinationDelivery.LIVE_EXTERNAL)
+            full, partial = self._paired_trajectory(
+                full_declared, partial_declared, private_full, private_partial, delivery
             )
             self._destinations.extend((full, partial))
-            initial_record_count = len(self._destination_records)
+            initial = len(self._routed)
             try:
-                self._capture_destination_record(
-                    full,
-                    canonical=full_canonical,
-                    inside_source=full_inside,
-                )
-                self._capture_destination_record(
-                    partial,
-                    canonical=partial_canonical,
-                    inside_source=partial_inside,
-                )
+                self._capture_destination_record(full, canonical=full_canonical, inside_source=full_inside)
+                self._capture_destination_record(partial, canonical=partial_canonical, inside_source=partial_inside)
                 if delivery is DestinationDelivery.LIVE_EXTERNAL:
                     if self._name_exchange is None:
                         self._name_exchange = _name_exchange_factory()
                     parent = full_declared.parent
-                    self._created_external_parents.extend(
-                        _ensure_external_parent(self._detach_transaction, parent)
-                    )
+                    self._created_external_parents.extend(_ensure_external_parent(self._detach_transaction, parent))
                     self._external_capabilities[parent] = _probe_external_parent(
                         self._detach_transaction,
                         parent,
                         self._name_exchange,
                     )
             except BaseException as primary:
-                captured = self._destination_records[initial_record_count:]
                 try:
-                    if captured:
-                        restore_stage = _create_source_stage(
-                            self.layout.source,
-                            self._detach_transaction.name,
-                            "restore",
-                            workspace_key=self.layout.workspace_key,
-                        )
-                        try:
-                            _restore_destination_records(
-                                self.layout.source,
-                                self._detach_transaction,
-                                captured,
-                                restore_stage,
-                            )
-                        finally:
-                            _validate_source_stage(
-                                restore_stage,
-                                source=self.layout.source,
-                                transaction_id=self._detach_transaction.name,
-                                purpose="restore",
-                                workspace_key=self.layout.workspace_key,
-                            )
-                            _remove_owned_tree(restore_stage, self.layout.source.parent)
-                    for index in range(initial_record_count, initial_record_count + 2):
-                        baseline_root = (
-                            self._detach_transaction / f"destination-{index:04d}-baseline"
-                        )
-                        if baseline_root.exists() or baseline_root.is_symlink():
-                            _remove_owned_tree(baseline_root, self._detach_transaction)
-                        manifest_path = (
-                            self._detach_transaction
-                            / f"destination-{index:04d}-baseline-manifest.json"
-                        )
-                        if manifest_path.exists() and not manifest_path.is_symlink():
-                            manifest_path.unlink()
-                    self._destination_records = self._destination_records[:initial_record_count]
-                    _write_destination_records(
-                        self._detach_transaction,
-                        self._destination_records,
-                        include_published=False,
-                    )
-                    _cleanup_external_directories(
-                        self._detach_transaction,
-                        self._created_external_parents,
-                    )
-                    self._created_external_parents.clear()
+                    self._rollback_paired_capture(initial)
                 except Exception as recovery_error:
                     primary.add_note(
                         "paired trajectory registration retained a closed recovery conflict "
@@ -4192,20 +3622,41 @@ class ArtifactSession:
                     for destination in self._destinations
                     if destination is not full and destination is not partial
                 ]
-                self._route_record_indexes.pop(id(full), None)
-                self._route_record_indexes.pop(id(partial), None)
                 raise
         route = TrajectoryOutputRoute(run_dir, full, partial)
         self._trajectory_route = route
         return route
 
-    def _replace_destination_record(self, index: int, record: _DestinationRecord) -> None:
-        self._destination_records[index] = record
-        _write_destination_records(
-            self._detach_transaction,
-            self._destination_records,
-            include_published=False,
-        )
+    def _rollback_paired_capture(self, initial: int) -> None:
+        """Undo the two destination captures a failed paired registration made."""
+        captured = self._records()[initial:]
+        if captured:
+            restore_stage = _create_source_stage(
+                self.layout.source,
+                self._detach_transaction.name,
+                "restore",
+                workspace_key=self.layout.workspace_key,
+            )
+            try:
+                _restore_destination_records(self.layout.source, self._detach_transaction, captured, restore_stage)
+            finally:
+                _retire_source_stage(
+                    self.layout.source,
+                    self._detach_transaction.name,
+                    "restore",
+                    workspace_key=self.layout.workspace_key,
+                )
+        for index in range(initial, initial + 2):
+            baseline_root = self._detach_transaction / f"destination-{index:04d}-baseline"
+            if baseline_root.exists() or baseline_root.is_symlink():
+                _remove_owned_tree(baseline_root, self._detach_transaction)
+            manifest = self._detach_transaction / f"destination-{index:04d}-baseline-manifest.json"
+            if manifest.exists() and not manifest.is_symlink():
+                manifest.unlink()
+        del self._routed[initial:]
+        self._persist_records()
+        _cleanup_external_directories(self._detach_transaction, self._created_external_parents)
+        self._created_external_parents.clear()
 
     def write_trajectory_document(
         self,
@@ -4237,25 +3688,23 @@ class ArtifactSession:
             return
         if selected.delivery is not DestinationDelivery.LIVE_EXTERNAL:
             return
-        record_index = self._route_record_indexes.get(id(selected))
-        if record_index is None:
-            raise ArtifactVisibilityError("trajectory destination ledger identity mismatch")
+        item = self._routed_for(selected)
         digest = hashlib.sha256(document.json_bytes).hexdigest()
-        record = replace(self._destination_records[record_index], prepared_sha256=digest)
-        self._replace_destination_record(record_index, record)
+        item.record = replace(item.record, prepared_sha256=digest)
+        self._persist_records()
         if self._name_exchange is None:
             raise ArtifactVisibilityError("live external atomic exchange was not initialized")
         capability = self._external_capabilities.get(selected.requested.parent)
         if capability is None:
             raise ArtifactVisibilityError("live external output parent was not probed")
-        installed = _publish_live_external(
+        item.record = _publish_live_external(
             self._detach_transaction,
-            record,
+            item.record,
             document.json_bytes,
             exchange=self._name_exchange,
             capability=capability,
         )
-        self._replace_destination_record(record_index, installed)
+        self._persist_records()
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
         self._require_active()
@@ -4285,9 +3734,7 @@ class ArtifactSession:
                 try:
                     path.relative_to(route.run_dir)
                 except ValueError as exc:
-                    raise ArtifactVisibilityError(
-                        "run snapshot child path is outside its private run"
-                    ) from exc
+                    raise ArtifactVisibilityError("run snapshot child path is outside its private run") from exc
             if path in seen_paths:
                 raise ArtifactVisibilityError("run snapshot contains duplicate document identity")
             seen_paths.add(path)
@@ -4337,35 +3784,27 @@ class ArtifactSession:
         self._state = "frozen"
         return result
 
-    def finalization_merge_path(
-        self,
-        route: RoutedDestination,
-        *,
-        snapshot: ArtifactTreeSnapshot,
-    ) -> Path:
+    def finalization_merge_path(self, route: RoutedDestination, *, snapshot: ArtifactTreeSnapshot) -> Path:
         if self._state != "frozen" or snapshot is not self._frozen_snapshot:
             raise ArtifactVisibilityError("artifact session is not ready for frozen finalization")
         if not any(route is registered for registered in self._destinations):
             raise ArtifactVisibilityError("artifact destination route identity mismatch")
         if route.delivery is not DestinationDelivery.FINALIZATION_MERGE:
             raise ArtifactVisibilityError("artifact destination is not a finalization merge")
-        existing = self._late_paths.get(id(route))
-        if existing is not None:
-            return existing
-        record_index = self._route_record_indexes.get(id(route))
-        if record_index is None:
-            raise ArtifactVisibilityError("artifact destination ledger identity mismatch")
-        late = self.layout.live_root.parent / "late" / self._destination_records[record_index].record_id
+        item = self._routed_for(route)
+        if item.late is not None:
+            return item.late
+        late = self.layout.live_root.parent / "late" / item.record.record_id
         if late.exists() or late.is_symlink():
             raise ArtifactVisibilityError("artifact finalization stage already exists")
         late.mkdir(parents=True, mode=0o700)
         _fsync_directory(late.parent)
-        self._late_paths[id(route)] = late
+        item.late = late
         return late
 
     def _retire_late_paths(self) -> None:
         late_parent = self.layout.live_root.parent / "late"
-        for late in self._late_paths.values():
+        for late in (item.late for item in self._routed if item.late is not None):
             if late.exists() or late.is_symlink():
                 if late.parent != late_parent or late.is_symlink() or not late.is_dir():
                     raise ArtifactVisibilityError("artifact finalization stage ownership changed")
@@ -4375,12 +3814,7 @@ class ArtifactSession:
                 late_parent.rmdir()
                 _fsync_directory(late_parent.parent)
 
-    def finalize_frozen(
-        self,
-        snapshot: ArtifactTreeSnapshot,
-        *,
-        disposition: ArtifactDisposition,
-    ) -> None:
+    def finalize_frozen(self, snapshot: ArtifactTreeSnapshot, *, disposition: ArtifactDisposition) -> None:
         if self._state != "frozen":
             raise ArtifactVisibilityError("artifact session is not ready for frozen publication")
         if snapshot is not self._frozen_snapshot:
@@ -4407,8 +3841,7 @@ class ArtifactSession:
             or entry.path == _REVIEW_OUTPUT
         )
         transaction_id = f"publish-{self.layout.session_id}-{secrets.token_hex(8)}"
-        transactions = self.layout.state_root / "transactions"
-        transaction = transactions / transaction_id
+        transaction = self.layout.state_root / "transactions" / transaction_id
         transaction.mkdir(parents=True)
         _write_transaction_owner(
             transaction,
@@ -4416,7 +3849,12 @@ class ArtifactSession:
             session_id=self.layout.session_id,
             kind="publish",
         )
-        journal = transaction / "journal.json"
+        mark = partial(
+            _write_transition,
+            transaction / "journal.json",
+            transaction_id=transaction_id,
+            session_id=self.layout.session_id,
+        )
         publication_stage: Path | None = None
         try:
             _atomic_json(transaction / "publish-manifest.json", _manifest_payload(public_entries))
@@ -4430,16 +3868,9 @@ class ArtifactSession:
             _copy_tree(snapshot.root, public_stage, public_entries)
             canonical_stage = transaction / "canonical-stage"
             _copy_tree(snapshot.root, canonical_stage, public_entries)
-            registered = {
-                record_index: destination
-                for destination in snapshot.destinations
-                if (record_index := self._route_record_indexes.get(id(destination))) is not None
-            }
-            if len(registered) != len(self._destination_records):
-                raise ArtifactVisibilityError("frozen artifact destination registry is inconsistent")
             publish_records: list[_DestinationRecord] = []
-            for index, baseline_record in enumerate(self._destination_records):
-                destination = registered[index]
+            for index, item in enumerate(self._routed):
+                destination, baseline_record = item.route, item.record
                 baseline_root = self._detach_transaction / f"destination-{index:04d}-baseline"
                 publish_baseline = transaction / f"destination-{index:04d}-baseline"
                 _copy_tree(baseline_root, publish_baseline, baseline_record.baseline)
@@ -4447,10 +3878,7 @@ class ArtifactSession:
                 _copy_tree(baseline_root, projection, baseline_record.baseline)
                 if destination.delivery is DestinationDelivery.LIVE_EXTERNAL:
                     actual = _manifest(Path(baseline_record.base), (baseline_record.relative,))
-                    root_entry = next(
-                        (entry for entry in actual if entry.path == baseline_record.relative),
-                        None,
-                    )
+                    root_entry = next((entry for entry in actual if entry.path == baseline_record.relative), None)
                     installed_matches = (
                         root_entry is not None
                         and root_entry.kind == "file"
@@ -4465,81 +3893,33 @@ class ArtifactSession:
                             == (baseline_record.expected_dev, baseline_record.expected_ino)
                         )
                     if actual != baseline_record.baseline and not installed_matches:
-                        raise ArtifactVisibilityError(
-                            "external artifact destination changed before finalization"
-                        )
+                        raise ArtifactVisibilityError("external artifact destination changed before finalization")
                     published = actual
                 elif destination.delivery is DestinationDelivery.DEFERRED:
                     if destination.frozen_path is None:
                         raise ArtifactVisibilityError("deferred destination has no frozen path")
-                    write_relative = destination.frozen_path.relative_to(
-                        self.layout.live_root
-                    ).as_posix()
-                    published = _overlay_destination(
-                        snapshot.root,
-                        write_relative,
-                        projection,
-                        baseline_record,
-                    )
+                    write_relative = destination.frozen_path.relative_to(self.layout.live_root).as_posix()
+                    published = _overlay_destination(snapshot.root, write_relative, projection, baseline_record)
+                elif item.late is None:
+                    published = baseline_record.baseline
                 else:
-                    late = self._late_paths.get(id(destination))
-                    published = (
-                        baseline_record.baseline
-                        if late is None
-                        else _overlay_destination(
-                            late.parent,
-                            late.name,
-                            projection,
-                            baseline_record,
-                        )
-                    )
+                    published = _overlay_destination(item.late.parent, item.late.name, projection, baseline_record)
                 publish_records.append(replace(baseline_record, published=published))
             self._retire_late_paths()
-            _write_destination_records(
-                transaction,
-                publish_records,
-                include_published=True,
-                include_baseline=True,
-            )
-            _write_transition(
-                journal,
-                transaction_id=transaction_id,
-                session_id=self.layout.session_id,
-                state="PUBLISH_STAGED",
-            )
+            _write_destination_records(transaction, publish_records, include_published=True, include_baseline=True)
+            mark(state=_Transition.PUBLISH_STAGED)
         except BaseException:
             if publication_stage is not None:
-                _validate_source_stage(
-                    publication_stage,
-                    source=self.layout.source,
-                    transaction_id=transaction_id,
-                    purpose="publish",
-                    workspace_key=self.layout.workspace_key,
+                _retire_source_stage(
+                    self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
                 )
-                _remove_owned_tree(publication_stage, self.layout.source.parent)
-            _retire_transaction(
-                self.layout.state_root,
-                transaction,
-                terminal_state="PUBLISH_RECONCILED",
-            )
+            _retire_transaction(self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_RECONCILED)
             raise
         self._state = "publishing"
-        backup = transaction / "public-backup"
-        backup.mkdir()
+        (transaction / "public-backup").mkdir()
         _fsync_directory(transaction)
-        _write_transition(
-            journal,
-            transaction_id=transaction_id,
-            session_id=self.layout.session_id,
-            state="PUBLISH_BACKED_UP",
-        )
-        _replace_public_from_tree(
-            self.layout.source,
-            public_stage,
-            public_entries,
-            transaction=transaction,
-            workspace_key=self.layout.workspace_key,
-        )
+        mark(state=_Transition.PUBLISH_BACKED_UP)
+        _replace_public_from_tree(self.layout.source, public_stage, public_entries)
         for index, record in enumerate(publish_records):
             if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
                 continue
@@ -4552,43 +3932,21 @@ class ArtifactSession:
                 workspace_key=self.layout.workspace_key,
                 source=self.layout.source,
             )
-        _write_transition(
-            journal,
-            transaction_id=transaction_id,
-            session_id=self.layout.session_id,
-            state="PUBLISH_INSTALLED",
-        )
+        mark(state=_Transition.PUBLISH_INSTALLED)
         canonical = self.layout.state_root / "canonical"
-        old_canonical = transaction / "old-canonical"
-        os.replace(canonical, old_canonical)
+        os.replace(canonical, transaction / "old-canonical")
         os.replace(canonical_stage, canonical)
         _fsync_directory(self.layout.state_root)
         _atomic_json(self.layout.state_root / "canonical-manifest.json", _manifest_payload(public_entries))
-        _write_transition(
-            journal,
-            transaction_id=transaction_id,
-            session_id=self.layout.session_id,
-            state="PUBLISH_VERIFIED",
-        )
+        mark(state=_Transition.PUBLISH_VERIFIED)
         self._canonical_entries = public_entries
         _retire_transaction(
             self.layout.state_root,
             self._detach_transaction,
-            terminal_state="DETACHED_RECONCILED",
+            terminal_state=_TerminalState.DETACHED_RECONCILED,
         )
-        _validate_source_stage(
-            publication_stage,
-            source=self.layout.source,
-            transaction_id=transaction_id,
-            purpose="publish",
-            workspace_key=self.layout.workspace_key,
-        )
-        _remove_owned_tree(publication_stage, self.layout.source.parent)
-        _retire_transaction(
-            self.layout.state_root,
-            transaction,
-            terminal_state="PUBLISH_VERIFIED",
-        )
+        _retire_source_stage(self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key)
+        _retire_transaction(self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_VERIFIED)
         self._state = "published"
 
     def _restore_prior(self) -> None:
@@ -4601,39 +3959,23 @@ class ArtifactSession:
         )
         errors: list[Exception] = []
         try:
-            _restore_destination_records(
-                self.layout.source,
-                self._detach_transaction,
-                self._destination_records,
-                source_stage,
-            )
+            _restore_destination_records(self.layout.source, self._detach_transaction, self._records(), source_stage)
         except Exception as exc:
             errors.append(exc)
         try:
             projection = source_stage / "public"
             _copy_tree(canonical, projection, self._canonical_entries)
-            _replace_public_from_tree(
-                self.layout.source,
-                projection,
-                self._canonical_entries,
-                transaction=self._detach_transaction,
-                workspace_key=self.layout.workspace_key,
-            )
+            _replace_public_from_tree(self.layout.source, projection, self._canonical_entries)
         except Exception as exc:
             errors.append(exc)
-        _validate_source_stage(
-            source_stage,
-            source=self.layout.source,
-            transaction_id=self._detach_transaction.name,
-            purpose="restore",
+        _retire_source_stage(
+            self.layout.source,
+            self._detach_transaction.name,
+            "restore",
             workspace_key=self.layout.workspace_key,
         )
-        _remove_owned_tree(source_stage, self.layout.source.parent)
         try:
-            _cleanup_external_directories(
-                self._detach_transaction,
-                self._created_external_parents,
-            )
+            _cleanup_external_directories(self._detach_transaction, self._created_external_parents)
             self._created_external_parents.clear()
         except Exception as exc:
             errors.append(exc)
@@ -4643,7 +3985,7 @@ class ArtifactSession:
         _retire_transaction(
             self.layout.state_root,
             self._detach_transaction,
-            terminal_state="DETACHED_RECONCILED",
+            terminal_state=_TerminalState.DETACHED_RECONCILED,
         )
 
     def _close(self) -> None:
@@ -4651,7 +3993,6 @@ class ArtifactSession:
         fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         os.close(self._lock_fd)
         os.close(self._repo_fd)
-        os.close(self._source_fd)
 
 
 def artifact_dir_for(repo: Path) -> Path:
@@ -4683,9 +4024,7 @@ def assert_model_cwd_clean(cwd: Path) -> None:
             if destination.delivery is DestinationDelivery.LIVE_EXTERNAL:
                 requested = destination.requested.resolve(strict=False)
                 if _overlaps(declared, requested):
-                    raise ArtifactVisibilityError(
-                        "model cwd overlaps a live external artifact destination"
-                    )
+                    raise ArtifactVisibilityError("model cwd overlaps a live external artifact destination")
     for name in (_DAYDREAM, _REVIEW_OUTPUT):
         candidate = declared / name
         if candidate.exists() or candidate.is_symlink():
@@ -4760,188 +4099,137 @@ def _print_rebaseline_warning(source: Path, canonical: Path) -> None:
     )
 
 
-def _open_layout(
-    work: WorkContext,
-    session_id: str,
-    owner: PrivateWorkspaceOwner,
-) -> tuple[ArtifactLayout, int, int, int, tuple[ArtifactManifestEntry, ...], Path]:
-    if (
-        not session_id
-        or "\0" in session_id
-        or "/" in session_id
-        or "\\" in session_id
-        or session_id in (".", "..")
-    ):
+def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwner) -> ArtifactSession:
+    """Detach the public tree and return the held session, on a worker thread."""
+    if not session_id or "\0" in session_id or "/" in session_id or "\\" in session_id or session_id in (".", ".."):
         raise ArtifactVisibilityError("artifact session id is invalid")
     identity = derive_workspace_identity(work, owner=owner)
     source = identity.source
-    repo = identity.repo
-    repo_fd = _open_directory_descriptor(repo, label="artifact repo")
-    try:
-        source_fd = _open_directory_descriptor(source, label="artifact source")
-    except BaseException:
-        os.close(repo_fd)
-        raise
-    try:
-        collisions = git_ops.tracked_artifact_collisions(source)
-    except git_ops.GitError as exc:
-        os.close(repo_fd)
-        os.close(source_fd)
-        raise ArtifactVisibilityError("could not validate artifact Git ownership") from exc
-    if collisions:
-        os.close(repo_fd)
-        os.close(source_fd)
-        raise ArtifactVisibilityError("tracked artifact collision blocks the run")
     workspace_key = identity.workspace_key
     state_root = identity.state_root
-    lock_path = state_root / ".artifact.lock"
-    lock_fd: int | None = None
-    try:
-        if lock_path.exists() or lock_path.is_symlink():
-            metadata = lock_path.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                raise ArtifactVisibilityError("artifact workspace lock is unsafe")
-        lock_fd = os.open(
-            lock_path,
-            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
+    with ExitStack() as held:
+        repo_fd = _open_directory_descriptor(identity.repo, label="artifact repo")
+        held.callback(os.close, repo_fd)
+        try:
+            collisions = git_ops.tracked_artifact_collisions(source)
+        except git_ops.GitError as exc:
+            raise ArtifactVisibilityError("could not validate artifact Git ownership") from exc
+        if collisions:
+            raise ArtifactVisibilityError("tracked artifact collision blocks the run")
+        lock_path = state_root / ".artifact.lock"
+        try:
+            if lock_path.exists() or lock_path.is_symlink():
+                metadata = lock_path.lstat()
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                    raise ArtifactVisibilityError("artifact workspace lock is unsafe")
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except (OSError, ArtifactVisibilityError) as exc:
+            raise ArtifactVisibilityError("artifact workspace lock is unsafe") from exc
+        held.callback(os.close, lock_fd)
         if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
             raise ArtifactVisibilityError("artifact workspace lock is unsafe")
-    except (OSError, ArtifactVisibilityError) as exc:
-        if lock_fd is not None:
-            os.close(lock_fd)
-        os.close(repo_fd)
-        os.close(source_fd)
-        raise ArtifactVisibilityError("artifact workspace lock is unsafe") from exc
-    assert lock_fd is not None
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        os.close(lock_fd)
-        os.close(repo_fd)
-        os.close(source_fd)
-        raise ArtifactVisibilityError("artifact workspace is locked by another process") from exc
-    transaction: Path | None = None
-    try:
-        _recover_transactions(state_root, source)
-        _validate_legacy_public(source)
-        runs = state_root / "runs"
-        transactions = state_root / "transactions"
-        _ensure_private_directory(runs)
-        _ensure_private_directory(transactions)
-        run_root = runs / session_id
-        if run_root.exists() or run_root.is_symlink():
-            raise ArtifactVisibilityError("artifact session id already exists")
-        run_root.mkdir(mode=0o700)
-        live_root = run_root / "live"
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ArtifactVisibilityError("artifact workspace is locked by another process") from exc
+        held.callback(fcntl.flock, lock_fd, fcntl.LOCK_UN)
+        transaction: Path | None = None
+        try:
+            _recover_transactions(state_root, source)
+            _validate_legacy_public(source)
+            runs = state_root / "runs"
+            transactions = state_root / "transactions"
+            _create_private_directory(runs)
+            _create_private_directory(transactions)
+            run_root = runs / session_id
+            if run_root.exists() or run_root.is_symlink():
+                raise ArtifactVisibilityError("artifact session id already exists")
+            run_root.mkdir(mode=0o700)
 
-        public_entries = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
-        transaction_id = f"detach-{session_id}-{secrets.token_hex(8)}"
-        transaction = transactions / transaction_id
-        transaction.mkdir(mode=0o700)
-        _write_transaction_owner(
-            transaction,
-            workspace_key=workspace_key,
-            session_id=session_id,
-            kind="detach",
-        )
-        journal = transaction / "journal.json"
-        detach_stage = transaction / "detach-stage"
-        canonical = state_root / "canonical"
-        canonical_manifest = state_root / "canonical-manifest.json"
-        # Canonical is itself the durable byte-identical copy the DETACH_REMOVING
-        # ordering needs, so stage one only when this workspace has none yet.
-        # Recovery tolerates the absent stage for exactly this reason. Session
-        # open is the one safe reconciliation point for a benign between-run
-        # public drift: the workspace lock excludes concurrent sessions and no
-        # artifact transaction is in flight, so the drift is adopted as the new
-        # canonical baseline BEFORE the detach transaction stages anything.
-        # Doing this after staging would leave the stale stage the recovery
-        # path validates against on a crash.
-        canonical_present = canonical.exists()
-        if canonical_present:
-            canonical_entries = _parse_manifest(canonical_manifest)
-            if public_entries != canonical_entries:
-                _rebaseline_canonical_from_public(
-                    state_root,
+            public_entries = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
+            transaction_id = f"detach-{session_id}-{secrets.token_hex(8)}"
+            transaction = transactions / transaction_id
+            transaction.mkdir(mode=0o700)
+            _write_transaction_owner(transaction, workspace_key=workspace_key, session_id=session_id, kind="detach")
+            mark = partial(
+                _write_transition,
+                transaction / "journal.json",
+                transaction_id=transaction_id,
+                session_id=session_id,
+            )
+            detach_stage = transaction / "detach-stage"
+            canonical = state_root / "canonical"
+            canonical_manifest = state_root / "canonical-manifest.json"
+            # Canonical is itself the durable byte-identical copy the DETACH_REMOVING
+            # ordering needs, so stage one only when this workspace has none yet.
+            # Recovery tolerates the absent stage for exactly this reason. Session
+            # open is the one safe reconciliation point for a benign between-run
+            # public drift: the workspace lock excludes concurrent sessions and no
+            # artifact transaction is in flight, so the drift is adopted as the new
+            # canonical baseline BEFORE the detach transaction stages anything.
+            # Doing this after staging would leave the stale stage the recovery
+            # path validates against on a crash.
+            canonical_present = canonical.exists()
+            if canonical_present:
+                canonical_entries = _parse_manifest(canonical_manifest)
+                if public_entries != canonical_entries:
+                    _rebaseline_canonical_from_public(
+                        state_root, source, public_entries, transaction=transaction
+                    )
+                    canonical_entries = public_entries
+            else:
+                _copy_tree(source, detach_stage, public_entries)
+            _atomic_json(transaction / "manifest.json", _manifest_payload(public_entries))
+            mark(state=_Transition.DETACH_STAGED)
+            if canonical_present:
+                # Re-baselining already made canonical match the observed public
+                # state; keep the equality the recovery path relies on.
+                canonical_entries = _parse_manifest(canonical_manifest)
+                if public_entries != canonical_entries:
+                    raise ArtifactVisibilityError("canonical artifact recovery copy is inconsistent")
+            else:
+                os.replace(detach_stage, canonical)
+                _fsync_directory(state_root)
+                _atomic_json(canonical_manifest, _manifest_payload(public_entries))
+                canonical_entries = public_entries
+            mark(state=_Transition.DETACH_CANONICAL)
+            mark(state=_Transition.DETACH_REMOVING)
+            if public_entries:
+                _remove_manifested(
                     source,
                     public_entries,
                     transaction=transaction,
+                    workspace_key=workspace_key,
+                    purpose="detach-public",
+                    stage_parent=source.parent,
                 )
-                canonical_entries = public_entries
-        else:
-            _copy_tree(source, detach_stage, public_entries)
-        _atomic_json(transaction / "manifest.json", _manifest_payload(public_entries))
-        _write_transition(
-            journal,
-            transaction_id=transaction_id,
-            session_id=session_id,
-            state="DETACH_STAGED",
-        )
-        if canonical_present:
-            # Re-baselining already made canonical match the observed public
-            # state; keep the equality the recovery path relies on.
-            canonical_entries = _parse_manifest(canonical_manifest)
-            if public_entries != canonical_entries:
-                raise ArtifactVisibilityError("canonical artifact recovery copy is inconsistent")
-        else:
-            os.replace(detach_stage, canonical)
-            _fsync_directory(state_root)
-            _atomic_json(canonical_manifest, _manifest_payload(public_entries))
-            canonical_entries = public_entries
-        _write_transition(
-            journal,
-            transaction_id=transaction_id,
-            session_id=session_id,
-            state="DETACH_CANONICAL",
-        )
-        _write_transition(
-            journal,
-            transaction_id=transaction_id,
-            session_id=session_id,
-            state="DETACH_REMOVING",
-        )
-        if public_entries:
-            _remove_manifested(
-                source,
-                public_entries,
-                transaction=transaction,
-                workspace_key=workspace_key,
-                purpose="detach-public",
-                stage_parent=source.parent,
+            mark(state=_Transition.DETACHED)
+            layout = ArtifactLayout(
+                repo=identity.repo,
+                source=source,
+                git_common_dir=identity.git_common_dir,
+                source_git_dir=identity.source_git_dir,
+                repo_git_dir=identity.repo_git_dir,
+                operational_workspaces_root=identity.operational_state_root.parent,
+                session_id=session_id,
+                state_root=state_root,
             )
-        _write_transition(journal, transaction_id=transaction_id, session_id=session_id, state="DETACHED")
-        _copy_tree(canonical, live_root, canonical_entries)
-        layout = ArtifactLayout(
-            repo=repo,
-            source=source,
-            git_common_dir=identity.git_common_dir,
-            source_git_dir=identity.source_git_dir,
-            repo_git_dir=identity.repo_git_dir,
-            artifact_runtime_root=identity.runtime_root,
-            operational_workspaces_root=identity.operational_workspaces_root,
-            session_id=session_id,
-            state_root=state_root,
-            live_root=live_root,
-            daydream_dir=live_root / _DAYDREAM,
-            review_output=live_root / _REVIEW_OUTPUT,
-            public_daydream_dir=source / _DAYDREAM,
-            public_review_output=source / _REVIEW_OUTPUT,
-            workspace_key=workspace_key,
-        )
-        return layout, lock_fd, repo_fd, source_fd, canonical_entries, transaction
-    except BaseException as primary:
-        if transaction is not None and transaction.exists() and not transaction.is_symlink():
-            try:
-                _reconcile_failed_detach(state_root, source, transaction)
-            except Exception:
-                primary.add_note("artifact recovery retained a closed conflict")
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-        os.close(repo_fd)
-        os.close(source_fd)
-        raise
+            _copy_tree(canonical, layout.live_root, canonical_entries)
+        except BaseException as primary:
+            if transaction is not None and transaction.exists() and not transaction.is_symlink():
+                try:
+                    _reconcile_failed_detach(state_root, source, transaction)
+                except Exception:
+                    primary.add_note("artifact recovery retained a closed conflict")
+            raise
+        held.pop_all()
+    return ArtifactSession(
+        layout,
+        lock_fd=lock_fd,
+        repo_fd=repo_fd,
+        canonical_entries=canonical_entries,
+        detach_transaction=transaction,
+    )
 
 
 def _close_artifact_session(session: ArtifactSession) -> None:
@@ -4959,9 +4247,7 @@ def _close_artifact_session(session: ArtifactSession) -> None:
     except BaseException as close_error:
         if primary is None:
             raise
-        primary.add_note(
-            f"artifact session close failed ({type(close_error).__name__})"
-        )
+        primary.add_note(f"artifact session close failed ({type(close_error).__name__})")
     if primary is not None:
         raise primary
 
@@ -4974,18 +4260,7 @@ async def open_artifact_session(
     owner: PrivateWorkspaceOwner,
 ) -> AsyncIterator[ArtifactSession]:
     with anyio.CancelScope(shield=True):
-        acquired = await anyio.to_thread.run_sync(
-            partial(_open_layout, work, session_id, owner),
-        )
-        layout, lock_fd, repo_fd, source_fd, canonical_entries, detach_transaction = acquired
-        session = ArtifactSession(
-            layout,
-            lock_fd=lock_fd,
-            repo_fd=repo_fd,
-            source_fd=source_fd,
-            canonical_entries=canonical_entries,
-            detach_transaction=detach_transaction,
-        )
+        session = await anyio.to_thread.run_sync(partial(_open_layout, work, session_id, owner))
     token = _SESSION.set(session)
     primary: BaseException | None = None
     try:
@@ -5000,8 +4275,6 @@ async def open_artifact_session(
         except BaseException as recovery_error:
             if primary is None:
                 raise
-            primary.add_note(
-                f"artifact recovery retained a closed conflict ({type(recovery_error).__name__})"
-            )
+            primary.add_note(f"artifact recovery retained a closed conflict ({type(recovery_error).__name__})")
         finally:
             _SESSION.reset(token)

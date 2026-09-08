@@ -12,17 +12,20 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anyio
 import pytest
 
 from daydream import git_ops, runner
 from daydream.archive.git_context import GitContext
-from daydream.archive.manifest import Manifest, build_manifest
+from daydream.archive.manifest import (
+    Manifest,
+    archive_recorder_provenance_from_snapshot,
+    build_manifest_from_snapshot,
+)
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION_V1,
     AgentEvent,
@@ -35,7 +38,12 @@ from daydream.exploration import ExplorationContext
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.runner import RunConfig
-from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import (
+    DaydreamRunFlow,
+    RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
+    TrajectoryRecorder,
+)
 from daydream.workspace import AuditWorkspace, WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.git_helpers import bare_remote
@@ -178,120 +186,90 @@ def test_run_config_exploration_context_defaults_to_none() -> None:
     assert cfg2.exploration_context is explicit
 
 
-def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
-    tmp_path: Path,
-) -> None:
-    """The recorder callback is a non-raising immutable handoff, not finalization."""
-    from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
-    from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
+_VALID_DOCUMENT_BYTES = json.dumps(
+    {"session_id": "session", "trajectory_id": "session", "steps": [], "final_metrics": {}, "extra": {}}
+).encode()
 
-    recorder = TrajectoryRecorder(
+
+@pytest.fixture
+def capture_recorder(tmp_path: Path) -> TrajectoryRecorder:
+    """A bare recorder identifying the ``session`` run for capture tests."""
+    return TrajectoryRecorder(
         path=tmp_path / "trajectory.json",
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="test",
         session_id="session",
     )
-    payload = json.dumps(
-        {
-            "session_id": "session",
-            "trajectory_id": "session",
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    final = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id="session",
+
+
+def _capture_snapshot(
+    tmp_path: Path,
+    status: Literal["complete", "partial"],
+    *,
+    json_bytes: bytes = _VALID_DOCUMENT_BYTES,
+    root: str = "session",
+    cutoff_at: str = "2026-09-06T00:00:00Z",
+) -> RunWriteSnapshot:
+    """One single-document run-write snapshot whose path is never written."""
+    return RunWriteSnapshot(
+        status=status,
+        cutoff_at=cutoff_at,
+        root_trajectory_id=root,
         documents=(
             TrajectoryDocumentSnapshot(
                 trajectory_id="session",
-                path=tmp_path / "missing.json",
-                json_bytes=payload,
+                path=tmp_path / f"missing.{'json' if status == 'complete' else 'partial'}",
+                json_bytes=json_bytes,
             ),
         ),
     )
+
+
+def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
+    tmp_path: Path, capture_recorder: TrajectoryRecorder
+) -> None:
+    """The recorder callback is a non-raising immutable handoff, not finalization."""
+    from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
+
+    final = _capture_snapshot(tmp_path, "complete")
     capture = _RunWriteCapture(session_id="session")
 
-    capture.retain(recorder, final)
+    capture.retain(capture_recorder, final)
     assert capture.final is final
     assert capture.partial is None
     assert capture.validation_error is None
     assert not final.documents[0].path.exists()
 
-    invalid = RunWriteSnapshot(
-        status="partial",
-        cutoff_at=final.cutoff_at,
-        root_trajectory_id="other",
-        documents=final.documents,
-    )
-    capture.retain(recorder, invalid)
+    capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", root="other"))
     assert capture.final is final
     assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
 
 
 def test_run_write_capture_closes_ordinary_json_validation_failure(
-    tmp_path: Path,
+    tmp_path: Path, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The synchronous recorder callback never leaks an ordinary parser error."""
     from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
-    from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
 
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test",
-        session_id="session",
-    )
-    valid_payload = json.dumps(
-        {
-            "session_id": "session",
-            "trajectory_id": "session",
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    partial = RunWriteSnapshot(
-        status="partial",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id="session",
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id="session",
-                path=tmp_path / "missing.partial",
-                json_bytes=valid_payload,
-            ),
-        ),
-    )
+    partial = _capture_snapshot(tmp_path, "partial")
     capture = _RunWriteCapture(session_id="session")
-    capture.retain(recorder, partial)
+    capture.retain(capture_recorder, partial)
 
     # Ordinary parser failure, interpreter-independent: a truncated document
     # raises json.JSONDecodeError on every supported Python. (Deep nesting is
     # NOT usable here — CPython 3.14's rewritten JSON scanner no longer
     # recurses in C, so 10k-deep but well-formed JSON parses cleanly there and
     # only 3.12/3.13 raise RecursionError.)
-    malformed_document_bytes = (
-        b'{"session_id":"session","trajectory_id":"session","value":[0'
-    )
-    malformed_final = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:01Z",
-        root_trajectory_id="session",
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id="session",
-                path=tmp_path / "missing.json",
-                json_bytes=malformed_document_bytes,
-            ),
+    capture.retain(
+        capture_recorder,
+        _capture_snapshot(
+            tmp_path,
+            "complete",
+            json_bytes=b'{"session_id":"session","trajectory_id":"session","value":[0',
+            cutoff_at="2026-09-06T00:00:01Z",
         ),
     )
-
-    capture.retain(recorder, malformed_final)
 
     assert capture.partial is partial
     assert capture.final is None
@@ -300,32 +278,11 @@ def test_run_write_capture_closes_ordinary_json_validation_failure(
 
 
 def test_run_write_capture_does_not_swallow_base_exception(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
 ) -> None:
     """Cancellation-class failures remain authoritative at the callback boundary."""
     from daydream.runner import _RunWriteCapture
-    from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
 
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test",
-        session_id="session",
-    )
-    snapshot = RunWriteSnapshot(
-        status="partial",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id="session",
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id="session",
-                path=tmp_path / "missing.partial",
-                json_bytes=b"{}",
-            ),
-        ),
-    )
     capture = _RunWriteCapture(session_id="session")
 
     def interrupt(_payload: bytes) -> Any:
@@ -334,7 +291,7 @@ def test_run_write_capture_does_not_swallow_base_exception(
     monkeypatch.setattr("daydream.runner.json.loads", interrupt)
 
     with pytest.raises(KeyboardInterrupt):
-        capture.retain(recorder, snapshot)
+        capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", json_bytes=b"{}"))
     assert capture.partial is None
     assert capture.final is None
     assert capture.validation_error is None
@@ -377,21 +334,13 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     monkeypatch.setattr(
         "daydream.pr_review.find_pr_by_number",
         lambda *_args, **_kwargs: PRInfo(
-            number=7,
-            head_sha="a" * 40,
-            base_sha="b" * 40,
-            base_ref="main",
-            head_ref="feature",
-            owner="owner",
-            repo="repo",
-            url="https://example.invalid/owner/repo/pull/7",
+            number=7, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
+            owner="owner", repo="repo", url="https://example.invalid/owner/repo/pull/7",
         ),
     )
 
     result = runner._write_findings_for_parsed(
-        repo,
-        RunConfig(pr_number=7, findings_out=str(private_path)),
-        [],
+        repo, RunConfig(pr_number=7, findings_out=str(private_path)), []
     )
 
     output = capsys.readouterr().out
@@ -399,6 +348,106 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     assert private_path.is_file()
     assert "Findings artifact prepared." in output
     assert str(private_path) not in output
+
+
+def _feature_repo(tmp_path: Path, *, remote: bool = False) -> Path:
+    """Real git repo with one committed change on ``feature`` over ``main``."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "app.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "app.py")
+    _commit(repo, "base")
+    if remote:
+        _git(repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
+        _git(repo, "push", "-u", "origin", "main")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "app.py").write_text("VALUE = 2\n")
+    _git(repo, "add", "app.py")
+    _commit(repo, "feature")
+    return repo
+
+
+def _write_probe_flow(ext_dir: Any, flow_name: str) -> None:
+    """Register a one-step flow whose step makes one real ``run_agent`` call."""
+    ext_dir.write_module(
+        "from daydream.agent import run_agent\n"
+        "from daydream.extensions import FlowStep\n"
+        "from daydream.trajectory import DaydreamPhase\n"
+        "async def _probe(ctx):\n"
+        "    assert ctx.artifacts is not None\n"
+        "    assert ctx.private_workspace_owner is not None\n"
+        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE',"
+        " phase=DaydreamPhase.REVIEW)\n"
+        "def register(registry):\n"
+        "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
+        f"    registry.set_flow({flow_name!r}, ['probe'])\n"
+    )
+
+
+class _ControlledBackend:
+    """In-process backend with the stream behaviors the host boundary needs.
+
+    ``mode`` picks what the stream does once entered: ``yield`` streams a normal
+    turn, ``block`` waits for ``release``/``cancel``, ``hang`` sleeps forever,
+    and ``raise`` raises *error* mid-iteration (the trailing ``yield`` keeps this
+    an async generator, so a real backend's failure shape is preserved).
+    """
+
+    model = "controlled-model"
+
+    def __init__(
+        self,
+        mode: Literal["yield", "block", "hang", "raise"] = "yield",
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        self.mode = mode
+        self.error = error
+        self.entered = anyio.Event()
+        self.release = anyio.Event()
+        self.cancelled = False
+        self.cwd: Path | None = None
+
+    async def execute(self, cwd: Path, *_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
+        self.cwd = cwd
+        self.entered.set()
+        if self.mode == "raise":
+            assert self.error is not None
+            raise self.error
+        if self.mode == "block":
+            await self.release.wait()
+        elif self.mode == "hang":
+            await anyio.sleep_forever()
+        yield TextEvent(text="controlled output")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        self.cancelled = True
+        self.release.set()
+
+
+async def _run_private(config: RunConfig, tmp_path: Path) -> int:
+    """Drive the real ``runner.run`` against a per-test private artifact root."""
+    from daydream.artifact_visibility import private_root_locations
+
+    return await runner.run(
+        config, private_roots=private_root_locations(base=tmp_path / "private")
+    )
+
+
+def _assert_one_published_run(repo: Path, archive_dir: Path) -> tuple[Path, Path]:
+    """Exactly one public run and one archived run; return both directories."""
+    public_runs = list((repo / ".daydream" / "runs").iterdir())
+    archived_runs = list((archive_dir / "runs").iterdir())
+    assert len(public_runs) == len(archived_runs) == 1
+    return public_runs[0], archived_runs[0]
+
+
+def _assert_partial_evidence_published(repo: Path, archive_dir: Path) -> None:
+    """A joined-but-failed run publishes partial evidence under both roots."""
+    public_run, archived_run = _assert_one_published_run(repo, archive_dir)
+    assert json.loads((public_run / "trajectory.json").read_text())["extra"]["partial"] is True
+    assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
 
 
 @pytest.mark.parametrize("failure_mode", ["none", "destination", "archive"])
@@ -410,46 +459,9 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     failure_mode: str,
 ) -> None:
     """A real custom flow stays private until its real agent invocation joins."""
-    from daydream.artifact_visibility import private_root_locations
-
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    (repo / "app.py").write_text("VALUE = 1\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "app.py").write_text("VALUE = 2\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "feature")
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep\n"
-        "async def _probe(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    assert ctx.artifacts is not None\n"
-        "    assert ctx.private_workspace_owner is not None\n"
-        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE', "
-        "phase=DaydreamPhase.REVIEW)\n"
-        "def register(registry):\n"
-        "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
-        "    registry.set_flow('artifact-probe', ['probe'])\n"
-    )
-
-    class BlockingBackend:
-        model = "controlled-model"
-        entered = anyio.Event()
-        release = anyio.Event()
-
-        async def execute(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-            self.entered.set()
-            await self.release.wait()
-            yield TextEvent(text="controlled output")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-        async def cancel(self) -> None:
-            self.release.set()
-
-    backend = BlockingBackend()
+    repo = _feature_repo(tmp_path)
+    _write_probe_flow(ext_dir, "artifact-probe")
+    backend = _ControlledBackend("block")
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
     if failure_mode == "archive":
         (repo / ".review-output.md").write_bytes(b"operator baseline\x00")
@@ -473,12 +485,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     result: list[int] = []
 
     async def invoke() -> None:
-        result.append(
-            await runner.run(
-                config,
-                private_roots=private_root_locations(base=tmp_path / "private"),
-            )
-        )
+        result.append(await _run_private(config, tmp_path))
 
     with anyio.fail_after(20):
         async with anyio.create_task_group() as group:
@@ -493,56 +500,31 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 os.replace(replacement, external_trajectory)
             backend.release.set()
 
-    if failure_mode == "destination":
+    if failure_mode != "none":
         assert result == [1]
-        assert external_trajectory.read_text(encoding="utf-8") == "concurrent replacement\n"
-        assert not (repo / ".daydream").exists()
         assert not list((archive_dir / "runs").glob("*"))
-        return
-
-    if failure_mode == "archive":
-        assert result == [1]
-        assert external_trajectory.read_text(encoding="utf-8") == "operator baseline\n"
-        assert (repo / ".review-output.md").read_bytes() == b"operator baseline\x00"
-        assert not (repo / ".daydream" / "runs").exists()
-        assert not list((archive_dir / "runs").glob("*"))
+        if failure_mode == "destination":
+            assert external_trajectory.read_text(encoding="utf-8") == "concurrent replacement\n"
+            assert not (repo / ".daydream").exists()
+        else:
+            assert external_trajectory.read_text(encoding="utf-8") == "operator baseline\n"
+            assert (repo / ".review-output.md").read_bytes() == b"operator baseline\x00"
+            assert not (repo / ".daydream" / "runs").exists()
         return
 
     assert result == [0]
-    public_runs = list((repo / ".daydream" / "runs").iterdir())
-    archived_runs = list((archive_dir / "runs").iterdir())
-    assert len(public_runs) == len(archived_runs) == 1
-    assert (public_runs[0] / "trajectory.json").read_bytes() == (
-        archived_runs[0] / "trajectory.json"
-    ).read_bytes()
-    assert external_trajectory.read_bytes() == (
-        archived_runs[0] / "trajectory.json"
-    ).read_bytes()
-    manifest = json.loads((archived_runs[0] / "manifest.json").read_text())
-    assert manifest["session_id"] == public_runs[0].name
+    public_run, archived_run = _assert_one_published_run(repo, archive_dir)
+    archived_bytes = (archived_run / "trajectory.json").read_bytes()
+    assert (public_run / "trajectory.json").read_bytes() == archived_bytes
+    assert external_trajectory.read_bytes() == archived_bytes
+    assert json.loads((archived_run / "manifest.json").read_text())["session_id"] == public_run.name
 
 
 async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    archive_dir: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
 ) -> None:
     """Root/fork provenance is stable source identity, not the deleted model cwd."""
-    from daydream.artifact_visibility import private_root_locations
-
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    (repo / "app.py").write_text("VALUE = 1\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "base")
-    origin = bare_remote(tmp_path / "origin.git")
-    _git(repo, "remote", "add", "origin", str(origin))
-    _git(repo, "push", "-u", "origin", "main")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "app.py").write_text("VALUE = 2\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "feature")
+    repo = _feature_repo(tmp_path, remote=True)
     ext_dir.write_module(
         "from daydream.agent import run_agent\n"
         "from daydream.extensions import FlowStep\n"
@@ -559,24 +541,10 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
         "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
         "    registry.set_flow('source-probe', ['probe'])\n"
     )
-
-    class RecordingBackend:
-        model = "controlled-model"
-        cwd: Path | None = None
-
-        async def execute(
-            self, cwd: Path, *_args: Any, **_kwargs: Any
-        ) -> AsyncIterator[AgentEvent]:
-            self.cwd = cwd
-            yield TextEvent(text="controlled output")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-        async def cancel(self) -> None:
-            return None
-
-    backend = RecordingBackend()
+    backend = _ControlledBackend()
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
-    result = await runner.run(
+
+    result = await _run_private(
         RunConfig(
             target=str(repo),
             base="main",
@@ -586,23 +554,20 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
             archive=True,
             non_interactive=True,
         ),
-        private_roots=private_root_locations(base=tmp_path / "private"),
+        tmp_path,
     )
 
     assert result == 0
     assert backend.cwd is not None
     assert backend.cwd != repo.resolve()
     assert not backend.cwd.exists()
-    public_run_dir = next((repo / ".daydream" / "runs").iterdir())
-    run_dir = next((archive_dir / "runs").iterdir())
+    public_run_dir, run_dir = _assert_one_published_run(repo, archive_dir)
     payloads = [
         json.loads(path.read_text())
         for path in (run_dir / "trajectory.json", *sorted((run_dir / "trajectories").glob("*.json")))
     ]
     assert len(payloads) == 2
-    assert {payload["extra"]["target_dir"] for payload in payloads} == {
-        str(repo.resolve())
-    }
+    assert {payload["extra"]["target_dir"] for payload in payloads} == {str(repo.resolve())}
     assert str(backend.cwd) not in json.dumps(payloads)
     assert (public_run_dir / "trajectory.json").read_bytes() == (
         run_dir / "trajectory.json"
@@ -623,64 +588,29 @@ async def test_artifact_session_runner_preserves_primary_and_publishes_partial_e
     finalizer_interrupt: bool,
 ) -> None:
     """A complete recorder write cannot turn a failed body into host success."""
-    from daydream.artifact_visibility import private_root_locations
-
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    (repo / "app.py").write_text("VALUE = 1\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "app.py").write_text("VALUE = 2\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "feature")
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep\n"
-        "async def _probe(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE', "
-        "phase=DaydreamPhase.REVIEW)\n"
-        "def register(registry):\n"
-        "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
-        "    registry.set_flow('artifact-probe-error', ['probe'])\n"
-    )
+    repo = _feature_repo(tmp_path)
+    _write_probe_flow(ext_dir, "artifact-probe-error")
     primary = RuntimeError("model boundary failed")
-
-    class FailingBackend:
-        model = "controlled-model"
-
-        async def execute(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-            raise primary
-            # A bare raise would not make this an async generator, so the
-            # failure would surface at call time instead of during iteration
-            # like a real backend stream. The yield is never reached.
-            # The yield is never reached; it exists only so this function is
-            # an async generator and the failure surfaces during iteration.
-            yield TextEvent(text="unreachable")  # noqa
-
-        async def cancel(self) -> None:
-            return None
-
-    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: FailingBackend())
+    monkeypatch.setattr(
+        runner, "create_backend", lambda *_a, **_k: _ControlledBackend("raise", error=primary)
+    )
     if finalizer_interrupt:
         monkeypatch.setattr(
             "daydream.archive.finalize_archive_run",
             lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
-    config = RunConfig(
-        target=str(repo),
-        base="main",
-        flow_name="artifact-probe-error",
-        run_eval=False,
-        archive=True,
-        non_interactive=True,
-    )
 
     with pytest.raises(RuntimeError) as raised:
-        await runner.run(
-            config,
-            private_roots=private_root_locations(base=tmp_path / "private"),
+        await _run_private(
+            RunConfig(
+                target=str(repo),
+                base="main",
+                flow_name="artifact-probe-error",
+                run_eval=False,
+                archive=True,
+                non_interactive=True,
+            ),
+            tmp_path,
         )
 
     assert raised.value is primary
@@ -689,59 +619,16 @@ async def test_artifact_session_runner_preserves_primary_and_publishes_partial_e
         assert not list((archive_dir / "runs").glob("*"))
         assert any("secondary base failure" in note for note in primary.__notes__)
         return
-    public_runs = list((repo / ".daydream" / "runs").iterdir())
-    archived_runs = list((archive_dir / "runs").iterdir())
-    assert len(public_runs) == len(archived_runs) == 1
-    root_payload = json.loads((public_runs[0] / "trajectory.json").read_text())
-    manifest = json.loads((archived_runs[0] / "manifest.json").read_text())
-    assert root_payload["extra"]["partial"] is True
-    assert manifest["archive_status"] == "partial"
+    _assert_partial_evidence_published(repo, archive_dir)
 
 
 async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    archive_dir: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
 ) -> None:
     """Cancellation joins the backend, durably publishes evidence, then escapes."""
-    from daydream.artifact_visibility import private_root_locations
-
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    (repo / "app.py").write_text("VALUE = 1\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "app.py").write_text("VALUE = 2\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "feature")
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep\n"
-        "async def _probe(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE', "
-        "phase=DaydreamPhase.REVIEW)\n"
-        "def register(registry):\n"
-        "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
-        "    registry.set_flow('artifact-probe-cancel', ['probe'])\n"
-    )
-
-    class BlockingBackend:
-        model = "controlled-model"
-        entered = anyio.Event()
-        released = False
-
-        async def execute(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-            self.entered.set()
-            await anyio.sleep_forever()
-            yield TextEvent(text="unreachable")
-
-        async def cancel(self) -> None:
-            self.released = True
-
-    backend = BlockingBackend()
+    repo = _feature_repo(tmp_path)
+    _write_probe_flow(ext_dir, "artifact-probe-cancel")
+    backend = _ControlledBackend("hang")
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
     config = RunConfig(
         target=str(repo),
@@ -755,10 +642,7 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
 
     async def invoke() -> None:
         try:
-            await runner.run(
-                config,
-                private_roots=private_root_locations(base=tmp_path / "private"),
-            )
+            await _run_private(config, tmp_path)
         except BaseException as exc:
             caught.append(exc)
             raise
@@ -771,14 +655,8 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
 
     assert len(caught) == 1
     assert isinstance(caught[0], anyio.get_cancelled_exc_class())
-    assert backend.released is True
-    public_runs = list((repo / ".daydream" / "runs").iterdir())
-    archived_runs = list((archive_dir / "runs").iterdir())
-    assert len(public_runs) == len(archived_runs) == 1
-    root_payload = json.loads((public_runs[0] / "trajectory.json").read_text())
-    manifest = json.loads((archived_runs[0] / "manifest.json").read_text())
-    assert root_payload["extra"]["partial"] is True
-    assert manifest["archive_status"] == "partial"
+    assert backend.cancelled is True
+    _assert_partial_evidence_published(repo, archive_dir)
 
 
 async def test_signal_flush_immutable_cutoff_before_first_root_step(
@@ -1343,13 +1221,11 @@ async def test_owner_preflight_failure_never_reaches_identity_or_backend(
     """Real-path: owner preflight failure stays inside the trace boundary.
 
     A valid non-Git target fails ``resolve_private_workspace_owner`` after the
-    run-root span opens. Both boundary assertions sit on external seams — the
-    App installation-token mint (the network seam) and ``create_backend`` (the
-    Backend-protocol seam) — so the proof is that the outside world was never
-    touched, not that an internal dispatcher was swapped out. App credentials
-    are configured and the default deep flow with ``pr_repo`` is a posting
-    flow, so if identity resolution ran, ``_mint_installation_token`` would
-    fire and fail the test.
+    run-root span opens. Both assertions sit on external seams — the App
+    installation-token mint and ``create_backend`` — so the proof is that the
+    outside world was never touched. App credentials are configured and the
+    default deep flow with ``pr_repo`` posts, so a token would be minted here
+    if identity resolution ran at all.
     """
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
@@ -2540,40 +2416,14 @@ def test_open_recorder_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert recorder.test_backend_name == "claude"
 
 
-@dataclass
-class _MockManifestRecorder:
-    """Minimal recorder surface consumed by ``build_manifest``.
-
-    Mirrors tests/test_archive.py's ``_MockRecorder``: ``build_manifest`` reads
-    the identity fields, ``run_flow``, and ``_final_totals``, and calls the two
-    timing methods.
-    """
-
-    session_id: str = "abcd1234-0000-0000-0000-000000000000"
-    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
-    pr_number: int | None = None
-    pr_repo: str | None = None
-    _final_totals: dict[str, Any] = field(
-        default_factory=lambda: {
-            "prompt": 0,
-            "completion": 0,
-            "cached": 0,
-            "cost": 0.0,
-            "any_cost_seen": False,
-        },
-    )
-
-    def compute_wall_clock_seconds(self) -> float | None:
-        return None
-
-    def compute_phase_timings(self) -> dict[str, Any] | None:
-        return None
-
-
 def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> Manifest:
-    """Build a manifest for ``config``/``flow`` from a mock recorder."""
-    return build_manifest(
-        recorder=cast(TrajectoryRecorder, _MockManifestRecorder(run_flow=flow)),
+    """Build a manifest for ``config``/``flow`` from one real frozen snapshot."""
+    snapshot = _capture_snapshot(tmp_path, "complete")
+    return build_manifest_from_snapshot(
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
+            write_snapshot=snapshot, run_flow=flow
+        ),
+        write_snapshot=snapshot,
         config=config,
         git_ctx=GitContext(),
         status="complete",

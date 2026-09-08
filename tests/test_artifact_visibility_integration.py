@@ -66,11 +66,7 @@ def _write_probe_extension(
     sink_backend: bool = False,
     read_only: bool = False,
 ) -> None:
-    read_only_lines = (
-        "        read_only=True,\n"
-        if read_only
-        else ""
-    )
+    read_only_lines = "        read_only=True,\n" if read_only else ""
     prompt_kind = "READ-ONLY" if read_only else "VISIBILITY"
     sink_lines = (
         "    from tests.test_artifact_visibility_integration import BACKEND_SINK\n"
@@ -112,22 +108,13 @@ def _write_probe_extension(
 
 def _seed_private_canaries(private_base: Path) -> None:
     private_base.mkdir(mode=0o700)
-    (private_base / "private sentinel.txt").write_text(
-        PRIVATE_ROOT_CANARY,
-        encoding="utf-8",
-    )
+    (private_base / "private sentinel.txt").write_text(PRIVATE_ROOT_CANARY, encoding="utf-8")
     runtime_root = private_base / "runtime"
     runtime_root.mkdir(mode=0o700)
     sibling = runtime_root / "sibling-owner" / "runs" / "sibling-run"
     sibling.mkdir(parents=True)
-    (sibling / "reasoning.txt").write_text(
-        SIBLING_REASONING_CANARY,
-        encoding="utf-8",
-    )
-    (runtime_root / "runtime state.txt").write_text(
-        RUNTIME_STATE_CANARY,
-        encoding="utf-8",
-    )
+    (sibling / "reasoning.txt").write_text(SIBLING_REASONING_CANARY, encoding="utf-8")
+    (runtime_root / "runtime state.txt").write_text(RUNTIME_STATE_CANARY, encoding="utf-8")
 
 
 def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
@@ -138,10 +125,7 @@ def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
 
     prior = repo / ".daydream" / "runs" / "prior-public-run"
     prior.mkdir(parents=True)
-    (prior / "trajectory.json").write_text(
-        json.dumps({"reasoning": PRIOR_REASONING_CANARY}),
-        encoding="utf-8",
-    )
+    (prior / "trajectory.json").write_text(json.dumps({"reasoning": PRIOR_REASONING_CANARY}), encoding="utf-8")
     legacy = repo / ".daydream" / "resume" / "legacy cache.json"
     legacy.parent.mkdir(parents=True)
     legacy.write_text(RESUME_CACHE_CANARY, encoding="utf-8")
@@ -226,9 +210,7 @@ def _install_claude_boundary(
             if str(sanctioned_path) in prompt:
                 metadata = sanctioned_path.lstat()
                 assert stat.S_ISREG(metadata.st_mode)
-                sanctioned_reads[str(sanctioned_path)] = hashlib.sha256(
-                    sanctioned_path.read_bytes()
-                ).hexdigest()
+                sanctioned_reads[str(sanctioned_path)] = hashlib.sha256(sanctioned_path.read_bytes()).hexdigest()
             observations.append(
                 {
                     "backend": "claude",
@@ -251,9 +233,7 @@ def _install_claude_boundary(
             )
 
         async def receive_response(self) -> Any:
-            message = MockAssistantMessage(
-                content=[MockTextBlock(text=CURRENT_REASONING_CANARY)]
-            )
+            message = MockAssistantMessage(content=[MockTextBlock(text=CURRENT_REASONING_CANARY)])
             setattr(message, "model", self.options.model)
             yield message
             yield MockResultMessage(
@@ -298,6 +278,76 @@ def _configure_cli_backend(
     return fixture
 
 
+_HIDDEN_CWD_CANARIES = (
+    PRIOR_REASONING_CANARY,
+    CURRENT_REASONING_CANARY,
+    SIBLING_REASONING_CANARY,
+    RESUME_CACHE_CANARY,
+    SANCTIONED_INPUT_CANARY,
+)
+
+
+def _seed_world(repo: Path, tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Seed the source/private canaries plus one external sanctioned input.
+
+    Returns ``(private_base, sanctioned_dir, sanctioned_path)``. The spaces in
+    every name are deliberate: they exercise quoting on each transport.
+    """
+    private_base = (tmp_path / "test private base").resolve()
+    _seed_visibility_canaries(repo, private_base)
+    sanctioned_dir = tmp_path / "external sanctioned artifacts"
+    sanctioned_dir.mkdir()
+    sanctioned_path = (sanctioned_dir / "evidence artifact with spaces.txt").resolve()
+    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    return private_base, sanctioned_dir, sanctioned_path
+
+
+def _assert_cwd_isolated(observation: dict[str, Any], *, extra: tuple[str, ...] = ()) -> None:
+    """The model saw the source tree and nothing private: no prior/sibling/runtime bytes."""
+    assert observation["cwd_canaries"][SOURCE_CANARY] is True
+    for canary in _HIDDEN_CWD_CANARIES + extra:
+        assert observation["cwd_canaries"][canary] is False
+    assert "private sentinel.txt" not in observation["cwd_entries"]
+    assert "runtime state.txt" not in observation["cwd_entries"]
+
+
+def _probe_config(
+    make_config: MakeConfig,
+    repo: Path,
+    *,
+    flow_name: str = "artifact-visibility-probe",
+    **overrides: Any,
+) -> RunConfig:
+    return make_config(
+        repo,
+        flow_name=flow_name,
+        model="fixture-model",
+        archive=True,
+        run_eval=True,
+        **overrides,
+    )
+
+
+async def _run_probe(config: RunConfig, private_base: Path) -> int:
+    return await runner.run(config, private_roots=private_root_locations(base=private_base))
+
+
+def _assert_archived_run(archive_dir: Path, trajectory: Path, *, backend: str, status: str) -> dict[str, Any]:
+    """The archived bundle mirrors the explicit trajectory byte-for-byte."""
+    explicit: dict[str, Any] = json.loads(trajectory.read_bytes())
+    session_id = explicit["session_id"]
+    assert explicit["trajectory_id"] == session_id
+    assert explicit["extra"]["backend"] == backend
+    archived_run = archive_dir / "runs" / session_id
+    assert (archived_run / "trajectory.json").read_bytes() == trajectory.read_bytes()
+    manifest = json.loads((archived_run / "manifest.json").read_bytes())
+    assert manifest["session_id"] == session_id
+    assert manifest["archive_status"] == status
+    assert manifest["run"]["backend"] == backend
+    assert json.loads((archived_run / "evaluation.json").read_bytes())["session_id"] == session_id
+    return explicit
+
+
 def _assert_external_observations(
     observations: list[dict[str, Any]],
     *,
@@ -310,22 +360,10 @@ def _assert_external_observations(
     for observation in observations:
         assert observation["backend"] == backend
         assert observation["effective_cwd"] == str(repo.resolve())
-        assert observation["cwd_canaries"][SOURCE_CANARY] is True
-        for canary in (
-            PRIOR_REASONING_CANARY,
-            CURRENT_REASONING_CANARY,
-            SIBLING_REASONING_CANARY,
-            RESUME_CACHE_CANARY,
-            SANCTIONED_INPUT_CANARY,
-        ):
-            assert observation["cwd_canaries"][canary] is False
+        _assert_cwd_isolated(observation)
         assert observation["prompt_canaries"][CURRENT_REASONING_CANARY] is False
         assert observation["prompt_canaries"][SANCTIONED_INPUT_CANARY] is False
-        assert "private sentinel.txt" not in observation["cwd_entries"]
-        assert "runtime state.txt" not in observation["cwd_entries"]
-        assert observation["sanctioned_reads"] == {
-            str(sanctioned_path): expected_digest
-        }
+        assert observation["sanctioned_reads"] == {str(sanctioned_path): expected_digest}
         assert not any(entry == ".daydream" or entry.startswith(".daydream/") for entry in observation["cwd_entries"])
 
 
@@ -381,13 +419,7 @@ async def test_runner_ordinary_adapter_two_turn_visibility(
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
-    private_base = (tmp_path / "test private base").resolve()
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "external sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "evidence artifact with spaces.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     _write_probe_extension(ext_dir, sanctioned_path)
 
     model = "fixture-model"
@@ -406,40 +438,21 @@ async def test_runner_ordinary_adapter_two_turn_visibility(
 
     explicit_trajectory = tmp_path / f"{backend} explicit trajectory output.json"
     dump_dir = tmp_path / f"{backend} explicit artifact dump"
-    result = await runner.run(
-        make_config(
+    result = await _run_probe(
+        _probe_config(
+            make_config,
             repo,
-            flow_name="artifact-visibility-probe",
             backend=backend,
-            model=model,
-            archive=True,
-            run_eval=True,
             trajectory_path=explicit_trajectory,
             dump_artifacts=str(dump_dir),
         ),
-        private_roots=private_root_locations(base=private_base),
+        private_base,
     )
 
     assert result == 0
-    observations = (
-        claude_observations
-        if cli_fixture is None
-        else cli_fixture.read_observations()
-    )
-    _assert_external_observations(
-        observations,
-        backend=backend,
-        repo=repo,
-        sanctioned_path=sanctioned_path,
-    )
-    _assert_frozen_outputs(
-        repo,
-        archive_dir,
-        explicit_trajectory,
-        dump_dir,
-        backend=backend,
-        model=model,
-    )
+    observations = claude_observations if cli_fixture is None else cli_fixture.read_observations()
+    _assert_external_observations(observations, backend=backend, repo=repo, sanctioned_path=sanctioned_path)
+    _assert_frozen_outputs(repo, archive_dir, explicit_trajectory, dump_dir, backend=backend, model=model)
 
 
 _MODEL_FAILURES: dict[str, type[Exception]] = {
@@ -468,24 +481,14 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
-    private_base = (tmp_path / "failure private base").resolve()
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "failure sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "failure evidence with spaces.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     _write_probe_extension(ext_dir, sanctioned_path)
 
     model = "fixture-model"
     cli_fixture: ProtocolCli | None = None
     claude_observations: list[dict[str, Any]] = []
     if backend == "claude":
-        claude_observations = _install_claude_boundary(
-            monkeypatch,
-            sanctioned_path,
-            model_error=True,
-        )
+        claude_observations = _install_claude_boundary(monkeypatch, sanctioned_path, model_error=True)
     else:
         cli_fixture = _configure_cli_backend(
             backend,
@@ -499,29 +502,14 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "1")
 
     explicit_trajectory = tmp_path / f"{backend} failed trajectory output.json"
-    with pytest.raises(
-        _MODEL_FAILURES[backend],
-        match=_MODEL_FAILURE_MESSAGES[backend],
-    ) as raised:
-        await runner.run(
-            make_config(
-                repo,
-                flow_name="artifact-visibility-probe",
-                backend=backend,
-                model=model,
-                archive=True,
-                run_eval=True,
-                trajectory_path=explicit_trajectory,
-            ),
-            private_roots=private_root_locations(base=private_base),
+    with pytest.raises(_MODEL_FAILURES[backend], match=_MODEL_FAILURE_MESSAGES[backend]) as raised:
+        await _run_probe(
+            _probe_config(make_config, repo, backend=backend, trajectory_path=explicit_trajectory),
+            private_base,
         )
 
     assert type(raised.value) is _MODEL_FAILURES[backend]
-    observations = (
-        claude_observations
-        if cli_fixture is None
-        else cli_fixture.read_observations()
-    )
+    observations = claude_observations if cli_fixture is None else cli_fixture.read_observations()
     assert len(observations) == 1
     observation = observations[0]
     assert observation["response_mode"] == "model_error"
@@ -535,24 +523,11 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
         argv = observation["argv"]
         assert argv[argv.index("--model") + 1] == model
 
-    explicit_bytes = explicit_trajectory.read_bytes()
-    explicit = json.loads(explicit_bytes)
-    session_id = explicit["session_id"]
-    assert explicit["trajectory_id"] == session_id
+    explicit = _assert_archived_run(archive_dir, explicit_trajectory, backend=backend, status="partial")
     assert explicit["extra"]["partial"] is True
-    assert explicit["extra"]["backend"] == backend
     assert not explicit_trajectory.with_suffix(".json.partial").exists()
-
-    public_run = repo / ".daydream" / "runs" / session_id
-    archived_run = archive_dir / "runs" / session_id
-    assert (public_run / "trajectory.json").read_bytes() == explicit_bytes
-    assert (archived_run / "trajectory.json").read_bytes() == explicit_bytes
-    manifest = json.loads((archived_run / "manifest.json").read_bytes())
-    evaluation = json.loads((archived_run / "evaluation.json").read_bytes())
-    assert manifest["session_id"] == session_id
-    assert manifest["archive_status"] == "partial"
-    assert manifest["run"]["backend"] == backend
-    assert evaluation["session_id"] == session_id
+    public_run = repo / ".daydream" / "runs" / explicit["session_id"]
+    assert (public_run / "trajectory.json").read_bytes() == explicit_trajectory.read_bytes()
 
 
 def _release_fifo_invocations(
@@ -585,12 +560,7 @@ def _release_fifo_invocations(
         failures.append(exc)
 
 
-async def _run_blocked_codex(
-    *,
-    fixture: ProtocolCli,
-    config: RunConfig,
-    private_base: Path,
-) -> int:
+async def _run_blocked_codex(*, fixture: ProtocolCli, config: RunConfig, private_base: Path) -> int:
     stop = threading.Event()
     failures: list[BaseException] = []
     releaser = threading.Thread(
@@ -602,10 +572,7 @@ async def _run_blocked_codex(
     releaser.start()
     try:
         with anyio.fail_after(20):
-            return await runner.run(
-                config,
-                private_roots=private_root_locations(base=private_base),
-            )
+            return await runner.run(config, private_roots=private_root_locations(base=private_base))
     finally:
         stop.set()
         releaser.join(timeout=5)
@@ -653,7 +620,7 @@ async def test_two_ephemeral_runs_for_one_source_cannot_observe_sibling_runtime(
 
     trajectories: list[Path] = []
     fixtures: list[ProtocolCli] = []
-    private_bases = (first_private, second_private)
+    private_bases = first_private, second_private
     for index, private_base in enumerate(private_bases, start=1):
         fixture = _configure_cli_backend(
             "codex",
@@ -666,15 +633,8 @@ async def test_two_ephemeral_runs_for_one_source_cannot_observe_sibling_runtime(
         trajectory = tmp_path / f"ephemeral run {index} trajectory.json"
         result = await _run_blocked_codex(
             fixture=fixture,
-            config=make_config(
-                repo,
-                flow_name="artifact-visibility-probe",
-                backend="codex",
-                model="fixture-model",
-                force_worktree=True,
-                archive=True,
-                run_eval=True,
-                trajectory_path=trajectory,
+            config=_probe_config(
+                make_config, repo, backend="codex", force_worktree=True, trajectory_path=trajectory
             ),
             private_base=private_base,
         )
@@ -700,20 +660,8 @@ async def test_two_ephemeral_runs_for_one_source_cannot_observe_sibling_runtime(
         for observation in observations:
             assert observation["response_mode"] == "block"
             assert observation["process_outcome"] == "block"
-            assert observation["cwd_canaries"][SOURCE_CANARY] is True
-            for canary in (
-                PRIOR_REASONING_CANARY,
-                CURRENT_REASONING_CANARY,
-                SIBLING_REASONING_CANARY,
-                RESUME_CACHE_CANARY,
-                SANCTIONED_INPUT_CANARY,
-            ):
-                assert observation["cwd_canaries"][canary] is False
-            assert "private sentinel.txt" not in observation["cwd_entries"]
-            assert "runtime state.txt" not in observation["cwd_entries"]
-            assert observation["sanctioned_reads"] == {
-                str(sanctioned_path): expected_digest
-            }
+            _assert_cwd_isolated(observation)
+            assert observation["sanctioned_reads"] == {str(sanctioned_path): expected_digest}
             serialized = json.dumps(observation, sort_keys=True)
             assert str(private_bases[1 - index] / "runtime") not in serialized
 
@@ -753,16 +701,8 @@ async def test_runner_codex_read_only_uses_clone_and_inline_sanctioned_input(
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
-    private_base = (tmp_path / "read-only private base").resolve()
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "read-only sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "read-only evidence with spaces.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     _write_probe_extension(ext_dir, sanctioned_path, read_only=True)
-
-    model = "fixture-model"
     fixture = _configure_cli_backend(
         "codex",
         tmp_path / "codex read-only protocol fixture",
@@ -774,17 +714,9 @@ async def test_runner_codex_read_only_uses_clone_and_inline_sanctioned_input(
 
     source_before = _tracked_source_state(repo)
     explicit_trajectory = tmp_path / "read-only trajectory output.json"
-    result = await runner.run(
-        make_config(
-            repo,
-            flow_name="artifact-visibility-probe",
-            backend="codex",
-            model=model,
-            archive=True,
-            run_eval=True,
-            trajectory_path=explicit_trajectory,
-        ),
-        private_roots=private_root_locations(base=private_base),
+    result = await _run_probe(
+        _probe_config(make_config, repo, backend="codex", trajectory_path=explicit_trajectory),
+        private_base,
     )
     assert result == 0
 
@@ -808,12 +740,7 @@ async def test_runner_codex_read_only_uses_clone_and_inline_sanctioned_input(
         assert clone != repo.resolve()
         assert not clone.is_relative_to(repo.resolve())
         assert not clone.is_relative_to(private_base)
-        assert observation["cwd_canaries"][SOURCE_CANARY] is True
-        assert observation["cwd_canaries"][SANCTIONED_INPUT_CANARY] is False
-        assert observation["cwd_canaries"][SIBLING_REASONING_CANARY] is False
-        assert observation["cwd_canaries"][RUNTIME_STATE_CANARY] is False
-        assert "private sentinel.txt" not in observation["cwd_entries"]
-        assert "runtime state.txt" not in observation["cwd_entries"]
+        _assert_cwd_isolated(observation, extra=(RUNTIME_STATE_CANARY,))
         # The disposable clone has no source remote.
         assert observation["git_remote_count"] == 0
         # Sanctioned bytes inline; source/runtime paths absent from stdin/argv/env.
@@ -828,16 +755,8 @@ async def test_runner_codex_read_only_uses_clone_and_inline_sanctioned_input(
     # No disposable checkout directories survive anywhere.
     assert not [p for p in tmp_path.iterdir() if p.name.startswith("daydream-codex-read-only-")]
 
-    explicit = json.loads(explicit_trajectory.read_bytes())
-    session_id = explicit["session_id"]
-    assert explicit["trajectory_id"] == session_id
+    explicit = _assert_archived_run(archive_dir, explicit_trajectory, backend="codex", status="complete")
     assert explicit["extra"].get("partial") is not True
-    assert explicit["extra"]["backend"] == "codex"
-    archived_run = archive_dir / "runs" / session_id
-    assert (archived_run / "trajectory.json").read_bytes() == explicit_trajectory.read_bytes()
-    manifest = json.loads((archived_run / "manifest.json").read_bytes())
-    assert manifest["archive_status"] == "complete"
-    assert manifest["run"]["backend"] == "codex"
 
 
 def _write_improve_probe_extension(ext_dir: Any) -> None:
@@ -881,9 +800,7 @@ def _write_improve_probe_extension(ext_dir: Any) -> None:
     )
 
 
-def _install_improve_strict_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[dict[str, Any]]:
+def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Fake only the SDK client boundary; route the real improve prompts."""
     observations: list[dict[str, Any]] = []
 
@@ -903,12 +820,7 @@ def _install_improve_strict_boundary(
             if "you are the **repo-survey** specialist" in lowered:
                 structured: Any = {"conventions": [], "guidelines": []}
             elif "IMPROVE_RECON" in prompt:
-                structured = {
-                    "languages": ["python"],
-                    "commands": [],
-                    "conventions": [],
-                    "intent_docs": [],
-                }
+                structured = {"languages": ["python"], "commands": [], "conventions": [], "intent_docs": []}
             elif "read-only improve audit specialist" in prompt:
                 structured = {"findings": []}
             elif "AUDIT VISIBILITY PROBE" in prompt:
@@ -990,19 +902,10 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
     model = "fixture-model"
     explicit_trajectory = tmp_path / "improve trajectory output.json"
-    result = await runner.run(
-        make_config(
-            repo,
-            flow_name="improve",
-            backend="claude",
-            model=model,
-            archive=True,
-            run_eval=True,
-            trajectory_path=explicit_trajectory,
-        ),
-        private_roots=private_root_locations(base=private_base),
+    config = _probe_config(
+        make_config, repo, flow_name="improve", backend="claude", trajectory_path=explicit_trajectory
     )
-    assert result == 0
+    assert await _run_probe(config, private_base) == 0
     assert observations
 
     audit_roots = {observation["effective_cwd"] for observation in observations}
@@ -1014,9 +917,7 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
     # The standalone audit snapshot is process-owned and gone after the run.
     assert not audit_root.exists()
 
-    classified: dict[str, int] = {
-        "survey": 0, "recon": 0, "probe": 0, "audit": 0,
-    }
+    classified: dict[str, int] = {"survey": 0, "recon": 0, "probe": 0, "audit": 0}
     for observation in observations:
         prompt = observation["prompt"]
         if "you are the **repo-survey** specialist" in prompt.lower():
@@ -1028,17 +929,7 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
         else:
             assert "read-only improve audit specialist" in prompt
             classified["audit"] += 1
-        assert observation["cwd_canaries"][SOURCE_CANARY] is True
-        for canary in (
-            PRIOR_REASONING_CANARY,
-            CURRENT_REASONING_CANARY,
-            SIBLING_REASONING_CANARY,
-            RESUME_CACHE_CANARY,
-            SANCTIONED_INPUT_CANARY,
-            PRIVATE_ROOT_CANARY,
-            RUNTIME_STATE_CANARY,
-        ):
-            assert observation["cwd_canaries"][canary] is False
+        _assert_cwd_isolated(observation, extra=(PRIVATE_ROOT_CANARY, RUNTIME_STATE_CANARY))
         # No runtime or source path may be named in any prompt.
         assert str(private_base) not in prompt
         assert str(repo.resolve()) not in prompt
@@ -1071,29 +962,13 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
     assert classified["probe"] == 1
     assert classified["audit"] >= 1
 
-    probe_observations = [
-        observation
-        for observation in observations
-        if "AUDIT VISIBILITY PROBE" in observation["prompt"]
-    ]
+    probe_observations = [o for o in observations if "AUDIT VISIBILITY PROBE" in o["prompt"]]
     assert len(probe_observations) == 1
     _assert_inline_sanctioned_prompt(probe_observations[0])
-    assert "Sanctioned phase inputs (captured verbatim):" in (
-        probe_observations[0]["prompt"]
-    )
+    assert "Sanctioned phase inputs (captured verbatim):" in probe_observations[0]["prompt"]
 
-    explicit = json.loads(explicit_trajectory.read_bytes())
-    session_id = explicit["session_id"]
-    assert explicit["trajectory_id"] == session_id
+    explicit = _assert_archived_run(archive_dir, explicit_trajectory, backend="claude", status="complete")
     assert explicit["extra"].get("partial") is not True
-    assert explicit["extra"]["backend"] == "claude"
-    archived_run = archive_dir / "runs" / session_id
-    assert (archived_run / "trajectory.json").read_bytes() == explicit_trajectory.read_bytes()
-    manifest = json.loads((archived_run / "manifest.json").read_bytes())
-    assert manifest["archive_status"] == "complete"
-    assert manifest["run"]["backend"] == "claude"
-    evaluation = json.loads((archived_run / "evaluation.json").read_bytes())
-    assert evaluation["session_id"] == session_id
 
 
 def _write_osprey_sandbox_extension(
@@ -1156,13 +1031,7 @@ async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
-    private_base = (tmp_path / "sandbox private base").resolve()
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "sandbox sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "sandbox evidence with spaces.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    private_base, sanctioned_dir, sanctioned_path = _seed_world(repo, tmp_path)
     BACKEND_SINK.clear()
     osprey_fixture = install_protocol_cli(
         tmp_path / "osprey sandbox protocol fixture",
@@ -1181,20 +1050,15 @@ async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input
 
     explicit_trajectory = tmp_path / "sandbox trajectory output.json"
     dump_dir = tmp_path / "sandbox explicit artifact dump"
-    result = await runner.run(
-        make_config(
-            repo,
-            flow_name="artifact-visibility-osprey-sandbox",
-            backend="osprey",
-            model="fixture-model",
-            archive=True,
-            run_eval=True,
-            trajectory_path=explicit_trajectory,
-            dump_artifacts=str(dump_dir),
-        ),
-        private_roots=private_root_locations(base=private_base),
+    config = _probe_config(
+        make_config,
+        repo,
+        flow_name="artifact-visibility-osprey-sandbox",
+        backend="osprey",
+        trajectory_path=explicit_trajectory,
+        dump_artifacts=str(dump_dir),
     )
-    assert result == 0
+    assert await _run_probe(config, private_base) == 0
 
     observations = osprey_fixture.read_observations()
     assert len(observations) == 2
@@ -1203,25 +1067,11 @@ async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input
         assert observation["response_mode"] == "success"
         argv = observation["argv"]
         assert "--sandbox" in argv
-        allowed_roots = [
-            argv[index + 1]
-            for index, flag in enumerate(argv)
-            if flag == "--allowed-root"
-        ]
+        allowed_roots = [argv[index + 1] for index, flag in enumerate(argv) if flag == "--allowed-root"]
         # Explicit non-runtime roots preserved byte-for-byte; nothing else.
         assert allowed_roots == [str(sanctioned_dir)]
         assert observation["effective_cwd"] == str(repo.resolve())
-        assert observation["cwd_canaries"][SOURCE_CANARY] is True
-        for canary in (
-            PRIOR_REASONING_CANARY,
-            CURRENT_REASONING_CANARY,
-            SIBLING_REASONING_CANARY,
-            RESUME_CACHE_CANARY,
-            SANCTIONED_INPUT_CANARY,
-        ):
-            assert observation["cwd_canaries"][canary] is False
-        assert "private sentinel.txt" not in observation["cwd_entries"]
-        assert "runtime state.txt" not in observation["cwd_entries"]
+        _assert_cwd_isolated(observation)
         # Sandbox row: sanctioned bytes inline, no sanctioned file open.
         assert observation["stdin_bytes"] == 0
         _assert_inline_sanctioned_prompt(observation)
@@ -1234,14 +1084,7 @@ async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input
     assert backend.sandbox is True
     assert backend.allowed_roots == (str(sanctioned_dir),)
 
-    _assert_frozen_outputs(
-        repo,
-        archive_dir,
-        explicit_trajectory,
-        dump_dir,
-        backend="osprey",
-        model="fixture-model",
-    )
+    _assert_frozen_outputs(repo, archive_dir, explicit_trajectory, dump_dir, backend="osprey", model="fixture-model")
 
 
 async def _wait_for_entered(fixture: ProtocolCli, timeout_s: float = 30.0) -> int:
@@ -1269,9 +1112,7 @@ def _assert_pid_reaped(pid: int) -> None:
 
 
 def _assert_single_partial_snapshot(
-    repo: Path,
-    archive_dir: Path,
-    explicit_trajectory: Path,
+    repo: Path, archive_dir: Path, explicit_trajectory: Path, *, backend: str
 ) -> dict[str, Any]:
     """Exactly one honest partial snapshot is frozen across all destinations."""
     explicit_bytes = explicit_trajectory.read_bytes()
@@ -1284,22 +1125,11 @@ def _assert_single_partial_snapshot(
     assert not explicit_trajectory.with_suffix(".json.partial").exists()
     assert not list(explicit_trajectory.parent.glob("*.tmp"))
 
-    public_runs = [
-        path
-        for path in (repo / ".daydream" / "runs").iterdir()
-        if path.name != "prior-public-run"
-    ]
+    public_runs = [path for path in (repo / ".daydream" / "runs").iterdir() if path.name != "prior-public-run"]
     assert [path.name for path in public_runs] == [session_id]
-    archive_runs = list((archive_dir / "runs").iterdir())
-    assert [path.name for path in archive_runs] == [session_id]
-    archived_run = archive_dir / "runs" / session_id
+    assert [path.name for path in (archive_dir / "runs").iterdir()] == [session_id]
     assert (public_runs[0] / "trajectory.json").read_bytes() == explicit_bytes
-    assert (archived_run / "trajectory.json").read_bytes() == explicit_bytes
-    manifest = json.loads((archived_run / "manifest.json").read_bytes())
-    assert manifest["session_id"] == session_id
-    assert manifest["archive_status"] == "partial"
-    evaluation = json.loads((archived_run / "evaluation.json").read_bytes())
-    assert evaluation["session_id"] == session_id
+    _assert_archived_run(archive_dir, explicit_trajectory, backend=backend, status="partial")
     return explicit
 
 
@@ -1320,13 +1150,7 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
-    private_base = (tmp_path / "cancel private base").resolve()
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "cancel sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "cancel evidence with spaces.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     BACKEND_SINK.clear()
     _write_probe_extension(ext_dir, sanctioned_path, sink_backend=True)
 
@@ -1342,18 +1166,8 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "1")
 
     explicit_trajectory = tmp_path / f"{backend} cancelled trajectory.json"
-    config = make_config(
-        repo,
-        flow_name="artifact-visibility-probe",
-        backend=backend,
-        model="fixture-model",
-        archive=True,
-        run_eval=True,
-        trajectory_path=explicit_trajectory,
-    )
-    run_task = asyncio.create_task(
-        runner.run(config, private_roots=private_root_locations(base=private_base))
-    )
+    config = _probe_config(make_config, repo, backend=backend, trajectory_path=explicit_trajectory)
+    run_task = asyncio.create_task(runner.run(config, private_roots=private_root_locations(base=private_base)))
     try:
         pid = await _wait_for_entered(fixture)
         # The external process is blocked mid-turn: nothing may be frozen yet.
@@ -1376,7 +1190,7 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
     assert observation[0]["response_mode"] == "block"
     assert observation[0]["process_outcome"] == "entered"
     assert observation[0]["pid"] == pid
-    _assert_single_partial_snapshot(repo, archive_dir, explicit_trajectory)
+    _assert_single_partial_snapshot(repo, archive_dir, explicit_trajectory, backend=backend)
 
 
 @pytest.mark.asyncio
@@ -1390,13 +1204,7 @@ async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze
 ) -> None:
     """Adjudicated Claude cancellation: disconnect completes, then freeze."""
     repo = tiny_diff_target
-    private_base = (tmp_path / "claude cancel private base").resolve()
-    _seed_visibility_canaries(repo, private_base)
-
-    sanctioned_dir = tmp_path / "claude cancel sanctioned artifacts"
-    sanctioned_dir.mkdir()
-    sanctioned_path = (sanctioned_dir / "claude cancel evidence.txt").resolve()
-    sanctioned_path.write_text(SANCTIONED_INPUT_CANARY, encoding="utf-8")
+    private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     BACKEND_SINK.clear()
     _write_probe_extension(ext_dir, sanctioned_path, sink_backend=True)
 
@@ -1461,18 +1269,8 @@ async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze
     patch_claude_sdk(monkeypatch, BlockingCancelClient)
 
     explicit_trajectory = tmp_path / "claude cancelled trajectory.json"
-    config = make_config(
-        repo,
-        flow_name="artifact-visibility-probe",
-        backend="claude",
-        model="fixture-model",
-        archive=True,
-        run_eval=True,
-        trajectory_path=explicit_trajectory,
-    )
-    run_task = asyncio.create_task(
-        runner.run(config, private_roots=private_root_locations(base=private_base))
-    )
+    config = _probe_config(make_config, repo, backend="claude", trajectory_path=explicit_trajectory)
+    run_task = asyncio.create_task(runner.run(config, private_roots=private_root_locations(base=private_base)))
     try:
         await asyncio.wait_for(state["entered"].wait(), timeout=30)
         assert len(state["queries"]) == 1
@@ -1501,4 +1299,4 @@ async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze
     assert len(BACKEND_SINK) == 1
     resolved_backend = BACKEND_SINK.pop()
     assert resolved_backend._active_clients == set()
-    _assert_single_partial_snapshot(repo, archive_dir, explicit_trajectory)
+    _assert_single_partial_snapshot(repo, archive_dir, explicit_trajectory, backend="claude")

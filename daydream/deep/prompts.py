@@ -498,9 +498,8 @@ def _hunk_index_authority(diff_path: Path) -> str:
     """Name the hunk index adjacent to the routed full-diff artifact."""
     return (
         f"Changed line ranges are authoritative in `{diff_path.parent / 'hunk-index.json'}` "
-        "— do not re-derive them with `git diff` (the index is written once "
-        "at gather and is the single persisted source of changed-file/line "
-        "ranges)."
+        "— do not re-derive them with `git diff` (the index is written once at "
+        "gather and is the single persisted source of changed-file/line ranges)."
     )
 
 

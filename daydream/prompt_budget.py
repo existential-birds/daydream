@@ -17,18 +17,14 @@ from daydream.backends import AUDIT_ROOT_ISOLATION_V1
 # Upper bound for inlined diff text. Above this bound, prompts retain an
 # on-disk diff pointer rather than embedding the diff.
 INLINE_DIFF_BUDGET_BYTES = 12_288
-SANCTIONED_PHASE_INPUT_BUDGET_BYTES = INLINE_DIFF_BUDGET_BYTES
 SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES = INLINE_DIFF_BUDGET_BYTES
 SANCTIONED_EXACT_INPUT_MAX_FILES = 512
 SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES = 1_048_576
 SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 4_194_304
-SANCTIONED_INPUT_UNAVAILABLE = "sanctioned_input_unavailable"
 
 
 class SanctionedInputUnavailable(ArtifactVisibilityError):
     """A declared model input could not be captured without widening access."""
-
-    reason = SANCTIONED_INPUT_UNAVAILABLE
 
 
 class SanctionedInputTransport(str, Enum):
@@ -45,10 +41,7 @@ class PreparedSanctionedInput:
     label: str
     path: Path
     text: str | None
-    payload_bytes: bytes | None
     sha256: str
-    device: int
-    inode: int
     size: int
     mtime_ns: int
 
@@ -73,22 +66,20 @@ class PreparedSanctionedInputs:
             return "\n".join(lines)
         blocks = ["Sanctioned phase inputs (captured verbatim):"]
         for item in self.inputs:
-            blocks.extend(
-                (
-                    f'<sanctioned-input label="{item.label}">',
-                    item.text or "",
-                    "</sanctioned-input>",
-                )
-            )
+            blocks += [f'<sanctioned-input label="{item.label}">', item.text or "", "</sanctioned-input>"]
         return "\n".join(blocks)
 
     def render_prompt(self, prompt: str) -> str:
-        """Append the inputs, hiding private pathnames from inline transports."""
-        if self.transport is SanctionedInputTransport.INLINE:
+        """Append the inputs, hiding private pathnames from inline transports.
+
+        Builders suppress the pointers they own, but one still names artifacts
+        it did not sanction (a sibling under the same private root), so the
+        inputs' common parent is scrubbed too.
+        """
+        if self.transport is SanctionedInputTransport.INLINE and self.inputs:
             for item in self.inputs:
                 prompt = prompt.replace(str(item.path), f"sanctioned input '{item.label}'")
-            parents = [str(item.path.parent) for item in self.inputs]
-            common_parent = os.path.commonpath(parents) if parents else ""
+            common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
             if common_parent and common_parent != os.path.sep:
                 prompt = prompt.replace(common_parent, "sanctioned artifact storage")
         rendered = self.render()
@@ -98,47 +89,45 @@ class PreparedSanctionedInputs:
         """Fail closed if call identity or any captured file changed."""
         if backend is not self.backend_identity:
             raise SanctionedInputUnavailable("sanctioned input backend changed")
-        try:
-            canonical_cwd = cwd.resolve(strict=True)
-        except OSError as exc:
-            raise SanctionedInputUnavailable("sanctioned input cwd is unavailable") from exc
+        canonical_cwd = _canonical_cwd(cwd)
         if canonical_cwd != self.cwd or read_only is not self.read_only:
             raise SanctionedInputUnavailable("sanctioned input call mode changed")
         if _sanctioned_transport(backend, canonical_cwd, read_only=read_only) is not self.transport:
-            raise SanctionedInputUnavailable(
-                "sanctioned input transport mode changed before model execution"
-            )
+            raise SanctionedInputUnavailable("sanctioned input transport mode changed before model execution")
         aggregate = 0
         for item in self.inputs:
-            aggregate_limit = False
-            if self.transport is SanctionedInputTransport.INLINE:
-                max_bytes = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES - aggregate
-            else:
-                remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
-                max_bytes = min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining)
-                aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
-            current = _capture_input(
-                item.label,
-                item.path,
-                transport=self.transport,
-                max_bytes=max(max_bytes, 0),
-                aggregate_limit=aggregate_limit,
-            )
+            current = _capture_input(item.label, item.path, self.transport, aggregate)
             aggregate += current.size
             if current != item:
-                raise SanctionedInputUnavailable(
-                    f"sanctioned input {item.label!r} changed before model execution"
-                )
+                raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
+
+
+def _canonical_cwd(cwd: Path) -> Path:
+    try:
+        return cwd.resolve(strict=True)
+    except OSError as exc:
+        raise SanctionedInputUnavailable("sanctioned input cwd is unavailable") from exc
 
 
 def _capture_input(
-    label: str,
-    path: Path,
-    *,
-    transport: SanctionedInputTransport,
-    max_bytes: int,
-    aggregate_limit: bool = False,
+    label: str, path: Path, transport: SanctionedInputTransport, aggregate: int
 ) -> PreparedSanctionedInput:
+    """Capture one no-follow file within the transport's remaining allowance.
+
+    Reading stops one byte past the allowance, so a refusal never hashes more
+    than the aggregate ceiling admits. ``fstat`` before and after bounds the
+    captured bytes to one immutable revision of one inode.
+    """
+    aggregate_limit = False
+    limit_name = "byte budget"
+    if transport is SanctionedInputTransport.INLINE:
+        max_bytes = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES - aggregate
+    else:
+        remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
+        max_bytes = min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining)
+        aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
+        limit_name = "file byte limit"
+    max_bytes = max(max_bytes, 0)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
     fd = -1
@@ -146,43 +135,22 @@ def _capture_input(
         lexical = Path(os.path.abspath(path))
         lexical_stat = lexical.lstat()
         if not stat.S_ISREG(lexical_stat.st_mode):
-            raise SanctionedInputUnavailable(
-                f"sanctioned input {label!r} must be a regular file"
-            )
+            raise SanctionedInputUnavailable(f"sanctioned input {label!r} must be a regular file")
         fd = os.open(lexical, flags)
+        # An identical (dev, ino) is the same inode, hence still a regular file.
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise SanctionedInputUnavailable(
-                f"sanctioned input {label!r} must be a regular file"
-            )
         if (lexical_stat.st_dev, lexical_stat.st_ino) != (before.st_dev, before.st_ino):
-            raise SanctionedInputUnavailable(
-                f"sanctioned input {label!r} changed while being opened"
-            )
+            raise SanctionedInputUnavailable(f"sanctioned input {label!r} changed while being opened")
         digest = hashlib.sha256()
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
-        chunks: list[bytes] | None = (
-            [] if transport is SanctionedInputTransport.INLINE else None
-        )
+        chunks: list[bytes] | None = [] if transport is SanctionedInputTransport.INLINE else None
         total = 0
-        while True:
-            chunk = os.read(fd, min(65_536, max_bytes + 1 - total))
-            if not chunk:
-                break
+        while chunk := os.read(fd, min(65_536, max_bytes + 1 - total)):
             total += len(chunk)
             if total > max_bytes:
                 if aggregate_limit:
-                    raise SanctionedInputUnavailable(
-                        "sanctioned input aggregate byte limit exceeded"
-                    )
-                limit = (
-                    "byte budget"
-                    if transport is SanctionedInputTransport.INLINE
-                    else "file byte limit"
-                )
-                raise SanctionedInputUnavailable(
-                    f"sanctioned input {label!r} exceeds the {limit}"
-                )
+                    raise SanctionedInputUnavailable("sanctioned input aggregate byte limit exceeded")
+                raise SanctionedInputUnavailable(f"sanctioned input {label!r} exceeds the {limit_name}")
             digest.update(chunk)
             decoder.decode(chunk, final=False)
             if chunks is not None:
@@ -192,63 +160,46 @@ def _capture_input(
     except SanctionedInputUnavailable:
         raise
     except UnicodeDecodeError as exc:
-        raise SanctionedInputUnavailable(
-            f"sanctioned input {label!r} is not valid UTF-8"
-        ) from exc
+        raise SanctionedInputUnavailable(f"sanctioned input {label!r} is not valid UTF-8") from exc
     except OSError as exc:
-        raise SanctionedInputUnavailable(
-            f"sanctioned input {label!r} is unavailable"
-        ) from exc
+        raise SanctionedInputUnavailable(f"sanctioned input {label!r} is unavailable") from exc
     finally:
         if fd >= 0:
             os.close(fd)
-    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
-        raise SanctionedInputUnavailable(
-            f"sanctioned input {label!r} changed while being captured"
-        )
+    # One fd cannot change device or inode, so size and mtime are the whole check.
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise SanctionedInputUnavailable(f"sanctioned input {label!r} changed while being captured")
     payload = b"".join(chunks) if chunks is not None else None
-    text = payload.decode("utf-8") if payload is not None else None
     return PreparedSanctionedInput(
         label=label,
         path=lexical,
-        text=text,
-        payload_bytes=payload,
+        text=payload.decode("utf-8") if payload is not None else None,
         sha256=digest.hexdigest(),
-        device=before.st_dev,
-        inode=before.st_ino,
         size=before.st_size,
         mtime_ns=before.st_mtime_ns,
     )
 
 
-def _sanctioned_transport(
-    backend: object, cwd: Path, *, read_only: bool
-) -> SanctionedInputTransport:
-    try:
-        canonical_cwd = cwd.resolve(strict=True)
-    except OSError as exc:
-        raise SanctionedInputUnavailable("sanctioned input cwd is unavailable") from exc
-    audit_root = getattr(backend, "audit_root", None)
-    audit_capability = getattr(backend, "audit_root_isolation", None)
-    try:
-        if audit_capability == AUDIT_ROOT_ISOLATION_V1:
-            if not isinstance(audit_root, Path) or audit_root.resolve(strict=True) != canonical_cwd:
-                raise SanctionedInputUnavailable(
-                    "sanctioned input audit root does not match the model cwd"
-                )
-            strict_audit = True
-        else:
-            strict_audit = False
-    except OSError as exc:
-        raise SanctionedInputUnavailable(
-            "sanctioned input audit root is unavailable"
-        ) from exc
-    disposable_read_only = read_only and bool(
-        getattr(backend, "read_only_disposable_clone", False)
-    )
-    sandboxed_osprey = bool(getattr(backend, "sandbox", False))
-    if strict_audit or disposable_read_only or sandboxed_osprey:
+def _sanctioned_transport(backend: object, canonical_cwd: Path, *, read_only: bool) -> SanctionedInputTransport:
+    """Inline the inputs for a backend that cannot read exact host paths.
+
+    "Can this backend read this host path" is not on the ``Backend`` protocol,
+    so it is read off the three concrete backends that declare it.
+    """
+    strict_audit = getattr(backend, "audit_root_isolation", None) == AUDIT_ROOT_ISOLATION_V1
+    if strict_audit:
+        audit_root = getattr(backend, "audit_root", None)
+        try:
+            matched = isinstance(audit_root, Path) and audit_root.resolve(strict=True) == canonical_cwd
+        except OSError as exc:
+            raise SanctionedInputUnavailable("sanctioned input audit root is unavailable") from exc
+        if not matched:
+            raise SanctionedInputUnavailable("sanctioned input audit root does not match the model cwd")
+    if (
+        strict_audit
+        or (read_only and bool(getattr(backend, "read_only_disposable_clone", False)))
+        or bool(getattr(backend, "sandbox", False))
+    ):
         return SanctionedInputTransport.INLINE
     return SanctionedInputTransport.EXACT_PATHS
 
@@ -273,48 +224,17 @@ def prepare_sanctioned_inputs(
     read_only: bool,
 ) -> PreparedSanctionedInputs:
     """Capture a closed logical-label mapping for one backend call."""
-    try:
-        canonical_cwd = cwd.resolve(strict=True)
-    except OSError as exc:
-        raise SanctionedInputUnavailable("sanctioned input cwd is unavailable") from exc
+    canonical_cwd = _canonical_cwd(cwd)
     transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
-    if (
-        transport is SanctionedInputTransport.EXACT_PATHS
-        and len(inputs) > SANCTIONED_EXACT_INPUT_MAX_FILES
-    ):
+    if transport is SanctionedInputTransport.EXACT_PATHS and len(inputs) > SANCTIONED_EXACT_INPUT_MAX_FILES:
         raise SanctionedInputUnavailable("sanctioned input file count limit exceeded")
     prepared: list[PreparedSanctionedInput] = []
     aggregate = 0
     for label, path in sorted(inputs.items()):
-        if (
-            not label
-            or len(label) > 128
-            or any(ord(char) < 32 or ord(char) == 127 for char in label)
-            or any(char in label for char in '<>"')
-        ):
+        if not label or len(label) > 128 or any(ord(c) < 32 or ord(c) == 127 or c in '<>"' for c in label):
             raise SanctionedInputUnavailable("sanctioned input label is invalid")
-        aggregate_limit = False
-        if transport is SanctionedInputTransport.INLINE:
-            per_file_limit = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES - aggregate
-        else:
-            remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
-            per_file_limit = min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining)
-            aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
-        item = _capture_input(
-            label,
-            path,
-            transport=transport,
-            max_bytes=max(per_file_limit, 0),
-            aggregate_limit=aggregate_limit,
-        )
+        item = _capture_input(label, path, transport, aggregate)
         aggregate += item.size
-        if (
-            transport is SanctionedInputTransport.EXACT_PATHS
-            and aggregate > SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES
-        ):
-            raise SanctionedInputUnavailable(
-                "sanctioned input aggregate byte limit exceeded"
-            )
         prepared.append(item)
     return PreparedSanctionedInputs(
         transport=transport,

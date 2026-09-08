@@ -2155,37 +2155,28 @@ def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     ]
 
 
+def tracked_path_collisions(repo: Path, *relatives: str) -> tuple[str, ...]:
+    """Return tracked entries overlapping any repository-relative output.
+
+    Both a tracked ancestor and any tracked descendant make a requested output
+    unsafe. The query is strict so Git failure cannot be mistaken for an
+    untracked destination; absence is only ever an empty tuple.
+    """
+    return tuple(
+        sorted(
+            {
+                path
+                for path in ls_files(repo, strict=True)
+                for relative in relatives
+                if path == relative or path.startswith(f"{relative}/") or relative.startswith(f"{path}/")
+            }
+        )
+    )
+
+
 def tracked_artifact_collisions(repo: Path) -> tuple[str, ...]:
-    """Return tracked paths that collide with generated compatibility roots.
-
-    This strict query is the narrow Git boundary used before artifact detach.
-    A query failure raises :class:`GitError`; absence is represented only by an
-    empty tuple, never by a soft-failure fallback.
-    """
-    return tuple(
-        sorted(
-            path
-            for path in ls_files(repo, strict=True)
-            if path == ".review-output.md" or path == ".daydream" or path.startswith(".daydream/")
-        )
-    )
-
-
-def tracked_path_collisions(repo: Path, relative: str) -> tuple[str, ...]:
-    """Return tracked entries overlapping one repository-relative output.
-
-    Both a tracked ancestor and any tracked descendant make the requested
-    output unsafe. The query is strict so Git failure cannot be mistaken for
-    an untracked destination.
-    """
-    prefix = f"{relative}/"
-    return tuple(
-        sorted(
-            path
-            for path in ls_files(repo, strict=True)
-            if path == relative or path.startswith(prefix) or relative.startswith(f"{path}/")
-        )
-    )
+    """Return tracked paths that collide with the generated compatibility roots."""
+    return tracked_path_collisions(repo, ".review-output.md", ".daydream")
 
 
 @dataclass(frozen=True)
@@ -2252,12 +2243,18 @@ def git_common_dir(repo: Path) -> Path:
     return Path(proc.stdout.rstrip("\n")).resolve()
 
 
+def git_dirs(repo: Path) -> tuple[Path, Path]:
+    """Return the canonical ``(git_dir, git_common_dir)`` pair from one query."""
+    proc = _run_git(repo, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])
+    lines = [line for line in proc.stdout.split("\n") if line]
+    if proc.returncode != 0 or len(lines) != 2:
+        raise GitError(f"cannot resolve Git directories in {repo}")
+    return Path(lines[0]).resolve(strict=True), Path(lines[1]).resolve()
+
+
 def git_dir(repo: Path) -> Path:
     """Return the canonical worktree-specific Git directory, raising on query failure."""
-    proc = _run_git(repo, ["rev-parse", "--path-format=absolute", "--git-dir"])
-    if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
-        raise GitError(f"cannot resolve Git directory in {repo}")
-    return Path(proc.stdout.rstrip("\n")).resolve(strict=True)
+    return git_dirs(repo)[0]
 
 
 def list_remotes(repo: Path, *, strict: bool = False) -> list[str]:
@@ -3459,15 +3456,10 @@ def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
 def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
     """Return the lock-armed time of the worktree at *path*, or None if unlocked.
 
-    Git assigns each linked worktree its own administrative directory, whose
-    name is not necessarily the worktree basename. Resolve that directory from
-    the exact worktree and inspect its ``locked`` child. Returns ``None`` only
-    for a genuinely absent lock file, never when the worktree or its metadata
-    cannot be resolved.
-
-    Raises:
-        GitError: If the exact worktree Git directory or lock metadata cannot
-            be resolved safely.
+    Git names each linked worktree's administrative directory itself, so the
+    lock file is resolved from the exact worktree rather than assembled from
+    its basename. ``None`` means a genuinely absent lock file; a worktree or
+    lock whose metadata cannot be resolved safely raises :class:`GitError`.
     """
     try:
         locked = git_dir(path) / "locked"
@@ -3479,7 +3471,7 @@ def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
         return None
     except OSError as exc:
         raise GitError(f"cannot inspect worktree lock for {path}") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+    if not stat.S_ISREG(metadata.st_mode):
         raise GitError(f"worktree lock metadata is unsafe for {path}")
     return metadata.st_mtime
 

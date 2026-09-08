@@ -136,41 +136,149 @@ async def _hold_archive_fork(
             await release.wait()
 
 
-# --- shared round-trip setup for the archive on_write tests ---
+# --- shared round-trip setup for the strict archive finalization tests ---
+def _finalize_strict_archive(
+    recorder: TrajectoryRecorder,
+    snapshot: RunWriteSnapshot,
+    config: Any,
+    target: Path,
+    *,
+    destinations: tuple[Any, ...] = (),
+    upload: bool = True,
+    dump_path: Path | None = None,
+) -> None:
+    """Drive the production strict archive finalizer over one frozen tree.
+
+    The tree handed over is attested after every stage, so ``target`` must not
+    contain the archive directory itself.
+    """
+    from daydream.archive import finalize_archive_run
+    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = recorder.session_id
+    finalize_archive_run(
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
+            write_snapshot=snapshot, run_flow=recorder.run_flow,
+        ),
+        artifacts=ArtifactTreeSnapshot(
+            session_id=session_id,
+            workspace_key="workspace",
+            root=target,
+            manifest=_manifest(target),
+            destinations=destinations,
+        ),
+        artifact_provenance=ArtifactEvidenceProvenance(
+            workspace_key="workspace",
+            session_id=session_id,
+            public_source=target,
+            # The frozen root is a copy of the live root, so route paths
+            # relative to one resolve unchanged inside the other.
+            live_root=target,
+        ),
+        config=config,
+        write_snapshot=snapshot,
+        work=None,
+        upload=upload,
+        dump_path=dump_path,
+    )
+
+
+def _strict_archive_callback(
+    config: Any,
+    target: Path,
+    *,
+    destinations: tuple[Any, ...] = (),
+    unsuccessful: bool = False,
+    dump_path: Path | None = None,
+) -> Any:
+    """An on_write hook that stands in for the runner's finalization boundary.
+
+    The runner retains snapshots during the run and calls
+    ``finalize_archive_run`` exactly once with ``upload=successful``; this hook
+    finalizes the first snapshot it sees so an archive can be assembled from a
+    single recorder without opening a real workspace.
+    """
+    finalized: list[str] = []
+
+    def _finalize(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+        if finalized:
+            return
+        finalized.append(snapshot.status)
+        _finalize_strict_archive(
+            recorder,
+            snapshot,
+            config,
+            target,
+            destinations=destinations,
+            upload=not unsuccessful,
+            dump_path=dump_path,
+        )
+
+    return _finalize
+
+
+def _findings_route(live_root: Path) -> Any:
+    """The registered ``--findings-out`` route the strict bundle relocates."""
+    from daydream.artifact_visibility import (
+        DestinationDelivery,
+        OutputLabel,
+        RoutedDestination,
+    )
+
+    private = live_root / ".explicit" / "0000" / "findings.json"
+    private.parent.mkdir(parents=True, exist_ok=True)
+    private.write_text(
+        '{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}'
+    )
+    return RoutedDestination(
+        label=OutputLabel.FINDINGS_OUTPUT,
+        requested=Path("findings/findings.json"),
+        write_path=private,
+        frozen_path=private,
+        delivery=DestinationDelivery.DEFERRED,
+    )
+
+
 def _make_round_trip_fixture(
     tmp_path: Path,
     run_flow: DaydreamRunFlow,
     *,
     run_eval: bool = False,
 ) -> TrajectoryRecorder:
-    """Build the full archive round-trip fixture: minimal .daydream/ scaffolding,
-    RunConfig, archive callback, and a recorder primed with two steps spaced 8.5s
-    apart so the derived wall-clock span is deterministic.
+    """Build the full archive round-trip fixture: a frozen tree with minimal
+    .daydream/ scaffolding, a registered findings route, a RunConfig, the strict
+    archive hook, and a recorder primed with lifecycle stamps 8.5s apart so the
+    derived wall-clock span is deterministic.
 
     ``run_eval`` turns on the real deterministic eval pass (production default),
     so the archived bundle carries a genuine ``evaluation.json`` whose metrics
     the manifest projection reads."""
-    from daydream.runner import RunConfig, _make_archive_callback
+    from daydream.runner import RunConfig
 
-    (tmp_path / ".review-output.md").write_text("# Review\nLooks good.\n")
-    findings_src = tmp_path / "findings" / "findings.json"
-    findings_src.parent.mkdir(parents=True)
-    findings_src.write_text(
-        '{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}'
-    )
+    target = tmp_path / "frozen"
+    target.mkdir()
+    (target / ".review-output.md").write_text("# Review\nLooks good.\n")
+    findings = _findings_route(target)
 
     config = RunConfig(
-        target=str(tmp_path),
+        target=str(target),
         stack="python",
         backend="claude",
         archive=True,
         run_eval=run_eval,
-        findings_out="findings/findings.json",
+        findings_out=str(findings.write_path),
     )
-    callback = _make_archive_callback(config, tmp_path)
-    assert callback is not None
 
-    recorder = make_recorder(tmp_path, run_flow=run_flow, on_write=callback)
+    recorder = make_recorder(
+        target,
+        run_flow=run_flow,
+        on_write=_strict_archive_callback(config, target, destinations=(findings,)),
+    )
     # Two steps spaced 8.5s apart so the derived span is deterministic.
     for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
         recorder.steps.append(
@@ -388,8 +496,8 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     archive_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A configured trajectory_hub_repo makes _archive_run_inner call the uploader after manifest write."""
-    from daydream.runner import RunConfig, _make_archive_callback
+    """A configured trajectory_hub_repo makes the finalizer call the uploader after manifest write."""
+    from daydream.runner import RunConfig
 
     uploaded: list[tuple[Any, ...]] = []
 
@@ -411,12 +519,9 @@ async def test_archive_callback_uploads_to_hub_when_configured(
         run_eval=False,
         dump_artifacts=None,
     )
-    cb = _make_archive_callback(config, target_dir)
-    assert cb is not None
-
-    from tests.harness.trajectory import make_recorder
-    recorder = make_recorder(tmp_path, on_write=cb)
-    from tests.test_archive_integration import _add_user_step  # reuse the step helper
+    recorder = make_recorder(
+        target_dir, on_write=_strict_archive_callback(config, target_dir)
+    )
     _add_user_step(recorder)
     async with recorder:
         pass
@@ -425,9 +530,11 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     repo_id, session = uploaded[0][1], uploaded[0][2]
     assert repo_id == "acme/dd-trajectories"
     assert session == recorder.session_id
-    # run_dir on disk contains the manifest the hook must wait for
-    run_dir = Path(uploaded[0][0])
-    assert (run_dir / "manifest.json").is_file()
+    # The bundle is uploaded from the private assembly directory, before it is
+    # installed under its session id — so the manifest the hook waited for is
+    # in the installed run directory once finalization completes.
+    assert Path(uploaded[0][0]) != archive_dir / "runs" / recorder.session_id
+    assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
 
 
 @pytest.mark.parametrize("filename,body,set_hf_token", [
@@ -449,9 +556,7 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     pyproject.toml or .daydream.toml — the ignored key never reaches the
     uploader even with HF_TOKEN present."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, _make_archive_callback
-    from tests.harness.trajectory import make_recorder
-    from tests.test_archive_integration import _add_user_step
+    from daydream.runner import RunConfig
 
     calls: list[Any] = []
     if set_hf_token:
@@ -473,8 +578,9 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
         run_eval=False,
         file_config=load_file_config(target_dir) if filename is not None else None,
     )
-    cb = _make_archive_callback(config, target_dir)
-    recorder = make_recorder(tmp_path, on_write=cb)
+    recorder = make_recorder(
+        target_dir, on_write=_strict_archive_callback(config, target_dir)
+    )
     _add_user_step(recorder)
     async with recorder:
         pass
@@ -483,15 +589,19 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
 
 
 # Signal-flush (partial) archives must never trigger the blocking HF upload
-async def test_archive_callback_partial_status_skips_hf_upload(
+@pytest.mark.parametrize("successful", [False, True])
+async def test_archive_upload_tracks_run_success(
     tmp_path: Path,
     archive_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    successful: bool,
 ) -> None:
-    """A partial (signal-flush) archive never uploads; a complete one does."""
-    from daydream.runner import RunConfig, _make_archive_callback
-    from tests.harness.trajectory import make_recorder
-    from tests.test_archive_integration import _add_user_step
+    """The bundle is always archived locally; only a successful run uploads.
+
+    The runner finalizes once and passes ``upload=successful``, so an
+    interrupted or failed run is archived without the blocking HF upload — that
+    call must never hang a SIGINT/SIGTERM shutdown on a network round trip."""
+    from daydream.runner import RunConfig
 
     uploaded: list[tuple[Any, ...]] = []
 
@@ -513,42 +623,54 @@ async def test_archive_callback_partial_status_skips_hf_upload(
         run_eval=False,
         dump_artifacts=None,
     )
-    cb = _make_archive_callback(config, target_dir)
-    assert cb is not None
-
-    recorder = make_recorder(tmp_path, on_write=cb)
+    recorder = make_recorder(
+        target_dir,
+        on_write=_strict_archive_callback(
+            config, target_dir, unsuccessful=not successful
+        ),
+    )
     _add_user_step(recorder)
-
-    # Signal flush publishes a partial snapshot synchronously; the blocking HF
-    # upload must be skipped so Ctrl-C/Ctrl-\ shutdown never hangs on a network call.
-    recorder.write_partial()
-    assert uploaded == []
-
-    # Normal completion publishes a complete snapshot; the upload must run.
     async with recorder:
         pass
 
-    assert len(uploaded) == 1
-    assert uploaded[0][1] == "acme/dd-trajectories"
-    assert uploaded[0][2] == recorder.session_id
+    assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
+    if successful:
+        assert [row[1:] for row in uploaded] == [
+            ("acme/dd-trajectories", recorder.session_id)
+        ]
+    else:
+        assert uploaded == []
 
 
 async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     tmp_path: Path,
     archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.runner import RunConfig, _make_archive_callback
+    """Each frozen snapshot archives as one immutable, self-consistent bundle.
 
-    config = RunConfig(target=str(tmp_path), archive=True, run_eval=True)
-    archive_callback = _make_archive_callback(config, tmp_path)
-    assert archive_callback is not None
+    The runner finalizes exactly one snapshot per run, so each status is
+    finalized into its own archive root here: the mid-flight partial (whose
+    documents must all share one cutoff, and whose still-running forks read as
+    malformed invocations) and the completed run (whose forks have closed)."""
+    from daydream.runner import RunConfig
+
+    target = tmp_path / "frozen"
+    target.mkdir()
+    config = RunConfig(target=str(target), archive=True, run_eval=True)
     snapshots: list[RunWriteSnapshot] = []
+    roots = {
+        status: tmp_path / f"archive-{status}" for status in ("partial", "complete")
+    }
 
     def callback(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
         snapshots.append(snapshot)
-        archive_callback(recorder, snapshot)
+        monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(roots[snapshot.status]))
+        _finalize_strict_archive(
+            recorder, snapshot, config, target, upload=snapshot.status == "complete"
+        )
 
-    recorder = make_recorder(tmp_path, on_write=callback)
+    recorder = make_recorder(target, on_write=callback)
     entered = {name: anyio.Event() for name in ("a", "b")}
     release = {name: anyio.Event() for name in entered}
     async with recorder:
@@ -572,7 +694,7 @@ async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
             }
             frozen = tuple(document.json_bytes for document in partial.documents)
 
-            run_dir = archive_dir / "runs" / recorder.session_id
+            run_dir = roots["partial"] / "runs" / recorder.session_id
             manifest = json.loads((run_dir / "manifest.json").read_text())
             evaluation = json.loads((run_dir / "evaluation.json").read_text())
             assert manifest["metrics"]["wall_clock_seconds"] == evaluation["timing"]["total_wall_clock_seconds"]
@@ -596,7 +718,7 @@ async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     assert complete.cutoff_at > partial.cutoff_at
     assert all("run_ended_at" in json.loads(document.json_bytes)["extra"] for document in complete.documents)
     final_evaluation = json.loads(
-        (archive_dir / "runs" / recorder.session_id / "evaluation.json").read_text()
+        (roots["complete"] / "runs" / recorder.session_id / "evaluation.json").read_text()
     )
     assert final_evaluation["timing"]["agent_completeness"] == {
         "total": 6,
@@ -613,9 +735,7 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--no-archive with --dump-artifacts still copies the bundle to the dump dir but never uploads."""
-    from daydream.runner import RunConfig, _make_archive_callback
-    from tests.harness.trajectory import make_recorder
-    from tests.test_archive_integration import _add_user_step
+    from daydream.runner import RunConfig
 
     uploaded: list[Any] = []
 
@@ -626,6 +746,7 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
     monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
 
     dump_dir = tmp_path / "dump"
+    dump_dir.mkdir()
     target_dir = tmp_path / "project"
     target_dir.mkdir()
     daydream_dir = target_dir / ".daydream"
@@ -638,10 +759,10 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
         run_eval=False,
         dump_artifacts=str(dump_dir),
     )
-    cb = _make_archive_callback(config, target_dir)
-    assert cb is not None
-
-    recorder = make_recorder(tmp_path, on_write=cb)
+    recorder = make_recorder(
+        target_dir,
+        on_write=_strict_archive_callback(config, target_dir, dump_path=dump_dir),
+    )
     _add_user_step(recorder)
     async with recorder:
         pass
@@ -663,7 +784,7 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
     from daydream.agent import run_agent
     from daydream.atif import validate as atif_validate
     from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from daydream.runner import RunConfig, _open_recorder
+    from daydream.runner import RunConfig
     from tests.harness.backend import ScriptedBackend
 
     sentinel = "opaque-test-only-sentinel"
@@ -691,8 +812,10 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
     )
 
     config = RunConfig(target=str(target_dir), archive=True, run_eval=False)
-    recorder = _open_recorder(
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
+    recorder = make_recorder(
+        target_dir,
+        run_flow=DaydreamRunFlow.NORMAL,
+        on_write=_strict_archive_callback(config, target_dir),
     )
 
     async with recorder:

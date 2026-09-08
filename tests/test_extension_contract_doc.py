@@ -101,33 +101,22 @@ def test_contract_doc_names_artifact_lifecycle_contract() -> None:
     assert working < stable, "artifact section must precede the stable ctx.data keys"
     section = doc[working:stable]
 
-    # Real helper/session names, not guessed APIs.
     for fragment in (
-        "`ctx.artifacts`",
-        "artifact_dir_for",
-        "review_output_path_for",
-        "prepare_sanctioned_inputs",
-        "FlowStep",
-        "run_agent",
+        # Real helper/session names, not guessed APIs.
+        "`ctx.artifacts`", "artifact_dir_for", "review_output_path_for",
+        "prepare_sanctioned_inputs", "FlowStep", "run_agent",
+        # Active-session lifetime: bound to the run, frozen at finalization.
+        "active artifact session", "freezes at finalization", "after the session ends",
+        # Sanctioned-input contract: per-attempt validation, fail closed.
+        "remain unchanged before each dispatch attempt", "fail before backend entry",
+        "not an OS sandbox",
+        # Transport split, then the rendered budgets.
+        "Strict Claude audit roots, read-only Codex clones, and sandboxed Osprey",
+        "12,288", "512 files", "1 MiB", "4 MiB",
     ):
         assert fragment in section, f"artifact contract detail {fragment!r} undocumented"
 
-    # Active-session lifetime: bound to the run, frozen at finalization.
-    assert "active artifact session" in section
-    assert "freezes at finalization" in section
-    assert "after the session ends" in section
-
-    # Sanctioned-input contract: per-attempt validation, fail closed.
-    assert "remain unchanged before each dispatch attempt" in section
-    assert "fail before backend entry" in section
-    assert "not an OS sandbox" in section
-
-    # Transport split and budget wording stay in sync with the shipped constants.
-    assert "Strict Claude audit roots, read-only Codex clones, and sandboxed Osprey" in section
-    assert "12,288" in section
-    assert "512 files" in section
-    assert "1 MiB" in section
-    assert "4 MiB" in section
+    # The rendered budgets stay in sync with the shipped constants.
     assert SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES == 12_288
     assert SANCTIONED_EXACT_INPUT_MAX_FILES == 512
     assert SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES == 1_048_576
