@@ -453,8 +453,13 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
         "DEFAULT_LIMITS",
         remote_ci.RemoteCILimits(
             poll_seconds=0.01,
-            discovery_seconds=10,
-            completion_seconds=20,
+            # The seeding thread races real Git/gh subprocess startup against
+            # every other xdist worker; CI runners have fewer cores than the
+            # 16-worker local gate, so a 10s window still occasionally
+            # starved to a "missing" verdict on CI (PR #1161 training-dry,
+            # 2026-09-08). Keep the harness precedent: margin over truth.
+            discovery_seconds=30,
+            completion_seconds=60,
             request_seconds=3,
         ),
     )
