@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import signal
 import socket
 import stat
@@ -42,6 +43,9 @@ from daydream.artifact_visibility import (
     resolve_private_workspace_owner,
     review_output_path_for,
     validate_private_workspace_owner,
+)
+from daydream.artifact_visibility import (
+    _manifest as _pv_manifest,
 )
 from daydream.artifact_visibility import (
     open_artifact_session as _open_artifact_session,
@@ -648,6 +652,13 @@ def _seed_public_artifacts(source: Path) -> tuple[_Entry, ...]:
     return _manifest(source)
 
 
+def _manifest_identity(entries: Any) -> tuple[tuple[str, str, int, int, Any], ...]:
+    """Comparable identity of manifest entries regardless of dataclass type."""
+    return tuple(
+        (entry.path, entry.kind, entry.size, entry.mode, entry.sha256) for entry in entries
+    )
+
+
 def _projection_matches(root: Path, entries: tuple[_Entry, ...]) -> bool:
     try:
         return _manifest(root) == entries
@@ -782,10 +793,23 @@ def test_recovery_spike_survives_real_process_death_at_each_journal_transition(
     }
 
 
-def test_runtime_ancestry_is_disjoint_from_real_repository_cwd(tmp_path: Path) -> None:
+async def test_runtime_ancestry_is_disjoint_from_real_repository_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repository"
     _init_repo(repo)
-    runtime = Path.home() / ".daydream" / "runtime"
+    # Hermetic: never depend on the ambient $HOME (a sandbox HOME can sit
+    # inside a repository or the pytest tmp tree). Patch the documented
+    # production seam and derive the runtime root through the real
+    # private_root_locations() provider.
+    private_home = tmp_path / "private-home"
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: private_home,
+    )
+    runtime = artifact_visibility.private_root_locations().artifact_runtime
 
     assert not _paths_overlap(runtime, repo)
     assert _paths_overlap(repo, repo / ".daydream" / "runtime")
@@ -1247,6 +1271,175 @@ async def test_artifact_session_rejects_unknown_legacy_tree_but_preserves_extens
     async with open_artifact_session(_work(source), session_id="anchored") as session:
         assert (session.daydream_dir / "extension-only" / "opaque.bin").read_bytes() == b"extension"
     assert unknown.read_bytes() == b"extension"
+
+
+async def test_artifact_session_rebaselines_public_deletion_at_open(
+    tmp_path: Path,
+) -> None:
+    """F2 brick: a benign between-run public deletion is adopted, not fatal.
+
+    A first run publishes artifacts (canonical seeded). The operator then
+    deletes ``.review-output.md`` between runs. The next session open must
+    adopt the observed public state into the canonical recovery copy (with a
+    warning) instead of failing with "public artifacts do not match canonical
+    recovery state".
+    """
+    source = tmp_path / "source"
+    _init_repo(source)
+    seeded = _seed_public_artifacts(source)
+    async with open_artifact_session(_work(source), session_id="baseline"):
+        # No publish: canonical is seeded from the observed public tree and
+        # the close restores it. (A mid-session write into the public tree
+        # would be a mid-run mutation, which stays fail-closed by design.)
+        pass
+    assert seeded
+    # First session restored the seeded public tree on close.
+    assert (source / ".review-output.md").read_bytes() == b"review output\n"
+
+    # Benign between-run operator cleanup: delete the public review output.
+    (source / ".review-output.md").unlink()
+    assert (source / ".review-output.md").exists() is False
+
+    async with open_artifact_session(_work(source), session_id="rebaseline") as session:
+        state_root = session.layout.state_root
+        canonical = state_root / "canonical"
+        entries = _load_manifest(state_root / "canonical-manifest.json")
+        assert _manifest_identity(_pv_manifest(canonical)) == _manifest_identity(entries)
+        assert all(entry.path != ".review-output.md" for entry in entries)
+        assert (canonical / ".daydream" / "deep" / "prior.md").read_bytes() == (
+            b"prior reasoning\n"
+        )
+        # The live private tree still carries the adopted baseline.
+        assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == (
+            b"prior reasoning\n"
+        )
+    # On close the adopted baseline is restored to the public tree.
+    restored = _load_manifest(state_root / "canonical-manifest.json")
+    assert _manifest_identity(_pv_manifest(source, (".daydream", ".review-output.md"))) == (
+        _manifest_identity(restored)
+    )
+    assert (source / ".review-output.md").exists() is False
+    assert seeded[0].path  # seeded manifest shape unchanged, sanity
+
+
+async def test_artifact_session_rebaselines_git_clean_between_runs(
+    tmp_path: Path,
+) -> None:
+    """``git clean -fdx`` style full public wipe is adopted as the new baseline."""
+    source = tmp_path / "source"
+    _init_repo(source)
+    _seed_public_artifacts(source)
+    async with open_artifact_session(_work(source), session_id="baseline") as session:
+        state_root = session.layout.state_root
+
+    # Simulate git clean -fdx: the whole public artifact tree disappears.
+    shutil.rmtree(source / ".daydream")
+    (source / ".review-output.md").unlink()
+
+    async with open_artifact_session(_work(source), session_id="after-clean") as session:
+        entries = _load_manifest(state_root / "canonical-manifest.json")
+        assert entries == ()
+        assert _pv_manifest(state_root / "canonical") == ()
+        assert not (source / ".daydream").exists()
+        assert session.layout.daydream_dir == session.layout.live_root / ".daydream"
+
+
+async def test_artifact_session_rebaselines_stray_public_addition(
+    tmp_path: Path,
+) -> None:
+    """A stray external write into the public tree is adopted at session open."""
+    source = tmp_path / "source"
+    _init_repo(source)
+    _seed_public_artifacts(source)
+    async with open_artifact_session(_work(source), session_id="baseline") as session:
+        state_root = session.layout.state_root
+
+    stray = source / ".daydream" / "operator-notes.txt"
+    stray.write_bytes(b"stray external bytes\n")
+
+    async with open_artifact_session(_work(source), session_id="after-stray") as session:
+        entries = _load_manifest(state_root / "canonical-manifest.json")
+        assert _manifest_identity(_pv_manifest(state_root / "canonical")) == _manifest_identity(entries)
+        stray_entry = next(entry for entry in entries if entry.path.endswith("operator-notes.txt"))
+        assert stray_entry.kind == "file"
+        assert (session.daydream_dir / "operator-notes.txt").read_bytes() == (
+            b"stray external bytes\n"
+        )
+    # On close the adopted baseline (with the stray file) is restored publicly.
+    restored = _load_manifest(state_root / "canonical-manifest.json")
+    assert _manifest_identity(_pv_manifest(source, (".daydream", ".review-output.md"))) == (
+        _manifest_identity(restored)
+    )
+    assert (source / ".daydream" / "operator-notes.txt").read_bytes() == b"stray external bytes\n"
+
+
+async def test_artifact_session_open_still_fails_closed_on_nonregular_public_node(
+    tmp_path: Path,
+) -> None:
+    """Re-baselining adopts benign drift only; unsafe nodes still fail closed."""
+    source = tmp_path / "source"
+    _init_repo(source)
+    _seed_public_artifacts(source)
+    async with open_artifact_session(_work(source), session_id="baseline"):
+        pass
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "canary").write_bytes(b"outside")
+    shutil.rmtree(source / ".daydream" / "runs")
+    (source / ".daydream" / "runs").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ArtifactVisibilityError, match="regular files and directories"):
+        async with open_artifact_session(_work(source), session_id="unsafe"):
+            pass
+    assert (outside / "canary").read_bytes() == b"outside"
+
+
+async def test_artifact_session_succeeds_with_only_empty_operational_root(
+    tmp_path: Path,
+) -> None:
+    """F1 cross-check: an EMPTY operational root is not an anchor blocker.
+
+    A wedged checkout can hold ``.daydream/worktrees`` (empty residue) with no
+    other anchor; session open must succeed rather than raising "legacy
+    .daydream tree has no recognized artifact anchor".
+    """
+    source = tmp_path / "source"
+    _init_repo(source)
+    (source / ".daydream" / "worktrees").mkdir(parents=True)
+
+    async with open_artifact_session(_work(source), session_id="empty-root") as session:
+        assert (session.daydream_dir / "worktrees").is_dir()
+
+    # On close the empty root is restored alongside the rest of the baseline.
+    assert (source / ".daydream" / "worktrees").is_dir()
+
+
+async def test_artifact_session_still_fails_closed_on_mid_run_public_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-baseline is session-open-only; mid-run divergence still fails closed.
+
+    A concurrent write into the public tree during the detach window must
+    keep raising through the existing conflict machinery (previously pinned
+    by the strict-equality path; now pinned by the same observer seam).
+    """
+    from daydream import artifact_visibility as av
+
+    source = tmp_path / "source"
+    _init_repo(source)
+    _seed_public_artifacts(source)
+
+    def mutate_before_removal(state: str) -> None:
+        if state == "DETACH_REMOVING":
+            (source / ".daydream" / "concurrent.bin").write_bytes(b"unique concurrent bytes")
+
+    monkeypatch.setattr(av, "_transition_observer", mutate_before_removal)
+    with pytest.raises(ArtifactVisibilityError, match="changed during detach"):
+        async with open_artifact_session(_work(source), session_id="mid-run-mutation"):
+            pass
+    assert (source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
+    assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
 
 @pytest.mark.parametrize(
@@ -2705,7 +2898,6 @@ async def test_live_external_refused_link_probe_rejects_route_before_producer(
     _init_repo(source)
     requested = tmp_path / "external" / "trajectory.json"
     requested.parent.mkdir()
-    producer_called = False
 
     def refuse_link(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("test link refusal")
@@ -2714,7 +2906,8 @@ async def test_live_external_refused_link_probe_rejects_route_before_producer(
     async with open_artifact_session(_work(source), session_id="probe-link-refused") as session:
         with pytest.raises(ArtifactVisibilityError, match="link probe"):
             session.register_trajectory_output(requested)
-        assert producer_called is False
+    # Rejection is before any producing write: no trajectory file and no
+    # staged probe residue may exist at the destination.
     assert not requested.exists()
     assert not any(path.name.startswith(".daydream-probe-") for path in requested.parent.iterdir())
 

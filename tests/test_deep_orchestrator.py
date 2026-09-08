@@ -3266,7 +3266,7 @@ async def test_no_pr_body_degrades_cleanly(
     assert "pull request description" not in intent.lower()
     assert "diff --git" in intent  # inlined, not pointed at
     assert "do NOT re-Read" in intent
-    assert ".daydream/diff.patch" in intent
+    assert ".daydream/diff.patch" not in intent  # inlined: private path must not leak
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
     _assert_authoritative_rule_gated(stub, expect_present=False)

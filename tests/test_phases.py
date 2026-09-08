@@ -5229,6 +5229,230 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         assert str(structural) not in prompt
 
 
+@pytest.mark.asyncio
+async def test_phase_understand_intent_inline_exploration_budget_degrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """INLINE transports degrade oversized exploration context instead of raising.
+
+    Wonder-finding 3 remediation: an exploration summary (or the summary +
+    affected-files pair) that would overflow the shared inline aggregate
+    budget must be dropped from the sanctioned set — not hard-fail the phase
+    with SanctionedInputUnavailable. Greedy prefix keeps the summary when the
+    pair is over budget, and an over-budget pair drops the tail file.
+    """
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.phases import phase_understand_intent
+    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    locations = private_root_locations(base=(tmp_path / "private").resolve())
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+
+    async with open_artifact_session(work, session_id="intent-inline-oversize", owner=owner):
+        exploration = artifact_dir_for(repo) / "exploration"
+        exploration.mkdir(parents=True)
+        big_summary = "s" * (SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES + 1)
+        (exploration / "summary.md").write_text(big_summary, encoding="utf-8")
+        (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
+
+        backend = ScriptedBackend(
+            events=[
+                TextEvent(text="This PR adds a login page."),
+                _RESULT,
+            ],
+            audit_root_isolation="claude-pretooluse-v1",
+            audit_root=repo.resolve(),
+        )
+        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
+        diff_file = tmp_path / "diff.patch"
+        diff_file.write_text(diff_text, encoding="utf-8")
+
+        result = await phase_understand_intent(
+            backend,
+            work,
+            diff_path=diff_file,
+            log="abc1234 add login",
+            branch="feat/login",
+            exploration_dir=exploration,
+            diff_text=diff_text,
+        )
+
+    assert "login" in result.lower()
+    prompt = backend.last_prompt
+    assert "Sanctioned phase inputs" in prompt
+    # Over-budget exploration summary is dropped from the sanctioned set;
+    # the small affected-files list survives (greedy prefix on byte budget).
+    assert big_summary not in prompt
+    assert "affected-a" in prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """Two exploration files summing over budget drop the second, keep the first."""
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.phases import phase_understand_intent
+    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    locations = private_root_locations(base=(tmp_path / "private").resolve())
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+
+    async with open_artifact_session(work, session_id="intent-inline-pair", owner=owner):
+        exploration = artifact_dir_for(repo) / "exploration"
+        exploration.mkdir(parents=True)
+        half = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES // 2
+        summary = "s" * half
+        (exploration / "summary.md").write_text(summary, encoding="utf-8")
+        (exploration / "affected_files.md").write_text("a" * half, encoding="utf-8")
+
+        backend = ScriptedBackend(
+            events=[
+                TextEvent(text="This PR adds a login page."),
+                _RESULT,
+            ],
+            audit_root_isolation="claude-pretooluse-v1",
+            audit_root=repo.resolve(),
+        )
+        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
+        diff_file = tmp_path / "diff.patch"
+        diff_file.write_text(diff_text, encoding="utf-8")
+
+        result = await phase_understand_intent(
+            backend,
+            work,
+            diff_path=diff_file,
+            log="abc1234 add login",
+            branch="feat/login",
+            exploration_dir=exploration,
+            diff_text=diff_text,
+        )
+
+    assert "login" in result.lower()
+    prompt = backend.last_prompt
+    # Both fit individually but not together: greedy prefix keeps the
+    # summary, drops the affected-files tail.
+    assert summary in prompt
+    assert not any("affected_files" in line for line in prompt.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """A non-clone INLINE correction turn never embeds the private diff path.
+
+    Previously the correction-turn clause gated the inline branch on
+    ``read_only_disposable_clone``, so an INLINE transport that was NOT a
+    disposable clone (audit-root Claude, sandboxed Osprey) embedded the
+    private live ``diff_path`` unscrubbed. The inline branch now fires for
+    every inlined diff; ``str(diff_path)`` is confined to the EXACT_PATHS
+    branch where the diff is a sanctioned input.
+    """
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.phases import phase_understand_intent
+    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+
+    silence_console("daydream.phases")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    locations = private_root_locations(base=(tmp_path / "private").resolve())
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+
+    responses = iter(["No, it's a login page with OAuth, not signup", "y"])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+
+    async with open_artifact_session(work, session_id="intent-inline-correction", owner=owner):
+        exploration = artifact_dir_for(repo) / "exploration"
+        exploration.mkdir(parents=True)
+        (exploration / "summary.md").write_text("summary works\n", encoding="utf-8")
+        (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
+
+        backend = ScriptedBackend(
+            script=[
+                [
+                    TextEvent(text="This PR adds a signup page."),
+                    _RESULT,
+                ],
+                [
+                    TextEvent(text="This PR adds a login page with OAuth support."),
+                    _RESULT,
+                ],
+            ],
+            audit_root_isolation="claude-pretooluse-v1",
+            audit_root=repo.resolve(),
+        )
+        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
+        diff_file = tmp_path / "diff.patch"
+        diff_file.write_text(diff_text, encoding="utf-8")
+
+        result = await phase_understand_intent(
+            backend,
+            work,
+            diff_path=diff_file,
+            log="abc1234 add login",
+            branch="feat/login",
+            exploration_dir=exploration,
+            diff_text=diff_text,
+        )
+
+    assert "login" in result.lower()
+    assert backend.call_count == 2
+    correction = backend.prompts[1]
+    assert str(diff_file) not in correction
+    assert "inlined below" in correction
+    assert "diff_path" not in correction
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in correction
+    assert "Re-examine the codebase and the diff inlined below" in correction
+
+
 async def test_cross_stack_merge_agent_phase_label(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],

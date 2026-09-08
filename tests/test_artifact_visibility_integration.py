@@ -152,18 +152,51 @@ def _scan_cwd(cwd: Path) -> tuple[list[str], dict[str, bool]]:
     entries: list[str] = []
     hits = dict.fromkeys(_OBSERVED_CANARIES, False)
     pending = [cwd]
+    visited: set[Path] = set()
     while pending:
         with os.scandir(pending.pop()) as children:
             for entry in children:
                 path = Path(entry.path)
                 entries.append(path.relative_to(cwd).as_posix())
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(path)
-                elif entry.is_file(follow_symlinks=False):
-                    payload = path.read_bytes()
+                resolved = _scan_resolve(path)
+                if resolved is None:
+                    # Unresolvable symlink (dangling, loop, depth cap):
+                    # still visible in the cwd listing, no content to scan.
+                    continue
+                if resolved.is_dir():
+                    if resolved not in visited:
+                        visited.add(resolved)
+                        pending.append(resolved)
+                elif resolved.is_file():
+                    with open(resolved, "rb") as handle:
+                        payload = handle.read(_SCAN_CWD_READ_CAP)
                     for canary in hits:
                         hits[canary] = hits[canary] or canary.encode() in payload
     return sorted(entries), hits
+
+
+_SCAN_CWD_READ_CAP = 1 << 20
+_SCAN_CWD_LINK_DEPTH = 8
+
+
+def _scan_resolve(path: Path) -> Path | None:
+    """Resolve a scan entry to a real file or directory, following links.
+
+    The model-cwd privacy scan must see through symlinks: a link pointing at
+    private content is still a read path from the model cwd and would trip
+    the canary. Depth is bounded so a link cycle cannot loop forever.
+    """
+    current = path
+    for _ in range(_SCAN_CWD_LINK_DEPTH):
+        if not current.is_symlink():
+            return current
+        try:
+            target_text = os.readlink(current)
+        except OSError:
+            return None
+        target = Path(target_text)
+        current = target if target.is_absolute() else current.parent / target
+    return None
 
 
 def _install_claude_boundary(

@@ -608,7 +608,11 @@ def register(registry: Registry) -> None:
 ```
 
 Inside the runner, `artifact_dir_for(ctx.work.repo)` routes to the active
-session's private directory, so the note never appears in the checkout.
+session's private directory while the session is live, so the note is
+invisible to the model's cwd and to git during the run. At finalization the
+whole `.daydream/` subtree is published back into the checkout (the same
+contract as `review_output_path_for`: private while the session is active,
+published under the checkout's untracked `.daydream/` at finalization).
 `review_output_path_for(ctx.work.repo)` routes the review-output file the same
 way: private while the session is active, published as `.review-output.md` at
 finalization.

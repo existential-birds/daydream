@@ -16,6 +16,7 @@ The module shells out via :mod:`daydream.git_ops` only.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -577,7 +578,21 @@ def _retire_legacy_operational_worktrees(
     source: Path,
     owner: PrivateWorkspaceOwner,
 ) -> None:
-    """Move or retire exact legacy Git worktrees before model-visible work."""
+    """Move or retire exact legacy Git worktrees before model-visible work.
+
+    Retires (never hard-fails on) unrecognized residue: junk left by crashed
+    ``git worktree add`` invocations or stray operator files inside a
+    daydream-created, untracked namespace is pruned with a warning, so one
+    stale entry cannot wedge every subsequent run on the repository. A
+    freshly-locked (live) worktree still fails closed — a concurrent run
+    mid-write must never be destroyed — and so does a registered worktree
+    whose ownership/lock probe fails outright (an unanswered safety
+    question, not provable residue). After all entries are moved or
+    retired, the emptied ``.daydream/worktrees`` / ``.daydream/audit`` root
+    directories themselves are removed, because ``_validate_legacy_public``
+    refuses any ``.daydream`` child named in the operational namespace and
+    an empty residue root would otherwise wedge every future run.
+    """
     actions: list[tuple[str, Path, Path | None]] = []
     destinations: set[Path] = set()
     for root, kind in (
@@ -596,43 +611,151 @@ def _retire_legacy_operational_worktrees(
                 metadata = entry.lstat()
             except OSError as exc:
                 raise ArtifactVisibilityError("legacy operational entry is inaccessible") from exc
-            if pattern.fullmatch(entry.name) is None or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
-                metadata.st_mode
-            ):
-                raise ArtifactVisibilityError("legacy operational entry is unknown or unsafe")
+            if stat.S_ISLNK(metadata.st_mode):
+                # A symlink inside a daydream-created namespace is residue,
+                # not operator data: refuse to follow it, prune it. Data
+                # actually reachable through the link stays untouched.
+                actions.append(("retire-entry", entry, None))
+                continue
+            if not stat.S_ISDIR(metadata.st_mode):
+                # A plain file cannot be a registered git worktree, so it is
+                # provable residue regardless of name.
+                _logger.warning(
+                    "retiring unrecognized legacy operational entry %s",
+                    entry,
+                )
+                actions.append(("retire-entry", entry, None))
+                continue
+            # Real directory: probe FIRST, before trusting the name pattern.
+            # The retire gate must never delete a registered worktree without
+            # the ownership/lock probe — a live-locked worktree whose name
+            # does not match the legacy reanchor shape is still a concurrent
+            # run mid-write and must fail closed, not be silently removed.
             try:
                 git_ops.assert_is_worktree(entry)
                 if git_ops.git_common_dir(entry) != owner.git_common_dir:
-                    raise ArtifactVisibilityError("legacy operational worktree has different Git ownership")
+                    # Registered to a different repository: not residue we
+                    # may destroy. Its checkout can hold that repo's
+                    # uncommitted operator work, so fail closed and keep it.
+                    raise ArtifactVisibilityError(
+                        "legacy operational worktree has different Git ownership"
+                    )
                 locked_at = git_ops.worktree_lock_mtime(source, entry)
             except ArtifactVisibilityError:
                 raise
+            except git_ops.NotAWorktreeError as exc:
+                # Provably not a registered worktree of any repository
+                # (crashed ``git worktree add``, bare directory, stray
+                # file): residue, safe to retire. Cross-check the git
+                # registry first: a registered worktree whose ``.git`` link
+                # chain is temporarily broken can raise NotAWorktreeError,
+                # and destroying it would lose uncommitted operator work.
+                if git_ops.registered_worktree_containing(source, entry) is not None:
+                    raise ArtifactVisibilityError(
+                        "legacy operational entry is registry-listed but unprobeable"
+                    ) from exc
+                _logger.warning(
+                    "retiring unrecognized legacy operational entry %s (%s)",
+                    entry,
+                    exc,
+                )
+                actions.append(("retire-entry", entry, None))
+                continue
             except git_ops.GitError as exc:
-                raise ArtifactVisibilityError("legacy operational entry is not a registered worktree") from exc
+                # The entry IS (or may be) a registered worktree but its
+                # ownership/lock probe failed: an UNANSWERED safety
+                # question — it could be live-locked mid-write holding
+                # uncommitted operator work. Fail closed, destroy nothing.
+                raise ArtifactVisibilityError(
+                    "legacy operational worktree could not be probed safely"
+                ) from exc
             if locked_at is not None and time.time() - locked_at <= _OPERATIONAL_LOCK_STALE_AFTER_S:
+                # Live and locked: a concurrent run is mid-write. Fail closed.
                 raise ArtifactVisibilityError("legacy operational worktree is live and locked")
-            if kind == "reanchor" and locked_at is None:
+            if kind == "reanchor" and pattern.fullmatch(entry.name) is not None and locked_at is None:
                 target = operational_worktree_path(owner) / entry.name
                 if target in destinations or target.exists() or target.is_symlink():
                     raise ArtifactVisibilityError("legacy operational migration destination is occupied")
                 destinations.add(target)
                 actions.append(("move", entry, target))
             else:
-                actions.append(("retire", entry, None))
+                actions.append(("retire-worktree", entry, None))
 
     if any(action == "move" for action, _, _ in actions):
         operational_worktree_root(owner)
-    retired = [entry for action, entry, _ in actions if action == "retire"]
-    if retired and _prune_stale_locked_worktrees(
+    retired_worktrees = [entry for action, entry, _ in actions if action == "retire-worktree"]
+    if retired_worktrees and _prune_stale_locked_worktrees(
         source,
-        retired,
+        retired_worktrees,
         stale_after_s=_OPERATIONAL_LOCK_STALE_AFTER_S,
-    ) != len(retired):
+    ) != len(retired_worktrees):
         raise ArtifactVisibilityError("legacy operational worktree could not be retired")
     for action, entry, action_destination in actions:
         if action == "move":
             assert action_destination is not None
             git_ops.worktree_move(source, entry, action_destination)
+        elif action == "retire-entry":
+            _logger.warning("retiring unrecognized legacy operational entry %s", entry)
+            if entry.is_symlink() or not entry.is_dir():
+                entry.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(entry, ignore_errors=True)
+            if entry.exists() or entry.is_symlink():
+                # Partial rmtree (EACCES/EBUSY): say so loudly instead of
+                # silently re-wedging the next run. Removal is NOT retried
+                # here and does not fail the session — the residue root is
+                # left for _validate_legacy_public to refuse with its
+                # actionable diagnostic naming the leftover.
+                _logger.warning(
+                    "residue remains at %s after retirement attempt; the next "
+                    "session open will refuse it naming the leftover",
+                    entry,
+                )
+    _remove_emptied_legacy_roots(source)
+
+
+def _remove_emptied_legacy_roots(source: Path) -> None:
+    """Remove the legacy operational roots after their entries are retired.
+
+    ``_validate_legacy_public`` refuses any ``.daydream`` child named in the
+    operational namespace, so an emptied ``.daydream/worktrees`` or
+    ``.daydream/audit`` root left behind by the migration would wedge every
+    subsequent run on the repository. Removal is best-effort and
+    non-following: a root that still holds unknown residue is left in place
+    (validation will refuse it, naming the residue), and a vanished root is
+    fine.
+    """
+    for name in ("worktrees", "audit"):
+        root = source / ".daydream" / name
+        try:
+            metadata = root.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ArtifactVisibilityError("legacy operational namespace is inaccessible") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            continue
+        try:
+            root.rmdir()
+        except OSError:
+            # Residue remains: leave the root for _validate_legacy_public to
+            # refuse with its actionable diagnostic.
+            continue
+        _fsync_directory(root.parent)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory entry change (best-effort fsync of the directory)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _resolve_ref(source: Path, branch: str | None) -> str:

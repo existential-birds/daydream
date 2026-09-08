@@ -58,10 +58,12 @@ from daydream.generated_files import (
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
+    SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
     PreparedSanctionedInputs,
     SanctionedInputTransport,
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
+    sanctioned_transport_for,
 )
 from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
@@ -1840,7 +1842,7 @@ def build_intent_prompt(
     if inline_diff is not None:
         inline_prefix = (
             "The complete diff under review is inlined below (do NOT re-Read "
-            f"{diff_path} — it is already here):\n\n"
+            "it from disk — it is already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
             "You have full access to explore the codebase. Examine it alongside "
             "the diff above to understand the intent of these changes. "
@@ -1895,7 +1897,7 @@ def build_alternative_review_prompt(
             f"{intent_summary}\n\n"
             f"Given this intent, explore the codebase and evaluate the implementation "
             f"in the diff inlined below (do NOT re-Read "
-            f"{diff_path} — it is already here):\n\n"
+            f"the diff from disk — it is already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
         )
         _, marker, tail = strategy_filled.partition(_rp.ALTERNATIVES_STRATEGY_JUDGMENT_MARKER)
@@ -4599,21 +4601,61 @@ async def phase_understand_intent(
                     + "\n[exploration summary truncated]\n"
                 )
             inline_exploration_summary = summary_text
+    # Advisers are advisory: when an INLINE transport is active (strict audit
+    # roots, read-only disposable clones, sandboxed Osprey), exploration files
+    # that would overflow the shared inline AGGREGATE budget must not
+    # hard-fail the whole deep run at its first model phase with
+    # SanctionedInputUnavailable. (The over-budget diff itself is a separate
+    # pre-existing capture limit on those transports; the inline-or-exclude
+    # degradation below applies to the exploration context only. The
+    # post-capture ``inline_transport`` below remains authoritative; this
+    # pre-check only sizes advisory inputs.)
+    exploration_inline_budgeted = (
+        session_active
+        and sanctioned_transport_for(backend, work.repo, read_only=True)
+        is SanctionedInputTransport.INLINE
+    )
+
+    def _budgeted_exploration_inputs() -> dict[str, Path | None]:
+        """Size the exploration pair against the shared inline aggregate.
+
+        Greedy include in declaration order (summary first) while the running
+        total stays within a single INLINE aggregate budget, so two files that
+        fit separately but not together degrade to the surviving prefix
+        instead of raising SanctionedInputUnavailable at capture time.
+        """
+        if exploration_dir is None:
+            return {"exploration-summary": None, "exploration-affected-files": None}
+        if not exploration_inline_budgeted:
+            return {
+                "exploration-summary": exploration_dir / "summary.md",
+                "exploration-affected-files": exploration_dir / "affected_files.md",
+            }
+        remaining = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+        sized: dict[str, Path | None] = {}
+        for label, file_name in (
+            ("exploration-summary", "summary.md"),
+            ("exploration-affected-files", "affected_files.md"),
+        ):
+            path = exploration_dir / file_name
+            try:
+                size = path.stat().st_size
+            except OSError:
+                sized[label] = None
+                continue
+            if size <= remaining:
+                sized[label] = path
+                remaining -= size
+            else:
+                sized[label] = None
+        return sized
+
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend,
         work,
         {
             "diff": diff_path if inline_diff is None else None,
-            "exploration-summary": (
-                exploration_dir / "summary.md"
-                if exploration_dir is not None
-                else None
-            ),
-            "exploration-affected-files": (
-                exploration_dir / "affected_files.md"
-                if exploration_dir is not None
-                else None
-            ),
+            **_budgeted_exploration_inputs(),
         },
         read_only=True,
     )
@@ -4684,11 +4726,13 @@ async def phase_understand_intent(
             return intent_text
 
         # User provided a correction — build new prompt with context. The
-        # correction turn runs read-only too, so for a disposable-clone
-        # read-only execution the diff is inlined under the untrusted-content
-        # boundary (the on-disk ``.daydream/diff.patch`` may be absent from the
-        # clone), reusing the budgeted inline computed above.
-        if read_only_disposable_clone and inline_diff:
+        # correction turn runs read-only too; whenever the diff was inlined
+        # above, reuse that budgeted inline (the on-disk private path is not
+        # sanctioned in that case — an INLINE transport must never see it;
+        # for a disposable clone the on-disk ``.daydream/diff.patch`` may be
+        # absent anyway). Only the non-inline branch names ``diff_path``,
+        # which is then a sanctioned EXACT_PATHS input.
+        if inline_diff is not None:
             diff_clause = (
                 f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
                 "Re-examine the codebase and the diff inlined below, and present an "
@@ -4741,21 +4785,58 @@ async def phase_alternative_review(
     print_dim(console, f"Model: {backend.model}")
 
     inline_diff = _inlineable_diff(diff_text)
+    # Same advisory-budget degradation as the intent phase: exploration files
+    # that would overflow the shared inline AGGREGATE budget must not
+    # hard-fail the wonder pass on INLINE transports (strict audit roots,
+    # read-only disposable clones, sandboxed Osprey). (The over-budget diff
+    # itself is a separate pre-existing capture limit on those transports;
+    # this pre-check only sizes advisory inputs.)
+    exploration_inline_budgeted = (
+        artifact_session_active()
+        and sanctioned_transport_for(backend, work.repo, read_only=False)
+        is SanctionedInputTransport.INLINE
+    )
+
+    def _budgeted_exploration_inputs() -> dict[str, Path | None]:
+        """Size the exploration pair against the shared inline aggregate.
+
+        Greedy include in declaration order (summary first) while the running
+        total stays within a single INLINE aggregate budget, so two files that
+        fit separately but not together degrade to the surviving prefix
+        instead of raising SanctionedInputUnavailable at capture time.
+        """
+        if exploration_dir is None:
+            return {"exploration-summary": None, "exploration-affected-files": None}
+        if not exploration_inline_budgeted:
+            return {
+                "exploration-summary": exploration_dir / "summary.md",
+                "exploration-affected-files": exploration_dir / "affected_files.md",
+            }
+        remaining = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+        sized: dict[str, Path | None] = {}
+        for label, file_name in (
+            ("exploration-summary", "summary.md"),
+            ("exploration-affected-files", "affected_files.md"),
+        ):
+            path = exploration_dir / file_name
+            try:
+                size = path.stat().st_size
+            except OSError:
+                sized[label] = None
+                continue
+            if size <= remaining:
+                sized[label] = path
+                remaining -= size
+            else:
+                sized[label] = None
+        return sized
+
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend,
         work,
         {
             "diff": diff_path if inline_diff is None else None,
-            "exploration-summary": (
-                exploration_dir / "summary.md"
-                if exploration_dir is not None
-                else None
-            ),
-            "exploration-affected-files": (
-                exploration_dir / "affected_files.md"
-                if exploration_dir is not None
-                else None
-            ),
+            **_budgeted_exploration_inputs(),
         },
     )
     inline_transport = (

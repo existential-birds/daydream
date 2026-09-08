@@ -622,7 +622,9 @@ def test_external_exploration_counts_only_current_owner_and_safe_relative_paths(
         private_base=tmp_path / "private",
     )
     private_live = Path(*provenance.live_components)
-    other_live = private_live.parents[2] / "other-key/runs/other-session/live"
+    # A sibling workspace key lives beside the current key (live layout:
+    # <base>/<workspace-key>/runs/<session>/live), never inside it.
+    other_live = private_live.parents[3] / "other-key/runs/other-session/live"
     trajectories = {
         "main": None,
         "forked": [

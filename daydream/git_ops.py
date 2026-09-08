@@ -3429,6 +3429,33 @@ def worktree_unlock(repo: Path, path: Path) -> None:
         raise GitError(f"git worktree unlock {path} failed: {proc.stderr.strip()}")
 
 
+def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
+    """Return the registered worktree whose checkout is *path*, or None.
+
+    Cross-checks ``git worktree list --porcelain`` from *repo*. ``assert_is_worktree``
+    can raise ``NotAWorktreeError`` for a registered worktree whose ``.git``
+    link or admin chain is temporarily broken (e.g. a moved admin dir); this
+    list check is the authoritative registry, so a listed entry must never be
+    treated as unregistered residue.
+
+    Raises:
+        GitError: If ``git worktree list`` itself fails.
+    """
+    proc = _run_git(repo, ["worktree", "list", "--porcelain"], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git worktree list failed: {proc.stderr.strip()}")
+    wanted = path.resolve()
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            try:
+                candidate = Path(line.split(maxsplit=1)[1].strip()).resolve()
+            except (IndexError, OSError):
+                continue
+            if candidate == wanted:
+                return candidate
+    return None
+
+
 def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
     """Return the lock-armed time of the worktree at *path*, or None if unlocked.
 

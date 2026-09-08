@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import stat
 import sys
 import unicodedata
@@ -2846,9 +2847,29 @@ def _validate_legacy_public(source: Path) -> None:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
         children = {child.name for child in daydream.iterdir()}
-        if children & _OPERATIONAL_NAMES:
-            raise ArtifactVisibilityError("legacy operational workspace blocks artifact detach")
-        if children and not children.intersection(_LEGACY_ANCHORS):
+        anchor_children = set(children)
+        for name in sorted(children & _OPERATIONAL_NAMES):
+            # An emptied operational root is inert residue (the workspace
+            # retirement pass removes it); refusing it here would wedge every
+            # future run on the repository. Only a root that still holds
+            # entries blocks the detach — and residue roots are also excluded
+            # from the anchor check below so an emptied namespace cannot
+            # resurface as "no recognized artifact anchor".
+            operational = daydream / name
+            try:
+                operational_metadata = operational.lstat()
+                if not stat.S_ISLNK(operational_metadata.st_mode) and stat.S_ISDIR(
+                    operational_metadata.st_mode
+                ):
+                    occupied = any(True for _ in operational.iterdir())
+                else:
+                    occupied = True
+            except OSError as exc:
+                raise ArtifactVisibilityError("artifact root could not be inspected") from exc
+            if occupied:
+                raise ArtifactVisibilityError("legacy operational workspace blocks artifact detach")
+            anchor_children.discard(name)
+        if anchor_children and not anchor_children.intersection(_LEGACY_ANCHORS):
             raise ArtifactVisibilityError("legacy .daydream tree has no recognized artifact anchor")
     review = source / _REVIEW_OUTPUT
     if review.exists() or review.is_symlink():
@@ -4680,6 +4701,65 @@ def bind_artifact_session(session: ArtifactSession) -> Iterator[ArtifactSession]
         _SESSION.reset(token)
 
 
+def _rebaseline_canonical_from_public(
+    state_root: Path,
+    source: Path,
+    public_entries: tuple[ArtifactManifestEntry, ...],
+    *,
+    transaction: Path,
+) -> None:
+    """Adopt the observed public tree as the new canonical recovery baseline.
+
+    Between two runs the published artifacts exist in two synchronized
+    copies: the public tree and the canonical recovery copy under the private
+    state root. Any benign external change to the public tree between runs
+    (a deleted ``.review-output.md``, ``git clean -fdx``, a stray external
+    write) previously bricked the checkout: session open compared the two
+    copies strictly and failed with no in-band recovery path. Session open
+    is the one safe place to reconcile: no artifact transaction is in
+    flight, the session lock excludes concurrent sessions, so the observed
+    public state is adopted as the new baseline with an actionable warning.
+    Divergence detected mid-run (during detach or publication) still fails
+    closed with the conflict machinery.
+    """
+    canonical = state_root / "canonical"
+    canonical_manifest = state_root / "canonical-manifest.json"
+    backup = transaction / "rebaseline-old-canonical"
+    stage = transaction / "rebaseline-stage"
+    if canonical.exists():
+        os.replace(canonical, backup)
+    try:
+        _copy_tree(source, stage, public_entries)
+        if canonical.exists() or canonical.is_symlink():
+            _remove_owned_tree(canonical, state_root)
+        os.replace(stage, canonical)
+        _fsync_directory(state_root)
+        _atomic_json(canonical_manifest, _manifest_payload(public_entries))
+    except BaseException:
+        with suppress(OSError):
+            shutil.rmtree(stage, ignore_errors=True)
+        if not canonical.exists() and backup.exists():
+            os.replace(backup, canonical)
+            _fsync_directory(state_root)
+        raise
+    with suppress(OSError):
+        shutil.rmtree(backup, ignore_errors=True)
+    _print_rebaseline_warning(source, canonical)
+
+
+def _print_rebaseline_warning(source: Path, canonical: Path) -> None:
+    from daydream.agent import console
+    from daydream.ui import print_warning
+
+    print_warning(
+        console,
+        "Public artifacts changed between runs; adopting the observed public "
+        f"state at {source / _DAYDREAM} (and {source / _REVIEW_OUTPUT}) as the "
+        f"new baseline in the canonical recovery copy at {canonical}. "
+        "Mid-run divergence still fails closed.",
+    )
+
+
 def _open_layout(
     work: WorkContext,
     session_id: str,
@@ -4772,9 +4852,25 @@ def _open_layout(
         canonical_manifest = state_root / "canonical-manifest.json"
         # Canonical is itself the durable byte-identical copy the DETACH_REMOVING
         # ordering needs, so stage one only when this workspace has none yet.
-        # Recovery tolerates the absent stage for exactly this reason.
+        # Recovery tolerates the absent stage for exactly this reason. Session
+        # open is the one safe reconciliation point for a benign between-run
+        # public drift: the workspace lock excludes concurrent sessions and no
+        # artifact transaction is in flight, so the drift is adopted as the new
+        # canonical baseline BEFORE the detach transaction stages anything.
+        # Doing this after staging would leave the stale stage the recovery
+        # path validates against on a crash.
         canonical_present = canonical.exists()
-        if not canonical_present:
+        if canonical_present:
+            canonical_entries = _parse_manifest(canonical_manifest)
+            if public_entries != canonical_entries:
+                _rebaseline_canonical_from_public(
+                    state_root,
+                    source,
+                    public_entries,
+                    transaction=transaction,
+                )
+                canonical_entries = public_entries
+        else:
             _copy_tree(source, detach_stage, public_entries)
         _atomic_json(transaction / "manifest.json", _manifest_payload(public_entries))
         _write_transition(
@@ -4784,9 +4880,11 @@ def _open_layout(
             state="DETACH_STAGED",
         )
         if canonical_present:
+            # Re-baselining already made canonical match the observed public
+            # state; keep the equality the recovery path relies on.
             canonical_entries = _parse_manifest(canonical_manifest)
             if public_entries != canonical_entries:
-                raise ArtifactVisibilityError("public artifacts do not match canonical recovery state")
+                raise ArtifactVisibilityError("canonical artifact recovery copy is inconsistent")
         else:
             os.replace(detach_stage, canonical)
             _fsync_directory(state_root)

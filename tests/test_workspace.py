@@ -383,7 +383,7 @@ async def test_open_workspace_rejects_linked_legacy_namespace_before_mutation(
     assert not (owner.operational_state_root / "operational" / name).exists()
 
 
-@pytest.mark.parametrize("entry_kind", ["live", "unknown"])
+@pytest.mark.parametrize("entry_kind", ["live"])
 async def test_open_workspace_refuses_unsafe_legacy_entry_without_mutation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -425,8 +425,138 @@ async def test_open_workspace_refuses_unsafe_legacy_entry_without_mutation(
     assert legacy.is_dir()
     assert _git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational").exists()
-    if entry_kind == "unknown":
-        assert (legacy / "retained.txt").read_bytes() == b"operator bytes\n"
+
+
+async def test_open_workspace_refuses_registry_listed_broken_chain_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A registered worktree whose .git chain is broken fails closed, not retired.
+
+    ``assert_is_worktree`` raises ``NotAWorktreeError`` when the checkout's
+    ``.git`` link/admin chain is broken, but the worktree is still listed in
+    the git registry — destroying it would lose uncommitted operator work.
+    The retire gate cross-checks ``git worktree list --porcelain`` and refuses
+    with "registry-listed but unprobeable".
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
+    git_ops.worktree_add(repo, legacy, "main", detach=True)
+    # Break the .git link file: the worktree remains registered (git worktree
+    # list still shows it) but assert_is_worktree can no longer resolve it.
+    gitfile = legacy / ".git"
+    assert gitfile.is_file()
+    gitfile.unlink()
+    before = _git(repo, "worktree", "list", "--porcelain")
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    with pytest.raises(ArtifactVisibilityError, match="registry-listed but unprobeable"):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base="main",
+            force_ephemeral=False,
+            skip_tests=True,
+            private_owner=owner,
+        ):
+            pass
+
+    assert legacy.is_dir()
+    assert _git(repo, "worktree", "list", "--porcelain") == before
+    assert not (owner.operational_state_root / "operational").exists()
+
+
+async def test_open_workspace_refuses_live_registered_worktree_with_nonpattern_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A live-locked registered worktree whose name is NOT the legacy -reanchor
+    shape must still fail closed, never be silently deleted by the name gate.
+
+    The retire gate used to skip the ownership/lock probe for directories
+    whose name did not match the legacy pattern, so a registered worktree
+    (e.g. created with a custom name in the daydream-managed namespace) that
+    was live-locked mid-write was rmtree'd without the probe. Every real
+    directory is probed first now; only provably-unregistered residue is
+    retired with a warning.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    legacy = repo / ".daydream" / "worktrees" / "custom-named-worktree"
+    git_ops.worktree_add(
+        repo,
+        legacy,
+        "main",
+        detach=True,
+        lock_reason="still-running",
+    )
+    before = _git(repo, "worktree", "list", "--porcelain")
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    with pytest.raises(ArtifactVisibilityError, match="legacy operational"):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base="main",
+            force_ephemeral=False,
+            skip_tests=True,
+            private_owner=owner,
+        ):
+            pass
+
+    assert legacy.is_dir()
+    assert _git(repo, "worktree", "list", "--porcelain") == before
+    assert not (owner.operational_state_root / "operational").exists()
+
+
+async def test_open_workspace_retires_unregistered_legacy_directory_without_mutation_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pattern-matching but unregistered legacy dir is residue: retired, not fatal.
+
+    (Formerly the ``[unknown]`` parametrization of the refusal test: the card
+    changes that contract from fail-closed to retire-with-warning, because a
+    crashed ``git worktree add`` or stray directory must not wedge every
+    subsequent run on the repository.)
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
+    legacy.mkdir(parents=True)
+    (legacy / "retained.txt").write_text("operator bytes\n", encoding="utf-8")
+    before = _git(repo, "worktree", "list", "--porcelain")
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=False,
+        skip_tests=True,
+        private_owner=owner,
+    ):
+        pass
+
+    assert not legacy.exists()
+    assert not (repo / ".daydream" / "worktrees").exists()
+    assert _git(repo, "worktree", "list", "--porcelain") == before
+    assert not (owner.operational_state_root / "operational").exists()
 
 
 async def test_open_workspace_retires_stale_legacy_audit_worktree(
@@ -464,9 +594,221 @@ async def test_open_workspace_retires_stale_legacy_audit_worktree(
         assert legacy.name not in _git(repo, "worktree", "list", "--porcelain")
 
 
-async def test_legacy_preflight_rejects_unknown_before_moving_registered_entry(
+async def test_open_workspace_removes_emptied_legacy_roots_after_migration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F1 wedge: the migration must not leave residue that blocks the next open.
+
+    After moving the unlocked legacy reanchor worktree into the private
+    operational root, the emptied ``.daydream/worktrees`` root itself must be
+    gone, so a session opened immediately after migration succeeds instead of
+    failing with "legacy operational workspace blocks artifact detach".
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
+    git_ops.worktree_add(repo, legacy, "main", detach=True)
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=False,
+        skip_tests=True,
+        private_owner=owner,
+    ) as work:
+        migrated = owner.operational_state_root / "operational" / legacy.name
+        assert migrated.is_dir()
+        assert not legacy.exists()
+        assert not (repo / ".daydream" / "worktrees").exists()
+
+        # The reviewer's empirical repro: open an artifact session on the
+        # migrated checkout in the SAME run window. Must not raise.
+        from daydream.artifact_visibility import open_artifact_session
+
+        async with open_artifact_session(
+            work, session_id="post-migration", owner=owner
+        ) as session:
+            assert session.layout.source == repo.resolve()
+
+    assert not (repo / ".daydream" / "worktrees").exists()
+    assert not (repo / ".daydream" / "audit").exists()
+
+
+async def test_open_workspace_session_succeeds_with_empty_legacy_root_residue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An emptied operational root left as residue must not wedge session open."""
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    (repo / ".daydream" / "worktrees").mkdir(parents=True)
+    (repo / ".daydream" / "audit").mkdir()
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=False,
+        skip_tests=True,
+        private_owner=owner,
+    ):
+        assert not (repo / ".daydream" / "worktrees").exists()
+        assert not (repo / ".daydream" / "audit").exists()
+
+
+async def test_open_workspace_retires_unrecognized_legacy_entry_with_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Stray junk in the daydream-owned legacy namespace is retired, not fatal."""
+    import logging
+
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    unknown_dir = repo / ".daydream" / "worktrees" / "run-old-reanchor"
+    unknown_dir.mkdir(parents=True)
+    (unknown_dir / "retained.txt").write_bytes(b"stray operator bytes")
+    stray_file = repo / ".daydream" / "audit"
+    stray_file.mkdir()
+    (stray_file / "notes.txt").write_bytes(b"not a worktree")
+    before = _git(repo, "worktree", "list", "--porcelain")
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    with caplog.at_level(logging.WARNING, logger="daydream.workspace"):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base="main",
+            force_ephemeral=False,
+            skip_tests=True,
+            private_owner=owner,
+        ):
+            pass
+
+    assert not unknown_dir.exists()
+    assert not (stray_file / "notes.txt").exists()
+    assert "retiring unrecognized legacy operational entry" in caplog.text
+    assert _git(repo, "worktree", "list", "--porcelain") == before
+
+
+async def test_open_workspace_still_refuses_different_ownership_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worktree registered to a DIFFERENT repo is operator data: fail closed."""
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    foreign = _bare_remote(tmp_path / "foreign.git")
+    foreign_repo = tmp_path / "foreign-repo"
+    _init_repo(foreign_repo)
+    _configure_identity(foreign_repo)
+    (foreign_repo / "foreign.txt").write_text("foreign\n")
+    _git(foreign_repo, "add", "foreign.txt")
+    _commit(foreign_repo, "foreign initial")
+    _git(foreign_repo, "remote", "add", "origin", str(foreign))
+    _git(foreign_repo, "push", "-u", "origin", "main")
+    embedded = repo / ".daydream" / "worktrees" / "run-old-reanchor"
+    git_ops.worktree_add(foreign_repo, embedded, "main", detach=True)
+    canary = embedded / "foreign-checkout.txt"
+    canary.write_bytes(b"foreign worktree bytes")
+    before = _git(repo, "worktree", "list", "--porcelain")
+
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    with pytest.raises(ArtifactVisibilityError, match="different Git ownership"):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base="main",
+            force_ephemeral=False,
+            skip_tests=True,
+            private_owner=owner,
+        ):
+            pass
+
+    assert canary.read_bytes() == b"foreign worktree bytes"
+    assert _git(repo, "worktree", "list", "--porcelain") == before
+
+
+async def test_open_workspace_still_refuses_registered_worktree_when_lock_probe_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A probe GitError on a VERIFIED registered worktree fails closed, never retires.
+
+    A registered, same-owner worktree whose ownership/lock probe raises a
+    plain ``GitError`` (transient git failure, unsafe lock metadata) poses an
+    UNANSWERED safety question — it may be live-locked with uncommitted
+    operator work. The retire path must destroy only residue it can PROVE is
+    unregistered (``NotAWorktreeError``); any other probe failure fails
+    closed with the worktree and its data intact.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    embedded = repo / ".daydream" / "worktrees" / "run-old-reanchor"
+    git_ops.worktree_add(repo, embedded, "main", detach=True)
+    canary = embedded / "operator-checkout.txt"
+    canary.write_bytes(b"registered worktree bytes")
+    before = _git(repo, "worktree", "list", "--porcelain")
+
+    real_lock_mtime = git_ops.worktree_lock_mtime
+
+    def flaky_lock_mtime(repo_arg: Path, path: Path) -> float | None:
+        if path == embedded:
+            raise git_ops.GitError(f"worktree lock metadata is unsafe for {path}")
+        return real_lock_mtime(repo_arg, path)
+
+    monkeypatch.setattr(git_ops, "worktree_lock_mtime", flaky_lock_mtime)
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+    with pytest.raises(ArtifactVisibilityError):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base="main",
+            force_ephemeral=False,
+            skip_tests=True,
+            private_owner=owner,
+        ):
+            pass
+
+    assert canary.read_bytes() == b"registered worktree bytes"
+    assert embedded.is_dir()
+    assert _git(repo, "worktree", "list", "--porcelain") == before
+
+
+async def test_legacy_preflight_retires_unknown_after_moving_registered_entry(
     tmp_path: Path,
 ) -> None:
+    """Unrecognized residue is retired (not fatal) AFTER the registered move.
+
+    The registered legacy worktree is migrated into the private operational
+    root; the stray non-worktree directory is retired with a warning so one
+    piece of junk cannot wedge every subsequent run. The registered entry is
+    moved before any residue is destroyed.
+    """
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = resolve_private_workspace_owner(
         repo,
@@ -479,21 +821,26 @@ async def test_legacy_preflight_rejects_unknown_before_moving_registered_entry(
     (unknown / "retained.txt").write_bytes(b"retain me")
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    with pytest.raises(ArtifactVisibilityError, match="unknown or unsafe"):
-        async with open_workspace(
-            repo,
-            branch=None,
-            base="main",
-            force_ephemeral=False,
-            skip_tests=True,
-            private_owner=owner,
-        ):
-            pass
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=False,
+        skip_tests=True,
+        private_owner=owner,
+    ):
+        migrated = owner.operational_state_root / "operational" / registered.name
+        assert migrated.is_dir()
+        assert git_ops.git_common_dir(migrated) == owner.git_common_dir
 
-    assert registered.is_dir()
-    assert (unknown / "retained.txt").read_bytes() == b"retain me"
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-    assert not (owner.operational_state_root / "operational").exists()
+    assert not unknown.exists()
+    assert not (repo / ".daydream" / "worktrees").exists()
+    after = _git(repo, "worktree", "list", "--porcelain")
+    # The registered worktree is re-registered at its new private path by
+    # ``git worktree move``; the main worktree line is unchanged.
+    assert after.splitlines()[0] == before.splitlines()[0]
+    assert "run-known-reanchor" in after
+    assert ".daydream/worktrees" not in after
 
 
 # --- 3. Ephemeral with branch (local + origin) ------------------------------

@@ -253,6 +253,18 @@ def _sanctioned_transport(
     return SanctionedInputTransport.EXACT_PATHS
 
 
+def sanctioned_transport_for(
+    backend: object, cwd: Path, *, read_only: bool
+) -> SanctionedInputTransport:
+    """Return the sanctioned-input transport a capture from *cwd* would use.
+
+    Public wrapper around the transport decision so phase builders can size
+    advisory inputs (e.g. exploration context) for the INLINE budget *before*
+    capture, mirroring how the diff is excluded when it is inlined.
+    """
+    return _sanctioned_transport(backend, cwd, read_only=read_only)
+
+
 def prepare_sanctioned_inputs(
     backend: object,
     cwd: Path,
