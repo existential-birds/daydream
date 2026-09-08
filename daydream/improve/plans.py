@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import stat
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -15,10 +14,12 @@ from typing import Any
 
 from daydream import git_ops
 from daydream.artifact_visibility import (
-    ArtifactVisibilityError,
     PrivateWorkspaceOwner,
+    operational_worktree_path,
+    operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
+    validate_private_directory,
     validate_private_workspace_owner,
 )
 from daydream.improve.prioritize import member_alias, plan_priority
@@ -32,7 +33,6 @@ from daydream.trajectory import redact_text
 from daydream.workspace import (
     _OPERATIONAL_LOCK_STALE_AFTER_S,
     _legacy_operational_root,
-    _private_operational_root,
     _prune_stale_locked_worktrees,
 )
 
@@ -716,36 +716,18 @@ def _public_reanchor_roots(
         )
     else:
         validate_private_workspace_owner(owner, source=owner.source, repo=repo)
-    operational = owner.operational_state_root / "operational"
+    operational = operational_worktree_path(owner)
     legacy = _legacy_operational_root(
         owner.source,
         "worktrees",
         label="legacy re-anchor root",
     )
-    _validate_reanchor_discovery_root(
+    validate_private_directory(
         operational,
         label="operational re-anchor root",
-        require_private_mode=True,
+        allow_absent=True,
     )
     return operational, legacy
-
-
-def _validate_reanchor_discovery_root(
-    root: Path,
-    *,
-    label: str,
-    require_private_mode: bool = False,
-) -> None:
-    if not root.exists() and not root.is_symlink():
-        return
-    try:
-        metadata = root.lstat()
-    except OSError as exc:
-        raise ArtifactVisibilityError(f"{label} is inaccessible") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise ArtifactVisibilityError(f"{label} must be a real directory")
-    if require_private_mode and stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise ArtifactVisibilityError(f"{label} must have mode 0700")
 
 
 def prune_stale_reanchor_worktrees(
@@ -1085,7 +1067,7 @@ class PlanWriteSession:
                 source=private_workspace_owner.source,
                 repo=self._repo,
             )
-            self._worktrees_root = _private_operational_root(private_workspace_owner)
+            self._worktrees_root = operational_worktree_root(private_workspace_owner)
         self._planned_at = planned_at
         self._planned_on = date.today()
         self._run_session_id = run_session_id

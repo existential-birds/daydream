@@ -875,7 +875,7 @@ def test_private_workspace_owner_creates_byte_identical_peers_and_operational_ro
     before_worktrees = _git(source, "worktree", "list", "--porcelain")
 
     owner = resolve_private_workspace_owner(source, locations=locations)
-    operational = operational_worktree_root(source, locations=locations)
+    operational = operational_worktree_root(owner)
 
     assert owner.artifact_state_root == locations.artifact_runtime / owner.workspace_key
     assert owner.operational_state_root == locations.operational_workspaces / owner.workspace_key

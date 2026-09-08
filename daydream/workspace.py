@@ -32,6 +32,8 @@ from daydream import git_ops
 from daydream.artifact_visibility import (
     ArtifactVisibilityError,
     PrivateWorkspaceOwner,
+    operational_worktree_path,
+    operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
     validate_private_workspace_owner,
@@ -197,7 +199,7 @@ async def open_workspace(
 
     is_ephemeral = force_ephemeral or branch is not None
     operational_root = (
-        _private_operational_root(private_owner) if is_ephemeral else None
+        operational_worktree_root(private_owner) if is_ephemeral else None
     )
 
     if is_ephemeral:
@@ -539,24 +541,6 @@ def _make_run_id() -> str:
     return f"{timestamp}-{secrets.token_hex(4)}"
 
 
-def _private_operational_root(owner: PrivateWorkspaceOwner) -> Path:
-    """Create and validate the already-owned operational worktree directory."""
-    root = owner.operational_state_root / "operational"
-    try:
-        root.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    try:
-        metadata = root.lstat()
-    except OSError as exc:
-        raise ArtifactVisibilityError("operational worktree root is not accessible") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise ArtifactVisibilityError("operational worktree root must be a real directory")
-    if stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise ArtifactVisibilityError("operational worktree root must have mode 0700")
-    return root
-
-
 def _legacy_operational_root(
     source: Path,
     name: str,
@@ -628,7 +612,7 @@ def _retire_legacy_operational_worktrees(
             if locked_at is not None and time.time() - locked_at <= _OPERATIONAL_LOCK_STALE_AFTER_S:
                 raise ArtifactVisibilityError("legacy operational worktree is live and locked")
             if kind == "reanchor" and locked_at is None:
-                target = owner.operational_state_root / "operational" / entry.name
+                target = operational_worktree_path(owner) / entry.name
                 if target in destinations or target.exists() or target.is_symlink():
                     raise ArtifactVisibilityError("legacy operational migration destination is occupied")
                 destinations.add(target)
@@ -637,7 +621,7 @@ def _retire_legacy_operational_worktrees(
                 actions.append(("retire", entry, None))
 
     if any(action == "move" for action, _, _ in actions):
-        _private_operational_root(owner)
+        operational_worktree_root(owner)
     retired = [entry for action, entry, _ in actions if action == "retire"]
     if retired and _prune_stale_locked_worktrees(
         source,

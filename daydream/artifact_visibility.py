@@ -105,6 +105,10 @@ class _ExternalEntryLifecycle(str, Enum):
     CONFLICT = "conflict"
 
 
+_EXTERNAL_PURPOSE_VALUES = frozenset(value.value for value in _ExternalEntryPurpose)
+_EXTERNAL_LIFECYCLE_VALUES = frozenset(value.value for value in _ExternalEntryLifecycle)
+
+
 @dataclass(frozen=True)
 class _NameExchangeResult:
     result: int
@@ -114,9 +118,6 @@ class _NameExchangeResult:
 @dataclass(frozen=True)
 class _ExternalEntryIssue:
     kind: Literal["directory", "fifo", "socket", "symlink", "special", "read_error"]
-    device: int | None
-    inode: int | None
-    mode: int | None
 
 
 class _AtomicNameExchange:
@@ -148,13 +149,7 @@ class _AtomicNameExchange:
 
     def call(self, parent_fd: int, staged_name: str, target_name: str) -> _NameExchangeResult:
         for name in (staged_name, target_name):
-            if (
-                not name
-                or name in (".", "..")
-                or any(character in name for character in ("/", "\\", "\0"))
-                or Path(name).name != name
-            ):
-                raise ArtifactVisibilityError("atomic exchange name is invalid")
+            _validate_exchange_name(name, message="atomic exchange name is invalid")
         ctypes.set_errno(0)
         result = self._function(
             parent_fd,
@@ -190,7 +185,6 @@ class ArtifactLayout:
     repo_git_dir: Path
     artifact_runtime_root: Path
     operational_workspaces_root: Path
-    operational_state_root: Path
     session_id: str
     state_root: Path
     live_root: Path
@@ -313,8 +307,10 @@ def _absolute_lexical(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _declared_directory(path: Path, *, label: str) -> Path:
+def _declared_directory_metadata(path: Path, *, label: str) -> tuple[Path, os.stat_result]:
+    """Resolve a declared directory, returning it with its own no-follow metadata."""
     declared = _absolute_lexical(path)
+    declared_metadata: os.stat_result | None = None
     for index, component in enumerate((declared, *declared.parents)):
         try:
             metadata = component.lstat()
@@ -322,12 +318,19 @@ def _declared_directory(path: Path, *, label: str) -> Path:
             raise ArtifactVisibilityError(f"{label} is not an accessible directory") from exc
         if stat.S_ISLNK(metadata.st_mode):
             raise ArtifactVisibilityError(f"{label} ancestry must not contain a symlink")
-        if index == 0 and not stat.S_ISDIR(metadata.st_mode):
-            raise ArtifactVisibilityError(f"{label} must be a real directory, not a symlink")
+        if index == 0:
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ArtifactVisibilityError(f"{label} must be a real directory, not a symlink")
+            declared_metadata = metadata
+    assert declared_metadata is not None
     try:
-        return declared.resolve(strict=True)
+        return declared.resolve(strict=True), declared_metadata
     except OSError as exc:
         raise ArtifactVisibilityError(f"{label} is not an accessible directory") from exc
+
+
+def _declared_directory(path: Path, *, label: str) -> Path:
+    return _declared_directory_metadata(path, label=label)[0]
 
 
 def _open_directory_descriptor(path: Path, *, label: str) -> int:
@@ -397,14 +400,28 @@ def _validate_private_root_declaration(path: Path, *, label: str) -> None:
             raise ArtifactVisibilityError(f"{label} ancestry is not a directory")
 
 
-def _validate_private_directory(path: Path, *, label: str) -> None:
+def validate_private_directory(
+    path: Path,
+    *,
+    label: str,
+    require_mode: bool = True,
+    allow_absent: bool = False,
+) -> None:
+    """Refuse anything but a real, owner-private directory at ``path``.
+
+    ``allow_absent`` accepts a path that does not exist yet, which discovery
+    roots need; ``require_mode`` drops the mode-0700 requirement for trees that
+    predate private storage.
+    """
+    if allow_absent and not path.exists() and not path.is_symlink():
+        return
     try:
         metadata = path.lstat()
     except OSError as exc:
         raise ArtifactVisibilityError(f"{label} is not an accessible directory") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise ArtifactVisibilityError(f"{label} must be a real directory")
-    if stat.S_IMODE(metadata.st_mode) != 0o700:
+    if require_mode and stat.S_IMODE(metadata.st_mode) != 0o700:
         raise ArtifactVisibilityError(f"{label} must have mode 0700")
 
 
@@ -418,13 +435,13 @@ def _create_private_directory(path: Path) -> None:
         directory.mkdir(mode=0o700)
         os.chmod(directory, 0o700)
         _fsync_directory(directory.parent)
-    _validate_private_directory(path, label="private storage root")
+    validate_private_directory(path, label="private storage root")
 
 
 def _preflight_owner_root(path: Path, expected: dict[str, object], *, label: str) -> bool:
     if not path.exists() and not path.is_symlink():
         return False
-    _validate_private_directory(path, label=label)
+    validate_private_directory(path, label=label)
     owner_path = path / "owner.json"
     if not owner_path.exists() and not owner_path.is_symlink():
         if any(path.iterdir()):
@@ -537,7 +554,7 @@ def validate_private_workspace_owner(
         (owner.operational_state_root, "operational state root"),
     ):
         _validate_private_root_declaration(path, label=label)
-        _validate_private_directory(path, label=label)
+        validate_private_directory(path, label=label)
     for private_root in (artifact_parent, operational_parent):
         if _overlaps(private_root, canonical_source) or _overlaps(private_root, common_dir):
             raise ArtifactVisibilityError("private workspace owner overlaps source Git ownership")
@@ -560,14 +577,14 @@ def validate_private_workspace_owner(
             raise ArtifactVisibilityError("artifact runtime and repository overlap")
 
 
-def operational_worktree_root(
-    source: Path,
-    *,
-    locations: PrivateRootLocations,
-) -> Path:
-    """Return the validated source-owned operational worktree directory."""
-    owner = resolve_private_workspace_owner(source, locations=locations)
-    root = owner.operational_state_root / "operational"
+def operational_worktree_path(owner: PrivateWorkspaceOwner) -> Path:
+    """Return the source-owned operational worktree directory without creating it."""
+    return owner.operational_state_root / "operational"
+
+
+def operational_worktree_root(owner: PrivateWorkspaceOwner) -> Path:
+    """Create and validate the source-owned operational worktree directory."""
+    root = operational_worktree_path(owner)
     _create_private_directory(root)
     return root
 
@@ -697,7 +714,14 @@ def _read_regular(path: Path, metadata: os.stat_result) -> bytes:
         os.close(fd)
 
 
-def _walk(root: Path, path: Path, entries: list[ArtifactManifestEntry], inodes: set[tuple[int, int]]) -> None:
+def _walk(
+    root: Path,
+    path: Path,
+    entries: list[ArtifactManifestEntry],
+    inodes: set[tuple[int, int]],
+    *,
+    digest: bool,
+) -> None:
     try:
         metadata = path.lstat()
     except OSError as exc:
@@ -719,7 +743,7 @@ def _walk(root: Path, path: Path, entries: list[ArtifactManifestEntry], inodes: 
             if key in normalized:
                 raise ArtifactVisibilityError("artifact tree contains duplicate normalized names")
             normalized.add(key)
-            _walk(root, child, entries, inodes)
+            _walk(root, child, entries, inodes, digest=digest)
         return
     if not stat.S_ISREG(metadata.st_mode):
         raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
@@ -727,13 +751,26 @@ def _walk(root: Path, path: Path, entries: list[ArtifactManifestEntry], inodes: 
     if inode in inodes:
         raise ArtifactVisibilityError("artifact tree contains duplicate filesystem aliases")
     inodes.add(inode)
+    if not digest:
+        entries.append(ArtifactManifestEntry(relative, "file", metadata.st_size, mode, None))
+        return
     content = _read_regular(path, metadata)
     entries.append(
         ArtifactManifestEntry(relative, "file", len(content), mode, hashlib.sha256(content).hexdigest())
     )
 
 
-def _manifest(root: Path, names: Sequence[str] | None = None) -> tuple[ArtifactManifestEntry, ...]:
+def _manifest(
+    root: Path,
+    names: Sequence[str] | None = None,
+    *,
+    digest: bool = True,
+) -> tuple[ArtifactManifestEntry, ...]:
+    """Enumerate a tree, hashing every file unless ``digest`` is disabled.
+
+    A digest-free listing carries no ``sha256`` and is therefore only valid for
+    enumerating a tree in order to delete it, never for attestation or storage.
+    """
     try:
         root_metadata = root.lstat()
     except OSError as exc:
@@ -752,7 +789,7 @@ def _manifest(root: Path, names: Sequence[str] | None = None) -> tuple[ArtifactM
         normalized.add(key)
         path = root / name
         if path.exists() or path.is_symlink():
-            _walk(root, path, entries, inodes)
+            _walk(root, path, entries, inodes, digest=digest)
     return tuple(entries)
 
 
@@ -773,34 +810,15 @@ def _parse_manifest(path: Path) -> tuple[ArtifactManifestEntry, ...]:
     seen: set[str] = set()
     normalized: set[str] = set()
     for raw in raw_entries:
-        if not isinstance(raw, dict) or set(raw) != {"path", "kind", "size", "mode", "sha256"}:
-            raise ArtifactVisibilityError("artifact manifest is malformed")
-        relative = raw["path"]
-        kind = raw["kind"]
-        size = raw["size"]
-        mode = raw["mode"]
-        digest = raw["sha256"]
-        if not isinstance(relative, str) or relative in seen:
+        entry = _manifest_entry_from_payload(raw, message="artifact manifest is malformed")
+        if entry.path in seen:
             raise ArtifactVisibilityError("artifact manifest contains duplicate paths")
-        _validate_relative_name(relative)
-        normalized_path = unicodedata.normalize("NFC", relative)
+        normalized_path = unicodedata.normalize("NFC", entry.path)
         if normalized_path in normalized:
             raise ArtifactVisibilityError("artifact manifest contains duplicate normalized paths")
-        if kind not in ("directory", "file"):
-            raise ArtifactVisibilityError("artifact manifest is malformed")
-        if type(size) is not int or type(mode) is not int or size < 0 or not 0 <= mode <= 0o7777:
-            raise ArtifactVisibilityError("artifact manifest is malformed")
-        if kind == "directory" and (size != 0 or digest is not None):
-            raise ArtifactVisibilityError("artifact manifest is malformed")
-        if kind == "file" and (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(char not in "0123456789abcdef" for char in digest)
-        ):
-            raise ArtifactVisibilityError("artifact manifest is malformed")
-        seen.add(relative)
+        seen.add(entry.path)
         normalized.add(normalized_path)
-        result.append(ArtifactManifestEntry(relative, cast(Any, kind), size, mode, cast(str | None, digest)))
+        result.append(entry)
     if [entry.path for entry in result] != sorted((entry.path for entry in result), key=os.fsencode):
         raise ArtifactVisibilityError("artifact manifest entries are not sorted")
     return tuple(result)
@@ -811,18 +829,47 @@ def _entries_belong_to(relative: str, entries: tuple[ArtifactManifestEntry, ...]
     return all(entry.path == relative or entry.path.startswith(prefix) for entry in entries)
 
 
+def _entry_at(
+    entries: Sequence[ArtifactManifestEntry],
+    relative: str,
+    *,
+    kind: str | None = None,
+) -> ArtifactManifestEntry | None:
+    """Return the manifest entry at ``relative``, optionally of one kind only."""
+    return next(
+        (
+            entry
+            for entry in entries
+            if entry.path == relative and (kind is None or entry.kind == kind)
+        ),
+        None,
+    )
+
+
+def _write_baseline_manifest(transaction: Path, index: int, record: _DestinationRecord) -> None:
+    """Persist one record's baseline manifest, which never changes after capture."""
+    _atomic_json(
+        transaction / f"destination-{index:04d}-baseline-manifest.json",
+        _manifest_payload(record.baseline),
+    )
+
+
 def _write_destination_records(
     transaction: Path,
     records: Sequence[_DestinationRecord],
     *,
     include_published: bool,
+    include_baseline: bool = False,
 ) -> None:
+    """Rewrite the destination ledger.
+
+    Baseline manifests are immutable once captured, so they are only written
+    when this transaction has not seen them yet (``include_baseline``).
+    """
     registry: list[dict[str, object]] = []
     for index, record in enumerate(records):
-        _atomic_json(
-            transaction / f"destination-{index:04d}-baseline-manifest.json",
-            _manifest_payload(record.baseline),
-        )
+        if include_baseline:
+            _write_baseline_manifest(transaction, index, record)
         if include_published:
             _atomic_json(
                 transaction / f"destination-{index:04d}-published-manifest.json",
@@ -1173,9 +1220,14 @@ def _cleanup_registered_stages(
         _remove_owned_tree(stage, stage.parent)
 
 
-def _manifest_entry_from_payload(value: object) -> ArtifactManifestEntry:
+def _manifest_entry_from_payload(
+    value: object,
+    *,
+    message: str = "artifact transfer intent is malformed",
+) -> ArtifactManifestEntry:
+    """Validate one persisted manifest entry payload into its dataclass."""
     if not isinstance(value, dict) or set(value) != {"path", "kind", "size", "mode", "sha256"}:
-        raise ArtifactVisibilityError("artifact transfer intent is malformed")
+        raise ArtifactVisibilityError(message)
     relative = value["path"]
     kind = value["kind"]
     size = value["size"]
@@ -1198,7 +1250,7 @@ def _manifest_entry_from_payload(value: object) -> ArtifactManifestEntry:
             )
         )
     ):
-        raise ArtifactVisibilityError("artifact transfer intent is malformed")
+        raise ArtifactVisibilityError(message)
     _validate_relative_name(relative)
     return ArtifactManifestEntry(
         relative,
@@ -1209,20 +1261,21 @@ def _manifest_entry_from_payload(value: object) -> ArtifactManifestEntry:
     )
 
 
-def _load_transfer_intents(stage: Path) -> list[dict[str, object]]:
+def _load_transfer_intents(stage: Path, *, owner: dict[str, Any] | None = None) -> list[dict[str, object]]:
     path = stage / "intents.json"
     if not path.exists() and not path.is_symlink():
         return []
+    if owner is None:
+        owner = _load_json(stage / "stage-owner.json")
     payload = _load_json(path)
     if (
         set(payload) != {"schema_version", "stage_id", "intents"}
         or payload.get("schema_version") != _SCHEMA_VERSION
-        or payload.get("stage_id") != _load_json(stage / "stage-owner.json").get("stage_id")
+        or payload.get("stage_id") != owner.get("stage_id")
         or not isinstance(payload.get("intents"), list)
     ):
         raise ArtifactVisibilityError("artifact transfer intent is malformed")
     result = cast(list[dict[str, object]], payload["intents"])
-    owner = _load_json(stage / "stage-owner.json")
     for index, intent in enumerate(result):
         if (
             not isinstance(intent, dict)
@@ -1253,8 +1306,8 @@ def _record_transfer_intent(
     relative: str,
     expected: ArtifactManifestEntry,
 ) -> None:
-    intents = _load_transfer_intents(stage)
     owner = _load_json(stage / "stage-owner.json")
+    intents = _load_transfer_intents(stage, owner=owner)
     intents.append(
         {
             "index": len(intents),
@@ -1274,14 +1327,18 @@ def _record_transfer_intent(
     )
 
 
-def _record_transfer_conflict(
+def _append_conflict(
     transaction: Path,
     *,
     record_id: str,
-    expected: ArtifactManifestEntry,
-    observed: ArtifactManifestEntry,
-    stage: Path,
+    reason: str,
+    expected_sha256: str | None,
+    observed_sha256: str | None,
+    expected_kind: str,
+    observed_kind: str,
+    stage_id: str | None,
 ) -> None:
+    """Append one adjudication record to the transaction's conflict registry."""
     path = transaction / "conflicts.json"
     conflicts: list[dict[str, object]] = []
     if path.exists() or path.is_symlink():
@@ -1297,12 +1354,12 @@ def _record_transfer_conflict(
     conflicts.append(
         {
             "record_id": record_id,
-            "reason": "unexpected_replacement",
-            "expected_sha256": expected.sha256,
-            "observed_sha256": observed.sha256,
-            "expected_kind": expected.kind,
-            "observed_kind": observed.kind,
-            "stage_id": _load_json(stage / "stage-owner.json")["stage_id"],
+            "reason": reason,
+            "expected_sha256": expected_sha256,
+            "observed_sha256": observed_sha256,
+            "expected_kind": expected_kind,
+            "observed_kind": observed_kind,
+            "stage_id": stage_id,
         }
     )
     _atomic_json(
@@ -1312,6 +1369,26 @@ def _record_transfer_conflict(
             "transaction_id": transaction.name,
             "conflicts": conflicts,
         },
+    )
+
+
+def _record_transfer_conflict(
+    transaction: Path,
+    *,
+    record_id: str,
+    expected: ArtifactManifestEntry,
+    observed: ArtifactManifestEntry,
+    stage: Path,
+) -> None:
+    _append_conflict(
+        transaction,
+        record_id=record_id,
+        reason="unexpected_replacement",
+        expected_sha256=expected.sha256,
+        observed_sha256=observed.sha256,
+        expected_kind=expected.kind,
+        observed_kind=observed.kind,
+        stage_id=cast(str, _load_json(stage / "stage-owner.json")["stage_id"]),
     )
 
 
@@ -1362,6 +1439,17 @@ def _transfer_entry(
         raise ArtifactVisibilityError("artifact entry changed during ownership transfer conflict")
 
 
+def _deepest_first_directories(
+    entries: Sequence[ArtifactManifestEntry],
+) -> list[ArtifactManifestEntry]:
+    """Return the directory entries ordered so children always precede parents."""
+    return sorted(
+        (entry for entry in entries if entry.kind == "directory"),
+        key=lambda item: item.path.count("/"),
+        reverse=True,
+    )
+
+
 def _remove_manifested(
     root: Path,
     entries: tuple[ArtifactManifestEntry, ...],
@@ -1372,62 +1460,12 @@ def _remove_manifested(
     purpose: str,
     stage_parent: Path,
     record_id: str = "public",
+    remove_directories: bool = True,
+    changed_message: str = "public artifacts changed during detach",
 ) -> None:
+    """Stage every manifested file out of ``root``, then drop its directories."""
     if _manifest(root, names) != entries:
-        raise ArtifactVisibilityError("public artifacts changed during detach")
-    stage = _create_transfer_stage(
-        stage_parent,
-        transaction=transaction,
-        workspace_key=workspace_key,
-        purpose=purpose,
-        record_id=record_id,
-    )
-    try:
-        for entry in entries:
-            if entry.kind == "file":
-                _transfer_entry(
-                    root / entry.path,
-                    stage=stage,
-                    relative=entry.path,
-                    expected=entry,
-                    transaction=transaction,
-                )
-    except BaseException:
-        raise
-    directories = sorted(
-        (entry for entry in entries if entry.kind == "directory"),
-        key=lambda item: item.path.count("/"),
-        reverse=True,
-    )
-    for entry in directories:
-        target = root / entry.path
-        try:
-            metadata = target.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                raise ArtifactVisibilityError("public artifact changed during removal")
-            target.rmdir()
-        except ArtifactVisibilityError:
-            raise
-        except OSError as exc:
-            raise ArtifactVisibilityError("public artifact directory changed during detach") from exc
-        _fsync_directory(target.parent)
-    _validate_transfer_stage(stage, transaction=transaction, workspace_key=workspace_key)
-    _remove_owned_tree(stage, stage_parent)
-
-
-def _remove_manifested_files_keep_directories(
-    root: Path,
-    entries: tuple[ArtifactManifestEntry, ...],
-    names: Sequence[str],
-    *,
-    transaction: Path,
-    workspace_key: str,
-    purpose: str,
-    stage_parent: Path,
-    record_id: str,
-) -> None:
-    if _manifest(root, names) != entries:
-        raise ArtifactVisibilityError("explicit artifact destination changed during detach")
+        raise ArtifactVisibilityError(changed_message)
     stage = _create_transfer_stage(
         stage_parent,
         transaction=transaction,
@@ -1444,6 +1482,19 @@ def _remove_manifested_files_keep_directories(
                 expected=entry,
                 transaction=transaction,
             )
+    if remove_directories:
+        for entry in _deepest_first_directories(entries):
+            target = root / entry.path
+            try:
+                metadata = target.lstat()
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                    raise ArtifactVisibilityError("public artifact changed during removal")
+                target.rmdir()
+            except ArtifactVisibilityError:
+                raise
+            except OSError as exc:
+                raise ArtifactVisibilityError("public artifact directory changed during detach") from exc
+            _fsync_directory(target.parent)
     _validate_transfer_stage(stage, transaction=transaction, workspace_key=workspace_key)
     _remove_owned_tree(stage, stage_parent)
 
@@ -1453,15 +1504,11 @@ def _remove_owned_tree(path: Path, owner: Path) -> None:
         raise ArtifactVisibilityError("refusing unsafe transaction cleanup")
     if not path.exists():
         return
-    entries = _manifest(path)
+    entries = _manifest(path, digest=False)
     for entry in entries:
         if entry.kind == "file":
             (path / entry.path).unlink()
-    for entry in sorted(
-        (entry for entry in entries if entry.kind == "directory"),
-        key=lambda item: item.path.count("/"),
-        reverse=True,
-    ):
+    for entry in _deepest_first_directories(entries):
         (path / entry.path).rmdir()
     path.rmdir()
     _fsync_directory(owner)
@@ -1516,8 +1563,8 @@ def _external_records(transaction: Path) -> list[dict[str, object]]:
             not isinstance(entry, dict)
             or set(entry) != required
             or entry.get("record_id") != f"external-{index:04d}"
-            or entry.get("purpose") not in {value.value for value in _ExternalEntryPurpose}
-            or entry.get("lifecycle") not in {value.value for value in _ExternalEntryLifecycle}
+            or entry.get("purpose") not in _EXTERNAL_PURPOSE_VALUES
+            or entry.get("lifecycle") not in _EXTERNAL_LIFECYCLE_VALUES
             or not isinstance(entry.get("parent"), str)
             or not isinstance(entry.get("name"), str)
             or type(entry.get("parent_dev")) is not int
@@ -1570,14 +1617,14 @@ def _write_external_records(transaction: Path, records: list[dict[str, object]])
     )
 
 
-def _validate_exchange_name(name: str) -> None:
+def _validate_exchange_name(name: str, *, message: str = "external entry name is invalid") -> None:
     if (
         not name
         or name in (".", "..")
         or any(character in name for character in ("/", "\\", "\0"))
         or Path(name).name != name
     ):
-        raise ArtifactVisibilityError("external entry name is invalid")
+        raise ArtifactVisibilityError(message)
 
 
 def _new_external_record(
@@ -1630,7 +1677,8 @@ def _update_external_record(
     expected_mode: int | None = None,
     expected_sha256: str | None = None,
     failure_reason: str | None = None,
-) -> None:
+) -> dict[str, object]:
+    """Persist one lifecycle transition and return the record as written."""
     records = _external_records(transaction)
     if index >= len(records):
         raise ArtifactVisibilityError("external entry record identity is malformed")
@@ -1654,6 +1702,7 @@ def _update_external_record(
             cast(str, current["purpose"]),
             Path(cast(str, current["parent"])) / cast(str, current["name"]),
         )
+    return current
 
 
 def _open_parent_fd(parent: Path) -> tuple[int, os.stat_result]:
@@ -1686,12 +1735,7 @@ def _external_identity(
     except FileNotFoundError:
         return None
     except OSError as exc:
-        return _ExternalEntryIssue(
-            "symlink" if exc.errno == errno.ELOOP else "read_error",
-            None,
-            None,
-            None,
-        )
+        return _ExternalEntryIssue("symlink" if exc.errno == errno.ELOOP else "read_error")
     try:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
@@ -1704,23 +1748,13 @@ def _external_identity(
                 kind = "socket"
             else:
                 kind = "special"
-            return _ExternalEntryIssue(
-                kind,
-                metadata.st_dev,
-                metadata.st_ino,
-                stat.S_IMODE(metadata.st_mode),
-            )
+            return _ExternalEntryIssue(kind)
         digest = hashlib.sha256()
         try:
             while chunk := os.read(fd, 64 * 1024):
                 digest.update(chunk)
         except OSError:
-            return _ExternalEntryIssue(
-                "read_error",
-                metadata.st_dev,
-                metadata.st_ino,
-                stat.S_IMODE(metadata.st_mode),
-            )
+            return _ExternalEntryIssue("read_error")
         return metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode), digest.hexdigest()
     finally:
         os.close(fd)
@@ -1829,6 +1863,20 @@ def _external_failure_reason(result: _NameExchangeResult, *, probe: bool) -> str
     return "operational_refusal"
 
 
+def _expected_external_identity(
+    record: _DestinationRecord,
+) -> tuple[int | None, int | None, int, str | None]:
+    """Return the (dev, ino, mode, digest) identity a live external entry must show."""
+    digest = record.installed_sha256
+    mode = 0o600
+    if digest is None:
+        baseline = _entry_at(record.baseline, record.relative, kind="file")
+        if baseline is not None:
+            digest = baseline.sha256
+            mode = baseline.mode
+    return record.expected_dev, record.expected_ino, mode, digest
+
+
 def _mark_external_conflict(
     transaction: Path,
     index: int,
@@ -1836,42 +1884,21 @@ def _mark_external_conflict(
     reason: str,
     observed: _ExternalEntryIssue | None = None,
 ) -> None:
-    _update_external_record(
+    record = _update_external_record(
         transaction,
         index,
         lifecycle=_ExternalEntryLifecycle.CONFLICT,
         failure_reason=reason,
     )
-    path = transaction / "conflicts.json"
-    conflicts: list[dict[str, object]] = []
-    if path.exists() or path.is_symlink():
-        payload = _load_json(path)
-        if (
-            set(payload) != {"schema_version", "transaction_id", "conflicts"}
-            or payload.get("schema_version") != _SCHEMA_VERSION
-            or payload.get("transaction_id") != transaction.name
-            or not isinstance(payload.get("conflicts"), list)
-        ):
-            raise ArtifactVisibilityError("artifact conflict registry is malformed")
-        conflicts = cast(list[dict[str, object]], payload["conflicts"])
-    conflicts.append(
-        {
-            "record_id": f"external-{index:04d}",
-            "reason": reason,
-            "expected_sha256": _external_records(transaction)[index]["expected_sha256"],
-            "observed_sha256": None,
-            "expected_kind": _external_records(transaction)[index]["expected_kind"],
-            "observed_kind": "unknown" if observed is None else observed.kind,
-            "stage_id": f"external-{index:04d}",
-        }
-    )
-    _atomic_json(
-        path,
-        {
-            "schema_version": _SCHEMA_VERSION,
-            "transaction_id": transaction.name,
-            "conflicts": conflicts,
-        },
+    _append_conflict(
+        transaction,
+        record_id=f"external-{index:04d}",
+        reason=reason,
+        expected_sha256=cast("str | None", record["expected_sha256"]),
+        observed_sha256=None,
+        expected_kind=cast(str, record["expected_kind"]),
+        observed_kind="unknown" if observed is None else observed.kind,
+        stage_id=f"external-{index:04d}",
     )
 
 
@@ -2257,26 +2284,7 @@ def _reconcile_external_entries(
                 raise ArtifactVisibilityError("external prepared entry has no destination identity")
             else:
                 target_name = Path(destination.requested).name
-                expected_digest = destination.installed_sha256
-                expected_mode = 0o600
-                if expected_digest is None:
-                    baseline = next(
-                        (
-                            entry
-                            for entry in destination.baseline
-                            if entry.path == destination.relative and entry.kind == "file"
-                        ),
-                        None,
-                    )
-                    if baseline is not None:
-                        expected_digest = baseline.sha256
-                        expected_mode = baseline.mode
-                expected_target = (
-                    destination.expected_dev,
-                    destination.expected_ino,
-                    expected_mode,
-                    expected_digest,
-                )
+                expected_target = _expected_external_identity(destination)
             observed_target = _external_identity(parent_fd, target_name)
             if observed_stage == expected_stage and observed_target == expected_target:
                 _cleanup_external_name(transaction, index, parent_fd)
@@ -2462,26 +2470,7 @@ def _publish_live_external(
             _cleanup_external_name(transaction, stage_index, parent_fd)
             return updated
 
-        expected_digest = record.installed_sha256
-        expected_mode = 0o600
-        if expected_digest is None:
-            baseline_root = next(
-                (
-                    entry
-                    for entry in record.baseline
-                    if entry.path == record.relative and entry.kind == "file"
-                ),
-                None,
-            )
-            expected_digest = None if baseline_root is None else baseline_root.sha256
-            if baseline_root is not None:
-                expected_mode = baseline_root.mode
-        expected_identity = (
-            record.expected_dev,
-            record.expected_ino,
-            expected_mode,
-            expected_digest,
-        )
+        expected_identity = _expected_external_identity(record)
         _update_external_record(
             transaction,
             stage_index,
@@ -2659,28 +2648,12 @@ def _notify_cleanup(state: str, transaction_id: str) -> None:
 def _remove_cleanup_transaction(path: Path, cleanup: Path) -> None:
     if path.parent != cleanup or path.is_symlink() or not path.is_dir():
         raise ArtifactVisibilityError("artifact cleanup transaction is unsafe")
-    entries = _manifest(path)
     journal = path / "journal.json"
-    journal_entry = next(
-        (entry for entry in entries if entry.path == "journal.json" and entry.kind == "file"),
-        None,
-    )
-    if journal_entry is not None:
+    if journal.is_file() and not journal.is_symlink():
         journal.unlink()
         _fsync_directory(path)
         _notify_cleanup("JOURNAL_REMOVED", path.name)
-        entries = tuple(entry for entry in entries if entry is not journal_entry)
-    for entry in entries:
-        if entry.kind == "file":
-            (path / entry.path).unlink()
-    for entry in sorted(
-        (entry for entry in entries if entry.kind == "directory"),
-        key=lambda item: item.path.count("/"),
-        reverse=True,
-    ):
-        (path / entry.path).rmdir()
-    path.rmdir()
-    _fsync_directory(cleanup)
+    _remove_owned_tree(path, cleanup)
     _notify_cleanup("CLEANUP_DIRECTORY_REMOVED", path.name)
 
 
@@ -2944,17 +2917,15 @@ def _install_regular_noclobber(
     target: Path,
     entry: ArtifactManifestEntry,
 ) -> None:
-    content = _read_regular(source, source.lstat())
-    if len(content) != entry.size or hashlib.sha256(content).hexdigest() != entry.sha256:
-        raise ArtifactVisibilityError("artifact recovery source changed")
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = target.parent / f".{target.name}.{secrets.token_hex(8)}.install"
-    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, entry.mode)
     try:
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
+        _copy_regular_entry(
+            source,
+            staged,
+            entry,
+            changed_message="artifact recovery source changed",
+        )
         try:
             os.link(staged, target, follow_symlinks=False)
         except FileExistsError as exc:
@@ -2963,7 +2934,6 @@ def _install_regular_noclobber(
         _fsync_file(target)
         _fsync_directory(target.parent)
     finally:
-        os.close(fd)
         with suppress(OSError):
             staged.unlink()
             _fsync_directory(staged.parent)
@@ -3064,10 +3034,17 @@ def _validate_source_stage(
         raise ArtifactVisibilityError("artifact source-stage ownership is malformed")
 
 
-def _copy_regular_entry(source: Path, target: Path, entry: ArtifactManifestEntry) -> None:
+def _copy_regular_entry(
+    source: Path,
+    target: Path,
+    entry: ArtifactManifestEntry,
+    *,
+    changed_message: str = "artifact file changed during destination staging",
+) -> None:
+    """Copy one manifested regular file, refusing a source that no longer matches."""
     content = _read_regular(source, source.lstat())
     if len(content) != entry.size or hashlib.sha256(content).hexdigest() != entry.sha256:
-        raise ArtifactVisibilityError("artifact file changed during destination staging")
+        raise ArtifactVisibilityError(changed_message)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, entry.mode)
     try:
@@ -3565,23 +3542,15 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
             if published_entries is not None:
                 allowed.append(published_entries)
             if not any(_manifest_is_subset(public_entries, candidate) for candidate in allowed):
-                _atomic_json(
-                    transaction / "conflicts.json",
-                    {
-                        "schema_version": _SCHEMA_VERSION,
-                        "transaction_id": transaction.name,
-                        "conflicts": [
-                            {
-                                "record_id": "public",
-                                "reason": "unexpected_replacement",
-                                "expected_sha256": None,
-                                "observed_sha256": None,
-                                "expected_kind": "directory",
-                                "observed_kind": "unknown",
-                                "stage_id": None,
-                            }
-                        ],
-                    },
+                _append_conflict(
+                    transaction,
+                    record_id="public",
+                    reason="unexpected_replacement",
+                    expected_sha256=None,
+                    observed_sha256=None,
+                    expected_kind="directory",
+                    observed_kind="unknown",
+                    stage_id=None,
                 )
                 raise ArtifactVisibilityError("public artifacts changed during recovery")
             if public_entries:
@@ -3715,15 +3684,13 @@ class ArtifactSession:
         self._require_active()
         declared = _absolute_lexical(repo)
         try:
-            canonical = _declared_directory(declared, label="artifact repo")
-            metadata = declared.lstat()
+            canonical, metadata = _declared_directory_metadata(declared, label="artifact repo")
             held = os.fstat(self._repo_fd)
         except (OSError, ArtifactVisibilityError) as exc:
             raise ArtifactVisibilityError("requested repo does not match active artifact session") from exc
         if (
             declared != self.layout.repo
             or canonical != self.layout.repo
-            or not stat.S_ISDIR(metadata.st_mode)
             or (metadata.st_dev, metadata.st_ino) != (held.st_dev, held.st_ino)
         ):
             raise ArtifactVisibilityError("requested repo does not match active artifact session")
@@ -3741,11 +3708,7 @@ class ArtifactSession:
             raise ArtifactVisibilityError("artifact destination label is unsupported")
         if public_subtree_owner is not None and not (
             any(public_subtree_owner is destination for destination in self._destinations)
-            and public_subtree_owner.label is OutputLabel.PUBLIC_DAYDREAM
-            and public_subtree_owner.requested == self.layout.public_daydream_dir
-            and public_subtree_owner.write_path == self.layout.daydream_dir
-            and public_subtree_owner.frozen_path == self.layout.daydream_dir
-            and public_subtree_owner.delivery is DestinationDelivery.DEFERRED
+            and self._is_public_daydream_owner(public_subtree_owner)
         ):
             raise ArtifactVisibilityError("public trajectory owner identity mismatch")
         if not requested.is_absolute():
@@ -3828,16 +3791,22 @@ class ArtifactSession:
         inside_source = canonical == self.layout.source or self.layout.source in canonical.parents
         return declared, canonical, inside_source
 
+    def _is_public_daydream_owner(self, destination: RoutedDestination) -> bool:
+        """Return whether one route is this session's public ``.daydream`` owner."""
+        return (
+            destination.label is OutputLabel.PUBLIC_DAYDREAM
+            and destination.requested == self.layout.public_daydream_dir
+            and destination.write_path == self.layout.daydream_dir
+            and destination.frozen_path == self.layout.daydream_dir
+            and destination.delivery is DestinationDelivery.DEFERRED
+        )
+
     def _public_daydream_owner(self) -> RoutedDestination | None:
         return next(
             (
                 destination
                 for destination in self._destinations
-                if destination.label is OutputLabel.PUBLIC_DAYDREAM
-                and destination.requested == self.layout.public_daydream_dir
-                and destination.write_path == self.layout.daydream_dir
-                and destination.frozen_path == self.layout.daydream_dir
-                and destination.delivery is DestinationDelivery.DEFERRED
+                if self._is_public_daydream_owner(destination)
             ),
             None,
         )
@@ -3933,6 +3902,7 @@ class ArtifactSession:
         _copy_tree(base, baseline_root, baseline)
         self._destination_records.append(record)
         self._route_record_indexes[id(route)] = index
+        _write_baseline_manifest(self._detach_transaction, index, record)
         _write_destination_records(
             self._detach_transaction,
             self._destination_records,
@@ -3940,7 +3910,7 @@ class ArtifactSession:
         )
         if inside_source and baseline:
             if route.label is OutputLabel.DUMP_DIRECTORY:
-                _remove_manifested_files_keep_directories(
+                _remove_manifested(
                     base,
                     baseline,
                     (relative,),
@@ -3949,6 +3919,8 @@ class ArtifactSession:
                     purpose="detach-dump",
                     stage_parent=base,
                     record_id=record.record_id,
+                    remove_directories=False,
+                    changed_message="explicit artifact destination changed during detach",
                 )
             else:
                 _remove_manifested(
@@ -4324,21 +4296,7 @@ class ArtifactSession:
             ):
                 raise ArtifactVisibilityError("run snapshot document identity is malformed")
             root_seen = root_seen or document.trajectory_id == self.layout.session_id
-            target = self.layout.live_root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                with os.fdopen(fd, "wb", closefd=False) as handle:
-                    handle.write(document.json_bytes)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, target)
-                _fsync_directory(target.parent)
-            finally:
-                os.close(fd)
-                with suppress(OSError):
-                    temporary.unlink()
+            _atomic_bytes(self.layout.live_root / relative, document.json_bytes)
         if not root_seen:
             raise ArtifactVisibilityError("run snapshot is missing its root document")
         entries = _manifest(self.layout.live_root)
@@ -4516,7 +4474,12 @@ class ArtifactSession:
                     )
                 publish_records.append(replace(baseline_record, published=published))
             self._retire_late_paths()
-            _write_destination_records(transaction, publish_records, include_published=True)
+            _write_destination_records(
+                transaction,
+                publish_records,
+                include_published=True,
+                include_baseline=True,
+            )
             _write_transition(
                 journal,
                 transaction_id=transaction_id,
@@ -4805,7 +4768,14 @@ def _open_layout(
         )
         journal = transaction / "journal.json"
         detach_stage = transaction / "detach-stage"
-        _copy_tree(source, detach_stage, public_entries)
+        canonical = state_root / "canonical"
+        canonical_manifest = state_root / "canonical-manifest.json"
+        # Canonical is itself the durable byte-identical copy the DETACH_REMOVING
+        # ordering needs, so stage one only when this workspace has none yet.
+        # Recovery tolerates the absent stage for exactly this reason.
+        canonical_present = canonical.exists()
+        if not canonical_present:
+            _copy_tree(source, detach_stage, public_entries)
         _atomic_json(transaction / "manifest.json", _manifest_payload(public_entries))
         _write_transition(
             journal,
@@ -4813,9 +4783,7 @@ def _open_layout(
             session_id=session_id,
             state="DETACH_STAGED",
         )
-        canonical = state_root / "canonical"
-        canonical_manifest = state_root / "canonical-manifest.json"
-        if canonical.exists():
+        if canonical_present:
             canonical_entries = _parse_manifest(canonical_manifest)
             if public_entries != canonical_entries:
                 raise ArtifactVisibilityError("public artifacts do not match canonical recovery state")
@@ -4855,7 +4823,6 @@ def _open_layout(
             repo_git_dir=identity.repo_git_dir,
             artifact_runtime_root=identity.runtime_root,
             operational_workspaces_root=identity.operational_workspaces_root,
-            operational_state_root=identity.operational_state_root,
             session_id=session_id,
             state_root=state_root,
             live_root=live_root,
