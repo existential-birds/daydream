@@ -270,12 +270,13 @@ def test_run_write_capture_closes_ordinary_json_validation_failure(
     capture = _RunWriteCapture(session_id="session")
     capture.retain(recorder, partial)
 
-    deeply_nested = (
-        b'{"session_id":"session","trajectory_id":"session","value":'
-        + b"[" * 10_000
-        + b"0"
-        + b"]" * 10_000
-        + b"}"
+    # Ordinary parser failure, interpreter-independent: a truncated document
+    # raises json.JSONDecodeError on every supported Python. (Deep nesting is
+    # NOT usable here — CPython 3.14's rewritten JSON scanner no longer
+    # recurses in C, so 10k-deep but well-formed JSON parses cleanly there and
+    # only 3.12/3.13 raise RecursionError.)
+    malformed_document_bytes = (
+        b'{"session_id":"session","trajectory_id":"session","value":[0'
     )
     malformed_final = RunWriteSnapshot(
         status="complete",
@@ -285,7 +286,7 @@ def test_run_write_capture_closes_ordinary_json_validation_failure(
             TrajectoryDocumentSnapshot(
                 trajectory_id="session",
                 path=tmp_path / "missing.json",
-                json_bytes=deeply_nested,
+                json_bytes=malformed_document_bytes,
             ),
         ),
     )
@@ -295,7 +296,7 @@ def test_run_write_capture_closes_ordinary_json_validation_failure(
     assert capture.partial is partial
     assert capture.final is None
     assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
-    assert "RecursionError" in str(capture.validation_error)
+    assert "JSONDecodeError" in str(capture.validation_error)
 
 
 def test_run_write_capture_does_not_swallow_base_exception(
