@@ -32,6 +32,42 @@ def _count_specialist_calls(stub: StubBackend) -> int:
     return sum(1 for c in stub.calls if _SPECIALIST_MARKER in c["prompt"].lower())
 
 
+def _workspace_state_root(artifact_runtime_root: Path) -> Path:
+    """Locate the test's single workspace state root under the private runtime."""
+    matches = [entry for entry in artifact_runtime_root.iterdir() if entry.is_dir()]
+    assert len(matches) == 1, f"expected exactly one workspace state root, got {matches}"
+    return matches[0]
+
+
+def _drift_cached_key_between_runs(
+    artifact_runtime_root: Path, target: Path, *, drop: bool = False, content: str = "",
+) -> None:
+    """Drift the cached exploration key between two runs, consistently.
+
+    Between two runs the published artifacts exist in two synchronized copies:
+    the public tree and the canonical recovery copy under the private state
+    root — the next run seeds its live tree (where the exploration cache is
+    actually read) from the canonical copy, never from the public tree.
+    Artifact sessions fail closed when the public tree does not match the
+    canonical recovery state, so a staleness simulation must apply the same
+    drift to BOTH copies and refresh the canonical manifest. The fail-closed
+    public-vs-canonical validation still runs on the next open; the drift is a
+    consistent (not corrupting) state change that the next run observes as a
+    stale, corrupt, or missing cache key.
+    """
+    from daydream.artifact_visibility import _atomic_json, _manifest, _manifest_payload
+
+    state_root = _workspace_state_root(artifact_runtime_root)
+    canonical = state_root / "canonical"
+    for base in (target / ".daydream", canonical / ".daydream"):
+        key = base / "exploration" / "cache-key"
+        if drop:
+            key.unlink()
+        else:
+            key.write_text(content)
+    _atomic_json(state_root / "canonical-manifest.json", _manifest_payload(_manifest(canonical)))
+
+
 async def _run_deep(target: Path) -> int:
     from daydream.runner import RunConfig, run
 
@@ -122,6 +158,7 @@ async def test_uncommitted_edit_reuses_an_exact_cache_key(
 
 async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     multi_stack_target: Path,
+    artifact_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unignored Daydream output alone does not make a rebuilt cache ineligible."""
@@ -132,12 +169,14 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)) == 0
     assert _count_specialist_calls(stub1) > 0
 
-    exploration = multi_stack_target / ".daydream" / "exploration"
-    (exploration / "cache-key").write_text("stale")
+    _drift_cached_key_between_runs(
+        artifact_runtime_root, multi_stack_target, content="stale"
+    )
 
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)) == 0
     assert _count_specialist_calls(stub2) > 0
+    exploration = multi_stack_target / ".daydream" / "exploration"
     assert (exploration / "cache-key").read_text().strip() != "stale"
 
 
@@ -168,6 +207,7 @@ async def test_depth_change_invalidates_cache(
 
 async def test_corrupt_key_file_is_a_miss_not_a_crash(
     multi_stack_target: Path,
+    artifact_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A truncated/garbage key file re-runs the pre-scan instead of failing."""
@@ -175,25 +215,28 @@ async def test_corrupt_key_file_is_a_miss_not_a_crash(
     _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
 
-    exploration = multi_stack_target / ".daydream" / "exploration"
-    (exploration / "cache-key").write_text("not-a-real-key")
+    _drift_cached_key_between_runs(
+        artifact_runtime_root, multi_stack_target, content="not-a-real-key"
+    )
 
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) > 0
+    exploration = multi_stack_target / ".daydream" / "exploration"
     assert "RUN2 SENTINEL" in (exploration / "dependencies.md").read_text()
 
 
 async def test_missing_key_file_is_a_miss(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    artifact_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-upgrade exploration dir (no key file) is treated as stale."""
     silence(monkeypatch)
     _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
 
-    exploration = multi_stack_target / ".daydream" / "exploration"
-    (exploration / "cache-key").unlink()
+    _drift_cached_key_between_runs(artifact_runtime_root, multi_stack_target, drop=True)
 
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -1331,3 +1332,347 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
         for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
     ]
     assert diagnostics[0]["metadata"]["warnings"]["reasons"] == {"tool_not_string": 1}
+
+
+class _JoinedArtifactEvidenceBackend(StubBackend):
+    """Exercise sanctioned artifact reads at the external backend boundary."""
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self.private_intent_paths: list[Path] = []
+        self.private_intent_payloads: list[bytes] = []
+        self.python_sanctioned_entries: list[tuple[tuple[str, Path], ...]] = []
+        self.python_prompts: list[str] = []
+        self.python_entry_visibility: list[tuple[bool, bool]] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        del persist_session  # StubBackend has no resumable external session.
+        lowered = prompt.lower()
+        python_request = "you are reviewing the python stack" in lowered
+        generic_request = "you are reviewing the generic-fallback stack" in lowered
+        artifact_reference: str | None = None
+
+        if python_request:
+            header = "Sanctioned phase inputs (read only these exact files):"
+            prompt_lines = prompt.splitlines()
+            assert prompt_lines.count(header) == 1
+            start = prompt_lines.index(header) + 1
+            rendered_entries: list[tuple[str, Path]] = []
+            for line in prompt_lines[start:]:
+                assert line.startswith("- ")
+                label, raw_path = line.removeprefix("- ").split(": ", 1)
+                rendered_entries.append((label, Path(raw_path)))
+
+            intent_entries = [
+                path for label, path in rendered_entries if label == "intent"
+            ]
+            assert len(intent_entries) == 1
+            intent_path = intent_entries[0]
+            assert str(intent_path).endswith("/deep/intent.md")
+            assert intent_path.is_absolute()
+            assert intent_path.is_file()
+            assert not intent_path.is_symlink()
+            assert not intent_path.resolve().is_relative_to(cwd.resolve())
+
+            cwd_visibility = (
+                (cwd / ".daydream").exists(),
+                (cwd / ".review-output.md").exists(),
+            )
+            assert cwd_visibility == (False, False)
+            self.python_entry_visibility.append(cwd_visibility)
+            self.python_prompts.append(prompt)
+            self.python_sanctioned_entries.append(tuple(rendered_entries))
+            self.private_intent_paths.append(intent_path)
+            self.private_intent_payloads.append(intent_path.read_bytes())
+            artifact_reference = str(intent_path)
+        elif generic_request:
+            artifact_reference = ".daydream/deep/intent.md"
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            if isinstance(event, ResultEvent) and artifact_reference is not None:
+                call_id = (
+                    "joined-private-intent"
+                    if python_request
+                    else "joined-relative-intent"
+                )
+                yield ToolStartEvent(
+                    id=call_id,
+                    name="Read",
+                    input={"file_path": artifact_reference},
+                )
+                yield ToolResultEvent(
+                    id=call_id,
+                    output="artifact evidence",
+                    is_error=False,
+                )
+
+                payload = event.structured_output
+                assert isinstance(payload, dict)
+                issues = payload.get("issues")
+                assert isinstance(issues, list)
+                assert len(issues) == 1
+                assert isinstance(issues[0], dict)
+                issue = {
+                    **issues[0],
+                    "rationale": f"Evidence: {artifact_reference}",
+                }
+                yield replace(
+                    event,
+                    structured_output={**payload, "issues": [issue]},
+                )
+                continue
+            yield event
+
+
+async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_source(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    artifact_runtime_root: Path,
+) -> None:
+    """Real deep run keeps source credit while rejecting artifact evidence."""
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
+    backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
+    backend.per_stack_emit_reads = True
+    backend.parse_by_stack = {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "api.py",
+            "line": 1,
+            "description": "Python private-artifact rationale control",
+        },
+        "react": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "line": 1,
+            "description": "React source-only rationale control",
+        },
+        "generic": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "README.md",
+            "line": 1,
+            "description": "Generic relative-artifact rationale control",
+        },
+    }
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: backend,
+    )
+
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            output_mode="review",
+            assume="no",
+            non_interactive=True,
+            cleanup=False,
+            archive=True,
+            run_eval=True,
+            shallow_fanout_threshold=0,
+        )
+    )
+    assert exit_code == 0
+
+    assert len(backend.private_intent_paths) == 1
+    private_intent = backend.private_intent_paths[0]
+    assert backend.private_intent_payloads == [private_intent.read_bytes()]
+    assert backend.private_intent_payloads[0]
+    assert backend.python_entry_visibility == [(False, False)]
+    assert len(backend.python_prompts) == 1
+    assert len(backend.python_sanctioned_entries) == 1
+
+    sanctioned_entries = backend.python_sanctioned_entries[0]
+    assert len({label for label, _path in sanctioned_entries}) == len(
+        sanctioned_entries
+    )
+    assert all(path.is_absolute() and path.is_file() for _label, path in sanctioned_entries)
+    sanctioned_paths = {path for _label, path in sanctioned_entries}
+    assert private_intent in sanctioned_paths
+    private_relative = private_intent.relative_to(artifact_runtime_root)
+    assert private_relative.parts[1] == "runs"
+    assert private_relative.parts[3:] == (
+        "live",
+        ".daydream",
+        "deep",
+        "intent.md",
+    )
+    assert not private_intent.resolve().is_relative_to(multi_stack_target.resolve())
+    live_dir = private_intent.parents[2]
+    parent_artifact_dir = private_intent.parents[1]
+    assert artifact_runtime_root not in sanctioned_paths
+    assert live_dir not in sanctioned_paths
+    assert parent_artifact_dir not in sanctioned_paths
+    assert private_intent.parent not in sanctioned_paths
+
+    run_dir = _only_archived_run(archive_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    evaluation = json.loads(
+        (run_dir / "evaluation.json").read_text(encoding="utf-8")
+    )
+    assert manifest["session_id"] == private_relative.parts[2]
+    assert evaluation["daydream_dir"] == str(multi_stack_target / ".daydream")
+
+    python_trajectory = json.loads(
+        _deep_python_trajectory(run_dir).read_text(encoding="utf-8")
+    )
+    python_completed_ids = {
+        result["source_call_id"]
+        for step in python_trajectory["steps"]
+        for result in (step.get("observation") or {}).get("results", [])
+        if result.get("extra", {}).get("is_error") is False
+    }
+    python_reads = {
+        call["arguments"].get("file_path") or call["arguments"].get("path")
+        for step in python_trajectory["steps"]
+        for call in step.get("tool_calls") or []
+        if call["tool_call_id"] in python_completed_ids
+        and call["function_name"].casefold() == "read"
+    }
+    assert "api.py" in python_reads
+    assert str(private_intent) in python_reads
+
+    generic_candidates = sorted(
+        (run_dir / "trajectories").glob("deep-generic*.json")
+    )
+    assert len(generic_candidates) == 1
+    assert re.fullmatch(
+        r"deep-generic(?:--[0-9a-f]{64})?\.json",
+        generic_candidates[0].name,
+    )
+    generic_trajectory = json.loads(
+        generic_candidates[0].read_text(encoding="utf-8")
+    )
+    generic_completed_ids = {
+        result["source_call_id"]
+        for step in generic_trajectory["steps"]
+        for result in (step.get("observation") or {}).get("results", [])
+        if result.get("extra", {}).get("is_error") is False
+    }
+    generic_reads = {
+        call["arguments"].get("file_path") or call["arguments"].get("path")
+        for step in generic_trajectory["steps"]
+        for call in step.get("tool_calls") or []
+        if call["tool_call_id"] in generic_completed_ids
+        and call["function_name"].casefold() == "read"
+    }
+    assert "README.md" in generic_reads
+    assert ".daydream/deep/intent.md" in generic_reads
+
+    controlled_records: list[dict[str, Any]] = []
+    expected_records = {
+        "python": (
+            "api.py",
+            "Python private-artifact rationale control",
+            str(private_intent),
+        ),
+        "react": (
+            "App.tsx",
+            "React source-only rationale control",
+            "stub",
+        ),
+        "generic": (
+            "README.md",
+            "Generic relative-artifact rationale control",
+            ".daydream/deep/intent.md",
+        ),
+    }
+    for stack, (file, description, rationale) in expected_records.items():
+        records_payload = json.loads(
+            (run_dir / "deep" / f"stack-{stack}-records.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        records = (
+            records_payload["issues"]
+            if isinstance(records_payload, dict)
+            else records_payload
+        )
+        matches = [
+            record
+            for record in records
+            if record.get("file") == file
+            and record.get("description") == description
+        ]
+        assert len(matches) == 1
+        assert matches[0]["line"] == 1
+        assert matches[0]["evidence"] == f"{file}:1"
+        assert rationale in matches[0]["rationale"]
+        controlled_records.append(matches[0])
+    assert len({record["description"] for record in controlled_records}) == 3
+
+    coverage = evaluation["coverage"]
+    assert coverage["coverage_ratio"] == 1.0
+    assert coverage["files_read_by_reviewers"] == coverage["files_in_diff"]
+    assert coverage["artifact_reads_rejected"] == 2
+
+    grounding = evaluation["grounding"]
+    assert grounding["artifact_evidence_rejections"] == 2
+    python_rows = [
+        row
+        for row in grounding["ungrounded"]
+        if row["stack"] == "python" and row["file"] == "api.py"
+    ]
+    generic_rows = [
+        row
+        for row in grounding["ungrounded"]
+        if row["stack"] == "generic" and row["file"] == "README.md"
+    ]
+    react_rows = [
+        row
+        for row in grounding["grounded"]
+        if row["stack"] == "react" and row["file"] == "App.tsx"
+    ]
+    assert len(python_rows) == len(generic_rows) == len(react_rows) == 1
+    python_row = python_rows[0]
+    generic_row = generic_rows[0]
+    react_row = react_rows[0]
+
+    assert python_row["file_was_read"] is True
+    assert python_row["line_grounded"] is True
+    assert python_row["artifact_file_ref"] is None
+    assert python_row["artifact_rationale_refs"] == [str(private_intent)]
+    assert python_row["unread_rationale_refs"] == []
+    assert python_row["grounded"] is False
+
+    assert generic_row["file_was_read"] is True
+    assert generic_row["line_grounded"] is True
+    assert generic_row["artifact_file_ref"] is None
+    assert generic_row["artifact_rationale_refs"] == [
+        ".daydream/deep/intent.md"
+    ]
+    assert generic_row["unread_rationale_refs"] == []
+    assert generic_row["grounded"] is False
+
+    assert react_row["file_was_read"] is True
+    assert react_row["line_grounded"] is True
+    assert react_row["artifact_rationale_refs"] == []
+    assert react_row["unread_rationale_refs"] == []
+    assert react_row["grounded"] is True
+
+    assert manifest["metrics"]["grounding_rate"] is not None
+    assert (
+        manifest["metrics"]["grounding_rate"]
+        == evaluation["grounding"]["grounding_rate"]
+    )

@@ -30,6 +30,48 @@ from tests.harness.claude_sdk import (
 )
 
 
+@pytest.mark.asyncio
+async def test_artifact_visibility_protocol_sdk_query_observes_exact_options_and_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    target = (tmp_path / "model cwd with spaces").resolve()
+    target.mkdir()
+    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
+    observed: dict[str, Any] = {}
+    base_client = scripted_client([
+        MockAssistantMessage(content=[MockTextBlock(text="CURRENT_REASONING_CANARY")]),
+        MockResultMessage(total_cost_usd=None),
+    ])
+
+    class ObservingClient(base_client):  # type: ignore[misc,valid-type]
+        async def query(self, prompt: str) -> None:
+            await super().query(prompt)
+            cwd = Path(self.options.cwd)
+            observed.update(
+                cwd=str(cwd), prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
+                source_seen="SOURCE_CANARY" in (cwd / "source.py").read_text(encoding="utf-8"),
+                permission_mode=self.options.permission_mode,
+                tools=self.options.allowed_tools,
+            )
+
+    patch_claude_sdk(monkeypatch, ObservingClient)
+    backend = ClaudeBackend(model="fixture-model")
+    prompt = "Inspect the committed source only."
+
+    events = [event async for event in backend.execute(target, prompt)]
+
+    assert observed["cwd"] == str(target)
+    assert observed["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert observed["source_seen"] is True
+    assert observed["permission_mode"] == "bypassPermissions"
+    assert observed["tools"] == ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
+    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
+    assert backend._active_clients == set()
+
+
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Return a function that patches the SDK imports in claude.py."""

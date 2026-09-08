@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -237,8 +238,28 @@ def _build(
     **kw: Any,
 ) -> Manifest:
     """Build a manifest from the mock recorder/config pair."""
+    active_recorder = cast(TrajectoryRecorder, recorder or _MockRecorder())
+    write_snapshot = kw.pop("write_snapshot", None)
+    if write_snapshot is not None:
+        from daydream.archive.manifest import (
+            archive_recorder_provenance_from_snapshot,
+            build_manifest_from_snapshot,
+        )
+
+        return build_manifest_from_snapshot(
+            recorder_provenance=archive_recorder_provenance_from_snapshot(
+                write_snapshot=write_snapshot,
+                run_flow=active_recorder.run_flow,
+            ),
+            write_snapshot=write_snapshot,
+            config=cast(RunConfig, _MockConfig() if config is None else config),
+            git_ctx=git_ctx if git_ctx is not None else GitContext(),
+            status="complete",
+            archive_path=tmp_path,
+            **kw,
+        )
     return build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder or _MockRecorder()),
+        recorder=active_recorder,
         config=cast(RunConfig, _MockConfig() if config is None else config),
         git_ctx=git_ctx if git_ctx is not None else GitContext(),
         status="complete",
@@ -4649,3 +4670,428 @@ def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert not (run_dir / "evaluation.json").exists()
     assert manifest["metrics"]["total_findings"] is None
+
+
+def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(
+    tmp_path: Path,
+) -> None:
+    """The production manifest identity comes only from validated root bytes."""
+    from daydream.archive.manifest import (
+        archive_recorder_provenance_from_snapshot,
+        build_manifest_from_snapshot,
+    )
+
+    recorder = _MockRecorder(pr_number=7, pr_repo="Owner/Repo")
+    snapshot = _write_snapshot(recorder)
+    payload = json.loads(snapshot.documents[0].json_bytes)
+    payload["extra"] = {"pr_number": 7, "pr_repo": "Owner/Repo"}
+    document = TrajectoryDocumentSnapshot(
+        trajectory_id=recorder.session_id,
+        path=snapshot.documents[0].path,
+        json_bytes=json.dumps(payload).encode(),
+    )
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at=snapshot.cutoff_at,
+        root_trajectory_id=recorder.session_id,
+        documents=(document,),
+    )
+    provenance = archive_recorder_provenance_from_snapshot(
+        write_snapshot=snapshot,
+        run_flow=DaydreamRunFlow.NORMAL,
+    )
+    recorder.pr_number = 99
+    recorder.pr_repo = "mutated/repo"
+    config = _MockConfig()
+    config.pr_number = 100  # type: ignore[attr-defined]
+    config.pr_repo = "also/mutated"  # type: ignore[attr-defined]
+
+    manifest = build_manifest_from_snapshot(
+        recorder_provenance=provenance,
+        write_snapshot=snapshot,
+        config=cast(Any, config),
+        git_ctx=GitContext(),
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    assert manifest.session_id == snapshot.root_trajectory_id
+    assert manifest.pr_number == 7
+    assert manifest.pr_repo == "Owner/Repo"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ({"pr_number": True}, "pr_number"),
+        ({"pr_number": 7, "pr_repo": None}, "pr_repo"),
+        ({"pr_number": 7, "pr_repo": ""}, "pr_repo"),
+    ],
+)
+def test_snapshot_manifest_provenance_rejects_malformed_present_pr_metadata(
+    tmp_path: Path,
+    extra: dict[str, Any],
+    message: str,
+) -> None:
+    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+
+    payload = {
+        "session_id": "session",
+        "trajectory_id": "session",
+        "steps": [],
+        "final_metrics": {},
+        "extra": extra,
+    }
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id="session",
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id="session",
+                path=tmp_path / "trajectory.json",
+                json_bytes=json.dumps(payload).encode(),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        archive_recorder_provenance_from_snapshot(
+            write_snapshot=snapshot,
+            run_flow=DaydreamRunFlow.NORMAL,
+        )
+
+
+@pytest.mark.parametrize("session_id", [".", "..", "../escape", "bad\\path", "bad\0id"])
+def test_snapshot_manifest_provenance_rejects_unsafe_session_identity(
+    tmp_path: Path,
+    session_id: str,
+) -> None:
+    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "steps": [],
+            "final_metrics": {},
+            "extra": {},
+        }
+    ).encode()
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(TrajectoryDocumentSnapshot(session_id, tmp_path / "root.json", encoded),),
+    )
+
+    with pytest.raises(ValueError, match="session_id"):
+        archive_recorder_provenance_from_snapshot(
+            write_snapshot=snapshot,
+            run_flow=DaydreamRunFlow.NORMAL,
+        )
+
+
+def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host finalizer cannot infer success from the legacy fail-open wrapper."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import ArchiveRecorderProvenance
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = "strict-session"
+    frozen = tmp_path / "frozen"
+    run_dir = frozen / ".daydream" / "runs" / session_id
+    run_dir.mkdir(parents=True)
+    payload = {
+        "session_id": session_id,
+        "trajectory_id": session_id,
+        "steps": [],
+        "final_metrics": {},
+        "extra": {},
+    }
+    encoded = json.dumps(payload).encode()
+    (run_dir / "trajectory.json").write_bytes(encoded)
+    write_snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id=session_id,
+                path=run_dir / "trajectory.json",
+                json_bytes=encoded,
+            ),
+        ),
+    )
+    artifacts = ArtifactTreeSnapshot(
+        session_id=session_id,
+        workspace_key="workspace",
+        root=frozen,
+        manifest=_manifest(frozen),
+        destinations=(),
+    )
+    artifact_provenance = ArtifactEvidenceProvenance(
+        workspace_key="workspace",
+        session_id=session_id,
+        public_source=tmp_path / "source",
+        live_components=tuple((tmp_path / "live").parts),
+    )
+    monkeypatch.setattr(
+        "daydream.eval.analyzer.analyze_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("eval failed")),
+    )
+
+    with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+        finalize_archive_run(
+            recorder_provenance=ArchiveRecorderProvenance(
+                session_id=session_id,
+                run_flow=DaydreamRunFlow.NORMAL,
+                pr_number=None,
+                pr_repo=None,
+            ),
+            artifacts=artifacts,
+            artifact_provenance=artifact_provenance,
+            config=cast(Any, _MockConfig(run_eval=True)),
+            write_snapshot=write_snapshot,
+            work=None,
+            upload=False,
+        )
+    assert not (get_archive_dir() / "runs" / session_id).exists()
+
+
+@pytest.mark.parametrize("mutate", [False, True])
+def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate: bool,
+) -> None:
+    """A code-running consumer cannot make archive bytes and manifest disagree."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import ArchiveRecorderProvenance
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = "strict-mutated-evidence"
+    frozen = tmp_path / "frozen"
+    source_run = frozen / ".daydream" / "runs" / session_id
+    source_run.mkdir(parents=True)
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "steps": [],
+            "final_metrics": {},
+            "extra": {},
+        }
+    ).encode()
+    (source_run / "trajectory.json").write_bytes(encoded)
+    receipt = frozen / ".daydream" / "deep" / "test-verdict.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps({"session_id": session_id, "passed": True}),
+        encoding="utf-8",
+    )
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                session_id,
+                source_run / "trajectory.json",
+                encoded,
+            ),
+        ),
+    )
+    artifacts = ArtifactTreeSnapshot(
+        session_id,
+        "workspace",
+        frozen,
+        _manifest(frozen),
+        (),
+    )
+    public_source = tmp_path / "source"
+    public_source.mkdir()
+
+    def mutate_frozen_receipt(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if mutate:
+            receipt.write_text(
+                json.dumps({"session_id": session_id, "passed": False}),
+                encoding="utf-8",
+            )
+        return {"quality": {"scoped_files": 0}}
+
+    monkeypatch.setattr(
+        "daydream.eval.analyzer.analyze_session",
+        mutate_frozen_receipt,
+    )
+
+    arguments: dict[str, Any] = dict(
+        recorder_provenance=ArchiveRecorderProvenance(
+            session_id,
+            DaydreamRunFlow.NORMAL,
+            None,
+            None,
+        ),
+        artifacts=artifacts,
+        artifact_provenance=ArtifactEvidenceProvenance(
+            "workspace",
+            session_id,
+            public_source,
+            tuple((tmp_path / "live").parts),
+        ),
+        config=cast(Any, _MockConfig(run_eval=True)),
+        write_snapshot=snapshot,
+        work=None,
+        upload=False,
+    )
+    if mutate:
+        with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
+            finalize_archive_run(**arguments)
+    else:
+        finalize_archive_run(
+            **arguments,
+        )
+
+    archive_dir = get_archive_dir()
+    rows = query_runs(archive_dir, "session_id = ?", (session_id,))
+    if mutate:
+        assert not (archive_dir / "runs" / session_id).exists()
+        assert rows == []
+    else:
+        assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
+        assert len(rows) == 1
+
+
+def test_strict_archive_upload_refusal_removes_incomplete_local_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The external uploader's False disposition is a closed host failure."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import ArchiveRecorderProvenance
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = "strict-upload"
+    frozen = tmp_path / "frozen"
+    source_run = frozen / ".daydream" / "runs" / session_id
+    source_run.mkdir(parents=True)
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "steps": [],
+            "final_metrics": {},
+            "extra": {},
+        }
+    ).encode()
+    (source_run / "trajectory.json").write_bytes(encoded)
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    )
+    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", lambda _config: "private/repo")
+    monkeypatch.setattr(
+        "daydream.archive.hub.upload_run_bundle",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with pytest.raises(ArchiveFinalizationError, match="upload"):
+        finalize_archive_run(
+            recorder_provenance=ArchiveRecorderProvenance(
+                session_id, DaydreamRunFlow.NORMAL, None, None
+            ),
+            artifacts=ArtifactTreeSnapshot(
+                session_id, "workspace", frozen, _manifest(frozen), ()
+            ),
+            artifact_provenance=ArtifactEvidenceProvenance(
+                "workspace", session_id, tmp_path / "source", tuple((tmp_path / "live").parts)
+            ),
+            config=cast(Any, _MockConfig(run_eval=False, archive=True)),
+            write_snapshot=snapshot,
+            work=None,
+            upload=True,
+        )
+
+    assert not (get_archive_dir() / "runs" / session_id).exists()
+
+
+def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused secret scan publishes neither an archive nor dump bytes."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import ArchiveRecorderProvenance
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = "strict-dump"
+    frozen = tmp_path / "frozen"
+    source_run = frozen / ".daydream" / "runs" / session_id
+    source_run.mkdir(parents=True)
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "steps": [],
+            "final_metrics": {},
+            "extra": {},
+        }
+    ).encode()
+    (source_run / "trajectory.json").write_bytes(encoded)
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    )
+    dump_stage = tmp_path / "late"
+    dump_stage.mkdir()
+    monkeypatch.setattr(
+        "daydream.archive.scan.scan_run_dir",
+        lambda _path: SimpleNamespace(clean=False),
+    )
+
+    with pytest.raises(ArchiveFinalizationError, match="secret scan"):
+        finalize_archive_run(
+            recorder_provenance=ArchiveRecorderProvenance(
+                session_id, DaydreamRunFlow.NORMAL, None, None
+            ),
+            artifacts=ArtifactTreeSnapshot(
+                session_id, "workspace", frozen, _manifest(frozen), ()
+            ),
+            artifact_provenance=ArtifactEvidenceProvenance(
+                "workspace", session_id, tmp_path / "source", tuple((tmp_path / "live").parts)
+            ),
+            config=cast(
+                Any,
+                _MockConfig(run_eval=False, archive=True, dump_artifacts="requested"),
+            ),
+            write_snapshot=snapshot,
+            work=None,
+            upload=False,
+            dump_path=dump_stage,
+        )
+
+    assert list(dump_stage.iterdir()) == []
+    assert not (get_archive_dir() / "runs" / session_id).exists()

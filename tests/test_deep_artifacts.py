@@ -6,6 +6,18 @@ from pathlib import Path
 import pytest
 
 
+def test_deep_dir_uses_active_artifact_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import artifacts
+
+    routed = tmp_path / "private" / ".daydream"
+    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target: routed)
+
+    assert artifacts.deep_dir(tmp_path / "model-cwd") == routed / "deep"
+    assert (routed / "deep").is_dir()
+
+
 def test_per_stack_path_scheme(tmp_path: Path) -> None:
     """D-18: per-stack output path is deterministic + unique."""
     from daydream.deep.artifacts import per_stack_review_path

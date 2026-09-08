@@ -14,6 +14,35 @@ def test_default_is_deep() -> None:
     assert config.shallow is False
 
 
+def test_trajectory_help_states_public_default_and_live_external(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--help-all names the public post-finalization default and live external updates.
+
+    Semantics only: stable option names and source/public-path wording, never
+    frozen argparse wrapping.
+    """
+    with pytest.raises(SystemExit):
+        _parse_args(["--help-all"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--trajectory" in out
+    assert "<target>/.daydream/runs/<session_id>/trajectory.json" in out
+    assert "after finalization" in out
+    assert "explicit external paths receive live updates" in out
+
+
+def test_dump_artifacts_help_states_merge_semantics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--help-all describes --dump-artifacts as a preserving per-file merge."""
+    with pytest.raises(SystemExit):
+        _parse_args(["--help-all"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--dump-artifacts" in out
+    assert "Merge the finalized run bundle" in out
+    assert "Preserves unrelated destination files" in out
+
+
 @pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
 def test_deep_resume_stages_accepted(stage: str) -> None:
     """ttt/per-stack/merge are valid resume stages in the (default) deep mode."""

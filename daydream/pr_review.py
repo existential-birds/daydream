@@ -1315,10 +1315,10 @@ def _resolve_trajectory_paths(
     for them.
 
     Discovery rule: parent path is taken from ``recorder.path``; siblings
-    are every ``*.json`` under
-    ``<target_dir>/.daydream/runs/<session_id>/trajectories/`` (every fork
-    in the run dir belongs to this run by construction — no prefix
-    filtering required).
+    are every ``*.json`` under the recorder's private ``artifact_run_dir``
+    when present. Standalone legacy recorders fall back to
+    ``<target_dir>/.daydream/runs/<session_id>``. Every fork in that run dir
+    belongs to this run by construction, so no prefix filtering is required.
 
     The returned ``TemporaryDirectory`` (when not ``None``) MUST be kept
     alive by the caller until the renderer finishes; closing it deletes
@@ -1340,13 +1340,10 @@ def _resolve_trajectory_paths(
             )
             paths.append(snapshot)
         # Discover sibling fork trajectories on disk (deep mode).
-        sibling_dir = (
-            recorder.target_dir
-            / ".daydream"
-            / "runs"
-            / recorder.session_id
-            / "trajectories"
+        run_dir = recorder.artifact_run_dir or (
+            recorder.target_dir / ".daydream" / "runs" / recorder.session_id
         )
+        sibling_dir = run_dir / "trajectories"
         if sibling_dir.is_dir():
             for sibling in sorted(sibling_dir.glob("*.json")):
                 if sibling.is_file():

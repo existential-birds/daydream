@@ -43,7 +43,7 @@ output, _, aborted = await run_agent(
     ctx.backend_for("review"), ctx.work.repo, "inspect sample", phase=DaydreamPhase.REVIEW,
     {controls}
 )
-(ctx.work.repo / ".daydream/trace-failure-result.json").write_text(
+(ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(
     json.dumps({{"output": output, "aborted": aborted}})
 )
 return Stop(1) if aborted else None
@@ -175,7 +175,7 @@ async def child(label):
 async with anyio.create_task_group() as group:
     group.start_soon(child, "left")
     group.start_soon(child, "right")
-(ctx.work.repo / ".daydream/trace-failure-result.json").write_text(json.dumps(outputs))
+(ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(json.dumps(outputs))
 """,
     )
     backend = _FanoutBackend()

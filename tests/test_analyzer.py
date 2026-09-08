@@ -449,6 +449,531 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
     return {"_source_file": source_file, "steps": steps}
 
 
+def _artifact_provenance(
+    *,
+    public_source: Path,
+    private_base: Path,
+    workspace_key: str = "workspace-key",
+    session_id: str = "session-id",
+) -> Any:
+    """Construct exact current-owner provenance without assuming a default root."""
+    from daydream.artifact_visibility import ArtifactEvidenceProvenance
+
+    live = private_base / workspace_key / "runs" / session_id / "live"
+    return ArtifactEvidenceProvenance(
+        workspace_key=workspace_key,
+        session_id=session_id,
+        public_source=public_source,
+        live_components=tuple(live.parts),
+    )
+
+
+def _backend_read_trajectory(backend: str, paths: list[str]) -> dict[str, Any]:
+    """One deep-python trajectory using a real supported backend read shape."""
+    if backend == "claude":
+        calls = [
+            {"function_name": "Read", "arguments": {"file_path": path}}
+            for path in paths
+        ]
+    elif backend == "osprey":
+        calls = [
+            {"function_name": "read", "arguments": {"path": path}}
+            for path in paths
+        ]
+    else:
+        calls = [
+            {
+                "function_name": "shell" if backend == "codex" else "bash",
+                "arguments": {"command": "cat " + " ".join(paths)},
+            }
+        ]
+    return {
+        "_source_file": "deep-python.json",
+        "steps": [{"step_id": "s0", "tool_calls": calls}],
+    }
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "pi", "osprey"])
+def test_artifact_evidence_never_earns_backend_coverage_or_grounding(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    """Every supported read shape credits source while excluding run artifacts."""
+    public_source = tmp_path / "source"
+    daydream_dir = public_source / ".daydream"
+    daydream_dir.mkdir(parents=True)
+    (daydream_dir / "diff.patch").write_text(
+        "diff --git a/src/api.py b/src/api.py\n",
+        encoding="utf-8",
+    )
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=tmp_path / "private",
+    )
+    private_live = Path(*provenance.live_components)
+    paths = [
+        str(public_source / "src/api.py"),
+        ".daydream/deep/stack-python-review.md",
+        ".review-output.md",
+        str(public_source / ".daydream/deep/src/api.py"),
+        str(private_live / ".daydream/deep/src/api.py"),
+    ]
+    trajectories = {
+        "main": None,
+        "forked": [_backend_read_trajectory(backend, paths)],
+    }
+
+    coverage = analyze_coverage(
+        trajectories,
+        daydream_dir,
+        artifact_provenance=provenance,
+    )
+    grounding = analyze_grounding(
+        trajectories,
+        [
+            {
+                "id": "py-1",
+                "_stack": "python",
+                "file": "src/api.py",
+                "rationale": "The implementation in src/api.py lacks a guard.",
+                "confidence": "HIGH",
+            }
+        ],
+        daydream_dir,
+        artifact_provenance=provenance,
+    )
+
+    assert coverage["coverage_ratio"] == 1.0
+    assert coverage["artifact_reads_rejected"] == 4
+    assert grounding["grounded_count"] == 1
+    assert grounding["artifact_evidence_rejections"] == 0
+
+
+def test_artifact_evidence_in_primary_and_redacted_rationale_is_rejected() -> None:
+    """Exact raw/redacted owner paths stay visible but cannot earn grounding."""
+    from daydream.trajectory import redact_text
+
+    public_source = Path("/Users/alice/project")
+    daydream_dir = public_source / ".daydream"
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=Path("/Users/alice/private"),
+    )
+    private_live = Path(*provenance.live_components)
+    artifact_primary = str(private_live / ".daydream/deep/src/api.py")
+    artifact_rationale = redact_text(
+        str(private_live / ".daydream/deep/stack-python-review.md")
+    )
+    trajectories = {
+        "main": None,
+        "forked": [
+            _read_traj(
+                "deep-python.json",
+                str(public_source / "src/api.py"),
+                artifact_primary,
+                artifact_rationale,
+            )
+        ],
+    }
+    findings = [
+        {
+            "id": "py-primary",
+            "_stack": "python",
+            "file": artifact_primary,
+            "rationale": "Artifact-backed claim",
+            "confidence": "HIGH",
+        },
+        {
+            "id": "py-rationale",
+            "_stack": "python",
+            "file": "src/api.py",
+            "rationale": f"Source claim derived from {artifact_rationale}",
+            "confidence": "HIGH",
+        },
+    ]
+
+    result = analyze_grounding(
+        trajectories,
+        findings,
+        daydream_dir,
+        artifact_provenance=provenance,
+    )
+
+    assert result["grounded_count"] == 0
+    assert result["artifact_evidence_rejections"] == 2
+    entries = {entry["id"]: entry for entry in result["ungrounded"]}
+    assert entries["py-primary"]["file_was_read"] is False
+    assert entries["py-primary"]["artifact_file_ref"] == redact_text(artifact_primary)
+    assert entries["py-rationale"]["file_was_read"] is True
+    assert entries["py-rationale"]["file"] == "src/api.py"
+    assert entries["py-rationale"]["artifact_rationale_refs"] == [artifact_rationale]
+    assert entries["py-rationale"]["unread_rationale_refs"] == []
+
+
+def test_external_exploration_counts_only_current_owner_and_safe_relative_paths(
+    tmp_path: Path,
+) -> None:
+    """Exploration utilization shares the exact owner-bound path classifier."""
+    from daydream.eval.analyzer import analyze_exploration_utilization
+
+    public_source = tmp_path / "source"
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=tmp_path / "private",
+    )
+    private_live = Path(*provenance.live_components)
+    # A sibling workspace key lives beside the current key (live layout:
+    # <base>/<workspace-key>/runs/<session>/live), never inside it.
+    other_live = private_live.parents[3] / "other-key/runs/other-session/live"
+    trajectories = {
+        "main": None,
+        "forked": [
+            _read_traj(
+                "deep-python.json",
+                str(private_live / ".daydream/exploration/summary.md"),
+                ".daydream/exploration/affected_files.md",
+                str(other_live / ".daydream/exploration/summary.md"),
+                "src/exploration/parser.py",
+                "../.daydream/exploration/escape.md",
+            )
+        ],
+    }
+
+    result = analyze_exploration_utilization(
+        trajectories,
+        daydream_dir=public_source / ".daydream",
+        artifact_provenance=provenance,
+    )
+
+    assert result["by_agent"][0]["total_reads"] == 5
+    assert result["by_agent"][0]["exploration_reads"] == 2
+    assert result["by_agent"][0]["utilized"] is True
+
+
+def test_artifact_evidence_lexical_negatives_remain_repository_reads(
+    tmp_path: Path,
+) -> None:
+    """Names resembling private storage do not trigger broad substring rejection."""
+    public_source = tmp_path / "source"
+    daydream_dir = public_source / ".daydream"
+    daydream_dir.mkdir(parents=True)
+    diff_files = [
+        ".daydream.toml",
+        ".daydream_helper.py",
+        "runtime/src/api.py",
+        "exploration/src/parser.py",
+        "src/api.py",
+    ]
+    (daydream_dir / "diff.patch").write_text(
+        "".join(f"diff --git a/{path} b/{path}\n" for path in diff_files),
+        encoding="utf-8",
+    )
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=tmp_path / "private",
+    )
+    private_live = Path(*provenance.live_components)
+    private_base = private_live.parents[3]
+    other_workspace = (
+        private_base
+        / "other-workspace/runs/session-id/live/.daydream/deep/src/api.py"
+    )
+    other_session = (
+        private_base
+        / "workspace-key/runs/other-session/live/.daydream/deep/src/api.py"
+    )
+    trajectories = {
+        "main": None,
+        "forked": [
+            _read_traj(
+                "deep-python.json",
+                "./.daydream.toml",
+                "./.daydream_helper.py",
+                "./runtime/src/api.py",
+                "./exploration/src/parser.py",
+                str(other_workspace),
+                str(other_session),
+                "./src/api.py",
+                "./.daydream/deep/report.md",
+                "../.daydream/deep/src/api.py",
+                ".daydream/../src/api.py",
+                "src/../src/api.py",
+            )
+        ],
+    }
+
+    result = analyze_coverage(
+        trajectories,
+        daydream_dir,
+        artifact_provenance=provenance,
+    )
+
+    assert result["coverage_ratio"] == 1.0
+    assert result["uncovered_files"] == []
+    assert result["artifact_reads_rejected"] == 4
+
+
+def test_artifact_evidence_other_owner_and_similar_names_stay_eligible(
+    tmp_path: Path,
+) -> None:
+    """Each false-positive control independently earns repository coverage."""
+    public_source = tmp_path / "source"
+    daydream_dir = public_source / ".daydream"
+    daydream_dir.mkdir(parents=True)
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=tmp_path / "private",
+    )
+    private_live = Path(*provenance.live_components)
+    private_base = private_live.parents[3]
+    cases = [
+        (
+            str(
+                private_base
+                / "other-workspace/runs/session-id/live/.daydream/deep/src/api.py"
+            ),
+            "src/api.py",
+        ),
+        (
+            str(
+                private_base
+                / "workspace-key/runs/other-session/live/.daydream/deep/src/api.py"
+            ),
+            "src/api.py",
+        ),
+        ("/repo/runtime/src/api.py", "src/api.py"),
+        ("/repo/exploration/src/api.py", "src/api.py"),
+        (".daydream.toml", ".daydream.toml"),
+        (".daydream_helper.py", ".daydream_helper.py"),
+    ]
+
+    for read_path, diff_path in cases:
+        (daydream_dir / "diff.patch").write_text(
+            f"diff --git a/{diff_path} b/{diff_path}\n",
+            encoding="utf-8",
+        )
+        result = analyze_coverage(
+            {
+                "main": None,
+                "forked": [_read_traj("deep-python.json", read_path)],
+            },
+            daydream_dir,
+            artifact_provenance=provenance,
+        )
+
+        assert result["coverage_ratio"] == 1.0, read_path
+        assert result["artifact_reads_rejected"] == 0, read_path
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        pytest.param(
+            _artifact_provenance(
+                public_source=Path("/repo"),
+                private_base=Path("/private"),
+                workspace_key="",
+            ),
+            id="blank-workspace",
+        ),
+        pytest.param(
+            _artifact_provenance(
+                public_source=Path("/repo"),
+                private_base=Path("/private"),
+                session_id="",
+            ),
+            id="blank-session",
+        ),
+        pytest.param(
+            _artifact_provenance(
+                public_source=Path("relative/repo"),
+                private_base=Path("/private"),
+            ),
+            id="relative-source",
+        ),
+    ],
+)
+def test_artifact_evidence_invalid_nonnull_provenance_fails_closed(
+    tmp_path: Path,
+    provenance: Any,
+) -> None:
+    """Malformed supplied identity is never treated as the legacy absent case."""
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+
+    with pytest.raises(ValueError, match="invalid artifact evidence provenance"):
+        analyze_coverage(
+            {"main": None, "forked": []},
+            daydream_dir,
+            artifact_provenance=provenance,
+        )
+
+
+def test_artifact_evidence_malformed_live_binding_fails_closed(tmp_path: Path) -> None:
+    """A valid-looking dataclass cannot substitute an unbound private root."""
+    from daydream.artifact_visibility import ArtifactEvidenceProvenance
+
+    provenance = ArtifactEvidenceProvenance(
+        workspace_key="workspace-key",
+        session_id="session-id",
+        public_source=tmp_path / "source",
+        live_components=tuple((tmp_path / "private/unrelated/live").parts),
+    )
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+
+    with pytest.raises(ValueError, match="invalid artifact evidence provenance"):
+        analyze_grounding(
+            {"main": None, "forked": []},
+            [],
+            daydream_dir,
+            artifact_provenance=provenance,
+        )
+
+
+def test_artifact_evidence_analyze_session_threads_one_classifier_to_all_consumers(
+    tmp_path: Path,
+) -> None:
+    """Coverage, grounding, exploration, and training share frozen provenance."""
+    public_source = tmp_path / "source"
+    public_source.mkdir()
+    (public_source / "src").mkdir()
+    (public_source / "src/api.py").write_text(
+        "def api(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    frozen = tmp_path / "frozen"
+    daydream_dir = frozen / ".daydream"
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    (daydream_dir / "diff.patch").write_text(
+        "diff --git a/src/api.py b/src/api.py\n",
+        encoding="utf-8",
+    )
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=tmp_path / "private",
+        session_id="session",
+    )
+    private_live = Path(*provenance.live_components)
+    artifact_ref = str(private_live / ".daydream/deep/stack-python-review.md")
+    exploration_ref = str(private_live / ".daydream/exploration/summary.md")
+    (deep / "stack-python-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "py-1",
+                    "file": "src/api.py",
+                    "line": 1,
+                    "confidence": "HIGH",
+                    "rationale": f"Evidence came from {artifact_ref}",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "session_id": "session",
+            "trajectory_id": "session",
+            "agent": {"name": "daydream", "model_name": "test"},
+            "steps": [],
+            "final_metrics": {},
+        },
+        "forked": [
+            _read_traj(
+                "deep-python.json",
+                str(public_source / "src/api.py"),
+                artifact_ref,
+                exploration_ref,
+            )
+        ],
+    }
+
+    result = analyze_session(
+        daydream_dir,
+        session_id="session",
+        frozen_trajectories=trajectories,
+        artifact_provenance=provenance,
+        code_workspace=public_source,
+    )
+
+    assert result["coverage"]["coverage_ratio"] == 1.0
+    assert result["coverage"]["artifact_reads_rejected"] == 2
+    assert result["grounding"]["artifact_evidence_rejections"] == 1
+    assert result["grounding"]["grounded_count"] == 0
+    assert result["exploration_utilization"]["by_agent"][0]["exploration_reads"] == 1
+    assert "ungrounded_findings:1" in result["training_signals"]["trajectories"][0][
+        "noise_flags"
+    ]
+    assert result["tools"]["total_calls"] == 3
+
+
+def test_analyze_session_redacts_artifact_primary_from_entire_result(
+    tmp_path: Path,
+) -> None:
+    """A private primary citation never survives in serialized evaluation."""
+    from daydream.trajectory import redact_text
+
+    public_source = tmp_path / "source"
+    public_source.mkdir()
+    frozen = tmp_path / "frozen"
+    daydream_dir = frozen / ".daydream"
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=Path("/Users/alice/private"),
+        session_id="session",
+    )
+    private_live = Path(*provenance.live_components)
+    artifact_primary = str(
+        private_live / ".daydream/deep/stack-python-review.md"
+    )
+    (deep / "stack-python-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "py-private-primary",
+                    "file": artifact_primary,
+                    "line": 1,
+                    "confidence": "HIGH",
+                    "rationale": "The private review artifact supports this claim.",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "session_id": "session",
+            "trajectory_id": "session",
+            "agent": {"name": "daydream", "model_name": "test"},
+            "steps": [],
+            "final_metrics": {},
+        },
+        "forked": [_read_traj("deep-python.json")],
+    }
+
+    result = analyze_session(
+        daydream_dir,
+        session_id="session",
+        frozen_trajectories=trajectories,
+        artifact_provenance=provenance,
+        code_workspace=public_source,
+    )
+
+    entry = result["grounding"]["ungrounded"][0]
+    redacted_primary = redact_text(artifact_primary)
+    assert entry["artifact_file_ref"] == redacted_primary
+    assert entry["file"] == redacted_primary
+    serialized = json.dumps(result, sort_keys=True)
+    assert artifact_primary not in serialized
+    assert "/Users/alice/private" not in serialized
+
+
 def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
     from daydream.eval.analyzer import analyze_exploration_utilization
 
@@ -466,7 +991,10 @@ def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
             _read_traj("deep-go.json", "/repo/src/main.go"),
         ],
     }
-    result = analyze_exploration_utilization(trajectories)
+    result = analyze_exploration_utilization(
+        trajectories,
+        daydream_dir=Path("/repo/.daydream"),
+    )
     by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
     assert by_agent["deep-python"]["utilized"] is True
     assert by_agent["deep-ts"]["utilized"] is True
@@ -1117,6 +1645,49 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(
     assert entry["high_cc_functions"] == 1
     expected = round(_mass(12, 24) / (_mass(1, 2) + _mass(12, 24)), 4)
     assert quality["erosion"] == pytest.approx(expected)
+
+
+def test_analyze_session_reads_quality_from_explicit_code_workspace(
+    tmp_path: Path,
+) -> None:
+    """Frozen artifact inputs and post-fix source quality use distinct roots."""
+    artifacts = tmp_path / "frozen"
+    daydream_dir = artifacts / ".daydream"
+    run_dir = daydream_dir / "runs" / "quality-split"
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.6",
+                "session_id": "quality-split",
+                "agent": {"name": "daydream", "model_name": "test"},
+                "steps": [],
+            }
+        )
+    )
+    code_workspace = _quality_workspace(
+        tmp_path,
+        {"app.py": "def changed(x):\n    return x + 1\n"},
+        name="operational",
+    )
+    public_source = tmp_path / "public-source"
+    provenance = _artifact_provenance(
+        public_source=public_source,
+        private_base=tmp_path / "private",
+        workspace_key="workspace",
+        session_id="quality-split",
+    )
+
+    result = analyze_session(
+        daydream_dir,
+        session_id="quality-split",
+        artifact_provenance=provenance,
+        code_workspace=code_workspace,
+    )
+
+    assert result["quality"]["scoped_files"] == 1
+    assert list(result["quality"]["per_file"]) == ["app.py"]
+    assert result["daydream_dir"] == str(public_source / ".daydream")
 
 
 # --- review round 1 fix regressions (#316) ---

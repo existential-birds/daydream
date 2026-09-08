@@ -2155,6 +2155,39 @@ def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     ]
 
 
+def tracked_artifact_collisions(repo: Path) -> tuple[str, ...]:
+    """Return tracked paths that collide with generated compatibility roots.
+
+    This strict query is the narrow Git boundary used before artifact detach.
+    A query failure raises :class:`GitError`; absence is represented only by an
+    empty tuple, never by a soft-failure fallback.
+    """
+    return tuple(
+        sorted(
+            path
+            for path in ls_files(repo, strict=True)
+            if path == ".review-output.md" or path == ".daydream" or path.startswith(".daydream/")
+        )
+    )
+
+
+def tracked_path_collisions(repo: Path, relative: str) -> tuple[str, ...]:
+    """Return tracked entries overlapping one repository-relative output.
+
+    Both a tracked ancestor and any tracked descendant make the requested
+    output unsafe. The query is strict so Git failure cannot be mistaken for
+    an untracked destination.
+    """
+    prefix = f"{relative}/"
+    return tuple(
+        sorted(
+            path
+            for path in ls_files(repo, strict=True)
+            if path == relative or path.startswith(prefix) or relative.startswith(f"{path}/")
+        )
+    )
+
+
 @dataclass(frozen=True)
 class IndependentSnapshot:
     """Standalone repository and lexical locations of its outward symlinks."""
@@ -2217,6 +2250,14 @@ def git_common_dir(repo: Path) -> Path:
     if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
         raise GitError(f"cannot resolve common Git directory in {repo}")
     return Path(proc.stdout.rstrip("\n")).resolve()
+
+
+def git_dir(repo: Path) -> Path:
+    """Return the canonical worktree-specific Git directory, raising on query failure."""
+    proc = _run_git(repo, ["rev-parse", "--path-format=absolute", "--git-dir"])
+    if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
+        raise GitError(f"cannot resolve Git directory in {repo}")
+    return Path(proc.stdout.rstrip("\n")).resolve(strict=True)
 
 
 def list_remotes(repo: Path, *, strict: bool = False) -> list[str]:
@@ -3321,6 +3362,20 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 
 
+def worktree_move(repo: Path, source: Path, destination: Path) -> None:
+    """Move one registered worktree without bypassing Git's bookkeeping."""
+    proc = _run_git(
+        repo,
+        ["worktree", "move", str(source), str(destination)],
+        timeout=30,
+        retries=0,
+    )
+    if proc.returncode != 0:
+        raise GitError(
+            f"git worktree move {source} {destination} failed: {proc.stderr.strip()}"
+        )
+
+
 def worktree_remove_unlocked(repo: Path, path: Path, *, force: bool = True) -> None:
     """Unlock *path* (if locked), then remove the worktree.
 
@@ -3374,29 +3429,59 @@ def worktree_unlock(repo: Path, path: Path) -> None:
         raise GitError(f"git worktree unlock {path} failed: {proc.stderr.strip()}")
 
 
+def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
+    """Return the registered worktree whose checkout is *path*, or None.
+
+    Cross-checks ``git worktree list --porcelain`` from *repo*. ``assert_is_worktree``
+    can raise ``NotAWorktreeError`` for a registered worktree whose ``.git``
+    link or admin chain is temporarily broken (e.g. a moved admin dir); this
+    list check is the authoritative registry, so a listed entry must never be
+    treated as unregistered residue.
+
+    Raises:
+        GitError: If ``git worktree list`` itself fails.
+    """
+    proc = _run_git(repo, ["worktree", "list", "--porcelain"], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git worktree list failed: {proc.stderr.strip()}")
+    wanted = path.resolve()
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            try:
+                candidate = Path(line.split(maxsplit=1)[1].strip()).resolve()
+            except (IndexError, OSError):
+                continue
+            if candidate == wanted:
+                return candidate
+    return None
+
+
 def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
     """Return the lock-armed time of the worktree at *path*, or None if unlocked.
 
-    The lock file lives at ``<git_dir>/worktrees/<path.name>/locked``; its mtime
-    is when the lock was armed, and its absence means the worktree is unlocked.
-    Returns ``None`` only for a genuinely absent lock file, never on a git
-    failure (which propagates as :class:`GitError`).
+    Git assigns each linked worktree its own administrative directory, whose
+    name is not necessarily the worktree basename. Resolve that directory from
+    the exact worktree and inspect its ``locked`` child. Returns ``None`` only
+    for a genuinely absent lock file, never when the worktree or its metadata
+    cannot be resolved.
 
     Raises:
-        GitError: If ``git rev-parse --git-common-dir`` fails.
+        GitError: If the exact worktree Git directory or lock metadata cannot
+            be resolved safely.
     """
-    proc = _run_git(repo, ["rev-parse", "--git-common-dir"], timeout=5)
-    if proc.returncode != 0:
-        raise GitError(
-            f"git rev-parse --git-common-dir failed in {repo}: {proc.stderr.strip()}"
-        )
-    git_dir = Path(proc.stdout.strip())
-    if not git_dir.is_absolute():
-        git_dir = repo / git_dir
-    locked = git_dir / "worktrees" / path.name / "locked"
-    if not locked.is_file():
+    try:
+        locked = git_dir(path) / "locked"
+    except (GitError, OSError) as exc:
+        raise GitError(f"cannot resolve Git directory for exact worktree {path}") from exc
+    try:
+        metadata = locked.lstat()
+    except FileNotFoundError:
         return None
-    return locked.stat().st_mtime
+    except OSError as exc:
+        raise GitError(f"cannot inspect worktree lock for {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise GitError(f"worktree lock metadata is unsafe for {path}")
+    return metadata.st_mtime
 
 
 def create_branch(repo: Path, name: str) -> None:

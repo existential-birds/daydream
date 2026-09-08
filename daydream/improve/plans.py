@@ -13,6 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from daydream import git_ops
+from daydream.artifact_visibility import (
+    PrivateWorkspaceOwner,
+    operational_worktree_path,
+    operational_worktree_root,
+    private_root_locations,
+    resolve_private_workspace_owner,
+    validate_private_directory,
+    validate_private_workspace_owner,
+)
 from daydream.improve.prioritize import member_alias, plan_priority
 from daydream.improve.render import (
     _redact_model_value,
@@ -21,7 +30,11 @@ from daydream.improve.render import (
     render_plan,
 )
 from daydream.trajectory import redact_text
-from daydream.workspace import _prune_stale_locked_worktrees
+from daydream.workspace import (
+    _OPERATIONAL_LOCK_STALE_AFTER_S,
+    _legacy_operational_root,
+    _prune_stale_locked_worktrees,
+)
 
 REJECTIONS_SCHEMA_VERSION = 1
 PLAN_WRITE_DIAGNOSTICS_SCHEMA_VERSION = 1
@@ -48,11 +61,6 @@ _SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 # Re-anchor worktree dirnames end in this suffix; the prune pass and the
 # re-anchor write share it so a rename can never silently stop pruning.
 _REANCHOR_DIR_SUFFIX = "-reanchor"
-# A still-locked re-anchor worktree whose lock is older than this is treated as
-# a crashed session's leftover and reclaimed (unlocked then removed). A live
-# concurrent lock is under this age in any realistic session, so "stale" here
-# is generous and only a crashed lock (unboundedly old) is ever reclaimed.
-_REANCHOR_LOCK_STALE_AFTER_S = 24 * 3600
 REANCHORED_STATUS_PREFIX = "REANCHORED"
 _REANCHORED_LANDED = re.compile(rf"^{re.escape(REANCHORED_STATUS_PREFIX)} \(landed at (.+)\)$")
 
@@ -667,35 +675,72 @@ def planned_fingerprints(plans_dir: Path) -> set[str]:
 
 
 def _worktrees_dir(repo: Path) -> Path:
-    """Return the ``.daydream/worktrees`` base directory for a repo.
+    """Return the legacy ``.daydream/worktrees`` base directory for a repo.
 
-    Shared by every re-anchor worktree consumer so the base path cannot be
-    broadened in one place while others drift.
+    Owner-aware consumers use the private operational namespace. This remains
+    the explicit standalone-session fallback and legacy discovery root.
     """
     return repo / ".daydream" / "worktrees"
 
 
-def _iter_reanchor_worktrees(repo: Path) -> Iterable[Path]:
-    """Yield existing ``*-reanchor`` worktree directories under ``.daydream/worktrees``.
+def _iter_reanchor_worktrees(roots: Iterable[Path]) -> Iterable[Path]:
+    """Yield unambiguous existing ``*-reanchor`` worktree directories.
 
     Single source of truth for which worktrees the automatic prune removes and
     the manual list reports, so the discovery contract cannot drift. Existing
-    directories only; non-directory entries are skipped.
+    real directories only; non-directory and symlink entries are skipped.
     """
-    return (
+    paths = [
         path
-        for path in _worktrees_dir(repo).glob(f"*{_REANCHOR_DIR_SUFFIX}")
-        if path.is_dir()
+        for root in roots
+        for path in root.glob(f"*{_REANCHOR_DIR_SUFFIX}")
+        if not path.is_symlink() and path.is_dir()
+    ]
+    paths.sort(key=lambda path: (path.name, path.as_posix()))
+    names = [path.name for path in paths]
+    if len(names) != len(set(names)):
+        raise git_ops.GitError("ambiguous re-anchor worktree name across storage roots")
+    return iter(paths)
+
+
+def _public_reanchor_roots(
+    repo: Path,
+    private_workspace_owner: PrivateWorkspaceOwner | None,
+) -> tuple[Path, Path]:
+    """Resolve the operational root once while retaining legacy discovery."""
+    owner = private_workspace_owner
+    if owner is None:
+        owner = resolve_private_workspace_owner(
+            repo,
+            locations=private_root_locations(),
+        )
+    else:
+        validate_private_workspace_owner(owner, source=owner.source, repo=repo)
+    operational = operational_worktree_path(owner)
+    legacy = _legacy_operational_root(
+        owner.source,
+        "worktrees",
+        label="legacy re-anchor root",
     )
+    validate_private_directory(
+        operational,
+        label="operational re-anchor root",
+        allow_absent=True,
+    )
+    return operational, legacy
 
 
-def prune_stale_reanchor_worktrees(repo: Path) -> int:
+def prune_stale_reanchor_worktrees(
+    repo: Path,
+    *,
+    private_workspace_owner: PrivateWorkspaceOwner | None = None,
+) -> int:
     """Remove leftover ``*-reanchor`` worktrees from prior plan runs.
 
-    Repeated head-drift runs accumulate detached worktrees under
-    ``.daydream/worktrees/<run_id>-reanchor``; each new plan run prunes them so
-    the directory does not grow unboundedly. Individual failures are tolerated
-    so one stale worktree never blocks a plan run.
+    Repeated head-drift runs accumulate detached worktrees in the source-owned
+    private operational namespace. Legacy ``.daydream/worktrees`` entries stay
+    discoverable during migration. Each new plan run prunes stale entries so
+    storage does not grow unboundedly. Individual Git failures are tolerated.
 
     The prune is lock-aware and delegates its policy to
     :func:`daydream.workspace._prune_stale_locked_worktrees` — the same shared
@@ -705,8 +750,10 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     """
     return _prune_stale_locked_worktrees(
         repo,
-        _iter_reanchor_worktrees(repo),
-        stale_after_s=_REANCHOR_LOCK_STALE_AFTER_S,
+        _iter_reanchor_worktrees(
+            _public_reanchor_roots(repo, private_workspace_owner)
+        ),
+        stale_after_s=_OPERATIONAL_LOCK_STALE_AFTER_S,
     )
 
 
@@ -733,15 +780,20 @@ class NamedPruneOutcome:
     plan_count: int = 0
 
 
-def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
+def prune_named_reanchor_worktree(
+    repo: Path,
+    name: str,
+    *,
+    private_workspace_owner: PrivateWorkspaceOwner | None = None,
+) -> NamedPruneOutcome:
     """Remove the single ``-reanchor`` worktree named *name*, returning a verdict.
 
-    The worktree lives at ``.daydream/worktrees/<name>``. The name is
-    validated against the shared filesystem-safe dirname rules before any
-    filesystem or git access. A ``daydream_plans`` directory's ``*.md`` count
-    is captured (*before* removal) purely as blast-radius metadata for the
-    removal notice; it never affects removal. Removal failures are reported as
-    :data:`PRUNE_GIT_FAILURE`, never coerced to success.
+    The worktree may live in the private operational root or the legacy
+    ``.daydream/worktrees`` root. The name is validated against the shared
+    filesystem-safe dirname rules before any storage or Git access. A name in
+    both roots is ambiguous and fails without mutation. A ``daydream_plans``
+    directory's ``*.md`` count is captured (*before* removal) purely as
+    blast-radius metadata; it never affects removal.
 
     Returns :data:`PRUNE_UNSAFE_NAME` for a name that fails the
     filesystem-safe dirname rules, :data:`PRUNE_NOT_REANCHOR` for a safe name
@@ -753,9 +805,15 @@ def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
         return NamedPruneOutcome(PRUNE_UNSAFE_NAME)
     if not name.endswith(_REANCHOR_DIR_SUFFIX):
         return NamedPruneOutcome(PRUNE_NOT_REANCHOR)
-    path = _worktrees_dir(repo) / name
-    if not path.is_dir():
+    roots = _public_reanchor_roots(repo, private_workspace_owner)
+    candidates = [root / name for root in roots if (root / name).exists() or (root / name).is_symlink()]
+    if not candidates:
         return NamedPruneOutcome(PRUNE_NOT_FOUND)
+    if len(candidates) != 1:
+        return NamedPruneOutcome(PRUNE_GIT_FAILURE)
+    path = candidates[0]
+    if path.is_symlink() or not path.is_dir():
+        return NamedPruneOutcome(PRUNE_GIT_FAILURE)
     plans = path / "daydream_plans"
     if plans.is_dir():
         plan_count = sum(1 for _ in plans.glob("*.md"))
@@ -768,14 +826,22 @@ def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
     return NamedPruneOutcome(PRUNE_REMOVED, plan_count)
 
 
-def list_reanchor_worktrees(repo: Path) -> list[Path]:
-    """List the ``*.{_REANCHOR_DIR_SUFFIX}`` directories under ``.daydream/worktrees``.
+def list_reanchor_worktrees(
+    repo: Path,
+    *,
+    private_workspace_owner: PrivateWorkspaceOwner | None = None,
+) -> list[Path]:
+    """List re-anchor directories across private and legacy storage.
 
     Returns the exact names the automatic prune would remove, so an operator
     can discover them before pruning. Existing directories only; non-directory
     entries are skipped, matching ``prune_stale_reanchor_worktrees``.
     """
-    return list(_iter_reanchor_worktrees(repo))
+    return list(
+        _iter_reanchor_worktrees(
+            _public_reanchor_roots(repo, private_workspace_owner)
+        )
+    )
 
 
 def _highest_plan_number(
@@ -989,9 +1055,19 @@ class PlanWriteSession:
         planned_at: str,
         non_interactive_default: bool = False,
         run_session_id: str | None = None,
+        private_workspace_owner: PrivateWorkspaceOwner | None = None,
     ) -> None:
         self._plans_dir = plans_dir
         self._repo = plans_dir.parent
+        if private_workspace_owner is None:
+            self._worktrees_root = _worktrees_dir(self._repo)
+        else:
+            validate_private_workspace_owner(
+                private_workspace_owner,
+                source=private_workspace_owner.source,
+                repo=self._repo,
+            )
+            self._worktrees_root = operational_worktree_root(private_workspace_owner)
         self._planned_at = planned_at
         self._planned_on = date.today()
         self._run_session_id = run_session_id
@@ -1429,7 +1505,7 @@ class PlanWriteSession:
                 run_id = self._run_session_id or f"run-{self._planned_at[:12]}"
                 if _SAFE_DIRNAME.fullmatch(run_id) is None:
                     run_id = f"run-{self._planned_at[:12]}"
-                worktree = _worktrees_dir(self._repo) / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
+                worktree = self._worktrees_root / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
                 # Create the worktree already-locked in one git invocation so a
                 # concurrent run's start-of-run prune cannot destroy the live
                 # worktree between an add and a separate lock (fix #3). Released

@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from daydream.artifact_visibility import artifact_dir_for
+
 # Stage prerequisites -- single source of truth.
 # Value is a list of file names (relative to deep_dir) that must exist before the
 # given stage can run. Special handling for "merge" (needs at least one glob match)
@@ -33,7 +35,7 @@ _EARLIER_STAGE: dict[str, str] = {
 
 def deep_dir(target: Path) -> Path:
     """Return the `.daydream/deep/` directory for `target`, creating it if absent."""
-    d = target / ".daydream" / "deep"
+    d = artifact_dir_for(target) / "deep"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

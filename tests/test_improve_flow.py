@@ -11,6 +11,10 @@ import pytest
 
 from daydream import git_ops
 from daydream import review_profile as rp
+from daydream.artifact_visibility import (
+    private_root_locations,
+    resolve_private_workspace_owner,
+)
 from daydream.backends import AgentEvent, Backend, TextEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
@@ -18,6 +22,7 @@ from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError, head_sha
+from daydream.improve.command_contract import validate_recon_commands
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
     _audit_repo,
@@ -38,9 +43,15 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
-from daydream.workspace import AuditWorkspace, WorkContext
+from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
-from tests.harness.git_helpers import commit, configure_identity, git, init_repo
+from tests.harness.git_helpers import (
+    bare_remote,
+    commit,
+    configure_identity,
+    git,
+    init_repo,
+)
 from tests.harness.improve_backend import (
     AuditAbsoluteWorkingDirectoryBackend,
     ImproveStubBackend,
@@ -57,6 +68,18 @@ from tests.harness.improve_backend import (
 )
 
 MakeConfig = Callable[..., RunConfig]
+
+
+def test_improve_dir_uses_active_artifact_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.improve import artifacts
+
+    routed = tmp_path / "private" / ".daydream"
+    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target: routed)
+
+    assert artifacts.improve_dir(tmp_path / "model-cwd") == routed / "improve"
+    assert (routed / "improve").is_dir()
 
 
 def _default_strategy(stage: str) -> str:
@@ -896,6 +919,173 @@ async def test_unborn_plan_write_never_constructs_a_writer(
     for entry in [*result["failed"], *result["diagnostics"]]:
         assert "UNBORN_PLAN_ANCHOR_UNAVAILABLE" in json.dumps(entry)
     assert not (source / "daydream_plans").exists()
+
+
+@pytest.mark.anyio
+async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    tmp_path: Path,
+) -> None:
+    source = improve_monorepo_target
+    remote = bare_remote(tmp_path / "origin.git")
+    git(source, "remote", "add", "origin", str(remote))
+    git(source, "push", "-u", "origin", "main")
+    git(source, "remote", "set-head", "origin", "main")
+    locations = private_root_locations(base=tmp_path / "private")
+    owner = resolve_private_workspace_owner(source, locations=locations)
+    monkeypatch.setattr(
+        "daydream.artifact_visibility._default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+
+    class HeadAdvancingPlanBackend(ImproveStubBackend):
+        def __init__(self, target: Path, active_repo: Path) -> None:
+            super().__init__(target)
+            self._active_repo = active_repo
+            self.advanced = False
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            if "You are writing a self-contained implementation plan" in prompt and not self.advanced:
+                (self._active_repo / "concurrent.txt").write_text(
+                    "advanced after plan session opened\n",
+                    encoding="utf-8",
+                )
+                git(self._active_repo, "add", "concurrent.txt")
+                commit(self._active_repo, "advance active ephemeral checkout")
+                self.advanced = True
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+            ):
+                yield event
+
+    async with open_workspace(
+        source,
+        branch=None,
+        base="main",
+        force_ephemeral=True,
+        extra_copy=[],
+        skip_tests=True,
+        private_owner=owner,
+    ) as work:
+        backend = HeadAdvancingPlanBackend(work.repo, work.repo)
+        backend.plan_gate_on_first_menu_id = True
+        install_capable_improve_backend(monkeypatch, backend)
+        async with open_audit_workspace(work.repo, run_id="owner-reanchor") as audit:
+            context = FlowContext(
+                config=make_config(
+                    work.repo,
+                    flow_name="improve",
+                    improve_plan_description="Add explicit billing rate limits",
+                ),
+                work=work,
+                registry=build_registry(),
+                audit_workspace=audit,
+                private_workspace_owner=owner,
+            )
+            improve_dir = work.repo / ".daydream" / "improve"
+            improve_dir.mkdir(parents=True)
+            pyproject = work.repo / "pyproject.toml"
+            test_line = improve_fixture_test_command_anchor(pyproject)
+            commands = [
+                {
+                    "id": "test-suite",
+                    "purpose": "Run the repository Python test suite",
+                    "command": "uv run pytest",
+                    "working_directory": ".",
+                    "expected_success": {
+                        "exit_code": 0,
+                        "observable_result": "exit 0 and the repository tests pass",
+                    },
+                    "applicability": {
+                        "scope": {"kind": "whole-repository"},
+                        "preconditions": [],
+                        "rationale": "The repository config declares this test entry point.",
+                    },
+                    "evidence": {
+                        "kind": "literal-command",
+                        "source_path": "pyproject.toml",
+                        "line_anchor": {"start_line": test_line, "end_line": test_line},
+                        "verbatim_excerpt": 'test-command = "uv run pytest"',
+                    },
+                },
+                {
+                    "id": "git-diff",
+                    "purpose": "Check that unrelated paths remain unchanged",
+                    "command": "git diff --exit-code",
+                    "working_directory": ".",
+                    "expected_success": {
+                        "exit_code": 0,
+                        "observable_result": "exit 0 and no unexpected diff is reported",
+                    },
+                    "applicability": {
+                        "scope": {"kind": "whole-repository"},
+                        "preconditions": [],
+                        "rationale": "The repository config declares this scope check.",
+                    },
+                    "evidence": {
+                        "kind": "literal-command",
+                        "source_path": "pyproject.toml",
+                        "line_anchor": {
+                            "start_line": test_line + 1,
+                            "end_line": test_line + 1,
+                        },
+                        "verbatim_excerpt": 'scope-command = "git diff --exit-code"',
+                    },
+                },
+            ]
+            accepted, errors = validate_recon_commands(
+                {"commands": commands},
+                repo=work.repo,
+            )
+            assert errors == []
+            assert len(accepted) == 2
+            context.data.update(
+                {
+                    "audit_repo": audit.repo,
+                    "improve_dir": improve_dir,
+                    "recon": {
+                        "commands": accepted,
+                        "languages": [],
+                        "conventions": [],
+                        "intent_docs": [],
+                    },
+                }
+            )
+
+            await _step_write_plans(context)
+
+            assert backend.advanced is True
+            written = context.data["plan_write"]["written"]
+            assert len(written) == 1
+            landed = Path(written[0]["path"])
+            assert landed.is_relative_to(owner.operational_state_root / "operational")
+            assert not landed.is_relative_to(owner.artifact_state_root)
+            assert not landed.is_relative_to(source)
+            assert audit.repo != work.repo
+            assert git_ops.git_common_dir(audit.repo) != owner.git_common_dir
+            assert {path.name for path in locations.operational_workspaces.iterdir()} == {
+                owner.workspace_key
+            }
+            assert not (source / ".daydream" / "worktrees").exists()
 
 
 _GROUP = {
@@ -2768,6 +2958,7 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     assert code == 0
     assert len(selected) == 3
+    assert backend.selection_order == selected
     assert backend.completion_order == [1, 2, 0]
     assert _index_numbers_by_fingerprint(index) == {
         fingerprint: rank + 1 for rank, fingerprint in enumerate(selected)
@@ -4916,6 +5107,11 @@ async def test_disabled_publication_overwrites_stale_current_run_artifact(
         "published-issues.json",
     )
     artifact.parent.mkdir(parents=True, exist_ok=True)
+    # This is a prior Daydream bundle, not an arbitrary unowned ``.daydream``
+    # tree. The legacy run anchor makes that ownership explicit so the artifact
+    # session may import it before proving the current disabled disposition
+    # replaces the stale publication record.
+    (artifact.parents[1] / "runs").mkdir()
     artifact.write_text(
         json.dumps(
             {

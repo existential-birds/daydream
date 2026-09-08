@@ -533,6 +533,90 @@ built-in defaults (`default_render_finding`, `default_render_summary`) reproduce
 today's Markdown byte-for-byte, so an unregistered slot and a failed override
 both yield the stock output.
 
+### Working artifact paths
+
+During a run, Daydream's generated files live in private source-owned storage,
+not in the checkout. Production runner calls and custom-flow steps run inside an
+active artifact session (`ctx.artifacts`); the session freezes at finalization
+and then publishes `.daydream/` and `.review-output.md` into the source
+checkout.
+
+Working contracts for extension steps:
+
+- Write working outputs through the active artifact session, never directly to
+  `<source>/.daydream` or `.review-output.md`.
+- Use the paths already supplied in `ctx.data`; do not reconstruct them from
+  `ctx.work.repo`, and do not retain them after the session ends.
+- Before each model dispatch, Daydream rejects generated files in the model's
+  working directory. A direct public write can therefore fail a later phase even
+  when the write itself succeeded.
+- Model inputs that come from generated files are passed as **sanctioned
+  inputs**: exact named files bound to the selected backend, cwd, and read-only
+  mode. Their captured bytes must remain unchanged before each dispatch attempt.
+- Strict Claude audit roots, read-only Codex clones, and sandboxed Osprey
+  receive the captured contents inline. Other supported modes receive the exact
+  file paths. Neither transport makes an unrestricted backend's filesystem
+  inaccessible beyond its cwd.
+- Inline inputs have a combined limit of 12,288 UTF-8 payload bytes per model
+  call. Exact-path inputs have separate validation limits: 512 files, 1 MiB per
+  file, and 4 MiB combined. Missing, changed, non-regular, invalid UTF-8, or
+  over-limit inputs fail before backend entry instead of being truncated.
+  Exact-path validation streams and hashes the named files without retaining
+  their full contents.
+- Private storage is cwd-rooted discovery isolation, not an OS sandbox; no
+  transport grants access to an entire runtime directory.
+- Intentional standalone phase calls without an active artifact session keep
+  the legacy paths and provide no isolation guarantee. Production runner and
+  custom-flow calls bind a session and cannot opt out of the model-cwd check.
+
+This is additive: it does not bump `EXTENSION_API_VERSION`, rename stable keys,
+or alter verifier routing headings.
+
+A complete example — write a private note, prepare it as a sanctioned input,
+and dispatch one read-only agent turn:
+
+```python
+from daydream.agent import run_agent
+from daydream.artifact_visibility import artifact_dir_for
+from daydream.extensions import FlowStep, Registry
+from daydream.flows.engine import FlowContext
+from daydream.prompt_budget import prepare_sanctioned_inputs
+from daydream.trajectory import DaydreamPhase
+
+DAYDREAM_EXT_API = 6
+
+async def explain_note(ctx: FlowContext) -> None:
+    note = artifact_dir_for(ctx.work.repo) / "extension-note.txt"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("Review this repository's error-handling conventions.", encoding="utf-8")
+    backend = ctx.backend_for("review")
+    inputs = prepare_sanctioned_inputs(
+        backend, ctx.work.repo, {"note": note}, read_only=True,
+    )
+    await run_agent(
+        backend,
+        ctx.work.repo,
+        "Use the sanctioned note and inspect the relevant source files.",
+        phase=DaydreamPhase.REVIEW,
+        read_only=True,
+        sanctioned_inputs=inputs,
+    )
+
+def register(registry: Registry) -> None:
+    registry.register_phase(FlowStep(name="explain-note", run=explain_note))
+    registry.set_flow("explain-note", ["explain-note"])
+```
+
+Inside the runner, `artifact_dir_for(ctx.work.repo)` routes to the active
+session's private directory while the session is live, so the note is
+invisible to the model's cwd and to git during the run. At finalization the
+whole `.daydream/` subtree is published back into the checkout (the same
+contract as `review_output_path_for`: private while the session is active,
+published under the checkout's untracked `.daydream/` at finalization).
+`review_output_path_for(ctx.work.repo)` routes the review-output file the same
+way: private while the session is active, published as `.review-output.md` at
+finalization.
+
 ### Stable `ctx.data` keys
 
 Steps share state through `FlowContext.data`. Forks may **read** these keys;

@@ -34,6 +34,7 @@ _SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "requ
 _FLOW = '''
 import json
 from daydream.agent import run_agent
+from daydream.artifact_visibility import artifact_dir_for
 from daydream.extensions import FlowStep
 from daydream.trajectory import DaydreamPhase
 
@@ -44,7 +45,7 @@ async def trace_probe(ctx):
         phase=DaydreamPhase.REVIEW,
         output_schema={"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]},
     )
-    (ctx.work.repo / ".daydream" / "observability-result.json").write_text(json.dumps(output))
+    (artifact_dir_for(ctx.work.repo) / "observability-result.json").write_text(json.dumps(output))
 
 def register(r):
     r.register_phase(FlowStep(name="trace-probe", run=trace_probe))

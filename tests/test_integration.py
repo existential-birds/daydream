@@ -713,6 +713,21 @@ async def _wait_for_process_group_exit(pgid: int) -> None:
     raise AssertionError(f"remote CI process group {pgid} survived cancellation")
 
 
+def _live_deep_dir(artifact_runtime_root: Path) -> Path:
+    """Locate the P10 private-live deep dir of the run's one active session.
+
+    ``_step_remote_ci`` writes ``remote-ci-verdict.json`` / ``-handoff.json``
+    through ``ctx.data["dd"]`` = ``deep_dir()`` = ``artifact_dir_for()``,
+    which routes to the session's private live tree
+    (``<runtime>/<workspace-key>/runs/<session>/live/.daydream/deep``), not to
+    the public ``.daydream`` (detached for the run's duration). Exactly one
+    session exists per test tmp path, so the glob is unambiguous.
+    """
+    matches = sorted(artifact_runtime_root.glob("*/runs/*/live/.daydream/deep"))
+    assert len(matches) == 1, f"expected exactly one live deep dir, got {matches}"
+    return matches[0]
+
+
 @pytest.mark.asyncio
 async def test_runner_remote_ci_red_fails_after_real_push(
     tmp_path: Path,
@@ -980,6 +995,7 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
 @pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resume-stale-handoff"])
 async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     tmp_path: Path,
+    artifact_runtime_root: Path,
     install_backend: Callable[[object], object],
     make_config: Callable[..., "RunConfig"],
     fake_gh: FakeGh,
@@ -1049,13 +1065,21 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
             sha_path=hook_marker.with_name(hook_marker.name + " sha"),
             runner_task=task,
         )
-        pending = json.loads(verdict_path.read_text())
+        # Mid-run, P10 routes verdict/handoff writes into the session's
+        # private live tree; the public .daydream tree is detached for the
+        # run's duration and only republished when the run ends.
+        live_deep = _live_deep_dir(artifact_runtime_root)
+        pending = json.loads((live_deep / "remote-ci-verdict.json").read_text())
         assert pending["status"] == "pending"
         assert pending["session_id"] != "old-session"
         assert pending["target"]["pushed_sha"] != old_sha
-        assert not handoff_path.exists(), "the new attempt retained old-SHA guidance"
+        assert not (live_deep / "remote-ci-handoff.json").exists(), (
+            "the new attempt retained old-SHA guidance"
+        )
         if resume:
-            assert unrelated.read_bytes() == b'{"keep":"operator notes"}\n'
+            assert (live_deep / "operator-notes.json").read_bytes() == (
+                b'{"keep":"operator notes"}\n'
+            )
     finally:
         task.cancel()
         try:

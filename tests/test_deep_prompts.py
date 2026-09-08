@@ -1555,22 +1555,25 @@ def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> N
 
 
 def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp_path: Path) -> None:
-    """Should-Have: 'do NOT read up front' applies to exploration artifacts, not assigned source files."""
+    """Bounded-context exploration pointers never carry the assigned-source mandate."""
     from daydream.deep.prompts import build_per_stack_prompt
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], exploration_dir=tmp_path / ".daydream" / "exploration", **p,
     )
-    assert "do NOT read them all up front" in out
+    # Exploration artifacts are pointed at as bounded context only: two named
+    # files, sibling artifacts explicitly out of scope.
+    assert "Read the pre-scan summary at" in out
+    assert str(tmp_path / ".daydream" / "exploration" / "summary.md") in out
+    assert "Do not infer or enumerate sibling artifact files" in out
     assert "assigned source files" in out and "MUST read in full" in out
-    # The no-up-front-read rule is scoped to exploration artifacts ONLY: the
-    # sentence that forbids up-front reads must not also carry the assigned-
-    # source-files mandate (today's dash-joined wording fails this).
-    upfront = "do NOT read them all up front"
-    sentence = out[out.index(upfront):]
-    sentence = sentence[: sentence.index("\n")]
-    assert "assigned source files" not in sentence
+    # The bounded-exploration rule is scoped to exploration artifacts ONLY: the
+    # sentence that bounds exploration reads must not also carry the assigned-
+    # source-files mandate.
+    bounded = out[out.index("Read the pre-scan summary at"):]
+    bounded = bounded[: bounded.index("\n")]
+    assert "assigned source files" not in bounded
 
 
 def test_per_stack_prompt_uses_profile_strategy_and_no_skill() -> None:
@@ -1826,12 +1829,15 @@ def test_diagram_prompts_clone_mode_truncation_is_byte_accurate(tmp_path: Path) 
 
 
 def test_diagram_prompts_non_clone_keeps_pointer_behavior_byte_for_byte(tmp_path: Path) -> None:
-    """Non-disposable backends are unchanged: default kwargs (clone_mode=False)
-    render the same pointer text as today, including the over-budget degrade."""
+    """Non-disposable backends keep host-path pointers (never inline): default
+    kwargs (clone_mode=False) name the exploration files and the diff pointer,
+    including the over-budget degrade."""
     prompt = _sequence_prompt(tmp_path, inline_diff="x" * (INLINE_DIFF_BUDGET_BYTES + 1))
     assert "diff.patch" in prompt  # pointer degrade intact
     assert "[diff truncated" not in prompt
-    assert "Pre-scan exploration results are available in" in prompt
+    assert "Read the pre-scan summary at" in prompt  # host-path exploration pointer
+    assert str(tmp_path / ".daydream" / "exploration" / "summary.md") in prompt
+    assert "dependencies.md" in prompt  # dependency-edge pointer intact
 
 
 def test_diagram_prompts_missing_inline_exploration_omits_block(tmp_path: Path) -> None:

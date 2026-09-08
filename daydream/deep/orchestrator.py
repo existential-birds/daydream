@@ -19,7 +19,7 @@ import json
 import os
 import shutil
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -27,6 +27,7 @@ import anyio
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt, run_agent
+from daydream.artifact_visibility import artifact_dir_for, review_output_path_for
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_DEEP_SHARD_ENABLED,
@@ -206,8 +207,13 @@ from daydream.ui import (
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
+    from daydream.artifact_visibility import (
+        ArtifactSession,
+        PrivateWorkspaceOwner,
+        TrajectoryOutputRoute,
+    )
     from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
-    from daydream.runner import RunConfig
+    from daydream.runner import RunConfig, _RunWriteCapture
     from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
 
 # Exploration infrastructure import guard. Deep mode still runs without
@@ -230,7 +236,12 @@ from daydream.deep.prompts import (
     bound_deep_diff,
     build_diagram_repair_prompt,
 )
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+from daydream.prompt_budget import (
+    INLINE_DIFF_BUDGET_BYTES,
+    SanctionedInputTransport,
+    fits_inline_diff_budget,
+    prepare_sanctioned_inputs,
+)
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
@@ -1052,7 +1063,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
 
     config = ctx.config
     target_dir = ctx.work.repo
-    daydream_dir = target_dir / ".daydream"
+    daydream_dir = artifact_dir_for(target_dir)
     # Issue #644 — the pre-scan must be grounded in the FULL diff, never the
     # bounded in-memory ``ctx.data["diff"]``: ``detect_affected_files`` seeds a
     # specialist per affected file, so a dropped-block file would otherwise get
@@ -1780,6 +1791,34 @@ async def _run_uncovered_sweep(
                                 f"deep-uncovered-{n}",
                                 dispatch=dispatch,
                             ):
+                                sanctioned_inputs = (
+                                    prepare_sanctioned_inputs(
+                                        parse_backend,
+                                        ctx.work.repo,
+                                        {
+                                            "intent": ctx.data["intent_path"],
+                                            **(
+                                                {
+                                                    "exploration-summary": ctx.data[
+                                                        "exploration_dir"
+                                                    ]
+                                                    / "summary.md",
+                                                    "exploration-affected-files": ctx.data[
+                                                        "exploration_dir"
+                                                    ]
+                                                    / "affected_files.md",
+                                                }
+                                                if isinstance(
+                                                    ctx.data.get("exploration_dir"), Path
+                                                )
+                                                else {}
+                                            ),
+                                        },
+                                        read_only=False,
+                                    )
+                                    if ctx.artifacts is not None
+                                    else None
+                                )
                                 structured, _, budget_reason = await run_agent(
                                     parse_backend,
                                     ctx.work.repo,
@@ -1788,6 +1827,7 @@ async def _run_uncovered_sweep(
                                     output_schema=UNCOVERED_SWEEP_SCHEMA,
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                                    sanctioned_inputs=sanctioned_inputs,
                                 )
                             if budget_reason:
                                 sweep_failures[file] = (
@@ -2503,7 +2543,7 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     dd = ctx.data["dd"]
 
     print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
-    merged_report = target_dir / REVIEW_OUTPUT_FILE
+    merged_report = review_output_path_for(target_dir)
 
     # merged-items.json is the canonical source of truth; review-output.md is
     # render-only. The missing-input guard keys on the JSON so a --start-at fix
@@ -2898,7 +2938,12 @@ def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
 
 
 def _diagram_author_prompt(
-    ctx: FlowContext, kind: str, eligibility: Eligibility, backend: Any
+    ctx: FlowContext,
+    kind: str,
+    eligibility: Eligibility,
+    backend: Any,
+    *,
+    inline_artifacts: bool = False,
 ) -> str:
     """Build one kind's first-turn author prompt through the registry.
 
@@ -2927,19 +2972,27 @@ def _diagram_author_prompt(
     )
     inline_kwargs: dict[str, Any]
     if clone_mode and _prompt_builder_accepts_inline_kwargs(builder):
-        inline_exploration, inline_dependencies = _inline_exploration_text(exploration_dir)
+        legacy_exploration, legacy_dependencies = (
+            _inline_exploration_text(exploration_dir)
+            if ctx.artifacts is None
+            else (None, None)
+        )
         inline_kwargs = {
             "exploration_dir": None,
             "clone_mode": True,
-            "inline_exploration": inline_exploration,
-            "inline_dependencies": inline_dependencies,
+            "inline_exploration": legacy_exploration,
+            "inline_dependencies": legacy_dependencies,
         }
     else:
         # A legacy override keeps its documented kwarg set, but a clone run
         # must not name the host-only exploration_dir: the path dangles in
         # the disposable clone, so it arrives as ``None`` there and untouched
         # otherwise.
-        inline_kwargs = {"exploration_dir": None if clone_mode else exploration_dir}
+        inline_kwargs = {
+            "exploration_dir": (
+                None if clone_mode or inline_artifacts else exploration_dir
+            )
+        }
     if kind == "sequence":
         return str(
             builder(
@@ -3011,18 +3064,74 @@ async def _run_diagram_kind(
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
     read_paths: set[str] = set()
 
+    exploration_dir = ctx.data.get("exploration_dir")
+    clone_mode = bool(getattr(backend, "read_only_disposable_clone", False))
+    diagram_diff = _ttt_diff_text(ctx)
+    diagram_inputs = {
+        label: path
+        for label, path in {
+            "diff": (
+                ctx.data["diff_path"]
+                if not clone_mode
+                and (
+                    not diagram_diff
+                    or not fits_inline_diff_budget(diagram_diff)
+                )
+                else None
+            ),
+            "hunk-index": (
+                ctx.data["diff_path"].parent / "hunk-index.json"
+                if not clone_mode
+                else None
+            ),
+            "exploration-summary": (
+                exploration_dir / "summary.md"
+                if isinstance(exploration_dir, Path)
+                else None
+            ),
+            "exploration-affected-files": (
+                exploration_dir / "affected_files.md"
+                if isinstance(exploration_dir, Path)
+                else None
+            ),
+            "exploration-dependencies": (
+                exploration_dir / "dependencies.md"
+                if isinstance(exploration_dir, Path)
+                else None
+            ),
+        }.items()
+        if path is not None and path.is_file()
+    }
+    sanctioned_inputs = (
+        prepare_sanctioned_inputs(
+            backend, ctx.work.repo, diagram_inputs, read_only=True
+        )
+        if ctx.artifacts is not None
+        else None
+    )
+
     async with maybe_fork(
         recorder, f"diagram-{kind}", dispatch=dispatch
     ) as fork:
         structured, continuation, budget_reason = await run_agent(
             backend,
             ctx.work.repo,
-            _diagram_author_prompt(ctx, kind, eligibility, backend),
+            _diagram_author_prompt(
+                ctx,
+                kind,
+                eligibility,
+                backend,
+                inline_artifacts=(
+                    sanctioned_inputs is not None
+                    and sanctioned_inputs.transport is SanctionedInputTransport.INLINE
+                ),
+            ),
             phase=DaydreamPhase.DIAGRAM,
             output_schema=schema,
             read_only=True,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            sanctioned_inputs=sanctioned_inputs,
         )
     read_paths |= _diagram_read_paths(getattr(fork, "path", None))
     if budget_reason:
@@ -3064,6 +3173,7 @@ async def _run_diagram_kind(
                 read_only=True,
                 wall_budget_s=DEFAULT_WALL_BUDGET_S,
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                sanctioned_inputs=sanctioned_inputs,
             )
         read_paths |= _diagram_read_paths(getattr(repair_fork, "path", None))
         if not repair_budget and isinstance(repaired_output, dict):
@@ -3173,7 +3283,7 @@ async def _run_diagram_step(
     from daydream.services import enumerate_services
 
     changed_files = sorted(str(path) for path in ctx.data["changed_files"])
-    hunk_ranges = head_side_ranges_by_file(load_hunk_index(target_dir / ".daydream"))
+    hunk_ranges = head_side_ranges_by_file(load_hunk_index(artifact_dir_for(target_dir)))
     file_config = _file_config_or_empty(ctx.config)
     eligibility = decide_eligibility(
         repo_root=target_dir,
@@ -3394,7 +3504,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         fix_failures_path(dd),
         fix_leftover_untracked_path(dd),
         stabilization_failed_path(dd),
-        ctx.work.repo / ".daydream" / "recommended.patch",
+        artifact_dir_for(ctx.work.repo) / "recommended.patch",
     )
     try:
         for stale in stale_paths:
@@ -3526,7 +3636,9 @@ async def _step_verify(ctx: FlowContext) -> None:
 
 
 async def _capture_quality_before(
-    daydream_dir: Path, candidate_paths: set[str] | None
+    daydream_dir: Path,
+    code_workspace: Path,
+    candidate_paths: set[str] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
 
@@ -3545,7 +3657,12 @@ async def _capture_quality_before(
         from daydream.eval.analyzer import analyze_quality
 
         return await anyio.to_thread.run_sync(
-            analyze_quality, daydream_dir, candidate_paths
+            partial(
+                analyze_quality,
+                daydream_dir,
+                candidate_paths,
+                code_workspace=code_workspace,
+            )
         ), None
     except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
         return None, f"{type(exc).__name__}: {exc}"
@@ -3787,6 +3904,7 @@ async def _evaluate_quality_gate(
     erosion_absolute_threshold: float,
     verbosity_absolute_threshold: float,
     daydream_dir: Path,
+    code_workspace: Path,
     dd: Path,
     candidates: set[str] | None,
     before: dict[str, Any] | None,
@@ -3860,7 +3978,14 @@ async def _evaluate_quality_gate(
             # (reviewed *.py + files changed by the fix pass). ``candidates``
             # is always a set here -- the ``candidates is None`` branch above
             # returned already.
-            after = await anyio.to_thread.run_sync(analyze_quality, daydream_dir, candidates)
+            after = await anyio.to_thread.run_sync(
+                partial(
+                    analyze_quality,
+                    daydream_dir,
+                    candidates,
+                    code_workspace=code_workspace,
+                )
+            )
         except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
@@ -4351,7 +4476,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
     }
     if quality_enabled:
         quality_before, quality_unavailable = await _capture_quality_before(
-            ctx.work.repo / ".daydream", reviewed_python
+            artifact_dir_for(ctx.work.repo), ctx.work.repo, reviewed_python
         )
     else:
         quality_before, quality_unavailable = None, None
@@ -4480,7 +4605,8 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
             verbosity_absolute_threshold=_quality_gate_threshold(
                 config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
             ),
-            daydream_dir=ctx.work.repo / ".daydream",
+            daydream_dir=artifact_dir_for(ctx.work.repo),
+            code_workspace=ctx.work.repo,
             dd=ctx.data["dd"],
             candidates={path for path in snapshot.paths if path.endswith(".py")}
             | {
@@ -4833,7 +4959,7 @@ async def finalize_retained_tree_after_test(
             )
 
         try:
-            patch_path = ctx.work.repo / ".daydream" / "recommended.patch"
+            patch_path = artifact_dir_for(ctx.work.repo) / "recommended.patch"
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_bytes(snapshot.recommended_patch)
             atomic_write_json(
@@ -5276,7 +5402,7 @@ async def _perform_cleanup(ctx: FlowContext) -> None:
 
     if not enabled:
         return
-    review_output_path = target_dir / REVIEW_OUTPUT_FILE
+    review_output_path = review_output_path_for(target_dir)
     if review_output_path.exists():
         review_output_path.unlink()
         print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
@@ -5468,7 +5594,15 @@ DIAGRAM_STEPS: tuple[FlowStep, ...] = (
 )
 
 
-async def run_deep(config: RunConfig, work: WorkContext) -> int:
+async def run_deep(
+    config: RunConfig,
+    work: WorkContext,
+    *,
+    artifacts: ArtifactSession | None = None,
+    private_owner: PrivateWorkspaceOwner | None = None,
+    trajectory_route: TrajectoryOutputRoute | None = None,
+    capture: _RunWriteCapture | None = None,
+) -> int:
     """Execute the deep-review pipeline (D-07) across every PR-process mode.
 
     The single ``deep`` flow (#330) handles ``review`` and ``comment`` through
@@ -5491,7 +5625,20 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         Exit code (0 on success, 1 on failure).
     """
     mode = _resolve_mode(config)
-    return await _run_review_spine(config, work, mode)
+    supplied = (artifacts, private_owner, trajectory_route, capture)
+    if any(value is not None for value in supplied) and any(
+        value is None for value in supplied
+    ):
+        raise ValueError("deep artifact composition must be supplied as one unit")
+    return await _run_review_spine(
+        config,
+        work,
+        mode,
+        artifacts=artifacts,
+        private_owner=private_owner,
+        trajectory_route=trajectory_route,
+        capture=capture,
+    )
 
 
 def _collapse_stacks_for_shallow(
@@ -5550,7 +5697,16 @@ def _collapse_stacks_for_shallow(
     return [*structural, combined], True
 
 
-async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> int:
+async def _run_review_spine(
+    config: RunConfig,
+    work: WorkContext,
+    mode: str,
+    *,
+    artifacts: ArtifactSession | None,
+    private_owner: PrivateWorkspaceOwner | None,
+    trajectory_route: TrajectoryOutputRoute | None,
+    capture: _RunWriteCapture | None,
+) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
@@ -5562,6 +5718,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         _default_backend_name,
         _open_recorder,
         _resolve_review_profile,
+        _RunArtifacts,
     )
 
     # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
@@ -5595,7 +5752,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         print_warning(console, f"No diff found -- nothing to {subject}")
         return 0
 
-    daydream_dir = target_dir / ".daydream"
+    daydream_dir = artifact_dir_for(target_dir)
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
@@ -5622,8 +5779,27 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         dd.mkdir(parents=True, exist_ok=True)
         diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
 
+    run_artifacts = (
+        _RunArtifacts(
+            session=artifacts,
+            owner=private_owner,
+            trajectory=trajectory_route,
+            capture=capture,
+            findings=None,
+            dump=None,
+        )
+        if artifacts is not None
+        and private_owner is not None
+        and trajectory_route is not None
+        and capture is not None
+        else None
+    )
     async with _open_recorder(
-        config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
+        config=config,
+        target_dir=target_dir,
+        work=work,
+        flow_kind=_flow_kind_for_mode(mode),
+        run_artifacts=run_artifacts,
     ):
         # Composition-root re-entry: resolution already happened in
         # ``_run_loop_deep`` before this recorder existed; this no-op resolve
@@ -5800,6 +5976,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
             work=work,
             registry=get_registry(),
             review_profile=config.review_profile,
+            private_workspace_owner=private_owner,
+            artifacts=artifacts,
             data={
                 "mode": mode,
                 "diff": bounded_diff,

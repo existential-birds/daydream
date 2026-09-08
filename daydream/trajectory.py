@@ -475,6 +475,10 @@ class RunWriteSnapshot:
 
 
 TrajectoryWriteCallback = Callable[["TrajectoryRecorder", RunWriteSnapshot], None]
+TrajectoryDocumentWriter = Callable[
+    [TrajectoryDocumentSnapshot, Literal["complete", "partial"]],
+    None,
+]
 
 
 @dataclass(frozen=True)
@@ -1367,13 +1371,20 @@ class _SignalFlushRegistry:
             documents=ordered,
         )
         for document in prepared:
-            if status == "complete":
-                atomic_write_json(document.path, json.loads(document.json_bytes))
-                continue
             try:
-                document.path.parent.mkdir(parents=True, exist_ok=True)
-                document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
+                if root.document_writer is not None:
+                    root.document_writer(document, status)
+                elif status == "complete":
+                    atomic_write_json(document.path, json.loads(document.json_bytes))
+                else:
+                    document.path.parent.mkdir(parents=True, exist_ok=True)
+                    document.path.write_text(
+                        document.json_bytes.decode("utf-8"),
+                        encoding="utf-8",
+                    )
             except Exception as exc:  # noqa: BLE001 - isolate every recorder write
+                if status == "complete":
+                    raise
                 print_warning(
                     _console,
                     f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
@@ -1436,6 +1447,7 @@ class _SignalFlushRegistry:
         document = root._prepare_document(
             status="complete",
             cutoff_at=cutoff_at,
+            allow_empty_root=root.document_writer is not None,
         )
         if document is None:
             return
@@ -2618,6 +2630,8 @@ class TrajectoryRecorder:
     target_dir: Path
     agent_model_name: str
     session_id: str
+    artifact_run_dir: Path | None = None
+    document_writer: TrajectoryDocumentWriter | None = None
     redactor: Redactor = field(default_factory=Redactor)
     steps: list[Step] = field(default_factory=list)
     parent: TrajectoryRecorder | None = None
@@ -2685,6 +2699,12 @@ class TrajectoryRecorder:
                     "Trajectory write failed",
                     f"{type(exc).__name__}: {exc}",
                 )
+                if exc_val is not None:
+                    exc_val.add_note(
+                        "trajectory finalization retained a secondary failure "
+                        f"({type(exc).__name__})"
+                    )
+                    return
                 raise SystemExit(2) from exc
             # Implicit/default path — degrade with warning per CORE-09 / D-11
             print_warning(
@@ -3115,9 +3135,17 @@ class TrajectoryRecorder:
         if identity is not None:
             identity_digest = hashlib.sha256(identity.fork_id.encode("utf-8")).hexdigest()
             slug = f"{slug[:80]}--{identity_digest}"
-        return (
-            self.target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / self.session_id / _TRAJECTORIES_SUBDIR / f"{slug}.json"
-        )
+        run_dir = self.artifact_run_dir
+        if run_dir is None:
+            run_dir = self.target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / self.session_id
+        return run_dir / _TRAJECTORIES_SUBDIR / f"{slug}.json"
+
+    def _logical_child_trajectory_ref(self, child_path: Path) -> str:
+        """Return a child path relative to the stable public ``.daydream`` root."""
+        if self.artifact_run_dir is not None:
+            relative = child_path.relative_to(self.artifact_run_dir)
+            return (Path(_RUNS_SUBDIR) / self.session_id / relative).as_posix()
+        return child_path.relative_to(self.target_dir / _DAYDREAM_DIRNAME).as_posix()
 
     def fork(
         self,
@@ -3136,10 +3164,6 @@ class TrajectoryRecorder:
         """Materialize one identified, start-stamped deterministic dispatch."""
         results: list[ObservationResult] = []
         for completed in dispatch._ordered_completed():
-            try:
-                relative_path = str(completed.path.relative_to(self.target_dir / _DAYDREAM_DIRNAME))
-            except ValueError:
-                relative_path = completed.path.name
             results.append(
                 ObservationResult(
                     content=f"Dispatched to {completed.identity.descriptor}",
@@ -3147,7 +3171,9 @@ class TrajectoryRecorder:
                         SubagentTrajectoryRef(
                             trajectory_id=completed.trajectory_id,
                             session_id=self.session_id,
-                            trajectory_path=relative_path,
+                            trajectory_path=self._logical_child_trajectory_ref(
+                                completed.path
+                            ),
                         )
                     ],
                 )
@@ -3266,7 +3292,10 @@ class TrajectoryRecorder:
         )
         if document is None:
             return
-        atomic_write_json(document.path, json.loads(document.json_bytes))
+        if self.document_writer is not None:
+            self.document_writer(document, "complete")
+        else:
+            atomic_write_json(document.path, json.loads(document.json_bytes))
         if registry is not None:
             registry.retain(document)
 
@@ -3285,25 +3314,39 @@ class TrajectoryRecorder:
         """Freeze one canonical document without performing any filesystem write."""
         steps = self.steps if status == "complete" else self._snapshot_in_flight_steps()
         if not steps:
-            if status != "partial" or self.parent is not None or not allow_empty_root:
+            if self.parent is not None or not allow_empty_root:
                 return None
-            # ATIF requires at least one Step. An early signal can arrive while
-            # child agents are already running but before the root has emitted a
-            # dispatch or agent Step. Represent the real host snapshot event as
-            # a system Step in the immutable partial only; do not mutate the live
-            # recorder or fabricate an agent invocation.
-            steps = [
-                Step(
-                    step_id=1,
-                    timestamp=cutoff_at,
-                    source="system",
-                    message="Daydream run snapshot",
-                    extra={
-                        "daydream_run_flow": self.run_flow.value,
-                        "host_event": "partial_snapshot",
-                    },
-                )
-            ]
+            if status == "partial":
+                # ATIF requires at least one Step. An early signal can arrive while
+                # child agents are already running but before the root has emitted a
+                # dispatch or agent Step. Represent the real host snapshot event as
+                # a system Step in the immutable partial only; do not mutate the live
+                # recorder or fabricate an agent invocation.
+                steps = [
+                    Step(
+                        step_id=1,
+                        timestamp=cutoff_at,
+                        source="system",
+                        message="Daydream run snapshot",
+                        extra={
+                            "daydream_run_flow": self.run_flow.value,
+                            "host_event": "partial_snapshot",
+                        },
+                    )
+                ]
+            else:
+                steps = [
+                    Step(
+                        step_id=1,
+                        timestamp=cutoff_at,
+                        source="system",
+                        message="Daydream host-only run snapshot",
+                        extra={
+                            "daydream_run_flow": self.run_flow.value,
+                            "host_event": "host_only_final_snapshot",
+                        },
+                    )
+                ]
         trajectory = self.build_trajectory(
             steps=list(steps),
             snapshot_at=cutoff_at if status == "partial" else None,
@@ -3392,8 +3435,20 @@ class TrajectoryRecorder:
             )
             if document is None:
                 return False
-            document.path.parent.mkdir(parents=True, exist_ok=True)
-            document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
+            try:
+                if self.document_writer is not None:
+                    self.document_writer(document, "partial")
+                else:
+                    document.path.parent.mkdir(parents=True, exist_ok=True)
+                    document.path.write_text(
+                        document.json_bytes.decode("utf-8"),
+                        encoding="utf-8",
+                    )
+            except Exception as exc:  # noqa: BLE001 - capture still receives prepared bytes
+                print_warning(
+                    _console,
+                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
+                )
             if self.on_write is not None:
                 snapshot = RunWriteSnapshot(
                     status="partial",
@@ -3462,6 +3517,8 @@ class _ForkCM:
             review_backend_name=self._parent.review_backend_name,
             fix_backend_name=self._parent.fix_backend_name,
             test_backend_name=self._parent.test_backend_name,
+            artifact_run_dir=self._parent.artifact_run_dir,
+            document_writer=self._parent.document_writer,
         )
         child.parent = self._parent
         child.descriptor = self._descriptor
@@ -3509,10 +3566,7 @@ class _ForkCM:
                     cost_usd=(child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None),
                 )
                 child.parent._folded_fork_totals = True
-                try:
-                    sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))
-                except ValueError:
-                    sibling_ref = child.path.name
+                sibling_ref = child.parent._logical_child_trajectory_ref(child.path)
                 phase = DaydreamPhase.FIX.value
                 for step in child.steps:
                     if step.extra is None:

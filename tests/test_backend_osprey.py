@@ -38,6 +38,47 @@ from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecord
 from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_terminal_envelope(
+    tmp_path: Path, sandbox: bool,
+) -> None:
+    import hashlib
+
+    from tests.harness.protocol_cli import install_protocol_cli
+
+    target = (tmp_path / "model cwd with spaces").resolve()
+    target.mkdir()
+    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
+    fixture = install_protocol_cli(tmp_path / "external fixture", "osprey")
+    allowed = str(target / "source.py")
+    backend = OspreyBackend(
+        model="fixture-model", osprey_binary=str(fixture.executable),
+        sandbox=sandbox, allowed_roots=[allowed] if sandbox else (),
+    )
+    prompt = "Inspect the committed source only."
+
+    events = [event async for event in backend.execute(target, prompt)]
+
+    observation = fixture.read_observations()[0]
+    assert observation["effective_cwd"] == str(target)
+    assert observation["inherited_cwd"] == str(target)
+    assert observation["stdin_bytes"] == 0
+    assert observation["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert observation["cwd_canaries"]["SOURCE_CANARY"] is True
+    assert observation["walk_truncated"] is False
+    argv = observation["argv"]
+    assert argv[:2] == ["agent", "--events-jsonl"]
+    assert ("--sandbox" in argv) is sandbox
+    if sandbox:
+        assert argv[argv.index("--allowed-root") + 1] == allowed
+    else:
+        assert "--allowed-root" not in argv
+    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
+    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
+    assert backend._transports == []
+
+
 def _stream(
     *events: dict[str, object], returncode: int = 0
 ) -> tuple[list[dict[str, object]], int]:

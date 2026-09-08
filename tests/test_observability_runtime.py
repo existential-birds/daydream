@@ -200,6 +200,37 @@ def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogC
     assert "REDACTED" in caplog.text
 
 
+def test_flag_valued_secret_env_vars_are_not_harvested_as_credentials() -> None:
+    """A boolean/numeric flag under a secret-named env var is not a credential.
+
+    Harvesting e.g. ``HERMES_REDACT_SECRETS=true`` as a literal secret
+    literal-replaced every ``true`` in span content, corrupting JSON payloads
+    (``{"ok":true}`` read back as ``{"ok":[REDACTED_CREDENTIAL]}``).
+    """
+    policy = PrivacyPolicy(environ={"HERMES_REDACT_SECRETS": "true", "LANGSMITH_API_KEY": "opaque-value"})
+    assert json.loads(policy.json({"ok": True})) == {"ok": True}
+    assert json.loads(policy.json({"flag": "true", "n": 1, "off": False})) == {"flag": "true", "n": 1, "off": False}
+    assert "opaque-value" not in policy.text("carries opaque-value inside")
+
+
+@pytest.mark.anyio
+async def test_run_spans_survive_flag_valued_secret_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real-path: trace_run builds its policy from the ambient environment, so a
+    flag-valued secret-named var must not corrupt the agent span's JSON output."""
+    monkeypatch.setenv("HERMES_REDACT_SECRETS", "true")
+    exporter = InMemorySpanExporter()
+    registry = Registry()
+    registry.register_trace_exporter("memory", lambda _: exporter)
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
+        with agent_scope("review", backend="pi", model="requested") as agent:
+            agent.output({"ok": True})
+        run.finish(0)
+    agent_span = next(
+        span for span in exporter.get_finished_spans() if (span.attributes or {}).get("daydream.span.kind") == "agent"
+    )
+    assert json.loads(str((agent_span.attributes or {})["traceloop.entity.output"])) == {"ok": True}
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("stall_during", ["export", "shutdown"])
 async def test_shutdown_deadline_is_total_and_shutdown_once(

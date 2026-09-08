@@ -155,6 +155,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
+    artifact_runtime_root: Path,
     silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -177,7 +178,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     captured: dict[str, Any] = {}
     worktree_path_at_dispatch: dict[str, Path] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any) -> int:
+    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
@@ -199,10 +200,12 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     assert exit_code == 0
     assert captured["is_ephemeral"] is True
     assert captured["head_sha"] == feat_sha
-    # The ephemeral worktree was placed under ``<source>/.daydream/worktrees/``.
-    assert str(worktree_path_at_dispatch["repo"]).startswith(
-        str(repo_with_origin / ".daydream" / "worktrees")
-    )
+    # The ephemeral worktree is a source-owned private operational worktree
+    # under the artifact-private base (``<base>/workspaces/<key>/operational``),
+    # disjoint from the repo-eligible tree — never under the public source.
+    private_base = artifact_runtime_root.parent
+    assert str(worktree_path_at_dispatch["repo"]).startswith(str(private_base / "workspaces"))
+    assert not worktree_path_at_dispatch["repo"].is_relative_to(repo_with_origin)
     # Cleanup: the worktree directory is removed after exit.
     if worktree_path_at_dispatch["repo"].exists():
         pytest.fail(
@@ -218,6 +221,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
+    artifact_runtime_root: Path,
     silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,7 +250,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any) -> int:
+    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
@@ -270,9 +274,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     # The ephemeral worktree was checked out at origin/feat/Y, NOT the local SHA.
     assert captured["is_ephemeral"] is True
     assert captured["head_sha"] == origin_sha
-    assert str(captured["repo"]).startswith(
-        str(repo_with_origin / ".daydream" / "worktrees")
-    )
+    assert str(captured["repo"]).startswith(str(artifact_runtime_root.parent / "workspaces"))
 
 
 # --- Test 4: --comment + no open PR ----------------------------------------
@@ -304,7 +306,7 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     )
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any) -> int:
+    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
         captured["output_mode"] = config.output_mode
@@ -365,7 +367,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any) -> int:
+    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         return 0
@@ -412,7 +414,7 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError guard into the deep flow.
     routed: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any) -> int:
+    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
         return 0

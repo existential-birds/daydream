@@ -15,6 +15,16 @@ from urllib.parse import unquote, urlsplit
 
 from daydream.trajectory import redact_structured_text, redact_value
 
+#: Values that mark a feature flag rather than a credential when they appear
+#: under a secret-named environment variable (e.g. ``SOME_AUTH=1`` or
+#: ``HERMES_REDACT_SECRETS=true``). Harvesting such a token as an operator
+#: secret literal-replaces it across all span content, corrupting JSON payloads
+#: (``{"ok":true}`` becomes ``{"ok":[REDACTED_CREDENTIAL]}``) while protecting
+#: nothing — a credential is never a bare boolean or numeric toggle.
+_FLAG_VALUE_TOKENS = frozenset(
+    {"true", "false", "yes", "no", "on", "off", "1", "0", "enabled", "disabled", "null", "none"}
+)
+
 
 class PrivacyPolicy:
     """Redact structured secrets and literal credentials known to the operator."""
@@ -23,7 +33,9 @@ class PrivacyPolicy:
         self.capture_content = capture_content
         secrets: set[str] = set()
         for name, value in (os.environ if environ is None else environ).items():
-            if value and re.search(r"(?:KEY|TOKEN|SECRET|PASSWORD|AUTH|HEADERS)", name, re.I):
+            if value and value.casefold() not in _FLAG_VALUE_TOKENS and re.search(
+                r"(?:KEY|TOKEN|SECRET|PASSWORD|AUTH|HEADERS)", name, re.I
+            ):
                 secrets.add(value)
                 if "HEADERS" in name:
                     for header in value.split(","):

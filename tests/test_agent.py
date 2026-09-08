@@ -1,5 +1,6 @@
 """Tests for daydream.agent module-level state accessors."""
 
+import os
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,301 @@ from daydream.agent import (
 from daydream.backends import DiagnosticEvent, ResultEvent
 from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
+from daydream.prompt_budget import (
+    SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES,
+    SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES,
+    SANCTIONED_EXACT_INPUT_MAX_FILES,
+    SANCTIONED_PHASE_INPUT_BUDGET_BYTES,
+    SanctionedInputTransport,
+    SanctionedInputUnavailable,
+    prepare_sanctioned_inputs,
+)
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
+
+
+def test_prepare_sanctioned_inputs_selects_transport_and_enforces_aggregate_bytes(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("x" * (SANCTIONED_PHASE_INPUT_BUDGET_BYTES - 2), encoding="utf-8")
+    second.write_text("¢", encoding="utf-8")
+
+    ordinary = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(
+        ordinary,
+        tmp_path,
+        {"zeta": second, "alpha": first},
+        read_only=False,
+    )
+    assert prepared.transport is SanctionedInputTransport.EXACT_PATHS
+    assert [item.label for item in prepared.inputs] == ["alpha", "zeta"]
+    assert all(item.payload_bytes is None for item in prepared.inputs)
+    assert str(first.resolve()) in prepared.render()
+    assert "x" * 100 not in prepared.render()
+
+    strict = ScriptedBackend(
+        audit_root_isolation="claude-pretooluse-v1",
+        audit_root=tmp_path.resolve(),
+    )
+    inline = prepare_sanctioned_inputs(
+        strict, tmp_path, {"alpha": first, "zeta": second}, read_only=True
+    )
+    assert inline.transport is SanctionedInputTransport.INLINE
+    assert "x" * 100 in inline.render()
+    assert str(first.resolve()) not in inline.render()
+    assert str(first.resolve()) not in inline.render_prompt(f"Read {first.resolve()}")
+    assert "sanctioned input 'alpha'" in inline.render_prompt(f"Read {first.resolve()}")
+
+    second.write_text("¢x", encoding="utf-8")
+    exact_over_inline = prepare_sanctioned_inputs(
+        ordinary,
+        tmp_path,
+        {"alpha": first, "zeta": second},
+        read_only=False,
+    )
+    assert exact_over_inline.transport is SanctionedInputTransport.EXACT_PATHS
+    with pytest.raises(SanctionedInputUnavailable, match="byte budget"):
+        prepare_sanctioned_inputs(
+            strict,
+            tmp_path,
+            {"alpha": first, "zeta": second},
+            read_only=True,
+        )
+
+
+def test_prepare_sanctioned_exact_inputs_enforces_resource_caps(tmp_path: Path) -> None:
+    backend = ScriptedBackend()
+    maximum = tmp_path / "maximum.txt"
+    maximum.write_bytes(b"x" * SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
+    assert prepare_sanctioned_inputs(
+        backend, tmp_path, {"maximum": maximum}, read_only=False
+    ).inputs[0].size == SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
+
+    maximum.write_bytes(b"x" * (SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1))
+    with pytest.raises(SanctionedInputUnavailable, match="file byte limit"):
+        prepare_sanctioned_inputs(
+            backend, tmp_path, {"maximum": maximum}, read_only=False
+        )
+
+    files: dict[str, Path] = {}
+    each = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // 4
+    for index in range(4):
+        path = tmp_path / f"aggregate-{index}.txt"
+        path.write_bytes(b"x" * each)
+        files[f"input-{index}"] = path
+    assert len(prepare_sanctioned_inputs(
+        backend, tmp_path, files, read_only=False
+    ).inputs) == 4
+    files["overflow"] = tmp_path / "overflow.txt"
+    files["overflow"].write_text("x", encoding="utf-8")
+    with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
+        prepare_sanctioned_inputs(backend, tmp_path, files, read_only=False)
+
+    same = tmp_path / "same.txt"
+    same.write_text("x", encoding="utf-8")
+    too_many = {
+        f"input-{index:03d}": same
+        for index in range(SANCTIONED_EXACT_INPUT_MAX_FILES + 1)
+    }
+    with pytest.raises(SanctionedInputUnavailable, match="file count"):
+        prepare_sanctioned_inputs(backend, tmp_path, too_many, read_only=False)
+
+
+def test_prepare_sanctioned_exact_inputs_bounds_aggregate_streaming_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aggregate refusal reads only the admitted bytes plus one look-ahead."""
+    backend = ScriptedBackend()
+    inputs: dict[str, Path] = {}
+    for index in range(5):
+        path = tmp_path / f"input-{index}.txt"
+        path.write_bytes(b"x" * SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
+        inputs[f"input-{index}"] = path
+
+    delegated_bytes = 0
+    real_read = os.read
+
+    def counted_read(fd: int, size: int) -> bytes:
+        nonlocal delegated_bytes
+        chunk = real_read(fd, size)
+        delegated_bytes += len(chunk)
+        return chunk
+
+    monkeypatch.setattr("daydream.prompt_budget.os.read", counted_read)
+
+    with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
+        prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
+
+    assert delegated_bytes <= SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES + 1
+    assert backend.call_count == 0
+
+
+def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry rejects growth without hashing beyond the aggregate ceiling."""
+    backend = ScriptedBackend()
+    inputs: dict[str, Path] = {}
+    admitted_size = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // 5
+    for index in range(5):
+        path = tmp_path / f"input-{index}.txt"
+        path.write_bytes(b"x" * admitted_size)
+        inputs[f"input-{index}"] = path
+    prepared = prepare_sanctioned_inputs(
+        backend,
+        tmp_path,
+        inputs,
+        read_only=False,
+    )
+    inputs["input-4"].write_bytes(b"x" * SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
+
+    delegated_bytes = 0
+    real_read = os.read
+
+    def counted_read(fd: int, size: int) -> bytes:
+        nonlocal delegated_bytes
+        chunk = real_read(fd, size)
+        delegated_bytes += len(chunk)
+        return chunk
+
+    monkeypatch.setattr("daydream.prompt_budget.os.read", counted_read)
+
+    with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
+        prepared.revalidate(backend, tmp_path, read_only=False)
+
+    assert delegated_bytes <= SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES + 1
+    assert backend.call_count == 0
+
+
+def test_prepare_sanctioned_inputs_rejects_invalid_utf8_and_symlinks(tmp_path: Path) -> None:
+    invalid = tmp_path / "invalid.txt"
+    invalid.write_bytes(b"\xff")
+    with pytest.raises(SanctionedInputUnavailable, match="UTF-8"):
+        prepare_sanctioned_inputs(
+            ScriptedBackend(), tmp_path, {"input": invalid}, read_only=False
+        )
+
+    regular = tmp_path / "regular.txt"
+    regular.write_text("safe", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(regular)
+    with pytest.raises(SanctionedInputUnavailable, match="regular file"):
+        prepare_sanctioned_inputs(
+            ScriptedBackend(), tmp_path, {"input": link}, read_only=False
+        )
+
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(SanctionedInputUnavailable, match="regular file"):
+        prepare_sanctioned_inputs(
+            ScriptedBackend(), tmp_path, {"input": fifo}, read_only=False
+        )
+
+
+@pytest.mark.anyio
+async def test_run_agent_revalidates_sanctioned_inputs_before_backend_entry(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(
+        backend, tmp_path, {"artifact": artifact}, read_only=False
+    )
+    artifact.write_text("mutated", encoding="utf-8")
+
+    with pytest.raises(SanctionedInputUnavailable, match="changed"):
+        await run_agent(
+            backend,
+            tmp_path,
+            "inspect",
+            phase=DaydreamPhase.REVIEW,
+            sanctioned_inputs=prepared,
+        )
+    assert backend.call_count == 0
+
+
+@pytest.mark.anyio
+async def test_run_agent_revalidates_sanctioned_input_before_retry(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+
+    class RetryableFailure(RuntimeError):
+        retryable = True
+
+    class MutatingBackend(ScriptedBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            async for event in super().execute(*args, **kwargs):
+                if self.call_count == 1:
+                    artifact.write_text("mutated", encoding="utf-8")
+                    raise RetryableFailure("retry")
+                yield event
+
+    backend = MutatingBackend(
+        retry_attempts=1,
+        retry_base_delay_s=0,
+        retry_max_delay_s=0,
+    )
+    prepared = prepare_sanctioned_inputs(
+        backend, tmp_path, {"artifact": artifact}, read_only=False
+    )
+
+    with pytest.raises(SanctionedInputUnavailable, match="changed"):
+        await run_agent(
+            backend,
+            tmp_path,
+            "inspect",
+            phase=DaydreamPhase.REVIEW,
+            sanctioned_inputs=prepared,
+        )
+    assert backend.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    backend = ScriptedBackend(sandbox=False)
+    prepared = prepare_sanctioned_inputs(
+        backend, tmp_path, {"artifact": artifact}, read_only=False
+    )
+    setattr(backend, "sandbox", True)
+
+    with pytest.raises(SanctionedInputUnavailable, match="transport mode changed"):
+        await run_agent(
+            backend,
+            tmp_path,
+            "inspect",
+            phase=DaydreamPhase.REVIEW,
+            sanctioned_inputs=prepared,
+        )
+    assert backend.call_count == 0
+
+
+def test_prepare_sanctioned_inputs_rejects_mismatched_strict_audit_root(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    backend = ScriptedBackend(
+        audit_root_isolation="claude-pretooluse-v1",
+        audit_root=other,
+    )
+    with pytest.raises(SanctionedInputUnavailable, match="audit root"):
+        prepare_sanctioned_inputs(
+            backend, tmp_path, {"artifact": artifact}, read_only=True
+        )
 
 
 def test_set_and_get_non_interactive() -> None:

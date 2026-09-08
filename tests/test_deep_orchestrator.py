@@ -1693,12 +1693,22 @@ async def test_fix_quality_gate_fail_open(
     and reason -- so the failure is auditable and can never read as a clean
     verdict (and it supersedes any stale verdict for the current round).
     """
-    def _boom(*_args: object, **_kwargs: object) -> dict[str, Any]:
-        raise RuntimeError("analyzer down")
+    from daydream.eval import analyzer as analyzer_mod
+
+    real_analyze = analyzer_mod.analyze_quality
+
+    def _boom(
+        daydream_dir: Path,
+        candidate_paths: set[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if candidate_paths is not None:
+            raise RuntimeError("analyzer down")
+        return real_analyze(daydream_dir, candidate_paths, **kwargs)
 
     from daydream.config_file import DaydreamFileConfig
 
-    monkeypatch.setattr("daydream.eval.analyzer.analyze_quality", _boom)
+    monkeypatch.setattr(analyzer_mod, "analyze_quality", _boom)
     exit_code = await _run_quality_gate_fixture(
         multi_stack_target,
         monkeypatch,
@@ -1897,8 +1907,12 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
 
     real_analyze = analyzer_mod.analyze_quality
 
-    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None) -> dict[str, Any]:
-        result = real_analyze(daydream_dir, candidate_paths)
+    def _stub(
+        daydream_dir: Any,
+        candidate_paths: set[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        result = real_analyze(daydream_dir, candidate_paths, **kwargs)
         if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
             result["per_file"] = {
                 rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"
@@ -2109,9 +2123,13 @@ async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
     real_analyze = analyzer_mod.analyze_quality
     calls: list[set[str] | None] = []
 
-    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None) -> dict[str, Any]:
+    def _stub(
+        daydream_dir: Any,
+        candidate_paths: set[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         calls.append(candidate_paths)
-        return real_analyze(daydream_dir, candidate_paths)
+        return real_analyze(daydream_dir, candidate_paths, **kwargs)
 
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
 
@@ -2930,9 +2948,9 @@ async def test_confirmed_intent_reaches_fix_prompt(
 
     Real-path through ``runner.run`` to the fix gate (``assume="yes"``). The PR
     body carries ``INTENT_SENTINEL``; the stub's intent branch echoes it into
-    the confirmed-intent file (intent_p), and the fix phase must inline that
-    file's text plus the "don't undo deliberate intent" rule into each fix
-    prompt. Asserts on observable fix-prompt content, not that a call happened.
+    the confirmed-intent file (intent_p). The ordinary unrestricted backend
+    receives that one exact private file path plus the "don't undo deliberate
+    intent" rule, rather than duplicating its bytes in the base prompt.
     """
     from daydream.runner import run
 
@@ -2943,7 +2961,44 @@ async def test_confirmed_intent_reaches_fix_prompt(
         "daydream.git_ops.gh_pr_view",
         lambda repo, pr=None: {"body": INTENT_SENTINEL},
     )
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    observed_intent: list[str] = []
+
+    class _IntentReadingStub(_StubBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+        ) -> AsyncIterator[AgentEvent]:
+            if prompt.lower().startswith(("fix this issue", "fix these")):
+                intent_ref = next(
+                    line.removeprefix("- intent: ")
+                    for line in prompt.splitlines()
+                    if line.startswith("- intent: ")
+                )
+                observed_intent.append(Path(intent_ref).read_text(encoding="utf-8"))
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+            ):
+                yield event
+
+    stub = _IntentReadingStub(multi_stack_target)
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: stub,
+    )
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
 
     rc = await run(
@@ -2959,7 +3014,11 @@ async def test_confirmed_intent_reaches_fix_prompt(
     fix_prompts = _fix_prompts(stub)
     assert fix_prompts, "expected at least one fix prompt"
     joined = "\n".join(fix_prompts)
-    assert INTENT_SENTINEL in joined
+    assert INTENT_SENTINEL not in joined
+    assert observed_intent
+    assert all(INTENT_SENTINEL in body for body in observed_intent)
+    assert "- intent:" in joined
+    assert "/live/.daydream/deep/intent.md" in joined
     low = joined.lower()
     assert "deliberate" in low and ("do not" in low or "don't" in low)
 
@@ -3207,7 +3266,7 @@ async def test_no_pr_body_degrades_cleanly(
     assert "pull request description" not in intent.lower()
     assert "diff --git" in intent  # inlined, not pointed at
     assert "do NOT re-Read" in intent
-    assert ".daydream/diff.patch" in intent
+    assert ".daydream/diff.patch" not in intent  # inlined: private path must not leak
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
     _assert_authoritative_rule_gated(stub, expect_present=False)
@@ -6646,6 +6705,209 @@ async def test_environmental_failure_aborts_heal_loop(
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
 
 
+@pytest.mark.parametrize(
+    ("trajectory_mode", "response_kind"),
+    [
+        pytest.param("default", "clean", id="default-clean"),
+        pytest.param("custom-public", "clean", id="custom-public-clean"),
+        pytest.param("external", "clean", id="external-clean"),
+        pytest.param("default", "known-leaf", id="default-known-leaf-normalized"),
+        pytest.param(
+            "custom-public",
+            "known-leaf",
+            id="custom-public-known-leaf-normalized",
+        ),
+        pytest.param("external", "known-leaf", id="external-known-leaf-normalized"),
+        pytest.param("default", "unknown-private", id="unknown-private-fallback"),
+    ],
+)
+async def test_ephemeral_failure_handoff_projects_public_refs_without_private_paths(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    artifact_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+    trajectory_mode: str,
+    response_kind: str,
+) -> None:
+    """The real runner reads live bytes and persists only durable handoff paths."""
+    _silence(monkeypatch, prompts=False)
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    summarizer_observations: list[dict[str, str]] = []
+    private_partial_payloads: list[bytes] = []
+
+    class _HandoffReadingStub(_StubBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+        ) -> AsyncIterator[AgentEvent]:
+            if (
+                response_kind == "unknown-private"
+                and "run the project's test suite" in prompt.lower()
+            ):
+                self.test_suite_calls += 1
+                yield TextEvent(
+                    text=f"1 failed at {cwd / '.daydream' / 'unreported.log'}"
+                )
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
+            if "read-only failure-summarizer" in prompt.lower():
+                private_partial = Path(
+                    next(
+                        line.removeprefix("- trajectory-partial: ")
+                        for line in prompt.splitlines()
+                        if line.startswith("- trajectory-partial: ")
+                    )
+                )
+                partial_payload = json.loads(private_partial.read_text(encoding="utf-8"))
+                changed_relative = Path(".daydream-heal-fix-applied")
+                changed_body = (cwd / changed_relative).read_text(encoding="utf-8")
+                sanctioned_header = "Sanctioned phase inputs (read only these exact files):"
+                rendered_lines = prompt.splitlines()
+                sanctioned_index = rendered_lines.index(sanctioned_header)
+                sanctioned: dict[str, Path] = {}
+                for line in rendered_lines[sanctioned_index + 1 :]:
+                    if not line.startswith("- "):
+                        break
+                    label, path = line.removeprefix("- ").split(": ", 1)
+                    sanctioned[label] = Path(path)
+                assert sanctioned["trajectory-partial"] == private_partial
+                assert all(path.is_file() for path in sanctioned.values())
+                future_trajectory = next(
+                    line.removeprefix("- trajectory: ")
+                    for line in prompt.splitlines()
+                    if line.startswith("- trajectory: ")
+                )
+                future_children = next(
+                    line.removeprefix("- sub-trajectories: ")
+                    for line in prompt.splitlines()
+                    if line.startswith("- sub-trajectories: ")
+                )
+                model_body = (
+                    "# Daydream handoff\n\nHANDOFF_STRUCTURED_SUCCESS\n\n"
+                    "## Artifacts\n\n"
+                    f"- trajectory: {future_trajectory}\n"
+                    f"- sub-trajectories: {future_children}\n\n"
+                    "## Changed files\n\n"
+                    f"- {multi_stack_target / changed_relative}\n"
+                )
+                if response_kind == "known-leaf":
+                    model_body += f"\nExact evidence: {private_partial}\n"
+                elif response_kind == "unknown-private":
+                    model_body += f"\nUnknown evidence: {private_partial}.unknown\n"
+                private_partial_payloads.append(private_partial.read_bytes())
+                summarizer_observations.append(
+                    {
+                        "private_partial": str(private_partial),
+                        "cwd": str(cwd),
+                        "session_id": str(partial_payload["session_id"]),
+                        "changed_body": changed_body,
+                        "prompt": prompt,
+                        "future_trajectory": future_trajectory,
+                        "future_children": future_children,
+                        "model_body": model_body,
+                    }
+                )
+                yield ResultEvent(
+                    structured_output={"handoff_prompt": model_body},
+                    continuation=None,
+                )
+                return
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+            ):
+                yield event
+
+    stub = _HandoffReadingStub(multi_stack_target)
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: stub,
+    )
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    stub.fail_all_test_runs = True
+    mute_side_effects(heal=False)
+    _add_bare_remote(multi_stack_target)
+
+    from daydream.runner import run
+
+    trajectory_path = (
+        tmp_path / "external trajectory.json"
+        if trajectory_mode == "external"
+        else multi_stack_target / ".daydream" / "custom trajectory.json"
+        if trajectory_mode == "custom-public"
+        else None
+    )
+    config = make_config(
+        multi_stack_target,
+        assume="yes",
+        output_mode="loop",
+        force_worktree=True,
+        trajectory_path=trajectory_path,
+    )
+    exit_code = await run(config)
+
+    assert exit_code != 0
+    handoffs = list(multi_stack_target.glob(".daydream/runs/*/handoff.md"))
+    assert len(handoffs) == 1
+    body = handoffs[0].read_text(encoding="utf-8")
+    public_run = handoffs[0].parent
+    expected_trajectory = (
+        trajectory_path if trajectory_path is not None else public_run / "trajectory.json"
+    )
+    expected_partial = expected_trajectory.with_suffix(
+        expected_trajectory.suffix + ".partial"
+    )
+    assert str(expected_trajectory) in body
+    assert expected_trajectory.is_file()
+    assert str(artifact_runtime_root.parent) not in body
+    assert len(summarizer_observations) == 1
+    observation = summarizer_observations[0]
+    assert observation["changed_body"] == "healed\n"
+    assert observation["session_id"] == handoffs[0].parent.name
+    if trajectory_mode == "external":
+        assert observation["private_partial"] == str(
+            expected_trajectory.with_suffix(".json.partial")
+        )
+    else:
+        assert str(artifact_runtime_root.parent) in observation["private_partial"]
+    assert "Future handoff links (not readable evidence during this turn)" in observation["prompt"]
+    assert "## On-disk artifacts (read these first" not in observation["prompt"]
+    assert "- .daydream-heal-fix-applied" in observation["prompt"]
+    assert str(multi_stack_target / ".daydream-heal-fix-applied") in observation["prompt"]
+    assert observation["future_children"] == str(public_run / "trajectories")
+    private_partial = observation["private_partial"]
+    if response_kind == "clean":
+        assert body == observation["model_body"]
+    elif response_kind == "known-leaf":
+        assert body == observation["model_body"].replace(
+            private_partial,
+            str(expected_partial),
+        )
+        assert expected_partial.is_file()
+        assert expected_partial.read_bytes() == private_partial_payloads[0]
+    else:
+        assert "HANDOFF_STRUCTURED_SUCCESS" not in body
+        assert "Tests did not report success" in body
+        assert "[TRANSIENT_PATH]/.daydream/unreported.log" in body
+    if trajectory_mode != "external":
+        assert private_partial not in body
+    assert observation["cwd"] not in body
+
+
 def _install_accept_gate_pipeline(
     monkeypatch: pytest.MonkeyPatch, target: Path, mute: Mute
 ) -> _StubBackend:
@@ -7215,7 +7477,16 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     ]
     assert structural_prompts, "expected a structural review prompt"
     assert "Read it directly" in structural_prompts[0]
-    assert diff_path_str in structural_prompts[0]
+    structural_diff_lines = [
+        line
+        for line in structural_prompts[0].splitlines()
+        if line.startswith("- diff: ")
+    ]
+    assert len(structural_diff_lines) == 1
+    structural_diff = Path(structural_diff_lines[0].removeprefix("- diff: "))
+    assert structural_diff.is_file()
+    assert structural_diff.name == "diff.patch"
+    assert diff_path_str not in structural_prompts[0]
 
 
 async def test_ac6_single_stack_merged_items_carry_structural_lens(
@@ -7290,6 +7561,148 @@ async def test_ac_fix_resume_on_tiny_diff(
     assert rc == 0
     fix_prompts = [c for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
     assert fix_prompts, "fix loop did not run on --start-at fix resume"
+
+
+async def test_host_only_merge_resume_publishes_and_archives_system_root(
+    tmp_path: Path,
+    archive_dir: Path,
+    ext_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """A registered host-only merge retains its output through real finalization."""
+    from daydream import runner
+    from daydream.atif import validate as atif_validate
+
+    target = tmp_path / "host-only-merge"
+    target.mkdir()
+    (target / "README.md").write_text("# host-only fixture\n", encoding="utf-8")
+    _init_repo(target)
+    _git(target, "add", ".")
+    _commit(target, "initial")
+    _git(target, "checkout", "-b", "feature")
+    (target / "README.md").write_text(
+        "# host-only fixture\n\nchanged\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", ".")
+    _commit(target, "change")
+
+    host_payload = {
+        "items": [
+            {
+                "id": 1,
+                "description": "deterministic host-only finding",
+            }
+        ]
+    }
+    expected_items = (json.dumps(host_payload, indent=2) + "\n").encode()
+    ext_dir.write_module(
+        "import json\n"
+        "from daydream.extensions import FlowStep\n"
+        "\n"
+        "async def _host_only_merge(ctx):\n"
+        "    from daydream.artifact_visibility import artifact_dir_for\n"
+        "    from daydream.trajectory import DaydreamPhase, phase_scope\n"
+        "    async with phase_scope(DaydreamPhase.MERGE, stage='host-only-fixture'):\n"
+        "        deep = artifact_dir_for(ctx.work.repo) / 'deep'\n"
+        "        deep.mkdir(parents=True, exist_ok=True)\n"
+        "        payload = {\n"
+        "            'items': [\n"
+        "                {\n"
+        "                    'id': 1,\n"
+        "                    'description': 'deterministic host-only finding',\n"
+        "                }\n"
+        "            ]\n"
+        "        }\n"
+        "        (deep / 'merged-items.json').write_text(\n"
+        "            json.dumps(payload, indent=2) + '\\n', encoding='utf-8'\n"
+        "        )\n"
+        "\n"
+        "def register(registry):\n"
+        "    registry.register_phase(\n"
+        "        FlowStep(name='host-only-merge-fixture', run=_host_only_merge)\n"
+        "    )\n"
+        "    registry.set_flow('host-only-flow', ['host-only-merge-fixture'])\n"
+    )
+
+    def fail_backend_construction(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("host-only flow must not construct a backend")
+
+    monkeypatch.setattr(runner, "create_backend", fail_backend_construction)
+
+    rc = await runner.run(
+        make_config(
+            target,
+            flow_name="host-only-flow",
+            archive=True,
+            run_eval=False,
+        )
+    )
+
+    public_items = target / ".daydream" / "deep" / "merged-items.json"
+    public_runs = list((target / ".daydream" / "runs").glob("*"))
+    archived_runs = list((archive_dir / "runs").glob("*"))
+    assert (
+        rc == 0
+        and public_items.is_file()
+        and len(public_runs) == 1
+        and len(archived_runs) == 1
+    ), (
+        rc,
+        public_items.is_file(),
+        len(public_runs),
+        len(archived_runs),
+    )
+
+    public_run = public_runs[0]
+    archived_run = archived_runs[0]
+    assert public_run.name == archived_run.name
+    assert public_items.read_bytes() == expected_items
+    assert (archived_run / "deep" / "merged-items.json").read_bytes() == expected_items
+
+    public_trajectory = public_run / "trajectory.json"
+    archived_trajectory = archived_run / "trajectory.json"
+    assert public_trajectory.read_bytes() == archived_trajectory.read_bytes()
+    trajectory = json.loads(public_trajectory.read_bytes())
+    assert atif_validate(trajectory, validate_images=False)
+    assert trajectory["session_id"] == trajectory["trajectory_id"] == public_run.name
+    assert trajectory["steps"] == [
+        {
+            "step_id": 1,
+            "timestamp": trajectory["extra"]["run_ended_at"],
+            "source": "system",
+            "message": "Daydream host-only run snapshot",
+            "extra": {
+                "daydream_run_flow": "custom",
+                "host_event": "host_only_final_snapshot",
+            },
+        }
+    ]
+    assert trajectory["final_metrics"] == {"total_steps": 1}
+    assert not trajectory["agent"].get("model_name")
+    assert trajectory["extra"].get("subtrajectories", []) == []
+
+    merge_events = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "merge"
+    ]
+    assert [event["event"] for event in merge_events] == [
+        "phase_start",
+        "phase_end",
+    ]
+    assert all(event["session_id"] == public_run.name for event in merge_events)
+    assert merge_events[0]["scope_id"] == merge_events[1]["scope_id"]
+    assert all(
+        event["metadata"] == {"stage": "host-only-fixture"}
+        for event in merge_events
+    )
+    assert merge_events[-1]["status"] == "succeeded"
+
+    manifest = json.loads((archived_run / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["archive_status"] == "complete"
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
 
 
 async def test_ac_merge_resume_on_tiny_diff(
