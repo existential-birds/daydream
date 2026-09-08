@@ -59,8 +59,18 @@ class NoCIRemote:
                 poll_seconds=0.01,
                 # Real Git/gh subprocess startup under parallel CI exhausted
                 # a 5-second window; retain this loaded-host safety margin.
-                discovery_seconds=15,
-                completion_seconds=20,
+                # Two concurrent 16-worker pytest runs (e.g. overlapping
+                # pre-push gates on one host) exhausted even 15s: the
+                # seeding threads starve behind 32 saturated workers and
+                # the run reports "missing" CI for an evidence payload
+                # that arrives moments later. 45s covers the worst
+                # observed starvation with room to spare; a genuinely
+                # broken harness still fails fast enough for CI.
+                # completion >= discovery is a RemoteCILimits invariant;
+                # the completion window itself is inert here because the
+                # fake gh serves final no-CI evidence during discovery.
+                discovery_seconds=45,
+                completion_seconds=90,
                 request_seconds=10,
             ),
         )

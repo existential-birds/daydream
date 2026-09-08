@@ -12,6 +12,7 @@ import anyio
 import pytest
 
 import daydream.trajectory as trajectory_module
+from daydream import remote_ci
 from daydream.atif import Step
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
@@ -822,7 +823,12 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
         "daydream.runner.create_backend", lambda *args, **kwargs: backend
     )
 
-    with anyio.fail_after(30):
+    # Preserve the work watchdog in addition to the separately bounded remote-CI
+    # wait. The outer bound must scale with the no-CI harness discovery window:
+    # the run cannot conclude CI verification inside a fixed 30s when the
+    # harness margins widen (same precedent as test_deep_orchestrator.py's
+    # budget test).
+    with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
         exit_code = await run(
             make_config(
                 target,
