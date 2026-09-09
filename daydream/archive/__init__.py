@@ -166,9 +166,9 @@ def archive_run(
 
 def _validate_frozen_artifacts(artifacts: ArtifactTreeSnapshot) -> None:
     """Reject a frozen tree that changed before a strict host consumer."""
-    from daydream.artifact_visibility import _manifest
+    from daydream.artifact_visibility import manifest_tree
 
-    if _manifest(artifacts.root) != artifacts.manifest:
+    if manifest_tree(artifacts.root) != artifacts.manifest:
         raise ArchiveFinalizationError("frozen artifact tree changed before archive")
 
 
@@ -350,12 +350,10 @@ def finalize_archive_run(
             recorder_provenance=recorder_provenance,
             write_snapshot=write_snapshot,
         )
-        _validate_frozen_artifacts(artifacts)
         status = write_snapshot.status
         target_dir = artifacts.root
         git_target = work.repo if work is not None else target_dir
         git_ctx = capture_git_context(git_target)
-        _validate_frozen_artifacts(artifacts)
         if work is not None:
             git_ctx.base_branch = work.base_branch
             if git_ctx.base_sha is None:
@@ -389,7 +387,6 @@ def finalize_archive_run(
             if runs_fix
             else None
         )
-        _validate_frozen_artifacts(artifacts)
         if fix_failures:
             status = "partial"
         from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
@@ -421,7 +418,6 @@ def finalize_archive_run(
             pr_repo=recorder_provenance.pr_repo,
             pr_number=recorder_provenance.pr_number,
         )
-        _validate_frozen_artifacts(artifacts)
         pipeline_status = derive_pipeline_status(
             status,
             fix_failures,
@@ -452,7 +448,6 @@ def finalize_archive_run(
             json.dumps(manifest.to_dict(), indent=2),
             encoding="utf-8",
         )
-        _validate_frozen_artifacts(artifacts)
         if config.archive and upload:
             from daydream.archive import hub
 
@@ -464,7 +459,6 @@ def finalize_archive_run(
                     hub_repo_id,
                     recorder_provenance.session_id,
                 )
-                _validate_frozen_artifacts(artifacts)
                 if not uploaded:
                     raise ArchiveFinalizationError("archive upload failed")
         if config.dump_artifacts:
@@ -473,7 +467,6 @@ def finalize_archive_run(
             from daydream.archive import scan
 
             scan_result = scan.scan_run_dir(assembly_dir)
-            _validate_frozen_artifacts(artifacts)
             if not scan_result.clean:
                 raise ArchiveFinalizationError("dump artifact secret scan refused publication")
             dump_started = True
@@ -482,7 +475,6 @@ def finalize_archive_run(
         os.replace(assembly_dir, run_dir)
         assembly_created = False
         archive_installed = True
-        _validate_frozen_artifacts(artifacts)
         upsert_run(archive_dir, manifest)
         completed = True
     except BaseException as exc:

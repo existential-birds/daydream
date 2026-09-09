@@ -48,6 +48,7 @@ from daydream.archive.hydrate_rules import (
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
+from daydream.json_utils import atomic_write_json
 from daydream.trajectory import redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -542,14 +543,7 @@ class IngestResult:
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write ``payload`` to ``path`` atomically (temp file + rename); fatal on failure."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+    atomic_write_json(path, payload)
 
 
 def _utc_now() -> str:

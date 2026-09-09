@@ -41,12 +41,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
 from daydream.archive import get_archive_dir
+from daydream.json_utils import atomic_write_json
 from daydream.training import gate as gate_mod
 from daydream.training import stacks
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
@@ -133,11 +133,8 @@ class PipelineConfig:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write JSON atomically: temp file in the same directory, then rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    os.replace(tmp, path)
+    """Write JSON atomically via the shared crash-safe primitive."""
+    atomic_write_json(path, payload, sort_keys=True)
 
 
 def _file_digest(path: Path) -> str:
