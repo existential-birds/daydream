@@ -8,6 +8,7 @@ unavailable.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -3183,6 +3184,61 @@ def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) 
     # No "pr-create" response configured → the shim exits non-zero.
     with pytest.raises(GitError):
         git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")
+
+
+# --- gh_file_at_ref (issue #1167) -------------------------------------------
+
+_FILE_AT_REF_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_gh_file_at_ref_reads_a_nested_path_outside_any_checkout(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
+    """The poster's cwd need not be a git repository, let alone this repository."""
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/contents/src/deep/a%20b.py",
+        value={
+            "type": "file",
+            "path": "src/deep/a b.py",
+            "sha": "c" * 40,
+            "encoding": "base64",
+            "content": base64.b64encode(b"VALUE = 1\n").decode(),
+        },
+    )
+
+    content = git_ops.gh_file_at_ref(tmp_path, "o/r", _FILE_AT_REF_SHA, "src/deep/a b.py")
+
+    assert content == b"VALUE = 1\n"
+    endpoints = [call.endpoint for call in fake_gh.calls("GET")]
+    assert endpoints == [f"repos/o/r/contents/src/deep/a%20b.py?ref={_FILE_AT_REF_SHA}"]
+
+
+@pytest.mark.parametrize(
+    ("slug", "ref", "path"),
+    [
+        ("o", _FILE_AT_REF_SHA, "a.py"),
+        ("../o/r", _FILE_AT_REF_SHA, "a.py"),
+        ("o/r", "main", "a.py"),
+        ("o/r", _FILE_AT_REF_SHA, "../../etc/passwd"),
+        ("o/r", _FILE_AT_REF_SHA, "/etc/passwd"),
+        ("o/r", _FILE_AT_REF_SHA, "a.py\n"),
+    ],
+)
+def test_gh_file_at_ref_rejects_unsafe_arguments_before_any_request(
+    fake_gh: FakeGh, tmp_path: Path, slug: str, ref: str, path: str
+) -> None:
+    """Slug, ref, and the model-derived path all become endpoint text."""
+    with pytest.raises(GitError):
+        git_ops.gh_file_at_ref(tmp_path, slug, ref, path)
+    assert fake_gh.process_calls() == []
+
+
+def test_gh_file_at_ref_rejects_a_directory_response(fake_gh: FakeGh, tmp_path: Path) -> None:
+    fake_gh.set_response("GET", "repos/o/r/contents/src", value=[{"type": "file", "path": "src/a.py"}])
+
+    with pytest.raises(GitError, match="does not name a file"):
+        git_ops.gh_file_at_ref(tmp_path, "o/r", _FILE_AT_REF_SHA, "src")
 
 
 def test_log_shas_returns_none_when_ref_is_gone(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

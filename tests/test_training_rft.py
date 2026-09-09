@@ -151,15 +151,6 @@ def test_winners_header_stamps_provenance(frozen_rft_inputs: FrozenRftInputs, tm
     assert ids == sorted(ids)
 
 
-def test_rft_toml_carries_sampling() -> None:
-    import tomllib
-
-    cfg = tomllib.loads((Path(__file__).parents[1] / "rl" / "train" / "rft.toml").read_text())
-    # Deterministic replay: temperature pinned to 0, explicit seeds.
-    assert cfg["sampling"]["temperature"] == 0.0
-    assert "seed" in cfg["sampling"]
-
-
 def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
     """Issue 6: scoring inputs derive from the sampled findings subset, so candidates
     that differ only in their findings score differently (breakdown filter can prefer

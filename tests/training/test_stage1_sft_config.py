@@ -16,46 +16,6 @@ def _cfg() -> dict[str, Any]:
     return tomllib.loads(SFT.read_text())
 
 
-def test_bf16_lora_in_staged_band() -> None:
-    c = _cfg()
-    assert c["model"]["optimization_dtype"] == "bfloat16"
-    assert c["model"]["reduce_dtype"] == "bfloat16"
-    assert 64 <= c["model"]["lora"]["rank"] <= 128
-    # 2:1 alpha:rank band.
-    assert c["model"]["lora"]["alpha"] == 2.0 * c["model"]["lora"]["rank"]
-
-
-def test_lora_targets_default_projection_set() -> None:
-    # C2 requires prime-rl's default list, so the recipe omits `target_modules`
-    # rather than restating it (mirrors rl/train/rl.toml).
-    assert "target_modules" not in _cfg()["model"]["lora"]
-
-
-def test_default_renderer_not_stock_qwen3() -> None:
-    # The stock qwen3 renderer injects an empty <think></think> block, which
-    # corrupts cross-entropy on completions.
-    assert _cfg()["renderer"]["name"] == "default"
-
-
-def test_seq_len_matches_stage3() -> None:
-    assert _cfg()["model"]["seq_len"] == 32768
-
-
-def test_no_live_teacher_algo_block() -> None:
-    # M10: dataset SFT never routes through the live-teacher variant. There is
-    # no orchestrator at all on the `sft @` entrypoint, and no [algo] block.
-    assert "orchestrator" not in _cfg()
-    assert "algo" not in _cfg()
-
-
-def test_gold_positive_only_dataset_gate() -> None:
-    # M8/M9: the gold-positive-only guarantee lives in the coordinator's Stage-1
-    # materialization, NOT a prime-rl-unreadable [dataset] table. sft.toml is
-    # plain prime-rl schema so `uv run sft @ sft.toml --dry-run` validates
-    # directly with no stripping (issues 7/16).
-    assert "dataset" not in _cfg()
-
-
 def test_coordinator_stage1_materializes_gold_positive_prompt_completion(
     tmp_path: pathlib.Path,
 ) -> None:

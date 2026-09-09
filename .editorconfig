@@ -1,5 +1,4 @@
 # EditorConfig — https://editorconfig.org
-# Contract test: tests/contract/test_editorconfig_contract.py
 root = true
 
 [*]

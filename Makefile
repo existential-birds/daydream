@@ -78,7 +78,15 @@ lockcheck:
 
 # Run all CI checks locally: lockcheck and the root uv sync --all-extras install
 # step first (both before any uv run heals the lock), matching ci.yml's check job.
-check: lockcheck install lint deadcode typecheck test actionlint rl-check coverage-report
+#
+# `rl-check` is deliberately NOT a dependency, mirroring that job: the standalone
+# RL project is separately locked and has its own ci.yml job (own runner, own
+# `uv sync`, Python 3.12), and one of its e2e tests drives the real `claude` CLI
+# — present on a developer machine, absent on that runner, where the test's own
+# `shutil.which` guard skips it. As a `check` dependency it therefore failed the
+# pre-push gate on changes that never touch rl/. Run `make rl-check` when you
+# change rl/daydream_review_v1; its vulture scan still runs here via `deadcode`.
+check: lockcheck install lint deadcode typecheck test actionlint coverage-report
 
 # Install git hooks
 hooks:

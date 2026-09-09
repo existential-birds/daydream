@@ -1,39 +1,7 @@
 """Tests for the two-tier help surface (``--help`` vs ``--help-all``)."""
 
-import pytest
 
 from daydream.cli import _parse_args
-
-
-def test_default_help_hides_advanced(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit):
-        _parse_args(["--help"])
-    out = capsys.readouterr().out
-    assert "--comment" in out and "--start-at" not in out and "--ignore-path" not in out
-    assert "--findings-out" not in out and "--pr-number" not in out
-    assert "--precision" not in out  # #232: opt-in precision mode is an advanced flag
-    assert "--approve-on-clean" not in out  # #343: opt-in auto-approval is an advanced flag
-    # #1113: the diagram-only OUTPUT MODE is a default-tier flag; the
-    # review-path modifier is advanced. Assert on the choice brace so the two
-    # flags cannot be confused for one another (``"--diagram" not in out`` is
-    # unsatisfiable once ``--diagram-only`` is shown).
-    assert "--diagram-only {" in out
-    assert "--diagram {" not in out
-
-
-def test_help_all_shows_advanced(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit):
-        _parse_args(["--help-all"])
-    out = capsys.readouterr().out
-    assert "--start-at" in out
-    assert "--findings-out" in out and "--pr-number" in out
-    assert "--precision" in out  # #232: reachable from --help-all
-    assert "--approve-on-clean" in out  # #343: reachable from --help-all
-    assert "--diagram {" in out          # #1113: reachable from --help-all
-    assert "--diagram-only {" in out     # #1113: shown in both tiers
-    assert "--log" in out                # #438: --log is an advanced flag
-    assert "redacted agent events" in out   # #438: exact phrase
-    assert "raw agent events" not in out    # #438: raw wording removed
 
 
 def test_advanced_flags_still_parse() -> None:

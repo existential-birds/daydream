@@ -2,6 +2,11 @@
 #
 # Pre-push hook: verify signed commits, then run the full local CI gate (make check).
 #
+# `make check` deliberately excludes `rl-check` (see the Makefile): the RL
+# project has its own ci.yml job, and one of its e2e tests drives the real
+# `claude` CLI that the job's runner never installs. Run `make rl-check` by hand
+# when you change rl/daydream_review_v1.
+#
 # Install with: make hooks
 #
 set -euo pipefail

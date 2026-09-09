@@ -18,6 +18,7 @@ diagram-only run posts an issue comment and never a review. Regression (c)
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from collections.abc import Callable
@@ -362,6 +363,70 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     assert len(posted) == 1
     assert expected in posted[0]["body"]
     assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
+
+
+async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    diagram_run: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1167: the shipped post workflow holds the token, never the code.
+
+    Phase B runs from a directory that is not a repository at all, so head
+    evidence for every citation comes from the contents API at the same SHA.
+    """
+    target = dr.build_branch_heavy_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+    artifact_path = tmp_path / "findings.json"
+
+    exit_code, _ = await diagram_run(
+        target,
+        diagram="flowchart",
+        specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path),
+        pr_number=7,
+    )
+
+    assert exit_code == 0
+    expected = _artifact(target)["results"]["flowchart"]["mermaid"]
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    head_sha = artifact["head_sha"]
+    fake_gh.set_response(
+        "GET",
+        "repos/acme/widgets/contents/app/pipeline.py",
+        value={
+            "type": "file",
+            "path": "app/pipeline.py",
+            "sha": "d" * 40,
+            "encoding": "base64",
+            "content": base64.b64encode(git_ops.show(target, head_sha, "app/pipeline.py")).decode(),
+        },
+    )
+
+    no_checkout = tmp_path / "runner-workspace"
+    no_checkout.mkdir()
+    monkeypatch.chdir(no_checkout)
+    rc = _cli_main(
+        [
+            "post-findings",
+            str(artifact_path),
+            "--pr",
+            "7",
+            "--head-sha",
+            head_sha,
+            "--repo",
+            "acme/widgets",
+        ]
+    )
+
+    assert rc == 0
+    posted = _issue_comments(fake_gh)
+    assert len(posted) == 1
+    assert expected in posted[0]["body"]
+    assert [call.endpoint for call in fake_gh.calls("GET")].count(
+        f"repos/acme/widgets/contents/app/pipeline.py?ref={head_sha}"
+    ) == 1
 
 
 async def test_phase_b_rejects_diagram_evidence_missing_from_the_immutable_head(

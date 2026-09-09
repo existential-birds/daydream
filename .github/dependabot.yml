@@ -54,12 +54,30 @@ updates:
     commit-message:
       prefix: chore(deps)
 
-  # NOTE: the github-actions ecosystem was removed on purpose (PR 1065
-  # follow-up). The repo pins every third-party action to a full commit SHA
-  # registered in tests/test_workflow_templates.py::_PINNED_ACTION_VERSIONS,
-  # which Dependabot cannot update — every actions bump was structurally
-  # unmergeable. Bump actions manually: update the SHA + `# vX.Y.Z` comment in
-  # the workflows AND the map entry, then `make check`.
+  # Third-party GitHub Actions. Re-enabled after the hand-maintained SHA→version
+  # map in tests/test_workflow_templates.py was deleted: that map, not the SHA
+  # pinning itself, is what made every actions bump structurally unmergeable —
+  # Dependabot rewrote the pin and its `# vX.Y.Z` comment but could not edit a
+  # dict in a test file. Pins stay full 40-hex commit SHAs, still enforced by
+  # test_bot_workflow_action_references_are_pinned_to_commit_shas.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Brisbane
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
+
   # npm tracks the workflows-folder package.json (the @openai/codex pin).
   # The directory is the workflows folder on purpose — see header comment.
   - package-ecosystem: npm

@@ -297,6 +297,8 @@ jobs:
   # checks out PR code — it installs the reviewed diagram-capable revision and
   # consumes only the passive findings artifact, validated by `daydream
   # post-findings` against a strict schema and the LIVE PR head (the trust anchor).
+  # A rendered diagram's citations are re-read from the contents API at that head
+  # SHA (the minted token's `contents: read`), so that validation needs no checkout.
   post:
     needs: [gate, analyze]
     if: needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'success'

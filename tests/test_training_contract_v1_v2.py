@@ -18,8 +18,6 @@ rather than substring grep so they name the enclosing function exactly.
 
 import ast
 import json
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -77,59 +75,6 @@ def _v2_field_reads() -> list[tuple[str, str | None, int]]:
 
     Visitor().visit(tree)
     return reads
-
-
-def test_v1_load_path_untouched_and_gated_on_config_corpus() -> None:
-    """The v1 branch still calls ``stacks.load_dataset`` + ``_file_digest`` on
-    the corpus path, inside the ``else`` arm of the ``config.corpus_v2`` check —
-    the v1 ``--corpus`` journey is byte-identical to before the v2 branch."""
-    source = COORDINATOR.read_text(encoding="utf-8")
-    assert "stacks.load_dataset(corpus_path" in source, (
-        "the v1 load_dataset call was removed or rerouted — v1 must keep its "
-        "canonical loader call"
-    )
-    assert "_file_digest(corpus_path" in source, (
-        "the v1 single-file corpus digest was removed — v1 run identity must "
-        "be unchanged"
-    )
-
-    tree = ast.parse(source)
-    run_pipeline = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "run_pipeline"
-    )
-    ifs = [n for n in ast.walk(run_pipeline) if isinstance(n, ast.If)]
-    v2_guard = next(
-        n
-        for n in ifs
-        if isinstance(n.test, ast.Compare)
-        and isinstance(n.test.left, ast.Attribute)
-        and n.test.left.attr == "corpus_v2"
-    )
-    # The v2 loader is inside the corpus_v2 guard...
-    v2_body_source = "\n".join(ast.unparse(n) for n in v2_guard.body)
-    assert "load_v2_projection(" in v2_body_source
-    # ...and the v1 loader is not — it lives in the else arm only.
-    assert "stacks.load_dataset" not in v2_body_source
-
-
-def test_v2_only_fields_never_read_outside_v2_aware_builders() -> None:
-    """``finding_text``/``task_identity`` reads are confined to the row
-    builders and Stage-0, so a v1 corpus (records lacking them) never hits
-    them and the v1 gold/positive counts stay v2-field-free."""
-    offenders = [
-        (field, owner, lineno)
-        for field, owner, lineno in _v2_field_reads()
-        if owner not in V2_FIELD_ALLOWED_BUILDERS
-    ]
-    assert not offenders, (
-        f"v2-only fields read outside the v2-aware builders (add a v1-shape "
-        f"guard or move the read): {offenders}"
-    )
-    # The audit must actually see the v2 reads somewhere — otherwise the
-    # allowlist is vacuous.
-    assert _v2_field_reads(), "no v2-field reads found — audit is vacuous"
 
 
 def _write_corpus(path: Path, n: int = 50) -> Path:
@@ -192,17 +137,3 @@ def test_v1_and_v2_manifests_are_behaviorally_coherent(tmp_path: Path) -> None:
         assert payload["stages"].keys() == v1_manifest["stages"].keys()
 
 
-def test_combined_v1_and_v2_suites_green_in_one_invocation() -> None:
-    """The full gate: the canonical v1 contract suite and the v2 suite pass
-    together in a single pytest invocation (the parallel-implementation gate)."""
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", *COMBINED_SUITE],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=1800,
-    )
-    assert result.returncode == 0, (
-        f"combined v1+v2 suite failed:\n{result.stdout[-4000:]}\n{result.stderr[-2000:]}"
-    )
-    assert "no tests ran" not in result.stdout

@@ -59,6 +59,7 @@ from typing import Any, Callable, Generator, Literal, overload
 from urllib.parse import quote, urlparse
 
 from daydream.backends._subprocess import terminate_process
+from daydream.repository_paths import valid_repository_file_path
 
 _logger = logging.getLogger(__name__)
 
@@ -4191,6 +4192,67 @@ def gh_api(
     finally:
         if succeeded:
             tmp_path.unlink(missing_ok=True)
+
+
+# GitHub's own owner/repo name grammar. ``split_owner_repo`` only rejects
+# whitespace and a wrong slash count, which would still let ``..`` or an
+# encoded segment reshape the endpoint path built below.
+_GITHUB_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+
+
+def _decode_github_base64(content: str, what: str) -> bytes:
+    """Decode one line-wrapped GitHub base64 payload into raw bytes."""
+    try:
+        return base64.b64decode(content)
+    except ValueError as exc:  # binascii.Error subclasses ValueError
+        raise GitError(f"{what} returned undecodable base64 content") from exc
+
+
+def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
+    """Return the bytes of *path* at commit *ref* via the GitHub contents API.
+
+    The no-checkout counterpart to :func:`show`: the privileged poster reads
+    immutable head evidence for a repository it deliberately never clones
+    (issue #1167). *repo* only supplies the working directory ``gh`` runs in —
+    the endpoint names the repository explicitly, so it need not be a checkout
+    of *slug*, or a git repository at all.
+
+    *path* is model-derived and untrusted, so it is held to the repository-path
+    grammar (relative, no parent traversal) and percent-encoded before it
+    becomes part of the endpoint.
+
+    Raises:
+        GitError: If the slug, ref, or path is malformed; if *path* is absent
+            at *ref* or does not name a file; or if the API call fails.
+    """
+    owner_repo = split_owner_repo(slug)
+    if owner_repo is None or not all(_GITHUB_NAME_RE.fullmatch(part) for part in owner_repo):
+        raise GitError(f"invalid repository slug: {slug}")
+    if _COMMIT_SHA_RE.fullmatch(ref) is None:
+        raise GitError(f"invalid commit sha: {ref}")
+    if not valid_repository_file_path(path):
+        raise GitError("invalid repository file path")
+    owner, name = owner_repo
+    relative = path[2:] if path.startswith("./") else path
+    base = f"repos/{owner}/{name}"
+    where = f"{slug}@{ref}:{relative}"
+    payload = gh_api(repo, f"{base}/contents/{quote(relative)}?ref={ref}", idempotent=True)
+    if not isinstance(payload, dict) or payload.get("type") != "file":
+        raise GitError(f"{where} does not name a file")
+    content = payload.get("content")
+    if payload.get("encoding") == "base64" and isinstance(content, str):
+        return _decode_github_base64(content, where)
+    # Past the contents endpoint's 1 MiB inline ceiling GitHub answers with an
+    # empty body and ``encoding: "none"``; the blob endpoint still serves it.
+    blob_sha = payload.get("sha")
+    if not isinstance(blob_sha, str) or _COMMIT_SHA_RE.fullmatch(blob_sha) is None:
+        raise GitError(f"{where} carries no readable content")
+    blob = gh_api(repo, f"{base}/git/blobs/{blob_sha}", idempotent=True)
+    blob_content = blob.get("content") if isinstance(blob, dict) else None
+    if not isinstance(blob, dict) or blob.get("encoding") != "base64" or not isinstance(blob_content, str):
+        raise GitError(f"{where} carries no readable blob content")
+    return _decode_github_base64(blob_content, where)
 
 
 # --- gh secret / variable / PR primitives ------------------------------------

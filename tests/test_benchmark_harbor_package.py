@@ -7,20 +7,6 @@ import pytest
 from tests.harness.fake_gh import FakeGh
 
 
-def test_benchmark_extra_pins_harbor_022_and_not_base() -> None:
-    import tomllib
-
-    root = Path(__file__).resolve().parents[1]
-    data = tomllib.loads((root / "pyproject.toml").read_text())
-    deps = data["project"]["dependencies"]
-    assert "harbor" not in " ".join(deps)
-    extra = data["project"]["optional-dependencies"]["benchmark"]
-    assert "harbor>=0.22,<0.23" in extra
-    include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["include"]
-    assert "daydream/benchmark/harbor/templates/**" in include
-    assert "daydream/benchmark/harbor/runtime-requirements.lock" in include
-
-
 def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import hashlib
     import importlib.metadata

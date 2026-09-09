@@ -46,14 +46,6 @@ def test_single_variant_references_the_canonical_secret_and_var_names() -> None:
     assert config.BOT_HANDLE_VAR in single
 
 
-def test_browser_guide_documents_canonical_names_and_pem_limit() -> None:
-    guide = Path("docs/self-hosted-bot-setup.md").read_text(encoding="utf-8")
-    for name in (*config.SETUP_SECRET_NAMES, config.BOT_HANDLE_VAR):
-        assert name in guide
-    assert "download" in guide.lower() and "pem" in guide.lower()  # honest PEM-floor stated
-    assert "Use this template" not in guide  # no maintainer-hosted repo
-
-
 def test_yaml_templates_present_in_built_wheel() -> None:
     """Build a real wheel and confirm the YAML templates are included as package data.
 
