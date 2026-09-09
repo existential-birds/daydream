@@ -5,7 +5,9 @@
 # job holds the App key, so it NEVER checks out or executes PR code, per the
 # locked privilege split: no single job ever holds both PR code and the App key.
 # The artifact is passive data, validated by `daydream post-findings` against a strict schema before
-# anything is posted.
+# anything is posted. A rendered diagram's citations are re-read from the
+# contents API at the head SHA (the minted token's `contents: read`), so that
+# validation needs no checkout either.
 #
 # Target derivation: "Daydream Review" only runs via workflow_dispatch (the
 # `@<bot> review` command), so `pull_requests` is always empty and `head_sha`

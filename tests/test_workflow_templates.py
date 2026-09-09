@@ -923,6 +923,32 @@ def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list[Any
 
 @pytest.mark.parametrize(
     "wf_path",
+    [
+        TEMPLATES_DIR / "daydream-post.yml",
+        REPO_WORKFLOWS_DIR / "daydream-post.yml",
+        TEMPLATES_DIR / "single" / "daydream.yml",
+    ],
+    ids=["template", "live", "single"],
+)
+def test_post_job_token_can_read_head_evidence(wf_path: Path) -> None:
+    """The posting job's token must keep ``contents: read`` (issue #1167).
+
+    That job holds the App key and therefore never checks out PR code, so a
+    rendered diagram's citations are adjudicated against the contents API at
+    the head SHA. Dropping the permission would resurrect the bug where every
+    artifact carrying a diagram is rejected and nothing at all is posted.
+    """
+    steps = [
+        step
+        for step in load_workflow(wf_path)["jobs"]["post"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/create-github-app-token@")
+    ]
+    assert steps
+    assert all(step["with"]["permission-contents"] == "read" for step in steps)
+
+
+@pytest.mark.parametrize(
+    "wf_path",
     [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
     ids=["template", "live"],
 )

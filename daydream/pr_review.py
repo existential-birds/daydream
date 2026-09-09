@@ -50,8 +50,9 @@ from daydream.extensions import (
     SummaryFinding,
     get_registry,
 )
-from daydream.git_ops import GitError
+from daydream.git_ops import GitError, RateLimitError
 from daydream.pr_comment_renderer import render_run_info_block
+from daydream.repository_paths import valid_repository_file_path
 from daydream.severity import normalize_severity
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_error, print_info, print_success, print_warning
@@ -2123,14 +2124,74 @@ def _diagram_grounding_problem(
     return None
 
 
+class _HeadEvidence:
+    """Read repository files at the immutable head SHA, checkout or not.
+
+    A local checkout that already contains ``head_sha`` is read with ``git
+    show``; otherwise the same immutable bytes come from GitHub's contents API
+    at that exact SHA (issue #1167). The privileged poster deliberately never
+    checks out PR code, so without the second source every artifact carrying a
+    rendered diagram would be rejected there — findings included.
+    """
+
+    def __init__(self, target_dir: Path, head_sha: str, repo_slug: str | None) -> None:
+        self._target_dir = target_dir
+        self._head_sha = head_sha
+        self._repo_slug = repo_slug
+        self._local: bool | None = None
+        self._bytes: dict[str, bytes] = {}
+        self._lines: dict[str, list[str]] = {}
+
+    def _reads_locally(self) -> bool:
+        """Whether ``target_dir`` is a repository that already holds the head commit."""
+        if self._local is None:
+            try:
+                self._local = git_ops.commit_exists(self._target_dir, self._head_sha)
+            except GitError:
+                self._local = False
+        return self._local
+
+    def read(self, path: str) -> bytes:
+        """Return *path*'s bytes at the head SHA.
+
+        Raises:
+            GitError: If the file cannot be read at that commit, from either source.
+        """
+        cached = self._bytes.get(path)
+        if cached is not None:
+            return cached
+        # The spec schema's ``pattern`` is applied with ``re.search``, whose
+        # ``$`` matches before a trailing newline, so the grammar is re-checked
+        # here as a fullmatch — the sequence branch writes these paths into a
+        # snapshot tree, and the API branch into an endpoint.
+        if not valid_repository_file_path(path):
+            raise GitError("invalid repository file path")
+        if self._reads_locally():
+            data = git_ops.show(self._target_dir, self._head_sha, path)
+        elif self._repo_slug is None:
+            raise GitError(f"{self._target_dir} does not contain commit {self._head_sha}")
+        else:
+            data = git_ops.gh_file_at_ref(
+                self._target_dir, self._repo_slug, self._head_sha, path
+            )
+        self._bytes[path] = data
+        return data
+
+    def lines(self, path: str) -> list[str]:
+        """Return *path*'s decoded lines at the head SHA (same raises as :meth:`read`)."""
+        cached = self._lines.get(path)
+        if cached is None:
+            cached = self.read(path).decode(errors="replace").splitlines()
+            self._lines[path] = cached
+        return cached
+
+
 def _diagram_head_evidence_problem(
     kind: str,
     spec: dict[str, Any],
-    target_dir: Path,
-    head_sha: str,
-    sources: dict[str, list[str]],
+    head: _HeadEvidence,
 ) -> str | None:
-    """Return a problem when a rendered diagram citation is absent at ``head_sha``."""
+    """Return a problem when a rendered diagram citation is absent at the head SHA."""
     from daydream.tree_sitter_index import (
         is_branch_line,
         is_executable_statement_line,
@@ -2138,17 +2199,23 @@ def _diagram_head_evidence_problem(
         language_for_path,
     )
 
+    def unreadable(path: str, exc: GitError) -> str:
+        """Name the two reasons a citation cannot be read apart.
+
+        Both reject the payload, but a throttled read is the poster's problem
+        and an absent path is the artifact's — reporting the first as the
+        second sends an operator hunting a forged artifact that does not exist.
+        """
+        if isinstance(exc, RateLimitError):
+            return f"{kind} diagram evidence could not be read from immutable head: {exc}"
+        return f"{kind} diagram evidence is missing from immutable head: {path}"
+
     def check(evidence: dict[str, Any]) -> str | None:
         path = evidence["file"]
-        lines = sources.get(path)
-        if lines is None:
-            try:
-                lines = git_ops.show(target_dir, head_sha, path).decode(
-                    errors="replace"
-                ).splitlines()
-            except GitError:
-                return f"{kind} diagram evidence is missing from immutable head: {path}"
-            sources[path] = lines
+        try:
+            lines = head.lines(path)
+        except GitError as exc:
+            return unreadable(path, exc)
         if evidence["line"] > len(lines):
             return (
                 f"{kind} diagram evidence line {evidence['line']} is missing from "
@@ -2172,9 +2239,9 @@ def _diagram_head_evidence_problem(
             snapshot_root = Path(snapshot_dir)
             for path in paths:
                 try:
-                    source = git_ops.show(target_dir, head_sha, path)
-                except GitError:
-                    return f"sequence diagram evidence is missing from immutable head: {path}"
+                    source = head.read(path)
+                except GitError as exc:
+                    return unreadable(path, exc)
                 snapshot_path = snapshot_root / path
                 snapshot_path.parent.mkdir(parents=True, exist_ok=True)
                 snapshot_path.write_bytes(source)
@@ -2199,7 +2266,7 @@ def _diagram_head_evidence_problem(
             problem = check(evidence)
             if problem is not None:
                 return problem
-            source = "\n".join(sources[evidence["file"]]).encode()
+            source = "\n".join(head.lines(evidence["file"])).encode()
             language = language_for_path(evidence["file"])
             line = evidence["line"]
             try:
@@ -2225,6 +2292,7 @@ def validate_diagram_payload(
     *,
     target_dir: Path | None = None,
     head_sha: str | None = None,
+    repo_slug: str | None = None,
 ) -> str | None:
     """Validate each rendered spec and its grounding attestation before posting.
 
@@ -2239,6 +2307,10 @@ def validate_diagram_payload(
         payload: The artifact's ``diagrams`` payload.
         target_dir: Repository used to read immutable source evidence, when posting.
         head_sha: Event-derived commit used to read immutable source evidence.
+        repo_slug: Event-derived ``owner/repo``. When *target_dir* does not
+            contain *head_sha* — the shipped post workflow runs with no
+            checkout at all — evidence is read from GitHub's contents API at
+            that SHA instead.
 
     Returns:
         None when every rendered kind validates, else a human error message.
@@ -2264,7 +2336,11 @@ def validate_diagram_payload(
     results = payload.get("results")
     if not isinstance(results, dict):
         return "diagrams payload has no 'results' object"
-    sources: dict[str, list[str]] = {}
+    head = (
+        _HeadEvidence(target_dir, head_sha, repo_slug)
+        if target_dir is not None and head_sha is not None
+        else None
+    )
     for kind in DIAGRAM_KINDS:
         result = results.get(kind)
         if not isinstance(result, dict) or result.get("status") != "rendered":
@@ -2283,10 +2359,8 @@ def validate_diagram_payload(
         problem = _diagram_grounding_problem(kind, spec, result.get("grounding"))
         if problem is not None:
             return problem
-        if target_dir is not None and head_sha is not None:
-            problem = _diagram_head_evidence_problem(
-                kind, spec, target_dir, head_sha, sources
-            )
+        if head is not None:
+            problem = _diagram_head_evidence_problem(kind, spec, head)
             if problem is not None:
                 return problem
     return None
@@ -2318,7 +2392,10 @@ def _post_diagram_artifact(
         )
         return 1
     problem = validate_diagram_payload(
-        payload, target_dir=target_dir, head_sha=pr.head_sha
+        payload,
+        target_dir=target_dir,
+        head_sha=pr.head_sha,
+        repo_slug=f"{pr.owner}/{pr.repo}",
     )
     if problem is not None:
         print_error(console, "Diagram Artifact Rejected", problem)
@@ -2435,7 +2512,10 @@ def post_findings_from_artifact(
     diagram_blocks: str | None = None
     if isinstance(artifact.diagrams, dict):
         problem = validate_diagram_payload(
-            artifact.diagrams, target_dir=target_dir, head_sha=pr.head_sha
+            artifact.diagrams,
+            target_dir=target_dir,
+            head_sha=pr.head_sha,
+            repo_slug=repo,
         )
         if problem is not None:
             print_error(console, "Diagram Payload Rejected", problem)

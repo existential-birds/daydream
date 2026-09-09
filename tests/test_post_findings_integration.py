@@ -14,6 +14,7 @@ in-process bookkeeping.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -132,6 +133,9 @@ def test_post_findings_reads_valid_diagram_evidence_from_explicit_target(
     assert posts[0].payload["commit_id"] == head
     assert fake_gh.process_calls()
     assert all(call.cwd == git_repo.resolve() for call in fake_gh.process_calls())
+    # A checkout that already holds the head commit is read locally: the
+    # contents-API fallback (issue #1167) is for targets that do not.
+    assert _contents_calls(fake_gh) == []
 
 
 def _finding(
@@ -843,6 +847,168 @@ def test_post_findings_rejects_diagram_evidence_absent_from_immutable_head(
 
     assert code == 1
     assert fake_gh.calls("POST") == []
+
+
+# --- Issue #1167: head evidence without a checkout ---------------------------
+#
+# The shipped post workflow runs `post-findings` with no `actions/checkout` at
+# all, by design, so the poster reads immutable head evidence from the contents
+# API at the same SHA instead of from `git show`.
+
+_API_HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _serve_contents(fake_gh: FakeGh, path: str, source: str) -> None:
+    """Serve *source* as the contents-API body for *path* (the ``?ref=`` is asserted separately)."""
+    fake_gh.set_response(
+        "GET",
+        f"repos/o/r/contents/{path}",
+        value={
+            "type": "file",
+            "path": path,
+            "sha": "a" * 40,
+            "encoding": "base64",
+            "content": base64.b64encode(source.encode()).decode(),
+        },
+    )
+
+
+def _contents_calls(fake_gh: FakeGh) -> list[str]:
+    """Every contents-API endpoint the run requested, in order."""
+    return [
+        call.endpoint
+        for call in fake_gh.calls("GET")
+        if call.endpoint.startswith("repos/o/r/contents/")
+    ]
+
+
+def test_post_findings_posts_flowchart_evidence_read_without_a_checkout(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """The regression: an empty (non-repository) target must still post."""
+    _serve_contents(fake_gh, "a.py", "def run():\n    return 1\n")
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    assert _contents_calls(fake_gh) == [f"repos/o/r/contents/a.py?ref={_API_HEAD_SHA}"]
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "```mermaid" in posts[0].payload["body"]
+
+
+def test_post_findings_posts_sequence_evidence_read_without_a_checkout(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """The sequence branch re-grounds a snapshot built from the same API reads."""
+    _serve_contents(
+        fake_gh,
+        "api.py",
+        "from worker import worker\ndef api():\n    worker()\n    if enabled:\n        worker()\n",
+    )
+    _serve_contents(fake_gh, "worker.py", "def worker():\n    return 1\n")
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_sequence_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    assert sorted(_contents_calls(fake_gh)) == [
+        f"repos/o/r/contents/api.py?ref={_API_HEAD_SHA}",
+        f"repos/o/r/contents/worker.py?ref={_API_HEAD_SHA}",
+    ]
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "sequenceDiagram" in posts[0].payload["body"]
+
+
+def test_post_findings_reads_oversized_evidence_through_the_blob_endpoint(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """Past the contents endpoint's inline ceiling GitHub answers ``encoding: none``."""
+    blob_sha = "b" * 40
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/contents/a.py",
+        value={"type": "file", "path": "a.py", "sha": blob_sha, "encoding": "none", "content": ""},
+    )
+    fake_gh.set_response(
+        "GET",
+        f"repos/o/r/git/blobs/{blob_sha}",
+        value={
+            "sha": blob_sha,
+            "encoding": "base64",
+            "content": base64.b64encode(b"def run():\n    return 1\n").decode(),
+        },
+    )
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    assert fake_gh.calls("GET", f"repos/o/r/git/blobs/{blob_sha}")
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+
+
+def test_post_findings_rejects_api_evidence_that_contradicts_the_spec(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """Evidence fetched over the API is adjudicated exactly as a checkout's is."""
+    _serve_contents(fake_gh, "a.py", "x = 1\n")  # no `run` definition, one line
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
+        diagrams=_flowchart_payload(),
+        head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 1
+    assert fake_gh.calls("POST") == []
+
+
+def test_post_findings_rejects_evidence_absent_from_the_api_head(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """A 404 at the head SHA is a missing citation, not a reason to post anyway."""
+    fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=None)  # 404
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 1
+    assert fake_gh.calls("POST") == []
+
+
+def test_post_findings_reports_a_throttled_read_as_unreadable_not_missing(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A rate-limited read is the poster's problem, not a forged citation."""
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/contents/a.py",
+        value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
+    )
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 1
+    assert fake_gh.calls("POST") == []
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "could not be read from immutable head" in printed
+    assert "is missing from immutable head" not in printed
 
 
 def test_post_findings_matched_high_blocks_approval(
