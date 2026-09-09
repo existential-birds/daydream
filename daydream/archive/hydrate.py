@@ -92,6 +92,13 @@ class VerificationError(HydrationError):
     """The clean-room verification cycle failed — success is never reported (M20)."""
 
 
+def _warn(message: str) -> None:
+    """Print a one-line warning through the daydream console (never raises)."""
+    from daydream.ui import create_console, print_warning  # noqa: PLC0415 - lazy: avoid ui import at module load
+
+    print_warning(create_console(), message)
+
+
 def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bool) -> str:
     """Resolve ``revision`` to a pinned, immutable commit SHA (issue #982 M2).
 
@@ -2512,7 +2519,8 @@ def verify_publication(
     Downloads exactly the pinned output commit into a fresh staging dir,
     validates SHA256SUMS against the uploaded content, validates the curation
     manifest against the frozen schema, rescan every published batch with
-    ``scan_run_dir`` (must be clean), rebuilds a scratch index from the
+    ``scan_run_dir`` (must carry no blocking finding; advisory findings are
+    reported value-free — #1170), rebuilds a scratch index from the
     portable artifacts alone, and recomputes the candidate count. Any mismatch
     raises :class:`VerificationError` — success is never reported on a failed
     verification. Returns the verified admitted count.
@@ -2577,8 +2585,20 @@ def verify_publication(
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(_download(relpath))
         scan = scan_run_dir(batch_dir)
-        if not scan.clean:
-            raise VerificationError(redact_text(f"verify: published batch {sid!r} fails the secrets scan"))
+        if scan.blocking:
+            raise VerificationError(
+                redact_text(
+                    f"verify: published batch {sid!r} fails the secrets scan ({scan.summary()})"
+                )
+            )
+        if scan.findings:
+            # Advisory-only: a name/template shape, not a credential (#1170).
+            # Reported value-free rather than failing an already-published
+            # commit that a rule which cannot identify a secret objected to.
+            _warn(
+                f"verify: published batch {sid!r} carries advisory-only scan "
+                f"findings ({scan.summary()})"
+            )
         if sanitize._derivative_digest(batch_dir) != batch["content_digest"]:
             raise VerificationError(redact_text(f"verify: batch {sid!r} digest mismatch"))
         data = _read_manifest_dict(batch_dir)

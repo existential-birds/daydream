@@ -1157,6 +1157,11 @@ def _finalize_run_artifacts(
         run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
     except Exception as exc:
         if archive_error is not None:
+            # The rollback failure is what propagates and gets rendered, so the
+            # archive error the operator actually needs — which gate refused and
+            # which file tripped it — would otherwise be lost: ``add_note``
+            # carries only the type name and nothing renders notes (#1171).
+            print_error(console, "Artifact Finalization", str(archive_error))
             exc.add_note(f"strict archive finalization also failed ({type(archive_error).__name__})")
         raise
     return archive_error

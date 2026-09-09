@@ -2289,6 +2289,213 @@ async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
         assert (reopened.daydream_dir / custom_relative.parent / "unrelated.bin").read_bytes() == b"unrelated"
 
 
+def _restore_stage_leaks(source: Path) -> list[str]:
+    """Leftover ``.<source>.daydream-restore-*`` stage names beside ``source``."""
+    prefix = f".{source.name}.daydream-restore-"
+    return sorted(child.name for child in source.parent.iterdir() if child.name.startswith(prefix))
+
+
+def _open_rolled_back_dump(session: Any, session_id: str, dump: Path) -> Path:
+    """Register an absent dump destination on ``session`` and roll the run back.
+
+    Mirrors what a ``--dump-artifacts`` run does when strict archive
+    finalization refuses: the finalization-merge stage is created and left
+    empty, because ``finalize_archive_run`` raises before it copies anything
+    into it, and the disposition becomes ``ROLLBACK``.
+    """
+    session.register_destination(session.layout.source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
+    session.register_destination(
+        session.layout.source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT
+    )
+    route = session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
+    frozen = _freeze_run(session, session_id)
+    late = cast(Path, session.finalization_merge_path(route, snapshot=frozen))
+    assert late.is_dir()
+    assert not any(late.iterdir())
+    _publish(session, frozen, artifact_visibility.ArtifactDisposition.ROLLBACK)
+    return late
+
+
+async def test_rollback_of_an_absent_dump_destination_reopens_the_workspace(source: Path) -> None:
+    """#1171/#1172: an empty directory baseline is a restore target, not a fault.
+
+    A ``--dump-artifacts`` directory that did not exist before the run records
+    an empty baseline, so "restore to nothing" is the correct rollback target.
+    Raising "dump destination projection is malformed" instead aborted
+    ``_restore_prior`` before it retired anything, leaving a ``DETACHED``
+    journal that every later session open replayed into the identical failure,
+    plus a leaked restore stage that made the third open fail even earlier with
+    "artifact source-stage collision".
+    """
+    baseline = _seed_public_artifacts(source)
+    owner = _owner(source)
+    transactions = owner.artifact_state_root / "transactions"
+    dump = source.parent / "never-existed" / "out"
+
+    async with open_artifact_session(_work(source), session_id="rollback-dump", owner=owner) as session:
+        late = _open_rolled_back_dump(session, "rollback-dump", dump)
+
+    assert not dump.exists()
+    assert not dump.parent.exists()
+    assert _manifest(source) == baseline
+    assert not any(transactions.iterdir())
+    assert not late.exists()
+    assert not late.parent.exists()
+    assert _restore_stage_leaks(source) == []
+
+    # Two further opens: the first proves the replay is gone, the second that
+    # no restore stage was left to collide with.
+    for session_id in ("after-rollback-one", "after-rollback-two"):
+        async with open_artifact_session(_work(source), session_id=session_id, owner=owner) as reopened:
+            assert (reopened.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+        assert _manifest(source) == baseline
+        assert not any(transactions.iterdir())
+        assert _restore_stage_leaks(source) == []
+
+
+async def test_publishing_an_unused_dump_destination_leaves_it_absent(source: Path) -> None:
+    """The publish direction of the same projection: nothing written, nothing created.
+
+    ``_merge_directory_from_tree`` is reached twice — once with the baseline as
+    the projection (rollback) and once with the published manifest (install).
+    A registered dump route whose finalization stage was never taken publishes
+    an empty manifest, which used to abort the whole publication with
+    "dump destination projection is malformed".
+    """
+    _seed_public_artifacts(source)
+    owner = _owner(source)
+    dump = source.parent / "never-existed" / "out"
+
+    async with open_artifact_session(_work(source), session_id="unused-dump", owner=owner) as session:
+        session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
+        session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
+        session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
+        _publish(session, _freeze_run(session, "unused-dump"))
+
+    assert not dump.exists()
+    assert not dump.parent.exists()
+    assert (source / ".daydream" / "runs" / "unused-dump" / "trajectory.json").is_file()
+    assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+    assert not any((owner.artifact_state_root / "transactions").iterdir())
+
+
+async def test_session_open_heals_a_pre_fix_wedged_dump_transaction(
+    source: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1172: a workspace already wedged by the old behaviour heals on next open.
+
+    The wedge is built with the pre-fix code paths restored — the directory
+    merge raising on an empty projection, and a failed restore that neither
+    preserved the transaction nor reclaimed its stage — so the on-disk state is
+    the one operators are stuck with today: a ``DETACHED`` journal plus a
+    leaked ``.<source>.daydream-restore-*`` stage. Nothing about the wedge is
+    repaired by hand; the next real session open has to do it.
+    """
+    baseline = _seed_public_artifacts(source)
+    owner = _owner(source)
+    transactions = owner.artifact_state_root / "transactions"
+    dump = source.parent / "never-existed" / "out"
+    merge = artifact_visibility._merge_directory_from_tree
+
+    def pre_fix_merge(tree: Path, record: Any, *, desired: Any, **kwargs: Any) -> None:
+        if not desired:
+            raise ArtifactVisibilityError("dump destination projection is malformed")
+        merge(tree, record, desired=desired, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(artifact_visibility, "_merge_directory_from_tree", pre_fix_merge)
+        patched.setattr(
+            artifact_visibility, "_clear_failed_restore", lambda _root, _source, _txn, error: error
+        )
+        patched.setattr(artifact_visibility, "_reset_source_stage", lambda *_args, **_kwargs: None)
+
+        with pytest.raises(ArtifactVisibilityError, match="projection is malformed"):
+            async with open_artifact_session(_work(source), session_id="wedge", owner=owner) as session:
+                _open_rolled_back_dump(session, "wedge", dump)
+
+        wedged = [child.name for child in transactions.iterdir()]
+        assert len(wedged) == 1
+        assert _load_json(transactions / wedged[0] / "journal.json")["state"] == "DETACHED"
+
+        # The second open replays the journal, fails identically, and leaks the
+        # restore stage that makes every later open collide instead.
+        with pytest.raises(ArtifactVisibilityError, match="projection is malformed"):
+            async with open_artifact_session(_work(source), session_id="wedged-open", owner=owner):
+                pass
+        assert _restore_stage_leaks(source) == [f".{source.name}.daydream-restore-{wedged[0]}"]
+
+    async with open_artifact_session(_work(source), session_id="healed", owner=owner) as healed:
+        assert (healed.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+
+    assert _manifest(source) == baseline
+    assert not any(transactions.iterdir())
+    assert _restore_stage_leaks(source) == []
+    assert not dump.exists()
+    assert not (owner.artifact_state_root / "unreconciled").exists()
+
+
+async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
+    source: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1172: a restore that cannot finish is preserved, never replayed forever.
+
+    Recovery reruns the same records through the same code, so a destination
+    restore that fails once fails identically at every later open. The
+    transaction's baselines are the only surviving copy of an in-source
+    destination's prior bytes, so the transaction is moved under
+    ``unreconciled/`` rather than retired — the operator keeps every byte, the
+    error names where they are, and a fresh session still starts.
+    """
+    baseline = _seed_public_artifacts(source)
+    owner = _owner(source)
+    state_root = owner.artifact_state_root
+    transactions = state_root / "transactions"
+    findings = tmp_path / "external" / "findings.json"
+    findings.parent.mkdir()
+    findings.write_bytes(b"prior findings")
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise ArtifactVisibilityError("synthetic destination restore failure")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(artifact_visibility, "_restore_destination_records", refuse)
+        with pytest.raises(ArtifactVisibilityError, match="synthetic destination restore failure") as caught:
+            async with open_artifact_session(_work(source), session_id="unrestorable", owner=owner) as session:
+                session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
+                session.register_destination(
+                    source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT
+                )
+                session.register_destination(findings, label=OutputLabel.FINDINGS_OUTPUT)
+                frozen = _freeze_run(session, "unrestorable")
+                _publish(session, frozen, artifact_visibility.ArtifactDisposition.ROLLBACK)
+
+    # The operator is told which transaction failed, in which workspace, and
+    # where its baselines were kept.
+    preserved = state_root / "unreconciled"
+    message = str(caught.value)
+    retained = [child.name for child in preserved.iterdir()]
+    assert len(retained) == 1
+    assert retained[0] in message
+    assert str(state_root) in message
+    assert str(preserved / retained[0]) in message
+
+    # Nothing was discarded: the public tree is back and the baseline copy of
+    # the explicit destination survives under the preserved transaction.
+    assert _manifest(source) == baseline
+    assert (preserved / retained[0] / "destination-0000-baseline" / "findings.json").read_bytes() == (
+        b"prior findings"
+    )
+    assert not any(transactions.iterdir())
+    assert _restore_stage_leaks(source) == []
+
+    async with open_artifact_session(_work(source), session_id="after-unrestorable", owner=owner) as reopened:
+        assert (reopened.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+    assert not any(transactions.iterdir())
+
+
 async def test_public_subtree_trajectory_requires_exact_public_owner(source: Path) -> None:
     requested = source / ".daydream" / "custom.json"
 

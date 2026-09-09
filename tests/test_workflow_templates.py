@@ -20,6 +20,9 @@ cannot verify and that a careless edit could silently break:
 - Every App-token action in the live and packaged posting workflows stays pinned to the approved v3.2.0 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
+- The ``daydream-findings`` upload stays ``if: always()`` and stays after the
+  step that writes ``findings.json``, so a late-stage failure (a refused egress
+  scan, say) cannot discard findings the run already produced.
 - The repo's own Codex dogfood workflow persists ``codex login`` before the
   review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth), and
   the repository workflow README names ``OPENAI_API_KEY`` as the credential the
@@ -312,6 +315,44 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     assert upload["uses"].startswith("actions/upload-artifact@")
     assert upload["with"]["name"] == "daydream-findings-failure"
     assert upload["with"]["path"] == "findings/failure.json"
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [
+        TEMPLATES_DIR / "daydream-review.yml",
+        REPO_WORKFLOWS_DIR / "daydream-review.yml",
+        TEMPLATES_DIR / "single" / "daydream.yml",
+    ],
+    ids=["template", "live", "single"],
+)
+def test_findings_upload_survives_late_stage_failure(wf_path: Path) -> None:
+    """``findings.json`` written before a late-stage failure must still upload.
+
+    The review step writes ``findings/findings.json`` and only then reaches the
+    egress/archive tail, which can refuse (e.g. a blocking secret scan) and fail
+    the job. Under GitHub's implicit ``success()`` gate the already-written
+    findings would be discarded exactly when the operator needs them, so the
+    ``daydream-findings`` upload carries ``if: always()`` in every copy. This is
+    the passive-artifact upload, distinct from the ``failure()``-gated
+    ``daydream-findings-failure`` step.
+    """
+    wf = load_workflow(wf_path)
+    steps = job_steps(wf, "analyze")
+
+    upload = next(step for step in steps if step.get("name") == "Upload findings artifact")
+    assert upload.get("if", "") == "always()", (
+        f"{wf_path.name}: the findings upload must be if: always() so a late-stage "
+        "failure does not discard an already-written findings.json"
+    )
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["with"]["name"] == "daydream-findings"
+    assert upload["with"]["path"] == "findings/"
+
+    # The findings upload must come after the review step that writes the file,
+    # or always() would upload an empty directory on every run.
+    review = next(step for step in steps if "--findings-out" in step.get("run", ""))
+    assert steps.index(review) < steps.index(upload)
 
 
 @pytest.mark.parametrize(

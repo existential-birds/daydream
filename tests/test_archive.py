@@ -9,7 +9,6 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -5204,9 +5203,22 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
     )
     dump_stage = tmp_path / "late"
     dump_stage.mkdir()
+    from daydream.archive.scan import SEVERITY_BLOCKING, Finding, ScanResult
+
     monkeypatch.setattr(
         "daydream.archive.scan.scan_run_dir",
-        lambda _path: SimpleNamespace(clean=False),
+        lambda _path: ScanResult(
+            clean=False,
+            findings=[
+                Finding(
+                    path="trajectory.json",
+                    location="steps.[0].observation (json)",
+                    category="api_key",
+                    digest="0123456789ab",
+                    severity=SEVERITY_BLOCKING,
+                )
+            ],
+        ),
     )
 
     with pytest.raises(ArchiveFinalizationError, match="secret scan"):

@@ -1984,6 +1984,46 @@ def test_hub_import_accepts_clean_bundle_in_place(tmp_path: Path) -> None:
     assert incoming.exists()
 
 
+def test_hub_import_accepts_advisory_only_bundle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #1170: an advisory-only incoming bundle ingests instead of quarantining.
+
+    The manifest carries the issue's ``env_var`` false positive (an upper-case
+    name ending in ``KEY`` assigned an ordinary flag string). It is a name
+    shape, not a credential, so it is reported value-free and the bundle is
+    imported in place.
+    """
+    from daydream.archive import sanitize, scan
+
+    archive_dir = tmp_path / "archive"
+    incoming = archive_dir / "incoming" / "s3"
+    incoming.mkdir(parents=True)
+    (incoming / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session_id": "s3",
+                "git": {"remote_url": "https://github.com/o/r"},
+                "notes": 'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"',
+            }
+        )
+    )
+    pre = scan.scan_run_dir(incoming)
+    assert pre.clean is False and pre.blocking is False  # advisory-only bundle
+
+    result = sanitize.import_bundle(incoming, archive_dir)
+
+    assert result.imported is True
+    assert result.quarantined is False
+    assert incoming.exists()
+    assert not (archive_dir / "quarantine" / "s3").exists()
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "advisory" in out
+    assert "env_var" in out
+    assert "override_flag" not in out  # M11: never a matched value
+
+
 def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
     from daydream.training.labeler_signals import (
         PerFindingResolution,

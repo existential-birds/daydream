@@ -212,11 +212,13 @@ def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> d
     Returns:
         ``{"payload": [...], "blocked": bool, "scan_summary": str,
         "blocked_reasons": [...]}``. ``blocked`` is ``True`` only when the
-        post-redaction scan is dirty — the payload cannot be published; the
-        offending rows are kept in ``payload`` (never dropped silently) and
-        ``blocked_reasons`` carries the stable
-        ``import_unredactable_metadata`` reason code. Redaction runs before
-        ``publish_annotation_state`` (which re-scans and hard-fails on dirty).
+        post-redaction scan carries a *blocking* finding — the payload cannot
+        be published; the offending rows are kept in ``payload`` (never dropped
+        silently) and ``blocked_reasons`` carries the stable
+        ``import_unredactable_metadata`` reason code. An advisory-only scan
+        publishes, with the value-free ``scan_summary`` still reported (#1170).
+        Redaction runs before ``publish_annotation_state`` (which re-scans and
+        hard-fails on dirty).
 
     Raises:
         ValueError: When a ``rubric_json``/``reward_json`` blob is malformed
@@ -242,7 +244,12 @@ def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> d
         json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
     )
     scan = scan_run_dir(scan_dir)
-    blocked = not scan.clean
+    # Only a blocking finding withholds publication. An advisory finding is a
+    # name/template shape, not a credential (#1170) — and this payload is built
+    # from free-text ``rubric_json``/``reward_json``/``notes``, exactly the
+    # content that carries the ``env_var`` name shape. The value-free summary
+    # is returned either way, so an advisory finding is visible, not silent.
+    blocked = scan.blocking
     return {
         "payload": payload,
         "blocked": blocked,

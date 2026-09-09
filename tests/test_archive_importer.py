@@ -1155,6 +1155,27 @@ def test_dirty_metadata_blocks_publish(tmp_path: Path) -> None:
     assert result["blocked_reasons"] == [REASON_CODE_IMPORT_UNREDACTABLE_METADATA]
 
 
+def test_advisory_metadata_does_not_block_publish(tmp_path: Path) -> None:
+    """Issue #1170: an advisory-only finding reports but never blocks the payload.
+
+    ``payload.json`` is built from free-text ``rubric_json``/``reward_json``/
+    ``notes``, which is exactly the content that carries the ``env_var`` name
+    shape — an upper-case name ending in ``KEY`` assigned an ordinary flag
+    string. The value-free summary is still returned, so the finding is visible
+    rather than silent.
+    """
+    row = _metadata_row(notes='FEATURE_FLAG_OVERRIDE_KEY = "override_flag"')
+    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
+    scanned = scan_run_dir(tmp_path / "scan")
+    assert scanned.clean is False and scanned.blocking is False  # advisory-only
+    assert result["blocked"] is False
+    assert result["blocked_reasons"] == []
+    assert "env_var" in result["scan_summary"]
+    assert "override_flag" not in result["scan_summary"]  # M11: never a value
+    # The row is published as-is: an advisory shape is not credential material.
+    assert result["payload"][0]["notes"] == 'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"'
+
+
 def test_blocked_payload_carries_marker_skipping(tmp_path: Path) -> None:
     # Already-redacted markers are safe output, not secrets: a payload whose
     # only "suspicious" text is our own marker scans clean.
