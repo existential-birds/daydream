@@ -129,7 +129,9 @@ async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
     while True:
         try:
             _os.killpg(pgid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # EPERM means the pgid was recycled by a foreign-uid process,
+            # i.e. our same-uid group exited.
             return
         if loop.time() > deadline:
             raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")

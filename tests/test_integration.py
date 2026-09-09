@@ -707,7 +707,9 @@ async def _wait_for_process_group_exit(pgid: int) -> None:
     while time.monotonic() < deadline:
         try:
             os.killpg(pgid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # EPERM means the pgid was recycled by a foreign-uid process,
+            # i.e. our same-uid group exited.
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"remote CI process group {pgid} survived cancellation")
