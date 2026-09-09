@@ -203,11 +203,18 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     bin_dir.mkdir()
     marker = tmp_path / "codex-ready"
     cli = bin_dir / "codex"
+    # The marker is written to a temp path and renamed into place so it never
+    # exists empty: `open(marker, 'w')` creates the file before the pid write
+    # lands, and `_wait_for_file` polls bare existence, so a non-atomic write
+    # races the reader into `int('')` on a loaded host.
     cli.write_text(
         "#!/usr/bin/env python3\n"
         "import os, subprocess, time\n"
         "subprocess.Popen(['sleep', '300'])\n"
-        f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        f"tmp = {str(marker)!r} + '.tmp'\n"
+        "with open(tmp, 'w') as f:\n"
+        "    f.write(str(os.getpid()))\n"
+        f"os.replace(tmp, {str(marker)!r})\n"
         "time.sleep(1000)\n"
     )
     cli.chmod(0o755)
