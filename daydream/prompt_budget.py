@@ -117,6 +117,23 @@ class PreparedSanctionedInputs:
                 remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
                 max_bytes = min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining)
                 aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
+            if _unchanged_since_capture(item):
+                # The (dev, ino, size, mtime_ns) identity is unchanged since
+                # the capture that already streamed and hashed these exact
+                # bytes, so the re-read/re-hash is redundant on this attempt.
+                # The aggregate budget stays enforced exactly as a fresh
+                # capture would enforce it. Invariant: unchanged items carry
+                # their capture-time sizes, whose sum capture already checked
+                # against the cap, and a re-captured item either matches
+                # item (same size) or fails closed below — so this guard
+                # pins the cap fail-closed even if that invariant drifts.
+                if item.size > max_bytes:
+                    raise SanctionedInputUnavailable(
+                        f"sanctioned input {item.label!r} exceeds remaining "
+                        "aggregate input budget"
+                    )
+                aggregate += item.size
+                continue
             current = _capture_input(
                 item.label,
                 item.path,
@@ -129,6 +146,23 @@ class PreparedSanctionedInputs:
                 raise SanctionedInputUnavailable(
                     f"sanctioned input {item.label!r} changed before model execution"
                 )
+
+
+def _unchanged_since_capture(item: PreparedSanctionedInput) -> bool:
+    """Whether *item*'s file still carries the identity the capture attested.
+
+    The ``(dev, ino, size, mtime_ns)`` tuple is the same identity
+    :func:`_capture_input` validates internally; matching it re-validates file
+    identity without a per-attempt re-read. A missing, unreadable, or replaced
+    file returns ``False`` so the caller performs the full capture and
+    surfaces its original fail-closed errors.
+    """
+    try:
+        metadata = item.path.lstat()
+    except OSError:
+        return False
+    identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+    return identity == (item.device, item.inode, item.size, item.mtime_ns)
 
 
 def _capture_input(
