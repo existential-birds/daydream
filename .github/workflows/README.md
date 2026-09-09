@@ -97,12 +97,13 @@ two multi-dependency `uv` blocks each use one minor+patch group, so at most
 one grouped PR per uv project; the npm block is ungrouped since it tracks a
 single dependency. Commit messages carry the `chore(deps)` prefix.
 
-**Action bumps are manual.** The `github-actions` ecosystem was removed on
-purpose: every third-party action is pinned to a full commit SHA registered in
-`tests/test_workflow_templates.py::_PINNED_ACTION_VERSIONS`, which Dependabot
-cannot update — its action-bump PRs failed CI structurally. Bump actions by
-hand: update the SHA + `# vX.Y.Z` comment in the workflows (live and packaged
-templates) AND the map entry, then run `make check`.
+**Action bumps are automated.** Every third-party action stays pinned to a full
+commit SHA — enforced by
+`tests/test_workflow_templates.py::test_bot_workflow_action_references_are_pinned_to_commit_shas`
+— and the `github-actions` ecosystem raises the bumps. It was off for a while
+because a hand-maintained SHA→version map in that same test file could not be
+updated by Dependabot, so every bump PR failed CI; the map is gone, and the
+SHA-pinning invariant it was bolted onto is unaffected.
 
 **Validation gate.** Every dependency PR must pass `make check` before merge —
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`
