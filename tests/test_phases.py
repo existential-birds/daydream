@@ -2105,6 +2105,25 @@ async def test_phase_fix_parallel_forwards_exploration_pointer(
 
 
 @pytest.mark.asyncio
+async def test_phase_fix_parallel_drops_pointer_when_index_missing(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """An exploration dir without affected_files.md must not reach fix prompts."""
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_parallel(backend, make_work(tmp_path), items, exploration_dir=exploration_dir)
+    assert backend.prompts
+    assert not any("affected_files.md" in prompt for prompt in backend.prompts)
+
+
+@pytest.mark.asyncio
 async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_reviewer(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],

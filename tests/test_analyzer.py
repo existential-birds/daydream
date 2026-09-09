@@ -3311,6 +3311,17 @@ def test_grounding_accepts_a_within_tolerance_line(tmp_path: Path) -> None:
     assert result["grounding_rate"] == 1.0
 
 
+def test_grounding_treats_a_non_string_rationale_as_empty(tmp_path: Path) -> None:
+    dd, _deep = _worked_example_dirs(tmp_path)
+
+    result = analyze_grounding(
+        _loader_trajectories(), [_grounding_finding(rationale=None)], dd
+    )
+
+    assert result["total_findings"] == 1
+    assert result["grounding_rate"] == 1.0
+
+
 @pytest.mark.parametrize(
     ("finding", "expected_tier"),
     [

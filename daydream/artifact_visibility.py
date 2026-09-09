@@ -705,8 +705,9 @@ def _load_ledger(
     payload = _load_json(path)
     if (
         set(payload) != {"schema_version", items_key, *(key for key, _ in identity)}
-        or payload.get("schema_version") != _SCHEMA_VERSION
-        or any(payload.get(key) != value for key, value in identity)
+        or type(payload["schema_version"]) is not int
+        or payload["schema_version"] != _SCHEMA_VERSION
+        or any(type(payload[key]) is not type(value) or payload[key] != value for key, value in identity)
         or not isinstance(payload.get(items_key), list)
     ):
         raise ArtifactVisibilityError(message)

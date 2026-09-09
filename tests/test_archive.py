@@ -5103,6 +5103,72 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     assert not (get_archive_dir() / "runs" / session_id).exists()
 
 
+def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frozen tree mutated after finalization starts is caught before the external upload."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import ArchiveRecorderProvenance
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = "strict-upload-mutated"
+    frozen = tmp_path / "frozen"
+    source_run = frozen / ".daydream" / "runs" / session_id
+    source_run.mkdir(parents=True)
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "steps": [],
+            "final_metrics": {},
+            "extra": {},
+        }
+    ).encode()
+    (source_run / "trajectory.json").write_bytes(encoded)
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    )
+    artifacts = ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ())
+    uploads: list[Path] = []
+
+    def mutate_then_resolve(_config: Any) -> str:
+        (source_run / "trajectory.json").write_bytes(encoded + b"\n")
+        return "private/repo"
+
+    def record_upload(run_dir: Path, *_args: Any, **_kwargs: Any) -> bool:
+        uploads.append(run_dir)
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", mutate_then_resolve)
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", record_upload)
+
+    with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
+        finalize_archive_run(
+            recorder_provenance=ArchiveRecorderProvenance(
+                session_id, DaydreamRunFlow.NORMAL, None, None
+            ),
+            artifacts=artifacts,
+            artifact_provenance=ArtifactEvidenceProvenance(
+                "workspace", session_id, tmp_path / "source", tmp_path / "live"
+            ),
+            config=cast(Any, _MockConfig(run_eval=False, archive=True)),
+            write_snapshot=snapshot,
+            work=None,
+            upload=True,
+        )
+
+    assert uploads == []
+    assert not (get_archive_dir() / "runs" / session_id).exists()
+
+
 def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

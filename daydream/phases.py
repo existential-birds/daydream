@@ -2601,11 +2601,14 @@ def _prepare_fix_inputs(
     """
     intent_input = intent_path if intent_path is not None and intent_path.is_file() else None
     index = None if exploration_dir is None else exploration_dir / "affected_files.md"
+    if index is not None and not index.is_file():
+        index = None
+    pointer = None if index is None else exploration_dir
     prepared = _prepare_existing_phase_inputs(
         backend, work, {"intent": intent_input, "exploration-affected-files": index},
     )
     if prepared is None:
-        return None, _build_intent_suffix(intent_path), exploration_dir
+        return None, _build_intent_suffix(intent_path), pointer
     suffix = (
         "\nThe sanctioned phase input labelled `intent` contains CONFIRMED AUTHOR "
         "INTENT for this change. Treat it as authoritative product-behavior "
@@ -2616,9 +2619,7 @@ def _prepare_fix_inputs(
         if intent_input is not None
         else ""
     )
-    return prepared, suffix, _pointer_dir(
-        prepared, None if index is None or not index.is_file() else exploration_dir
-    )
+    return prepared, suffix, _pointer_dir(prepared, pointer)
 
 
 def _build_verifier_suffix(item: dict[str, Any]) -> str:

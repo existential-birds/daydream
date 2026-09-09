@@ -1703,6 +1703,7 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
         "embedded-dot",
         "empty-component",
         "normalized-duplicate",
+        "bool-schema-version",
     ],
 )
 async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
@@ -1724,6 +1725,7 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
         "embedded-dot": "runs/./record.json",
         "empty-component": "runs//record.json",
         "normalized-duplicate": "runs/record.json",
+        "bool-schema-version": "runs/record.json",
     }[manifest_problem]
     entry = {"path": raw_path, "kind": "directory", "size": 0, "mode": 0o700, "sha256": None}
     if manifest_problem == "duplicate-path":
@@ -1732,7 +1734,8 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
         entries = [entry, {**entry, "path": "./runs/record.json"}]
     else:
         entries = [entry]
-    _atomic_json(transaction / "manifest.json", {"schema_version": 1, "entries": entries})
+    schema_version = True if manifest_problem == "bool-schema-version" else 1
+    _atomic_json(transaction / "manifest.json", {"schema_version": schema_version, "entries": entries})
     _atomic_json(
         transaction / "journal.json",
         {

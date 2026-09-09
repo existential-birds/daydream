@@ -1475,7 +1475,8 @@ def analyze_grounding(
         reads = agent_reads.get(f"deep-{stack}", set())
 
         cited_file = finding.get("file", "")
-        rationale = finding.get("rationale", "")
+        rationale_value = finding.get("rationale", "")
+        rationale = rationale_value if isinstance(rationale_value, str) else ""
 
         cited_kind = _artifact_path_kind(cited_file, roots=roots)
         artifact_file_ref = (

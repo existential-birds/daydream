@@ -127,11 +127,18 @@ def _copy_snapshot_bundle(
     from daydream.artifact_visibility import OutputLabel
 
     _project_documents(write_snapshot, run_dir, session_id=recorder_provenance.session_id)
+    findings_routes = [
+        route for route in artifacts.destinations if route.label is OutputLabel.FINDINGS_OUTPUT
+    ]
     findings_src: Path | None = None
-    for route in artifacts.destinations:
-        if route.label is OutputLabel.FINDINGS_OUTPUT and route.frozen_path is not None:
-            relative = route.frozen_path.relative_to(artifact_provenance.live_root)
-            findings_src = artifacts.root / relative
+    if findings_routes:
+        if len(findings_routes) != 1 or findings_routes[0].frozen_path is None:
+            raise ArchiveFinalizationError("frozen artifact destination is malformed")
+        try:
+            relative = findings_routes[0].frozen_path.relative_to(artifact_provenance.live_root)
+        except ValueError as exc:
+            raise ArchiveFinalizationError("frozen artifact destination escaped its run") from exc
+        findings_src = artifacts.root / relative
     _copy_run_artifacts(
         artifacts.root,
         run_dir,
@@ -319,8 +326,11 @@ def finalize_archive_run(
             from daydream.archive import hub
 
             hub_repo_id = hub.resolve_hub_repo(config)
-            if hub_repo_id and not hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id):
-                raise ArchiveFinalizationError("archive upload failed")
+            if hub_repo_id:
+                _validate_frozen_artifacts(artifacts)
+                if not hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id):
+                    raise ArchiveFinalizationError("archive upload failed")
+                _validate_frozen_artifacts(artifacts)
         if config.dump_artifacts:
             if dump_path is None:
                 raise ArchiveFinalizationError("dump finalization path is missing")
@@ -328,6 +338,7 @@ def finalize_archive_run(
 
             if not scan.scan_run_dir(assembly_dir).clean:
                 raise ArchiveFinalizationError("dump artifact secret scan refused publication")
+            _validate_frozen_artifacts(artifacts)
             dump_started = True
             shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
         _validate_frozen_artifacts(artifacts)
