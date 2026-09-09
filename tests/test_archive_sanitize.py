@@ -1,5 +1,6 @@
 """Legacy bronze bundle sanitizer (issue #981 M14/M15/M19)."""
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,90 @@ def test_derivative_stays_quarantined_until_scan_passes(
     assert result.released is False  # M16
     assert (archive_dir / "quarantine" / "s1").is_dir()
     assert not (archive_dir / "sanitized" / "s1" / "manifest.json").exists()
+
+
+def test_advisory_only_derivative_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #1170: an advisory-only release scan releases instead of quarantining.
+
+    The rule *table* is the seam, not ``scan_run_dir``: the real scanner walks
+    the real derivative, mints real ``Finding`` objects and resolves severity
+    through the real ``ScanResult.blocking`` property — only the rule that fires
+    is swapped for an advisory one. A rule table is needed because the
+    sanitizer's own transform now scrubs every shape the tiering can demote
+    (``env_var`` is redacted, the three userinfo shapes are substituted), so a
+    derivative that legitimately carries an advisory-only finding is by
+    construction unreachable through real content.
+    """
+    advisory_rule = (
+        re.compile(r"\bFEATURE_FLAG_OVERRIDE_KEY\b"),
+        "env_var",
+        scan_module.SEVERITY_ADVISORY,
+    )
+    monkeypatch.setattr(scan_module, "_RULES", (advisory_rule,))
+    archive_dir = tmp_path / "archive"
+    run_dir = archive_dir / "runs" / "s1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"session_id": "s1", "git": {"remote_url": "https://github.com/o/r"}})
+    )
+    (run_dir / "diff.patch").write_text('+FEATURE_FLAG_OVERRIDE_KEY = "override_flag"\n')
+
+    result = sanitize.sanitize_bundle(run_dir, archive_dir)
+
+    assert result.released is True
+    assert result.status == "sanitized"
+    assert not (archive_dir / "quarantine" / "s1").exists()
+    assert (archive_dir / "sanitized" / "s1" / "manifest.json").is_file()
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "advisory" in out
+    assert "diff.patch" in out
+    assert "override_flag" not in out  # M11: never a matched value
+
+
+def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path) -> None:
+    """Issue #1170 F5: the JSON branch applies the scan-local substitutions.
+
+    A trajectory tool observation is a JSON string leaf, and JSON leaves used to
+    run only through ``_sanitize_json_value`` + ``redact_value`` — neither of
+    which carries the three scanner-local rewrites. A bundle whose
+    ``trajectory.json`` holds a token-only userinfo remote, the issue's f-string
+    DSN template, or a credential-bearing query param was therefore quarantined
+    on every pass, deterministically, because ``_mark_done`` was never reached.
+    """
+    archive_dir = tmp_path / "archive"
+    run_dir = archive_dir / "runs" / "s1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"session_id": "s1", "git": {"remote_url": "https://github.com/o/r"}})
+    )
+    dsn = 'return f"postgresql://{cfg.DB_USER}:{cfg.DB_PASSWORD}@{cfg.DB_HOST}:{cfg.DB_PORT}/x"'
+    (run_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"observation": dsn},
+                    {"observation": "fetch https://example.com/repo?token=abc123"},
+                    {"observation": "clone https://x-access-token@github.com/o/r.git"},
+                ]
+            }
+        )
+    )
+
+    result = sanitize.sanitize_bundle(run_dir, archive_dir)
+
+    assert result.released is True
+    assert not (archive_dir / "quarantine" / "s1").exists()
+    derivative = archive_dir / "sanitized" / "s1"
+    assert scan_module.scan_run_dir(derivative).clean is True  # re-scans clean
+    text = (derivative / "trajectory.json").read_text()
+    assert "x-access-token" not in text  # the blocking shape is gone, not tolerated
+    assert "token=abc123" not in text
+    assert "{cfg.DB_PASSWORD}" not in text
+    # M14: the source bundle is never modified.
+    assert "x-access-token" in (run_dir / "trajectory.json").read_text()
 
 
 def test_corpus_projection_reads_only_sanitized_paths(tmp_path: Path) -> None:

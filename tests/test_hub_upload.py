@@ -279,3 +279,40 @@ def test_upload_proceeds_for_clean_bundle(
     uploads = _install_fake_hfapi(monkeypatch)
     assert hub.upload_run_bundle(hf_run_dir, "org/ds", "s1") is True
     assert len(uploads) == 1
+
+
+def test_upload_proceeds_for_advisory_only_bundle(
+    hf_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #1170: an advisory-only finding reports but never gates the Hub.
+
+    The manifest carries the issue's ``env_var`` false positive — an upper-case
+    name ending in ``KEY`` assigned an ordinary flag string. A rule that cannot
+    identify a secret must not refuse irreversible egress, so the upload
+    proceeds and the operator gets the value-free summary instead of silence.
+    """
+    (hf_run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "git": {"remote_url": "https://github.com/o/r"},
+                "notes": 'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"',
+            }
+        ),
+        encoding="utf-8",
+    )
+    from daydream.archive import scan
+
+    result = scan.scan_run_dir(hf_run_dir)
+    assert result.clean is False and result.blocking is False  # advisory-only bundle
+    uploads = _install_fake_hfapi(monkeypatch)
+    assert hub.upload_run_bundle(hf_run_dir, "org/ds", "s1") is True
+    assert len(uploads) == 1
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "advisory" in out
+    assert "manifest.json" in out
+    assert "env_var" in out
+    assert "override_flag" not in out  # M11: never a matched value
+    assert "FEATURE_FLAG_OVERRIDE_KEY" not in out

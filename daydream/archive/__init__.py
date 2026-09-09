@@ -48,6 +48,17 @@ class ArchiveFinalizationError(RuntimeError):
     """Strict host archive finalization did not complete successfully."""
 
 
+def _warn(message: str) -> None:
+    """Print a one-line warning through the daydream console (never raises).
+
+    Lazily imported (mirroring ``hub._warn``) so the archive import graph does
+    not pull the UI package in for callers that never warn.
+    """
+    from daydream.ui import create_console, print_warning
+
+    print_warning(create_console(), message)
+
+
 def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     """Whether the executed flow runs the deep cross-stack/single-stack merge.
 
@@ -335,8 +346,17 @@ def finalize_archive_run(
                 raise ArchiveFinalizationError("dump finalization path is missing")
             from daydream.archive import scan
 
-            if not scan.scan_run_dir(assembly_dir).clean:
-                raise ArchiveFinalizationError("dump artifact secret scan refused publication")
+            scan_result = scan.scan_run_dir(assembly_dir)
+            if scan_result.blocking:
+                raise ArchiveFinalizationError(
+                    f"dump artifact secret scan refused publication ({scan_result.summary()})"
+                )
+            if scan_result.findings:
+                _warn(
+                    "Publishing the dump for "
+                    f"{recorder_provenance.session_id} with advisory secret-scan findings "
+                    f"({scan_result.summary()})"
+                )
             dump_started = True
             shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
         _validate_frozen_artifacts(artifacts)

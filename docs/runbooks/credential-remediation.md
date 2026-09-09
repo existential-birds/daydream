@@ -121,8 +121,8 @@ Choose exactly one option, in escalating order of destructiveness:
 |---|---|---|---|
 | `report_inventory()` scoping | No (read-only, value-free) | Agent or human | — |
 | Reading `sanitized/audit.jsonl` | No | Agent or human | Never print values |
-| `sanitize_archive()` / `sanitize_bundle()` | No (produces derivatives; bronze sources never modified) | Agent or human | Fail-closed scan; failures quarantine |
-| Quarantine **release** (moving a derivative out of `quarantine/` after review) | No | Agent or human | Must pass `scan_run_dir()` clean first |
+| `sanitize_archive()` / `sanitize_bundle()` | No (produces derivatives; bronze sources never modified) | Agent or human | Fail-closed scan; blocking findings quarantine, advisory findings are reported and released |
+| Quarantine **release** (moving a derivative out of `quarantine/` after review) | No | Agent or human | Must pass `scan_run_dir()` with no blocking finding first (see §6.2); advisory findings do not hold a release |
 | Credential revocation / rotation | **Destructive** | **Human only** | Human approval; never automated |
 | Hub revision deletion (4b) | **Destructive** | **Human only** | Approval + executed revocation + written deletion record |
 | Hub history rewrite (4c) | **Destructive** | **Human only** | Approval + executed revocation + written deletion record |
@@ -136,14 +136,35 @@ Post-remediation, confirm the incident is closed:
    `unparseable`, if pre-existing) remain.
 2. **Re-scan:** run the fail-closed scanner (`daydream.archive.scan.scan_run_dir`)
    over sanitized derivatives and any bundle that will egress. It must report
-   clean.
+   **no blocking findings** (`ScanResult.blocking` empty). The scanner reports
+   two tiers, and only the blocking tier is an acceptance criterion:
+   - **Blocking** — high-confidence credential formats: API-key prefixes
+     (`api_key`), PEM key material (`pem_key`), JWTs (`jwt`), literal
+     `user:pass@` userinfo and token-only userinfo (`url_credential`),
+     credential-bearing query parameters (`query_credential`), and any
+     `scan_error` (a scan that could not complete never reads clean). A
+     blocking finding refuses publication on every egress path.
+   - **Advisory** — shapes the scanner cannot attribute to a credential value:
+     a secret-*named* variable whose value is not secret-shaped (`env_var`,
+     e.g. `SORT_KEY = "created_at"`), and a userinfo template whose parts are
+     entirely `{placeholder}` interpolation. These are reported to the operator
+     but no longer refuse egress.
+
+   So a bundle carrying advisory findings will **not** report `clean` yet will
+   still egress. That is deliberate: a rule that cannot identify a credential
+   value must not gate irreversible publication. Read the advisory list anyway —
+   it names the path, location, and category (never a value), and it is where a
+   credential in an unrecognized format would show up. If an advisory finding
+   looks like a real credential, treat it as an incident and go back to step 1
+   rather than releasing.
 3. **Revocation holds:** attempt authentication with a revoked token from the
    operator's own terminal and confirm it fails.
 4. **Going forward:** the fail-closed scan (upload preflight in
-   `daydream/archive/hub.py`, the `--dump-artifacts` copy gate, and the
-   sanitizer release gate) blocks any bundle that is not provably clean from
-   every egress path. Future incidents should be caught at that gate, before
-   upload.
+   `daydream/archive/hub.py`, the `--dump-artifacts` copy gate, the sanitizer
+   release and metadata-import gates, and clean-room verification) blocks any
+   bundle carrying a blocking finding from every egress path, and reports the
+   advisory tier without blocking. Future incidents in a recognized credential
+   format should be caught at that gate, before upload.
 
 ## 7. How the harvest clone step authenticates
 

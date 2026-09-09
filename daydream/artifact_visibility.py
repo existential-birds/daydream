@@ -2730,6 +2730,111 @@ def _retire_source_stage(source: Path, transaction_id: str, purpose: str, *, wor
     _remove_owned_tree(stage, source.parent)
 
 
+def _reset_source_stage(source: Path, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
+    """Drop this exact identity's own leftover stage so a retry is not blocked.
+
+    A restore that raised before retiring its stage leaves the directory
+    behind, and ``_create_source_stage`` then refuses every later attempt with
+    "artifact source-stage collision" (#1172). A stage attesting exactly this
+    workspace, transaction and purpose holds nothing but regenerable copies of
+    durable state (``canonical`` and the transaction's own baselines), so it is
+    this identity's to reclaim. Anything else — a foreign directory, tampered
+    or absent attestation — is left alone and still collides.
+    """
+    stage = _source_stage_path(source, transaction_id, purpose)
+    if not stage.exists() and not stage.is_symlink():
+        return
+    if stage.is_symlink() or not stage.is_dir():
+        return
+    owner = stage / "stage-owner.json"
+    if not owner.is_file():
+        return
+    if _load_json(owner) != _source_stage_owner(source, transaction_id, purpose, workspace_key):
+        return
+    _remove_owned_tree(stage, source.parent)
+
+
+def _quarantine_transaction(state_root: Path, transaction: Path) -> Path:
+    """Move a transaction out of the replay path without destroying it.
+
+    Retiring a transaction deletes its ``destination-NNNN-baseline`` copies,
+    which are the only surviving record of an in-source destination's prior
+    bytes once detach has transferred them out of the source. Leaving the
+    journal under ``transactions/`` instead makes every later session open
+    replay a restore that already failed deterministically (#1172). Renaming
+    the transaction under ``unreconciled/`` does neither: recovery never looks
+    there, and the operator keeps every byte.
+    """
+    root = state_root / "unreconciled"
+    _create_private_directory(root)
+    preserved = root / transaction.name
+    if preserved.exists() or preserved.is_symlink():
+        raise ArtifactVisibilityError("artifact unreconciled transaction collision")
+    os.replace(transaction, preserved)
+    _fsync_directory(transaction.parent)
+    _fsync_directory(root)
+    return preserved
+
+
+class _NamedTransactionError(ArtifactVisibilityError):
+    """A storage error whose message already names its transaction and workspace."""
+
+
+def _transaction_context(error: Exception, state_root: Path, transaction: Path, *, detail: str = "") -> Exception:
+    """Re-raise ``error`` naming the transaction and workspace it belongs to.
+
+    A bare storage message ("dump destination projection is malformed") tells
+    an operator nothing about which transaction to act on or where its state
+    lives, which is the whole difficulty in #1172. The original text is kept
+    verbatim as the prefix so callers matching on it keep working.
+    """
+    if isinstance(error, _NamedTransactionError):
+        return error
+    suffix = f" (artifact transaction {transaction.name} in workspace {state_root}{detail})"
+    contextual = _NamedTransactionError(f"{error}{suffix}")
+    contextual.__cause__ = error
+    return contextual
+
+
+def _transaction_holds_conflict(transaction: Path) -> bool:
+    """Whether this transaction carries a durably recorded, unadjudicated conflict.
+
+    Either registry — ``conflicts.json`` or a ``conflict`` lifecycle in the
+    external-entry ledger — is the module's deliberate hard stop:
+    ``_retire_transaction`` refuses such a transaction and recovery refuses to
+    replay past it, because it is the only record of what diverged and only a
+    human can settle it.
+    """
+    registry = transaction / "conflicts.json"
+    if registry.exists() or registry.is_symlink():
+        return True
+    return any(
+        record["lifecycle"] == _ExternalEntryLifecycle.CONFLICT.value for record in _external_records(transaction)
+    )
+
+
+def _clear_failed_restore(state_root: Path, source: Path, transaction: Path, error: Exception) -> Exception:
+    """Take a transaction whose *destination* restore failed out of the replay path.
+
+    Recovery reruns the same records through the same code, so a destination
+    restore that fails once fails identically at every later session open and
+    wedges the workspace permanently. Both call sites have already reinstalled
+    the public tree by this point, which is why dropping the journal is safe
+    here and never for a public-restore failure — there the retained journal is
+    itself the mechanism that puts the public tree back.
+    """
+    if _transaction_holds_conflict(transaction):
+        return _transaction_context(error, state_root, transaction)
+    _reset_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
+    preserved = _quarantine_transaction(state_root, transaction)
+    return _transaction_context(
+        error,
+        state_root,
+        transaction,
+        detail=f"; it could not restore every explicit destination and is preserved at {preserved}",
+    )
+
+
 def _copy_regular_entry(
     source: Path,
     target: Path,
@@ -2849,6 +2954,41 @@ def _replace_destination_from_tree(
         raise ArtifactVisibilityError("explicit artifact destination verification failed")
 
 
+def _remove_directory_destination(
+    record: _DestinationRecord,
+    *,
+    transaction: Path,
+    workspace_key: str,
+) -> None:
+    """Project a directory destination back to "not present".
+
+    Whatever is live at the record was already validated against the record's
+    allowed manifests by the caller, so this removes that tree and gives back
+    every parent directory the record itself had to create.
+    """
+    root = Path(record.base)
+    actual = _manifest(root, (record.relative,))
+    if actual:
+        _remove_manifested(
+            root,
+            actual,
+            (record.relative,),
+            transaction=transaction,
+            workspace_key=workspace_key,
+            purpose="remove-dump-destination",
+            stage_parent=root,
+            record_id=record.record_id,
+            changed_message="dump destination changed during removal",
+        )
+    for parent_relative in reversed(record.missing_parents):
+        parent = root / parent_relative
+        with suppress(OSError):
+            parent.rmdir()
+            _fsync_directory(parent.parent)
+    if _manifest(root, (record.relative,)):
+        raise ArtifactVisibilityError("dump destination removal verification failed")
+
+
 def _merge_directory_from_tree(
     tree: Path,
     record: _DestinationRecord,
@@ -2862,6 +3002,16 @@ def _merge_directory_from_tree(
     target_root = root / record.relative
     baseline = {entry.path: entry for entry in record.baseline}
     desired_by_path = {entry.path: entry for entry in desired}
+    if not desired:
+        # ``_manifest`` omits names that do not exist, so an empty projection is
+        # the normal shape of a directory destination that was not there before
+        # the run. Its rollback target is "not present", not a malformed
+        # projection (#1171). An empty projection over a real baseline is still
+        # a genuine malformation and keeps failing closed.
+        if record.baseline:
+            raise ArtifactVisibilityError("dump destination projection dropped a baseline file")
+        _remove_directory_destination(record, transaction=transaction, workspace_key=workspace_key)
+        return
     desired_root = desired_by_path.get(record.relative)
     if desired_root is None or desired_root.kind != "directory":
         raise ArtifactVisibilityError("dump destination projection is malformed")
@@ -3109,132 +3259,154 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
     completed_sessions: set[str] = set()
     records.sort(key=lambda item: (not item[1].is_publish, item[0].name))
     for transaction, state, session_id in records:
-        if (transaction / "conflicts.json").exists() or (transaction / "conflicts.json").is_symlink():
-            raise ArtifactVisibilityError("artifact recovery retained a closed conflict")
-        if session_id in completed_sessions and not state.is_publish:
-            _retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
-            continue
-        canonical = state_root / "canonical"
-        canonical_manifest = state_root / "canonical-manifest.json"
-        transaction_manifest = transaction / "manifest.json"
-        published_entries: tuple[ArtifactManifestEntry, ...] | None = None
-        destination_records = _load_destination_records(transaction, include_published=state.is_publish)
-        _reconcile_external_entries(transaction, destination_records)
-        publication_stage = (_source_stage_path(source, transaction.name, "publish") if state.is_publish else None)
-        restore_stage: Path | None = None
-        if state.is_publish:
-            published_entries = _parse_manifest(transaction / "publish-manifest.json")
-        if state is _Transition.DETACH_STAGED:
-            entries = _parse_manifest(transaction_manifest)
-            stage = transaction / "detach-stage"
-            if not canonical.exists():
-                if _manifest(stage) != entries:
-                    raise ArtifactVisibilityError("staged detach is incomplete")
-                os.replace(stage, canonical)
-                _fsync_directory(state_root)
-            else:
-                if _manifest(canonical) != entries:
-                    raise ArtifactVisibilityError("staged detach ownership is ambiguous")
-                if stage.exists() and _manifest(stage) != entries:
-                    raise ArtifactVisibilityError("staged detach ownership is ambiguous")
-            if not canonical_manifest.exists():
-                _atomic_json(canonical_manifest, _manifest_payload(entries))
-        if state is _Transition.PUBLISH_INSTALLED and not canonical.exists():
-            replacement = transaction / "canonical-stage"
-            if published_entries is None or _manifest(replacement) != published_entries:
+        try:
+            _recover_transaction(
+                state_root, source, transaction, state, session_id, completed_sessions
+            )
+        except Exception as exc:
+            # A bare storage message names neither the transaction nor the
+            # workspace an operator has to act on (#1172).
+            raise _transaction_context(exc, state_root, transaction) from exc
+
+
+def _recover_transaction(
+    state_root: Path,
+    source: Path,
+    transaction: Path,
+    state: _Transition,
+    session_id: str,
+    completed_sessions: set[str],
+) -> None:
+    """Reconcile one journalled transaction, retiring it when it is settled."""
+    if (transaction / "conflicts.json").exists() or (transaction / "conflicts.json").is_symlink():
+        raise ArtifactVisibilityError("artifact recovery retained a closed conflict")
+    if session_id in completed_sessions and not state.is_publish:
+        _retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
+        return
+    canonical = state_root / "canonical"
+    canonical_manifest = state_root / "canonical-manifest.json"
+    transaction_manifest = transaction / "manifest.json"
+    published_entries: tuple[ArtifactManifestEntry, ...] | None = None
+    destination_records = _load_destination_records(transaction, include_published=state.is_publish)
+    _reconcile_external_entries(transaction, destination_records)
+    publication_stage = (_source_stage_path(source, transaction.name, "publish") if state.is_publish else None)
+    restore_stage: Path | None = None
+    if state.is_publish:
+        published_entries = _parse_manifest(transaction / "publish-manifest.json")
+    if state is _Transition.DETACH_STAGED:
+        entries = _parse_manifest(transaction_manifest)
+        stage = transaction / "detach-stage"
+        if not canonical.exists():
+            if _manifest(stage) != entries:
+                raise ArtifactVisibilityError("staged detach is incomplete")
+            os.replace(stage, canonical)
+            _fsync_directory(state_root)
+        else:
+            if _manifest(canonical) != entries:
+                raise ArtifactVisibilityError("staged detach ownership is ambiguous")
+            if stage.exists() and _manifest(stage) != entries:
+                raise ArtifactVisibilityError("staged detach ownership is ambiguous")
+        if not canonical_manifest.exists():
+            _atomic_json(canonical_manifest, _manifest_payload(entries))
+    if state is _Transition.PUBLISH_INSTALLED and not canonical.exists():
+        replacement = transaction / "canonical-stage"
+        if published_entries is None or _manifest(replacement) != published_entries:
+            raise ArtifactVisibilityError("staged canonical publication copy is corrupt")
+        os.replace(replacement, canonical)
+        _fsync_directory(state_root)
+    if not canonical.exists() or not canonical_manifest.exists():
+        raise ArtifactVisibilityError("canonical artifact recovery copy is missing")
+    canonical_entries = _parse_manifest(canonical_manifest)
+    canonical_actual = _manifest(canonical)
+    if canonical_actual != canonical_entries and not (
+        state is _Transition.PUBLISH_INSTALLED and canonical_actual == published_entries
+    ):
+        raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
+
+    if state is _Transition.PUBLISH_INSTALLED:
+        assert published_entries is not None
+        if _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT)) != published_entries:
+            raise ArtifactVisibilityError("installed public artifact recovery copy is corrupt")
+        replacement = transaction / "canonical-stage"
+        if replacement.exists():
+            if _manifest(replacement) != published_entries:
                 raise ArtifactVisibilityError("staged canonical publication copy is corrupt")
+            backup = transaction / "old-canonical"
+            os.replace(canonical, backup)
             os.replace(replacement, canonical)
             _fsync_directory(state_root)
-        if not canonical.exists() or not canonical_manifest.exists():
-            raise ArtifactVisibilityError("canonical artifact recovery copy is missing")
-        canonical_entries = _parse_manifest(canonical_manifest)
-        canonical_actual = _manifest(canonical)
-        if canonical_actual != canonical_entries and not (
-            state is _Transition.PUBLISH_INSTALLED and canonical_actual == published_entries
-        ):
-            raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
-
-        if state is _Transition.PUBLISH_INSTALLED:
-            assert published_entries is not None
-            if _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT)) != published_entries:
-                raise ArtifactVisibilityError("installed public artifact recovery copy is corrupt")
-            replacement = transaction / "canonical-stage"
-            if replacement.exists():
-                if _manifest(replacement) != published_entries:
-                    raise ArtifactVisibilityError("staged canonical publication copy is corrupt")
-                backup = transaction / "old-canonical"
-                os.replace(canonical, backup)
-                os.replace(replacement, canonical)
-                _fsync_directory(state_root)
-            elif _manifest(canonical) != published_entries:
-                raise ArtifactVisibilityError("installed canonical publication copy is missing")
-            _atomic_json(canonical_manifest, _manifest_payload(published_entries))
-            canonical_entries = published_entries
-        elif state is _Transition.PUBLISH_VERIFIED:
-            assert published_entries is not None
-            if canonical_entries != published_entries:
-                raise ArtifactVisibilityError("verified canonical publication identity is corrupt")
-            if _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT)) != canonical_entries:
-                raise ArtifactVisibilityError("verified public artifact recovery copy is corrupt")
-        else:
-            public_entries = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
-            allowed = [canonical_entries]
-            if published_entries is not None:
-                allowed.append(published_entries)
-            if not any(_manifest_is_subset(public_entries, candidate) for candidate in allowed):
-                _append_conflict(
-                    transaction,
-                    record_id="public",
-                    reason="unexpected_replacement",
-                    expected_sha256=None,
-                    observed_sha256=None,
-                    expected_kind="directory",
-                    observed_kind="unknown",
-                    stage_id=None,
-                )
-                raise ArtifactVisibilityError("public artifacts changed during recovery")
-            if public_entries:
-                _remove_manifested(
-                    source,
-                    public_entries,
-                    transaction=transaction,
-                    workspace_key=state_root.name,
-                    purpose="recover-public",
-                    stage_parent=source.parent,
-                )
-            restore_stage = _create_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
-            public_stage = restore_stage / "public"
-            _copy_tree(canonical, public_stage, canonical_entries)
-            _replace_public_from_tree(source, public_stage, canonical_entries)
-        if state in (_Transition.PUBLISH_INSTALLED, _Transition.PUBLISH_VERIFIED):
-            for record in destination_records:
-                if _manifest(Path(record.base), (record.relative,)) != record.published:
-                    raise ArtifactVisibilityError("installed explicit artifact recovery copy is corrupt")
-        else:
-            if destination_records:
-                assert restore_stage is not None
+        elif _manifest(canonical) != published_entries:
+            raise ArtifactVisibilityError("installed canonical publication copy is missing")
+        _atomic_json(canonical_manifest, _manifest_payload(published_entries))
+        canonical_entries = published_entries
+    elif state is _Transition.PUBLISH_VERIFIED:
+        assert published_entries is not None
+        if canonical_entries != published_entries:
+            raise ArtifactVisibilityError("verified canonical publication identity is corrupt")
+        if _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT)) != canonical_entries:
+            raise ArtifactVisibilityError("verified public artifact recovery copy is corrupt")
+    else:
+        public_entries = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
+        allowed = [canonical_entries]
+        if published_entries is not None:
+            allowed.append(published_entries)
+        if not any(_manifest_is_subset(public_entries, candidate) for candidate in allowed):
+            _append_conflict(
+                transaction,
+                record_id="public",
+                reason="unexpected_replacement",
+                expected_sha256=None,
+                observed_sha256=None,
+                expected_kind="directory",
+                observed_kind="unknown",
+                stage_id=None,
+            )
+            raise ArtifactVisibilityError("public artifacts changed during recovery")
+        if public_entries:
+            _remove_manifested(
+                source,
+                public_entries,
+                transaction=transaction,
+                workspace_key=state_root.name,
+                purpose="recover-public",
+                stage_parent=source.parent,
+            )
+        _reset_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
+        restore_stage = _create_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
+        public_stage = restore_stage / "public"
+        _copy_tree(canonical, public_stage, canonical_entries)
+        _replace_public_from_tree(source, public_stage, canonical_entries)
+    if state in (_Transition.PUBLISH_INSTALLED, _Transition.PUBLISH_VERIFIED):
+        for record in destination_records:
+            if _manifest(Path(record.base), (record.relative,)) != record.published:
+                raise ArtifactVisibilityError("installed explicit artifact recovery copy is corrupt")
+    else:
+        assert restore_stage is not None
+        if destination_records:
+            try:
                 _restore_destination_records(source, transaction, destination_records, restore_stage)
-            assert restore_stage is not None
-            _retire_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
-        if state.is_publish:
-            completed_sessions.add(session_id)
-            if publication_stage is None:
-                raise ArtifactVisibilityError("artifact publication stage is missing")
-            if publication_stage.exists() or publication_stage.is_symlink():
-                _retire_source_stage(source, transaction.name, "publish", workspace_key=state_root.name)
-            elif state is not _Transition.PUBLISH_VERIFIED:
-                raise ArtifactVisibilityError("artifact publication stage is missing")
-        _retire_transaction(
-            state_root,
-            transaction,
-            terminal_state=(
-                _TerminalState.PUBLISH_VERIFIED
-                if state is _Transition.PUBLISH_VERIFIED
-                else _TerminalState.PUBLISH_RECONCILED
-                if state.is_publish
-                else _TerminalState.DETACHED_RECONCILED
-            ),
-        )
+            except Exception as exc:
+                raise _clear_failed_restore(state_root, source, transaction, exc) from exc
+        _retire_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
+    if state.is_publish:
+        completed_sessions.add(session_id)
+        if publication_stage is None:
+            raise ArtifactVisibilityError("artifact publication stage is missing")
+        if publication_stage.exists() or publication_stage.is_symlink():
+            _retire_source_stage(source, transaction.name, "publish", workspace_key=state_root.name)
+        elif state is not _Transition.PUBLISH_VERIFIED:
+            raise ArtifactVisibilityError("artifact publication stage is missing")
+    _retire_transaction(
+        state_root,
+        transaction,
+        terminal_state=(
+            _TerminalState.PUBLISH_VERIFIED
+            if state is _Transition.PUBLISH_VERIFIED
+            else _TerminalState.PUBLISH_RECONCILED
+            if state.is_publish
+            else _TerminalState.DETACHED_RECONCILED
+        ),
+    )
 
 
 class _SessionState(str, Enum):
@@ -4000,43 +4172,60 @@ class ArtifactSession:
         self._state = _SessionState.PUBLISHED
 
     def _restore_prior(self) -> None:
-        canonical = self.layout.state_root / "canonical"
+        state_root = self.layout.state_root
+        transaction = self._detach_transaction
+        if not transaction.exists():
+            # Already retired or already taken out of the replay path by an
+            # earlier attempt (``finalize_frozen`` and session close both call
+            # this). There is nothing left to restore from.
+            return
+        canonical = state_root / "canonical"
+        _reset_source_stage(
+            self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
+        )
         source_stage = _create_source_stage(
             self.layout.source,
-            self._detach_transaction.name,
+            transaction.name,
             "restore",
             workspace_key=self.layout.workspace_key,
         )
-        errors: list[Exception] = []
+        # Destination failures and public failures need opposite treatment, so
+        # they are collected apart rather than into one list.
+        destination_errors: list[Exception] = []
+        public_errors: list[Exception] = []
         try:
-            _restore_destination_records(self.layout.source, self._detach_transaction, self._records(), source_stage)
+            _restore_destination_records(self.layout.source, transaction, self._records(), source_stage)
         except Exception as exc:
-            errors.append(exc)
+            destination_errors.append(exc)
         try:
             projection = source_stage / "public"
             _copy_tree(canonical, projection, self._canonical_entries)
             _replace_public_from_tree(self.layout.source, projection, self._canonical_entries)
         except Exception as exc:
-            errors.append(exc)
-        _retire_source_stage(
-            self.layout.source,
-            self._detach_transaction.name,
-            "restore",
-            workspace_key=self.layout.workspace_key,
-        )
+            public_errors.append(exc)
         try:
-            _cleanup_external_directories(self._detach_transaction, self._created_external_parents)
+            _retire_source_stage(
+                self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
+            )
+        except Exception as exc:
+            destination_errors.append(exc)
+        try:
+            _cleanup_external_directories(transaction, self._created_external_parents)
             self._created_external_parents.clear()
         except Exception as exc:
-            errors.append(exc)
-        if errors:
-            raise errors[0]
-        self._retire_late_paths()
-        _retire_transaction(
-            self.layout.state_root,
-            self._detach_transaction,
-            terminal_state=_TerminalState.DETACHED_RECONCILED,
-        )
+            destination_errors.append(exc)
+        if public_errors:
+            # The journal has to stay: the next session open replays it and
+            # reinstalls the public tree from canonical before anything can
+            # adopt the missing tree as a new baseline. Name it instead.
+            raise _transaction_context(public_errors[0], state_root, transaction)
+        try:
+            self._retire_late_paths()
+        except Exception as exc:
+            destination_errors.append(exc)
+        if destination_errors:
+            raise _clear_failed_restore(state_root, self.layout.source, transaction, destination_errors[0])
+        _retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
 
     def _close(self) -> None:
         self._state = _SessionState.CLOSED

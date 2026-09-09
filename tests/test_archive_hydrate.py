@@ -1107,6 +1107,121 @@ class TestFinalizeAndVerify:
         assert not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
 
 
+def _publish_verifiable_curation(
+    tmp_path: Path, batch_files: dict[str, str]
+) -> tuple[FakeHub, Path, str, str]:
+    """Hand-build one self-consistent published curation for verify_publication.
+
+    Every digest the verify cycle checks (SHA256SUMS over the published bytes,
+    the batch ``content_digest``) is computed from the same local tree, so the
+    only thing the scan gate can trip on is *batch_files*' content. Building
+    the published state directly is what makes the gate reachable at all: the
+    real pipeline sanitizes every bundle before publication, so neither an
+    advisory nor a credential-bearing batch can be driven into
+    :func:`verify_publication` through ``run_hydrate_hub``.
+
+    Returns ``(hub, stage, curation_id, output_commit_sha)``.
+    """
+    from daydream.archive import sanitize
+
+    curation_id = "cur-" + "0" * 16
+    prefix = f"curated/{curation_id}/"
+    local = tmp_path / "published"
+    batch_dir = local / "batches" / "sess-a"
+    batch_dir.mkdir(parents=True)
+    for name, content in batch_files.items():
+        (batch_dir / name).write_text(content, encoding="utf-8")
+    doc = {
+        "schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+        "source_hub_commit": "a" * 40,
+        "curation_id": curation_id,
+        "sanitizer_version": hydrate_rules.SANITIZER_VERSION,
+        "hydration_index_schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+        "admission_policy_version": hydrate_rules.ADMISSION_POLICY_VERSION,
+        "publication_prefix": prefix,
+        "batches": [
+            {
+                "session_id": "sess-a",
+                "content_digest": sanitize._derivative_digest(batch_dir),
+                "status": "admitted",
+                "reason_code": None,
+                "artifact_relpath": "batches/sess-a",
+                "manifest_relpath": "batches/sess-a/manifest.json",
+            }
+        ],
+    }
+    (local / "curation-manifest.json").write_text(json.dumps(doc, indent=2) + "\n")
+    relpaths = sorted(
+        p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()
+    )
+    files = {f"{prefix}{rel}": (local / rel).read_bytes() for rel in relpaths}
+    files[f"{prefix}SHA256SUMS"] = "".join(
+        f"{hashlib.sha256((local / rel).read_bytes()).hexdigest()}  {prefix}{rel}\n"
+        for rel in relpaths
+    ).encode()
+    hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
+    hub.commit_revision("b" * 40)
+    return hub, tmp_path / "stage", curation_id, "b" * 40
+
+
+_BATCH_MANIFEST = json.dumps(
+    {"session_id": "sess-a", "git": {"remote_url": "https://github.com/owner/repo-a"}}
+)
+
+
+def test_verify_publication_admits_advisory_only_batch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #1170: an advisory-only published batch verifies instead of failing.
+
+    ``diff.patch`` carries the issue's ``env_var`` false positive — an
+    upper-case name ending in ``KEY`` assigned an ordinary flag string. A rule
+    that cannot identify a secret must not fail an already-published commit, so
+    the batch verifies and the finding is reported value-free.
+    """
+    hub, stage, curation_id, output_sha = _publish_verifiable_curation(
+        tmp_path,
+        {
+            "manifest.json": _BATCH_MANIFEST,
+            "diff.patch": '+FEATURE_FLAG_OVERRIDE_KEY = "override_flag"\n',
+        },
+    )
+    verified = hydrate.verify_publication(
+        hub, stage, output_commit_sha=output_sha, curation_id=curation_id,
+        dry_run_admitted=1, source_commit="a" * 40,
+    )
+    assert verified == 1
+    from daydream.archive.scan import scan_run_dir
+
+    rescan = scan_run_dir(stage / "_verify" / "batches" / "sess-a")
+    assert rescan.clean is False and rescan.blocking is False  # advisory-only
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "advisory" in out
+    assert "diff.patch" in out
+    assert "override_flag" not in out  # M11: never a matched value
+
+
+def test_verify_publication_rejects_credential_bearing_batch(tmp_path: Path) -> None:
+    """A literal credential in a published batch still fails the clean-room scan."""
+    hub, stage, curation_id, output_sha = _publish_verifiable_curation(
+        tmp_path,
+        {
+            "manifest.json": _BATCH_MANIFEST,
+            "diff.patch": "+clone from https://user:s3cr3tcanary@github.com/x/y.git\n",
+        },
+    )
+    with pytest.raises(hydrate.VerificationError) as excinfo:
+        hydrate.verify_publication(
+            hub, stage, output_commit_sha=output_sha, curation_id=curation_id,
+            dry_run_admitted=1, source_commit="a" * 40,
+        )
+    message = str(excinfo.value)
+    assert "secrets scan" in message
+    assert "url_credential" in message  # value-free category, not the match
+    assert "s3cr3tcanary" not in message
+
+
 class TestPrefixBindingGate:
     """Issue #1094 task 7: a curated prefix records its policy binding at
     finalize; any republication whose binding differs fails closed before a

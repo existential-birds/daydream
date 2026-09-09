@@ -607,6 +607,233 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     assert not dump_dir.exists()
 
 
+# --- #1170: the dump secret-scan gate is tiered (advisory reports, blocking refuses) ---
+
+
+def _commit_scanned_file(target: Path, name: str, body: str) -> None:
+    """Commit *body* on the feature branch so it lands verbatim in ``diff.patch``.
+
+    ``_copy_run_artifacts`` carries ``diff.patch`` into the bundle with no
+    redaction, so a committed file is the real route by which arbitrary source
+    text reaches the egress scanner (#1170).
+    """
+    (target / name).write_text(body, encoding="utf-8")
+    git(target, "add", name)
+    git(target, "commit", "-m", f"add {name}")
+
+
+async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#1170: name-shape scan hits report and publish; they never refuse the run.
+
+    A settings module holding a dict-key constant and an f-string DSN template
+    carries no credential, but trips ``_ENV_VAR_PATTERN`` and the userinfo rules.
+    Before the tiering that refused the whole run after every LLM call had been
+    paid for. Now the operator gets a value-free advisory and the complete
+    bundle: review published, archive installed, dump copied, exit 0 (#981's
+    "preserving the local run").
+    """
+    from daydream.archive.index import query_runs
+
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    _commit_scanned_file(
+        multi_stack_target,
+        "settings.py",
+        'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"\n'
+        'DSN = f"postgresql://{cfg.DB_USER}:{cfg.DB_PASSWORD}@{cfg.DB_HOST}:{cfg.DB_PORT}/{cfg.DB_NAME}"\n',
+    )
+
+    dump_dir = tmp_path / "uploaded-artifacts"
+
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            dump_artifacts=str(dump_dir),
+        )
+    )
+    assert exit_code == 0
+
+    # Everything publishes: the dump, the archive index row, and the report.
+    run_dir = _only_archived_run(archive_dir)
+    assert (dump_dir / "manifest.json").is_file()
+    assert query_runs(archive_dir)
+    assert (multi_stack_target / ".review-output.md").is_file()
+
+    # The advisory is reported and value-free (M11): path and category only.
+    out = "".join(capfd.readouterr())
+    assert "diff.patch" in out
+    assert "env_var" in out
+    assert "override_flag" not in out
+    assert "DB_PASSWORD" not in out
+
+    # An advisory bundle is still dumped byte-for-byte — never redact-then-dump.
+    dumped = (dump_dir / "diff.patch").read_bytes()
+    assert dumped == (run_dir / "diff.patch").read_bytes()
+    assert b"FEATURE_FLAG_OVERRIDE_KEY" in dumped
+
+
+async def _assert_target_is_reusable(target: Path) -> None:
+    """A blocking dump refusal must not wedge the checkout for the next run.
+
+    Without a rollback that can restore an absent dump destination, the refusal
+    left a ``DETACHED`` transaction behind and every later run at this path —
+    with or without ``--dump-artifacts`` — exited 1 during session open before
+    any review work started (#1172). ``exit_code == 1`` and a missing dump
+    directory hold either way, so this is what makes the refusal tests real
+    guards rather than assertions that pass through the wedge.
+    """
+    exit_code = await run(
+        RunConfig(target=str(target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+
+async def test_dump_artifacts_refuses_token_canary_in_diff(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#1170: a real token prefix in the diff still refuses every egress path.
+
+    The blocking tier keeps PR #1161's disposition exactly: no dump, no archive
+    row, exit 1 — and the console now names the file and rule that refused,
+    without echoing the credential.
+    """
+    from daydream.archive.index import query_runs
+
+    canary = "ghp_canaryfake123"
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    _commit_scanned_file(multi_stack_target, "creds.py", f'GITHUB_TOKEN = "{canary}"\n')
+
+    dump_dir = tmp_path / "uploaded-artifacts"
+
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            dump_artifacts=str(dump_dir),
+        )
+    )
+    assert exit_code == 1
+    assert not dump_dir.exists()
+    assert query_runs(archive_dir) == []
+
+    out = "".join(capfd.readouterr())
+    assert canary not in out
+    assert "diff.patch" in out
+    assert "api_key" in out
+    # #1171: the scan refusal is the message, not the rollback's own failure.
+    assert "dump destination projection is malformed" not in out
+
+    await _assert_target_is_reusable(multi_stack_target)
+
+
+async def test_dump_artifacts_refuses_multiline_pem_in_diff(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#1170 D4: multi-line key armor in ``diff.patch`` blocks the dump.
+
+    ``diff.patch`` is scanned line by line, and ``_PEM_KEY_PATTERN`` spans
+    BEGIN..END, so real key material in a patch was invisible to the gate while
+    the same key inside a JSON string leaf was caught. Separate from the token
+    canary on purpose: a bundle carrying both blocks on the canary alone, so a
+    combined test passes with the multi-line pass unimplemented.
+    """
+    from daydream.archive.index import query_runs
+
+    canary = "MIIFAKEKEYMATERIALFORTESTSONLY"
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    _commit_scanned_file(
+        multi_stack_target,
+        "deploy_key.pem",
+        "-----BEGIN PRIVATE KEY-----\n" f"{canary}\n{canary}\n" "-----END PRIVATE KEY-----\n",
+    )
+
+    dump_dir = tmp_path / "uploaded-artifacts"
+
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            dump_artifacts=str(dump_dir),
+        )
+    )
+    assert exit_code == 1
+    assert not dump_dir.exists()
+    assert query_runs(archive_dir) == []
+
+    out = "".join(capfd.readouterr())
+    assert canary not in out
+    assert "diff.patch" in out
+    assert "pem_key" in out
+    assert "dump destination projection is malformed" not in out
+
+    await _assert_target_is_reusable(multi_stack_target)
+
+
+async def test_dump_refusal_reports_the_archive_error_when_the_rollback_also_fails(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#1171: a failing rollback must not be the only thing the operator sees.
+
+    The pending ``ArchiveFinalizationError`` reaches the re-raised storage error
+    only through ``add_note``, which carries its type name and which nothing
+    renders — so the gate that refused and the file that tripped it were
+    invisible whenever the rollback itself failed. With an absent dump
+    destination now restorable this branch is no longer on the ordinary refusal
+    path, so the rollback is forced to fail to keep the report proven.
+    """
+    from daydream import artifact_visibility
+
+    canary = "ghp_canaryfake123"
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    _commit_scanned_file(multi_stack_target, "creds.py", f'GITHUB_TOKEN = "{canary}"\n')
+
+    def refuse_restore(_session: object) -> None:
+        raise artifact_visibility.ArtifactVisibilityError("synthetic rollback failure")
+
+    monkeypatch.setattr(artifact_visibility.ArtifactSession, "_restore_prior", refuse_restore)
+
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            dump_artifacts=str(tmp_path / "uploaded-artifacts"),
+        )
+    )
+    assert exit_code == 1
+
+    out = "".join(capfd.readouterr())
+    assert "Artifact Finalization" in out
+    assert "api_key" in out
+    assert "diff.patch" in out
+    assert "synthetic rollback failure" in out
+    assert canary not in out
+
+
 async def test_no_eval_leaves_manifest_eval_fields_null(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,

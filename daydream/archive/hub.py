@@ -65,11 +65,19 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     ``HF_TOKEN`` is absent. A pre-existing repo is reused with its current
     visibility (documented behavior), but a public one triggers a warning
     before the upload proceeds. Before anything reaches the Hub the bundle is
-    scanned for secrets (fail-closed): a dirty bundle — or a scanner error —
-    is refused with a safe-only warning and ``False``. Retries the upload
+    scanned for secrets (fail-closed): a *blocking* finding — or a scanner
+    error — refuses the upload with a safe-only warning and ``False``. An
+    advisory finding is by construction not a credential (issue #1170), and a
+    rule that cannot identify a secret must not gate irreversible egress
+    either, so it is reported and the upload proceeds. Retries the upload
     commit up to 3 total
     attempts on a commit-conflict shape (concurrent commits from parallel
     processes), backing off exponentially between attempts.
+
+    Note: this function's "never raises" contract is honored here, but its only
+    caller converts a ``False`` return into an ``ArchiveFinalizationError``.
+    That contract violation between a function and its caller is tracked
+    separately and deliberately not addressed here.
 
     Returns:
         True on success, False when skipped or failed.
@@ -91,12 +99,19 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     from daydream.archive import scan
 
     scan_result = scan.scan_run_dir(run_dir)
-    if not scan_result.clean:
+    if scan_result.blocking:
         _warn(
             f"Refusing HF upload of {session_id}: bundle secret scan found "
             f"problems ({scan_result.summary()})"
         )
         return False
+    if scan_result.findings:
+        # Advisory-only: a name/template shape, not a credential. Reported
+        # value-free so the operator sees it, never silently swallowed.
+        _warn(
+            f"HF upload of {session_id} proceeding with advisory-only scan "
+            f"findings ({scan_result.summary()})"
+        )
 
     try:
         api = HfApi()

@@ -8,15 +8,18 @@ Transformation pipeline per file:
 
 * ``manifest.json`` (and any JSON file): credential-bearing URL string leaves
   are rewritten through :func:`daydream.archive.git_safe.normalize_remote_url`
-  (the sole URL authority); the whole document is then passed through
+  (the sole URL authority); every string leaf then runs through the same text
+  pipeline the non-JSON branch uses, and the whole document through
   :func:`daydream.trajectory.redact_value`.
 * Text files: :func:`daydream.trajectory.redact_text` plus the scanner's
   extended userinfo/query-param substitutions.
 
 Release gate: every derivative is re-scanned with
-:func:`daydream.archive.scan.scan_run_dir`; a derivative that does not come
-back clean is moved to ``<archive_dir>/quarantine/<session_id>/`` and recorded
-with ``status="quarantined"`` — never released (fail-closed).
+:func:`daydream.archive.scan.scan_run_dir`; a derivative carrying a *blocking*
+finding is moved to ``<archive_dir>/quarantine/<session_id>/`` and recorded
+with ``status="quarantined"`` — never released (fail-closed). An advisory
+finding is a name/template shape, not a credential (issue #1170): it is
+reported value-free and the derivative is released.
 
 ``derivative_digest`` is a SHA-256 over a canonical manifest of
 ``(relative path, per-file SHA-256)`` pairs, stable across runs on identical
@@ -53,6 +56,13 @@ _DERIVATIVE_MARKER = ".daydream_derivative_marker"
 
 def _now_iso_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _warn(message: str) -> None:
+    """Print a one-line warning through the daydream console (never raises)."""
+    from daydream.ui import create_console, print_warning  # noqa: PLC0415 - lazy: avoid ui import at module load
+
+    print_warning(create_console(), message)
 
 
 @dataclass(frozen=True)
@@ -115,12 +125,34 @@ def _sanitize_json_value(value: Any) -> Any:
     return value
 
 
+def _sanitize_json_document(doc: Any) -> Any:
+    """Canonicalize URL leaves, then run every string leaf through the text pipeline.
+
+    ``_sanitize_json_value`` + :func:`redact_value` alone omit the three
+    scan-local substitutions that only :func:`_sanitize_text` carries, so a
+    JSON string leaf holding an SCP, token-only or query-credential shape — the
+    shape a trajectory tool observation routinely has — was quarantined instead
+    of sanitized, deterministically on every pass (issue #1170). Routing leaves
+    through :func:`_sanitize_text` is what makes that function's docstring claim
+    ("a rule added there applies here too") true for the JSON branch as well.
+    """
+    if isinstance(doc, dict):
+        return {key: _sanitize_json_document(child) for key, child in doc.items()}
+    if isinstance(doc, list):
+        return [_sanitize_json_document(child) for child in doc]
+    if isinstance(doc, str):
+        return _sanitize_text(_sanitize_url_string(doc))
+    return doc
+
+
 def _sanitize_text(text: str) -> str:
     """Redact one text file body, then re-check with the scanner's extra rules.
 
     The scanner's two local gaps (token-only userinfo, credential query params)
     are applied from scan.py's own patterns, so a rule added there applies here
-    too and the derivative passes the release scan (M16).
+    too and the derivative passes the release scan (M16). JSON string leaves
+    route through here as well (:func:`_sanitize_json_document`), so the claim
+    holds for both branches.
     """
     text = redact_text(text)
     text = scan._TOKEN_ONLY_USERINFO_PATTERN.sub(r"\1[REDACTED_USER]@", text)
@@ -141,7 +173,7 @@ def _sanitize_derivative(derivative_dir: Path) -> None:
             except ValueError:
                 doc = None
             if isinstance(doc, (dict, list)):
-                sanitized = redact_value(_sanitize_json_value(doc))
+                sanitized = redact_value(_sanitize_json_document(doc))
                 file_path.write_text(
                     json.dumps(sanitized, indent=2, sort_keys=True, default=str) + "\n",
                     encoding="utf-8",
@@ -278,10 +310,18 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
                 shutil.copy2(item, target)
         _sanitize_derivative(derivative_dir)
 
-        # Fail-closed release gate: only a clean scan releases the derivative.
+        # Fail-closed release gate: a blocking finding (or a scanner error)
+        # withholds the derivative. An advisory finding is by construction not
+        # a credential (#1170) — a rule that cannot identify a secret must not
+        # gate egress either — so it is reported and the derivative released.
         scan_result = scan.scan_run_dir(derivative_dir)
-        if not scan_result.clean:
+        if scan_result.blocking:
             raise _DerivativeUncleanError(f"derivative scan found {scan_result.summary()}")
+        if scan_result.findings:
+            _warn(
+                f"Sanitized derivative for {session_id} carries advisory-only scan "
+                f"findings ({scan_result.summary()})"
+            )
 
         digest = _derivative_digest(derivative_dir)
     except _DerivativeUncleanError:
@@ -365,15 +405,22 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
 def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
     """Fail-closed ingest gate for a downloaded Hub bundle (M18).
 
-    The incoming bundle is scanned before ingestion. A clean bundle is
-    imported in place; an affected bundle is moved to
-    ``<archive_dir>/quarantine/<session_id>/`` and skipped — never imported
-    raw, even when a released derivative exists. The move is never a deletion
-    of a source bundle; when the quarantine slot is already occupied the move
-    is skipped and the bundle is still reported quarantined.
+    The incoming bundle is scanned before ingestion. A bundle with no blocking
+    finding is imported in place (advisory findings are reported value-free and
+    do not gate ingest — #1170); a bundle carrying a blocking finding, or a
+    scanner error, is moved to ``<archive_dir>/quarantine/<session_id>/`` and
+    skipped — never imported raw, even when a released derivative exists. The
+    move is never a deletion of a source bundle; when the quarantine slot is
+    already occupied the move is skipped and the bundle is still reported
+    quarantined.
     """
     scan_result = scan.scan_run_dir(run_dir)
-    if scan_result.clean:
+    if not scan_result.blocking:
+        if scan_result.findings:
+            _warn(
+                f"Importing bundle {run_dir.name} with advisory-only scan "
+                f"findings ({scan_result.summary()})"
+            )
         return ImportResult(source=run_dir, imported=True, quarantined=False)
     quarantine_dir = archive_dir / "quarantine" / run_dir.name
     quarantine_dir.parent.mkdir(parents=True, exist_ok=True)

@@ -207,6 +207,10 @@ jobs:
           path: findings/failure.json
 
       - name: Upload findings artifact
+        # always(): a findings.json already written before a late-stage failure
+        # (e.g. a refused egress scan) is exactly what the operator needs; the
+        # default success() gate would discard it.
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daydream-findings
