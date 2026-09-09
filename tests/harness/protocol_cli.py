@@ -65,8 +65,7 @@ def install_protocol_cli(
         "forbidden_paths": [str(path) for path in forbidden_paths],
     }
     executable.write_text(
-        f"#!{sys.executable}\n_FIXTURE_CONFIG = {config!r}\n"
-        + Path(__file__).read_text(encoding="utf-8"),
+        f"#!{sys.executable}\n_FIXTURE_CONFIG = {config!r}\n" + Path(__file__).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     executable.chmod(0o700)
@@ -122,29 +121,29 @@ def _cwd_observation(cwd: Path) -> dict[str, Any]:
 
 def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
     """Admit known fixture flags only; content values become lengths/hashes."""
-    switches = {
-        "codex": {"exec", "--experimental-json"},
-        "pi": {"--no-session", "--no-skills"},
-        "osprey": {"agent", "--events-jsonl", "--sandbox", "--read-only", "--ultracode",
-                   "--atif-system-prompt-plaintext", "--immutable-runtime-surface",
-                   "--compress-context=true", "--compress-context=false"},
-    }[backend]
-    values = {
-        "codex": {"--model", "--sandbox", "--cd", "--output-schema", "resume"},
-        "pi": {"--mode", "--model", "--provider", "--thinking", "--tools", "--session-id"},
-        "osprey": {
-            "--model", "--toolset", "--temperature", "--atif-output", "--max-turns", "--turn-timeout",
-            "--stream-idle-timeout-secs", "--streaming-timeout-secs", "--empty-completion-threshold",
-            "--driver-max-retries", "--approval", "--allowed-root", "--compress-min-bytes",
-            "--tool-result-cap", "--tool-result-head", "--tool-result-tail", "--tool-result-max-lines",
-            "--tool-result-raw-dir", "--retry-failure-threshold", "--no-progress-family-threshold",
-            "--no-progress-family-window", "--no-progress-artifact-threshold", "--no-progress-suppression-window",
-            "--fork-from", "--resume", "--output-schema", "--max-subagents", "--llm-rpm", "--effort",
-            "--observation-budget-update-bytes", "--observation-budget-inline-bytes",
-            "--observation-budget-admission-bytes",
-        },
-    }[backend]
-    content = {"codex": {"-c"}, "pi": {"--append-system-prompt"}, "osprey": {"--persona", "--var"}}[backend]
+    switches = frozenset({
+        "codex": "exec --experimental-json",
+        "pi": "--no-session --no-skills",
+        "osprey": "agent --events-jsonl --sandbox --read-only --ultracode"
+                  " --atif-system-prompt-plaintext --immutable-runtime-surface"
+                  " --compress-context=true --compress-context=false",
+    }[backend].split())
+    values = frozenset({
+        "codex": "--model --sandbox --cd --output-schema resume",
+        "pi": "--mode --model --provider --thinking --tools --session-id",
+        "osprey": "--model --toolset --temperature --atif-output --max-turns --turn-timeout"
+                  " --stream-idle-timeout-secs --streaming-timeout-secs --empty-completion-threshold"
+                  " --driver-max-retries --approval --allowed-root --compress-min-bytes"
+                  " --tool-result-cap --tool-result-head --tool-result-tail --tool-result-max-lines"
+                  " --tool-result-raw-dir --retry-failure-threshold --no-progress-family-threshold"
+                  " --no-progress-family-window --no-progress-artifact-threshold"
+                  " --no-progress-suppression-window --fork-from --resume --output-schema"
+                  " --max-subagents --llm-rpm --effort --observation-budget-update-bytes"
+                  " --observation-budget-inline-bytes --observation-budget-admission-bytes",
+    }[backend].split())
+    content = frozenset(
+        {"codex": "-c", "pi": "--append-system-prompt", "osprey": "--persona --var"}[backend].split()
+    )
     recorded: list[str] = []
     hashes: dict[str, list[dict[str, Any]]] = {}
     index = 0
@@ -230,17 +229,11 @@ def _git_remote_count(cwd: Path) -> int:
     """Count the remotes of *cwd*; 0 when git is unavailable or it is not a repo."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(cwd), "remote"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+            ["git", "-C", str(cwd), "remote"], capture_output=True, text=True, timeout=10, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return 0
-    if proc.returncode != 0:
-        return 0
-    return len(proc.stdout.split())
+    return 0 if proc.returncode != 0 else len(proc.stdout.split())
 
 
 def _run_cli() -> int:

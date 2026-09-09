@@ -506,8 +506,12 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     eval_path = run_dir / "evaluation.json"
     eval_path.unlink(missing_ok=True)
 
-    from daydream.archive import _run_eval
-    from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
+    from daydream.eval.analyzer import analyze_session
+    from daydream.trajectory import (
+        RunWriteSnapshot,
+        TrajectoryDocumentSnapshot,
+        snapshot_trajectories,
+    )
 
     snapshot = RunWriteSnapshot(
         status="complete",
@@ -521,9 +525,15 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
             ),
         ),
     )
-    result = _run_eval(multi_stack_target, session_id, run_dir, snapshot)
-    assert result is not None
-    assert eval_path.is_file()
+    # The same evaluation seam the strict archive finalizer drives, over the
+    # injected trajectory bytes.
+    result = analyze_session(
+        multi_stack_target / ".daydream",
+        session_id=session_id,
+        frozen_trajectories=snapshot_trajectories(snapshot),
+    )
+    assert "error" not in result
+    eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     # Coverage degrades gracefully for the offending call only: the clean
     # sibling call still contributes its read, so api.py stays covered.

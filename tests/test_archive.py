@@ -1,24 +1,21 @@
 """Unit tests for the daydream.archive package.
 
-Covers git_context, manifest, index, and the top-level archive_run flow.
+Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flow.
 """
 
 import json
 import sqlite3
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 
 from daydream.archive import (
-    _copy_bundle,
     _read_fix_quality_gate,
-    archive_run,
     get_archive_dir,
 )
 from daydream.archive.git_context import GitContext, capture_git_context
@@ -37,7 +34,19 @@ from daydream.archive.index import (
     update_labels,
     upsert_run,
 )
-from daydream.archive.manifest import Manifest, build_manifest
+from daydream.archive.manifest import (
+    Manifest,
+    archive_recorder_provenance_from_snapshot,
+    build_manifest_from_snapshot,
+)
+from daydream.artifact_visibility import (
+    ArtifactEvidenceProvenance,
+    ArtifactTreeSnapshot,
+    DestinationDelivery,
+    OutputLabel,
+    RoutedDestination,
+    _manifest,
+)
 from daydream.config_file import DaydreamFileConfig
 from daydream.remote_ci import (
     CIObservation,
@@ -63,12 +72,29 @@ MakeConfig = Callable[..., RunConfig]
 InstallBackend = Callable[[object], object]
 
 
+_DEFAULT_FINAL_METRICS: dict[str, Any] = {
+    "total_prompt_tokens": 100,
+    "total_completion_tokens": 50,
+    "total_cached_tokens": 20,
+    "total_cost_usd": 0.05,
+}
+
+
 def _write_snapshot(
     recorder: Any,
     *,
     status: str = "complete",
     phase_events: list[dict[str, Any]] | None = None,
+    final_metrics: dict[str, Any] | None = None,
+    lifecycle: tuple[str, str] | None = None,
 ) -> RunWriteSnapshot:
+    """Freeze one root trajectory document the way the recorder's writer does.
+
+    ``lifecycle`` stamps the run-span keys the timing reducer needs (and pins the
+    snapshot cutoff to the end stamp, which ``compute_timing_summary`` requires
+    for a complete write); ``final_metrics`` overrides the whole-run totals the
+    manifest projects.
+    """
     path = Path(recorder.path)
     payload: dict[str, Any] = {}
     if path.is_file():
@@ -76,13 +102,25 @@ def _write_snapshot(
         if isinstance(loaded, dict):
             payload = loaded
     trajectory_id = str(getattr(recorder, "session_id"))
-    payload.setdefault("session_id", trajectory_id)
-    payload.setdefault("trajectory_id", trajectory_id)
+    # A frozen root document always carries the archived run's own identity.
+    payload["session_id"] = trajectory_id
+    payload["trajectory_id"] = trajectory_id
     payload.setdefault("steps", [])
-    payload.setdefault("extra", {})
+    extra: dict[str, Any] = payload.setdefault("extra", {})
     if phase_events is not None:
-        payload["extra"]["phase_events"] = phase_events
-    payload.setdefault("final_metrics", {})
+        extra["phase_events"] = phase_events
+    if getattr(recorder, "pr_number", None) is not None:
+        extra["pr_number"] = recorder.pr_number
+    if getattr(recorder, "pr_repo", None) is not None:
+        extra["pr_repo"] = recorder.pr_repo
+    cutoff_at = "2026-01-01T00:00:01Z"
+    if lifecycle is not None:
+        extra["run_started_at"], extra["run_ended_at"] = lifecycle
+        cutoff_at = lifecycle[1]
+    if final_metrics is not None:
+        payload["final_metrics"] = final_metrics
+    else:
+        payload.setdefault("final_metrics", dict(_DEFAULT_FINAL_METRICS))
     document = TrajectoryDocumentSnapshot(
         trajectory_id=trajectory_id,
         path=path,
@@ -90,7 +128,7 @@ def _write_snapshot(
     )
     return RunWriteSnapshot(
         status=cast(Any, status),
-        cutoff_at="2026-01-01T00:00:01Z",
+        cutoff_at=cutoff_at,
         root_trajectory_id=trajectory_id,
         documents=(document,),
     )
@@ -98,28 +136,84 @@ def _write_snapshot(
 
 @dataclass
 class _MockRecorder:
+    """The recorder identity fields a frozen snapshot is stamped from."""
+
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
-    path: Path = field(default_factory=lambda: Path("/nonexistent/trajectory.json"))
+    path: Path = Path("/nonexistent/trajectory.json")
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
-    explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
-    _wall_clock_seconds: float | None = None
-    _final_totals: dict[str, object] = field(
-        default_factory=lambda: {
-            "prompt": 100,
-            "completion": 50,
-            "cached": 20,
-            "cost": 0.05,
-            "any_cost_seen": True,
-        },
+
+
+def _frozen_target(tmp_path: Path) -> Path:
+    """A frozen artifact root that never contains the archive directory itself.
+
+    ``finalize_archive_run`` re-attests the tree it was handed after every
+    stage, so the archive (which the ``archive_dir`` fixture puts under
+    ``tmp_path``) must live outside the root under attestation.
+    """
+    target = tmp_path / "frozen"
+    target.mkdir()
+    return target
+
+
+def _findings_route(live_root: Path, name: str = "findings.json") -> RoutedDestination:
+    """The registered ``--findings-out`` route the strict bundle relocates."""
+    private = live_root / ".explicit" / "0000" / name
+    return RoutedDestination(
+        label=OutputLabel.FINDINGS_OUTPUT,
+        requested=Path("findings") / name,
+        write_path=private,
+        frozen_path=private,
+        delivery=DestinationDelivery.DEFERRED,
     )
 
-    def compute_wall_clock_seconds(self) -> float | None:
-        return self._wall_clock_seconds
 
-    def compute_phase_timings(self) -> dict[str, Any] | None:
-        return None
+def _strict_archive(
+    *,
+    target: Path,
+    session_id: str,
+    config: Any,
+    write_snapshot: RunWriteSnapshot,
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
+    destinations: tuple[RoutedDestination, ...] = (),
+    work: Any = None,
+    upload: bool = False,
+    dump_path: Path | None = None,
+) -> None:
+    """Archive one frozen run tree through the production strict finalizer.
+
+    ``target`` is the frozen artifact root, so it must not contain the archive
+    directory itself — ``finalize_archive_run`` re-attests the tree after every
+    stage and a write inside it would (correctly) be read as tampering.
+    """
+    from daydream.archive import finalize_archive_run
+
+    finalize_archive_run(
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
+            write_snapshot=write_snapshot, run_flow=run_flow,
+        ),
+        artifacts=ArtifactTreeSnapshot(
+            session_id=session_id,
+            workspace_key="workspace",
+            root=target,
+            manifest=_manifest(target),
+            destinations=destinations,
+        ),
+        artifact_provenance=ArtifactEvidenceProvenance(
+            workspace_key="workspace",
+            session_id=session_id,
+            public_source=target,
+            # The frozen root is a copy of the live root, so route paths relative
+            # to one resolve unchanged inside the other.
+            live_root=target,
+        ),
+        config=cast(RunConfig, config),
+        write_snapshot=write_snapshot,
+        work=work,
+        upload=upload,
+        dump_path=dump_path,
+    )
 
 
 @dataclass
@@ -237,29 +331,15 @@ def _build(
     config: Any | None = None,
     **kw: Any,
 ) -> Manifest:
-    """Build a manifest from the mock recorder/config pair."""
-    active_recorder = cast(TrajectoryRecorder, recorder or _MockRecorder())
-    write_snapshot = kw.pop("write_snapshot", None)
-    if write_snapshot is not None:
-        from daydream.archive.manifest import (
-            archive_recorder_provenance_from_snapshot,
-            build_manifest_from_snapshot,
-        )
-
-        return build_manifest_from_snapshot(
-            recorder_provenance=archive_recorder_provenance_from_snapshot(
-                write_snapshot=write_snapshot,
-                run_flow=active_recorder.run_flow,
-            ),
+    """Build a manifest from one frozen snapshot of the mock recorder/config pair."""
+    active_recorder = recorder or _MockRecorder()
+    write_snapshot = kw.pop("write_snapshot", None) or _write_snapshot(active_recorder)
+    return build_manifest_from_snapshot(
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
             write_snapshot=write_snapshot,
-            config=cast(RunConfig, _MockConfig() if config is None else config),
-            git_ctx=git_ctx if git_ctx is not None else GitContext(),
-            status="complete",
-            archive_path=tmp_path,
-            **kw,
-        )
-    return build_manifest(
-        recorder=active_recorder,
+            run_flow=active_recorder.run_flow,
+        ),
+        write_snapshot=write_snapshot,
         config=cast(RunConfig, _MockConfig() if config is None else config),
         git_ctx=git_ctx if git_ctx is not None else GitContext(),
         status="complete",
@@ -283,7 +363,7 @@ def test_build_manifest_basic(tmp_path: Path) -> None:
     assert m.session_id == _MockRecorder().session_id
     assert m.run_flow == "normal"
     assert m.skill == "python"
-    # Per-phase models replaced config.model; build_manifest stamps model as None.
+    # Per-phase models replaced config.model; the manifest stamps model as None.
     assert m.model is None
     assert m.backend == "claude"
     assert m.review_backend is None
@@ -572,11 +652,7 @@ def test_build_manifest_per_stack_review_tier(
         file_config=fc, shallow=shallow, flow_name=flow_name,
         review_backend="claude",
     )
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, _MockRecorder()),
-        config=config, git_ctx=GitContext(),
-        status="complete", archive_path=tmp_path,
-    )
+    m = _build(tmp_path, config=config)
     run = m.to_dict()["run"]
     assert m.per_stack_review_backend == "codex"  # per-stack tier resolved from its own key
     assert m.per_stack_review_model == "gpt-psr"
@@ -601,11 +677,9 @@ def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(
 
     assert _DEEP_FLOW_ALIASES  # non-empty; every alias must record the identity
     for flow_name in _DEEP_FLOW_ALIASES:
-        m = build_manifest(
-            recorder=cast(TrajectoryRecorder, _MockRecorder()),
+        m = _build(
+            tmp_path,
             config=RunConfig(target=str(tmp_path), backend=None, model=None, flow_name=flow_name),
-            git_ctx=GitContext(),
-            status="complete", archive_path=tmp_path,
         )
         assert m.per_stack_review_backend is not None
         assert m.per_stack_review_model is not None
@@ -618,11 +692,7 @@ def test_build_manifest_omits_per_stack_review_without_spine(tmp_path: Path) -> 
         RunConfig(target=str(tmp_path), backend=None, model=None, flow_name="improve"),
         RunConfig(target=str(tmp_path), backend=None, model=None, flow_name="custom-flow"),
     ):
-        m = build_manifest(
-            recorder=cast(TrajectoryRecorder, _MockRecorder()),
-            config=config, git_ctx=GitContext(),
-            status="complete", archive_path=tmp_path,
-        )
+        m = _build(tmp_path, config=config)
         run = m.to_dict()["run"]
         assert m.per_stack_review_backend is None
         assert m.per_stack_review_model is None
@@ -637,12 +707,7 @@ def test_build_manifest_pi_deep_records_backend_default_model(tmp_path: Path) ->
     model NULL; the manifest surfaces the backend default instead."""
     from daydream.config import DEFAULT_PI_MODEL
 
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, _MockRecorder()),
-        config=RunConfig(target=str(tmp_path), backend="pi", model=None),
-        git_ctx=GitContext(),
-        status="complete", archive_path=tmp_path,
-    )
+    m = _build(tmp_path, config=RunConfig(target=str(tmp_path), backend="pi", model=None))
     assert m.per_stack_review_backend == "pi"
     assert m.per_stack_review_model == DEFAULT_PI_MODEL
     assert m.to_dict()["run"]["per_stack_review_model"] == DEFAULT_PI_MODEL
@@ -737,30 +802,25 @@ def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
 
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
-    """Wall-clock is derived from step timestamps even when --eval did not run."""
-    m = _build(tmp_path, recorder=_MockRecorder(_wall_clock_seconds=12.3))
+    """The snapshot's own run span fills wall-clock even when --eval did not run."""
+    recorder = _MockRecorder()
+    m = _build(
+        tmp_path,
+        recorder=recorder,
+        write_snapshot=_write_snapshot(
+            recorder,
+            lifecycle=("2026-01-01T00:00:00Z", "2026-01-01T00:00:12.300000Z"),
+        ),
+    )
 
     assert m.wall_clock_seconds == 12.3
     assert m.total_findings is None
 
 
-def test_build_manifest_legacy_eval_wall_clock_overrides_recorder(
-    tmp_path: Path,
-) -> None:
-    """Without a frozen snapshot, legacy eval timing may fill the recorder span."""
-    m = _build(
-        tmp_path,
-        recorder=_MockRecorder(_wall_clock_seconds=12.3),
-        evaluation={"timing": {"total_wall_clock_seconds": 42.5}},
-    )
-
-    assert m.wall_clock_seconds == 42.5
-
-
 def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
     tmp_path: Path,
 ) -> None:
-    recorder = _MockRecorder(session_id="snapshot-session", _wall_clock_seconds=12.3)
+    recorder = _MockRecorder(session_id="snapshot-session")
     payload = {
         "session_id": recorder.session_id,
         "trajectory_id": recorder.session_id,
@@ -1413,38 +1473,24 @@ def test_get_archive_dir_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert expected.is_dir()
 
 
-def _make_recorder_mock(session_id: str, path: Path, *, explicit_path: bool = False) -> MagicMock:
-    """Build a mock TrajectoryRecorder with session_id and path attributes."""
-    recorder = MagicMock()
-    recorder.session_id = session_id
-    recorder.path = path
-    recorder.explicit_path = explicit_path
-    return recorder
-
-
 def _setup_bundle(
     tmp_path: Path,
     session_id: str = "abcd1234-0000-0000-0000-000000000000",
-) -> tuple[Path, Path, MagicMock]:
-    """Create a realistic target directory with artifacts and an empty run dir.
+) -> tuple[Path, Path, _MockRecorder]:
+    """Create a frozen artifact tree with one run's artifacts, plus an empty run dir.
 
-    Layout mirrors live-recorder output: ``.daydream/runs/<session_id>/``
-    holds ``trajectory.json`` + a ``trajectories/`` subdir for forks. The
-    archive copier copies that subtree wholesale.
+    Layout mirrors the frozen tree the host hands the archive:
+    ``.daydream/runs/<session_id>/trajectory.json`` alongside the deep
+    artifacts, the diff, and the public review output in the tree root.
     """
     target = tmp_path / "target"
     daydream = target / ".daydream"
     daydream.mkdir(parents=True)
-    live_run_dir = daydream / "runs" / session_id
-    live_run_dir.mkdir(parents=True)
+    frozen_run_dir = daydream / "runs" / session_id
+    frozen_run_dir.mkdir(parents=True)
 
-    traj = live_run_dir / "trajectory.json"
-    traj.write_text('{"session_id": "test"}')
-
-    # Sub-trajectories (fork output) live next to the parent.
-    sub_dir = live_run_dir / "trajectories"
-    sub_dir.mkdir()
-    (sub_dir / "deep-python.json").write_text('{"fork": true}')
+    traj = frozen_run_dir / "trajectory.json"
+    traj.write_text(json.dumps({"session_id": session_id, "trajectory_id": session_id}))
 
     deep = daydream / "deep"
     deep.mkdir()
@@ -1458,51 +1504,89 @@ def _setup_bundle(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    recorder = _make_recorder_mock(session_id, traj)
-
-    return target, run_dir, recorder
+    return target, run_dir, _MockRecorder(session_id=session_id, path=traj)
 
 
-def test_copy_bundle_trajectory(tmp_path: Path) -> None:
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+def _assemble_bundle(
+    target: Path,
+    run_dir: Path,
+    recorder: _MockRecorder,
+    *,
+    write_snapshot: RunWriteSnapshot | None = None,
+    destinations: tuple[RoutedDestination, ...] = (),
+) -> None:
+    """Run the production bundle assembler over one frozen tree + snapshot."""
+    from daydream.archive import _copy_snapshot_bundle
 
-    assert (run_dir / "trajectory.json").exists()
-    assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
+    snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(recorder)
+    _copy_snapshot_bundle(
+        artifacts=ArtifactTreeSnapshot(
+            session_id=recorder.session_id,
+            workspace_key="workspace",
+            root=target,
+            manifest=_manifest(target),
+            destinations=destinations,
+        ),
+        artifact_provenance=ArtifactEvidenceProvenance(
+            workspace_key="workspace",
+            session_id=recorder.session_id,
+            public_source=target,
+            live_root=target,
+        ),
+        run_dir=run_dir,
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
+            write_snapshot=snapshot, run_flow=recorder.run_flow,
+        ),
+        write_snapshot=snapshot,
+    )
 
 
-def test_copy_bundle_projects_only_frozen_snapshot_trajectory_bytes(
+def test_bundle_projects_only_frozen_snapshot_trajectory_bytes(
     tmp_path: Path,
 ) -> None:
+    """``trajectory.json`` carries the frozen bytes, never the live tree's copy."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     live = target / ".daydream" / "runs" / recorder.session_id / "trajectory.json"
-    live.write_text('{"trajectory_id":"root","marker":"MUTATED_LIVE"}')
-    frozen = b'{"trajectory_id":"root","marker":"FROZEN"}'
+    live.write_text('{"session_id":"abcd1234-0000-0000-0000-000000000000","marker":"MUTATED_LIVE"}')
+    frozen = json.dumps(
+        {
+            "session_id": recorder.session_id,
+            "trajectory_id": recorder.session_id,
+            "marker": "FROZEN",
+        }
+    ).encode()
     snapshot = RunWriteSnapshot(
         status="complete",
         cutoff_at="2026-01-01T00:00:01Z",
-        root_trajectory_id="root",
-        documents=(TrajectoryDocumentSnapshot("root", live, frozen),),
+        root_trajectory_id=recorder.session_id,
+        documents=(TrajectoryDocumentSnapshot(recorder.session_id, live, frozen),),
     )
 
-    _copy_bundle(target, run_dir, recorder, RunConfig(), write_snapshot=snapshot)
+    _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
 
     assert (run_dir / "trajectory.json").read_bytes() == frozen
 
 
-def test_copy_bundle_partial_trajectory(tmp_path: Path) -> None:
-    """Partial trajectory file inside the live run dir is copied too."""
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    target, run_dir, recorder = _setup_bundle(tmp_path, session_id)
-
-    partial = (
-        target / ".daydream" / "runs" / session_id / "trajectory.json.partial"
+def test_bundle_rejects_a_sibling_document_bound_to_another_session(
+    tmp_path: Path,
+) -> None:
+    """A fork document whose session is not this run's is refused, not archived."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    root = _write_snapshot(recorder).documents[0]
+    foreign = json.dumps(
+        {"session_id": "other-session", "trajectory_id": "fork-1"}
+    ).encode()
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=recorder.session_id,
+        documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
     )
-    partial.write_text('{"partial": true}')
 
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    with pytest.raises(ValueError, match="frozen trajectory document identity"):
+        _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
 
-    assert json.loads((run_dir / "trajectory.json.partial").read_text())["partial"] is True
+    assert not (run_dir / "trajectories").exists()
 
 
 @pytest.mark.parametrize(
@@ -1512,22 +1596,22 @@ def test_copy_bundle_partial_trajectory(tmp_path: Path) -> None:
         pytest.param("diff.patch", "diff content", id="diff-patch"),
     ],
 )
-def test_copy_bundle_file_path(tmp_path: Path, relative_path: str, expected: str) -> None:
+def test_bundle_file_path(tmp_path: Path, relative_path: str, expected: str) -> None:
     """Verify bundle copying preserves parameterized file contents and paths."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    _assemble_bundle(target, run_dir, recorder)
 
     assert (run_dir / relative_path).read_text() == expected
 
 
-def test_copy_bundle_deep_directory(tmp_path: Path) -> None:
+def test_bundle_deep_directory(tmp_path: Path) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    _assemble_bundle(target, run_dir, recorder)
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
 
 
-def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(
+def test_bundle_diagram_flow_excludes_stale_review_artifacts(
     tmp_path: Path,
 ) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
@@ -1539,7 +1623,7 @@ def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(
     (deep_dir / "diagram.md").write_text("current diagram")
     (target / ".daydream" / "recommended.patch").write_text("stale recommendation")
 
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    _assemble_bundle(target, run_dir, recorder)
 
     assert sorted(path.name for path in (run_dir / "deep").iterdir()) == [
         "diagram.json",
@@ -1550,72 +1634,73 @@ def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(
     assert not (run_dir / "recommended.patch").exists()
 
 
-def test_copy_bundle_sub_trajectories_copied(tmp_path: Path) -> None:
-    """Sibling trajectories under the live run dir copy verbatim — no prefix filtering."""
+def test_bundle_sub_trajectories_projected(tmp_path: Path) -> None:
+    """Sibling fork documents are projected under ``trajectories/`` by name."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    fork_path = target / ".daydream" / "runs" / recorder.session_id / "trajectories" / "deep-python.json"
+    root = _write_snapshot(recorder).documents[0]
+    fork_bytes = json.dumps(
+        {"session_id": recorder.session_id, "trajectory_id": "fork-1"}
+    ).encode()
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=recorder.session_id,
+        documents=(root, TrajectoryDocumentSnapshot("fork-1", fork_path, fork_bytes)),
+    )
+
+    _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
 
     sub = run_dir / "trajectories"
     assert sub.is_dir()
-    copied = sorted(p.name for p in sub.iterdir())
-    assert copied == ["deep-python.json"]
+    assert sorted(p.name for p in sub.iterdir()) == ["deep-python.json"]
+    assert (sub / "deep-python.json").read_bytes() == fork_bytes
 
 
-def test_copy_bundle_explicit_trajectory_path(tmp_path: Path) -> None:
-    """When --trajectory points outside the live run dir, the file is still archived."""
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    target, run_dir, _ = _setup_bundle(tmp_path, session_id)
-
-    # Simulate --trajectory /tmp/custom.json: file lives outside .daydream/runs/.
-    custom_traj = tmp_path / "custom-trajectory.json"
-    custom_traj.write_text('{"custom": true}')
-
-    recorder = _make_recorder_mock(session_id, custom_traj, explicit_path=True)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
-
-    # The custom path is copied on top of the run dir as trajectory.json.
-    archived = json.loads((run_dir / "trajectory.json").read_text())
-    assert archived["custom"] is True
-
-
-def test_copy_bundle_skips_missing(tmp_path: Path) -> None:
+def test_bundle_skips_missing(tmp_path: Path) -> None:
     target = tmp_path / "empty_target"
     target.mkdir()
     (target / ".daydream").mkdir()
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    recorder = _make_recorder_mock("no-match-session-id-here", tmp_path / "nonexistent.json")
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    recorder = _MockRecorder(
+        session_id="no-match-session-id-here", path=tmp_path / "nonexistent.json"
+    )
+    _assemble_bundle(target, run_dir, recorder)
 
-    assert not (run_dir / "trajectory.json").exists()
+    assert (run_dir / "trajectory.json").is_file()  # the frozen document always lands
     assert not (run_dir / "review-output.md").exists()
     assert not (run_dir / "deep").exists()
     assert not (run_dir / "diff.patch").exists()
 
 
-def test_copy_bundle_archives_findings_artifact(tmp_path: Path) -> None:
-    """findings.json from --findings-out is archived so harvest's per-finding join has a source."""
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    # Review-bot workflow writes findings.json under the repo root (CWD at run time).
-    findings_src = target / "findings" / "findings.json"
-    findings_src.parent.mkdir(parents=True)
-    findings_src.write_text('{"findings": [{"fingerprint": "abc"}]}')
+def test_bundle_archives_findings_artifact(tmp_path: Path) -> None:
+    """findings.json is relocated from its registered route into the bundle.
 
-    config = RunConfig(findings_out="findings/findings.json")
-    _copy_bundle(target, run_dir, recorder, config)
+    The archive never reconstructs the operator's requested path: it reads the
+    route's frozen path relative to the live root and resolves it inside the
+    frozen tree, so harvest's per-finding join has a fingerprint source.
+    """
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    route = _findings_route(target)
+    assert route.frozen_path is not None
+    route.frozen_path.parent.mkdir(parents=True)
+    route.frozen_path.write_text('{"findings": [{"fingerprint": "abc"}]}')
+
+    _assemble_bundle(target, run_dir, recorder, destinations=(route,))
 
     archived = run_dir / "findings.json"
-    assert archived.exists()
+    assert archived.is_file()
     assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
 
 
-def test_copy_bundle_findings_artifact_skipped_without_findings_out(
+def test_bundle_findings_artifact_skipped_without_route(
     tmp_path: Path,
 ) -> None:
-    """No findings_out means no findings.json is archived (no source to copy)."""
+    """No registered findings destination means no findings.json is archived."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
+    _assemble_bundle(target, run_dir, recorder)
 
     assert not (run_dir / "findings.json").exists()
 
@@ -1625,37 +1710,41 @@ def test_dump_artifacts_refuses_credential_bearing_bundle(
     archive_dir: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """M12: a bundle whose serialized artifacts carry a credential is not copied to
-    the ``--dump-artifacts`` destination — the scan gate refuses the copy, warns
-    with a value-free summary, and the archive run continues (non-fatal)."""
+    """M12: a bundle whose serialized artifacts carry a credential is never published.
+
+    The real scanner (no monkeypatched verdict) reads the assembled bundle. The
+    strict finalizer refuses closed: neither the ``--dump-artifacts``
+    destination nor the archive receives the dirty bundle, and the failure never
+    echoes the credential (M11)."""
+    from daydream.archive import ArchiveFinalizationError
+
     session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = _MockConfig(dump_artifacts=str(tmp_path / "dump"))
-
-    target, _, _ = _setup_bundle(tmp_path, session_id)
-    # Inject a credential into the serialized trajectory the bundle will carry.
-    traj_path = target / ".daydream" / "runs" / session_id / "trajectory.json"
-    traj = json.loads(traj_path.read_text())
-    traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
-    traj_path.write_text(json.dumps(traj))
-
-    recorder = _MockRecorder(session_id=session_id, path=traj_path)
-
-    archive_run(
-        recorder=cast(TrajectoryRecorder, recorder),
-        write_snapshot=_write_snapshot(recorder),
-        target_dir=target,
-        config=cast(RunConfig, config),
-    )
-
-    # The run itself is still archived (the gate is dump-path-only), but the
-    # user-specified destination never receives the dirty bundle.
     dest = tmp_path / "dump"
-    assert not (dest / "manifest.json").exists()
-    assert not (dest / "trajectory.json").exists()
+    dest.mkdir()
+    config = _MockConfig(archive=True, dump_artifacts=str(dest))
 
-    # The warning is value-free (M11): the credential never echoes.
+    target, _, recorder = _setup_bundle(tmp_path, session_id)
+    # Inject a credential into the serialized trajectory the bundle will carry.
+    traj = json.loads(recorder.path.read_text())
+    traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
+    recorder.path.write_text(json.dumps(traj))
+
+    with pytest.raises(ArchiveFinalizationError, match="secret scan") as excinfo:
+        _strict_archive(
+            target=target,
+            session_id=session_id,
+            config=config,
+            write_snapshot=_write_snapshot(recorder),
+            dump_path=dest,
+        )
+
+    assert list(dest.iterdir()) == []
+    assert not (archive_dir / "runs" / session_id).exists()
+    assert query_runs(archive_dir) == []
+
+    # The refusal is value-free (M11): the credential never echoes.
     captured = capsys.readouterr()
-    out = captured.out + captured.err
+    out = captured.out + captured.err + str(excinfo.value)
     assert "ghp_canaryfake123" not in out
 
 
@@ -1664,36 +1753,36 @@ def test_dump_artifacts_copies_clean_bundle(
 ) -> None:
     """The clean path is unchanged: a scan-clean bundle is copied wholesale."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = _MockConfig(dump_artifacts=str(tmp_path / "dump"))
-    target, _, _ = _setup_bundle(tmp_path, session_id)
-    recorder = _MockRecorder(session_id=session_id)
+    dest = tmp_path / "dump"
+    dest.mkdir()
+    config = _MockConfig(archive=True, dump_artifacts=str(dest))
+    target, _, recorder = _setup_bundle(tmp_path, session_id)
 
-    archive_run(
-        recorder=cast(TrajectoryRecorder, recorder),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=config,
         write_snapshot=_write_snapshot(recorder),
-        target_dir=target,
-        config=cast(RunConfig, config),
+        dump_path=dest,
     )
 
-    dest = tmp_path / "dump"
     assert (dest / "manifest.json").is_file()
     assert (dest / "trajectory.json").is_file()
     run_dir = archive_dir / "runs" / session_id
     assert (dest / "manifest.json").read_text() == (run_dir / "manifest.json").read_text()
 
 
-def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
+def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
     session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = _MockConfig()
+    config = _MockConfig(archive=True)
 
-    target, _, _ = _setup_bundle(tmp_path, session_id)
-    recorder = _MockRecorder(session_id=session_id)
+    target, _, recorder = _setup_bundle(tmp_path, session_id)
 
-    archive_run(
-        recorder=cast(TrajectoryRecorder, recorder),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=config,
         write_snapshot=_write_snapshot(recorder),
-        target_dir=target,
-        config=cast(RunConfig, config),
     )
 
     run_dir = archive_dir / "runs" / session_id
@@ -2560,17 +2649,16 @@ def test_manifest_review_backend_from_file_config_phase(tmp_path: Path) -> None:
     assert m.review_backend == "codex"
 
 
-def test_archive_run_records_general_backend_and_override(tmp_path: Path, archive_dir: Path) -> None:
-    """#647: archive_run persists the general backend + nullable review override."""
+def test_archive_records_general_backend_and_override(tmp_path: Path, archive_dir: Path) -> None:
+    """#647: the archive persists the general backend + nullable review override."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = _MockConfig(backend="claude", review_backend="codex")
-    target, _, _ = _setup_bundle(tmp_path, session_id)
-    recorder = _MockRecorder(session_id=session_id)
-    archive_run(
-        recorder=cast(TrajectoryRecorder, recorder),
+    config = _MockConfig(archive=True, backend="claude", review_backend="codex")
+    target, _, recorder = _setup_bundle(tmp_path, session_id)
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=config,
         write_snapshot=_write_snapshot(recorder),
-        target_dir=target,
-        config=cast(RunConfig, config),
     )
     manifest_data = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
     assert manifest_data["run"]["backend"] == "claude"
@@ -2586,12 +2674,14 @@ async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -
     from daydream.backends import MetricsEvent, ResultEvent, TextEvent
     from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
 
+    snapshots: list[RunWriteSnapshot] = []
     recorder = TrajectoryRecorder(
         path=tmp_path / ".daydream" / "runs" / "sess-fold" / "trajectory.json",
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
         session_id="sess-fold",
+        on_write=lambda _recorder, snapshot: snapshots.append(snapshot),
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -2610,8 +2700,12 @@ async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -
                 ))
                 cinv.observe(ResultEvent(structured_output=None, continuation=None))
 
-    m = build_manifest(
-        recorder=recorder,
+    write_snapshot = snapshots[-1]
+    m = build_manifest_from_snapshot(
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
+            write_snapshot=write_snapshot, run_flow=recorder.run_flow,
+        ),
+        write_snapshot=write_snapshot,
         config=cast(RunConfig, _MockConfig()),
         git_ctx=GitContext(),
         status="complete",
@@ -2640,11 +2734,9 @@ def test_build_manifest_pi_records_cwd_configured_default_model(tmp_path: Path) 
     )
     assert _configured_pi_model(tmp_path) == "gpt-psr-configured"
 
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, _MockRecorder()),
+    m = _build(
+        tmp_path,
         config=RunConfig(target=str(tmp_path), backend="pi", model=None),
-        git_ctx=GitContext(),
-        status="complete", archive_path=tmp_path,
         cwd=str(tmp_path),
     )
     assert m.per_stack_review_backend == "pi"
@@ -2660,12 +2752,7 @@ def test_build_manifest_pi_falls_back_to_default_when_no_cwd_config(
     the manifest records DEFAULT_PI_MODEL as before — the fallback path is intact."""
     from daydream.config import DEFAULT_PI_MODEL
 
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, _MockRecorder()),
-        config=RunConfig(target=str(tmp_path), backend="pi", model=None),
-        git_ctx=GitContext(),
-        status="complete", archive_path=tmp_path,
-    )
+    m = _build(tmp_path, config=RunConfig(target=str(tmp_path), backend="pi", model=None))
     assert m.per_stack_review_backend == "pi"
     assert m.per_stack_review_model == DEFAULT_PI_MODEL
 
@@ -2681,11 +2768,7 @@ def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(
             target=str(tmp_path), backend=None, model=None,
             flow_name="deep", start_at=start_at,
         )
-        m = build_manifest(
-            recorder=cast(TrajectoryRecorder, _MockRecorder()),
-            config=config, git_ctx=GitContext(),
-            status="complete", archive_path=tmp_path,
-        )
+        m = _build(tmp_path, config=config)
         run = m.to_dict()["run"]
         assert m.per_stack_review_backend is None, f"start_at={start_at}"
         assert m.per_stack_review_model is None, f"start_at={start_at}"
@@ -3066,13 +3149,11 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
     make_config: MakeConfig,
 ) -> None:
     """Archive success cannot admit a slug rejected by the verdict producer."""
-    from daydream.archive import _archive_run_inner
-    from tests.harness.trajectory import make_recorder
-
+    target = _frozen_target(tmp_path)
     oversized = f"{'a' * 100}/{'b' * 102}"
     with pytest.raises(ValueError, match="repository"):
         RemoteCITarget(
-            target_dir=tmp_path,
+            target_dir=target,
             base_repository=oversized,
             base_ref="main",
             head_repository=oversized,
@@ -3083,27 +3164,34 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
             pushed_sha=_PUSHED_SHA,
         )
 
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
+    recorder = _MockRecorder(session_id="oversized-slug-session")
     _write_deep(
-        tmp_path,
+        target,
         "test-verdict.json",
         {"session_id": recorder.session_id, "passed": True},
     )
-    _write_push_verdict(tmp_path, session_id=recorder.session_id)
-    _write_remote_verdict(tmp_path, session_id=recorder.session_id)
-    push_path = tmp_path / ".daydream" / "deep" / "push-verdict.json"
+    _write_push_verdict(target, session_id=recorder.session_id)
+    _write_remote_verdict(target, session_id=recorder.session_id)
+    push_path = target / ".daydream" / "deep" / "push-verdict.json"
     push = json.loads(push_path.read_text())
     push["pushed_repository"] = oversized
     push_path.write_text(json.dumps(push))
-    remote_path = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    remote_path = target / ".daydream" / "deep" / "remote-ci-verdict.json"
     remote = json.loads(remote_path.read_text())
     for identity in (remote["target"], remote["binding"]):
         identity["base_repository"] = oversized
         identity["head_repository"] = oversized
     remote_path.write_text(json.dumps(remote))
 
-    _archive_run_inner(
-        recorder=recorder,
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        config=make_config(
+            target,
+            archive=True,
+            pr_repo=oversized,
+            pr_number=42,
+        ),
         write_snapshot=_write_snapshot(
             recorder,
             phase_events=[
@@ -3127,16 +3215,6 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
                 ],
             ],
         ),
-        target_dir=tmp_path,
-        config=make_config(
-            tmp_path,
-            archive=False,
-            pr_repo=oversized,
-            pr_number=42,
-        ),
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     manifest = json.loads(
@@ -3233,14 +3311,12 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
     make_config: MakeConfig,
 ) -> None:
     """A real archived verdict preserves the evaluator's nonblocking advisory."""
-    from daydream.archive import _archive_run_inner
     from daydream.remote_ci import RemoteCILimits, RemoteCISnapshot, evaluate_remote_ci
-    from tests.harness.trajectory import make_recorder
 
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
-    recorder._phase_events.append(_phase_event(DaydreamPhase.FIX))  # noqa: SLF001
+    target = _frozen_target(tmp_path)
+    recorder = _MockRecorder(session_id="advisory-pending-session")
     config = make_config(
-        tmp_path, archive=False, pr_repo="example/project", pr_number=42
+        target, archive=True, pr_repo="example/project", pr_number=42
     )
     advisory = CIObservation(
         source="check_run",
@@ -3252,17 +3328,17 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
         diagnostic=None,
     )
     _write_deep(
-        tmp_path, "test-verdict.json", {"session_id": recorder.session_id, "passed": True}
+        target, "test-verdict.json", {"session_id": recorder.session_id, "passed": True}
     )
-    _write_push_verdict(tmp_path, session_id=recorder.session_id)
+    _write_push_verdict(target, session_id=recorder.session_id)
     _write_remote_verdict(
-        tmp_path, session_id=recorder.session_id, advisory=(advisory,)
+        target, session_id=recorder.session_id, advisory=(advisory,)
     )
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    artifact = target / ".daydream" / "deep" / "remote-ci-verdict.json"
     payload = json.loads(artifact.read_text())
     evaluated = evaluate_remote_ci(
         RemoteCISnapshot(
-            target=RemoteCITarget(target_dir=tmp_path, **payload["target"]),
+            target=RemoteCITarget(target_dir=target, **payload["target"]),
             binding=PRCIBinding(**payload["binding"]),
             policy=RequiredPolicy((RequiredContext("Build", 10),), True),
             active_workflows=({"id": 7, "state": "active"},),
@@ -3287,8 +3363,10 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
         completion_deadline=1800,
     )
 
-    _archive_run_inner(
-        recorder=recorder,
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        config=config,
         write_snapshot=_write_snapshot(
             recorder,
             phase_events=[
@@ -3302,11 +3380,6 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
                 },
             ],
         ),
-        target_dir=tmp_path,
-        config=config,
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     run_dir = archive_dir / "runs" / recorder.session_id
@@ -3575,29 +3648,28 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
     remote_status: str,
     expected_status: str,
 ) -> None:
-    from daydream.archive import _archive_run_inner
-    from tests.harness.trajectory import make_recorder
-
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
-    recorder._phase_events.append(_phase_event(DaydreamPhase.FIX))  # noqa: SLF001
+    target = _frozen_target(tmp_path)
+    recorder = _MockRecorder(session_id="registry-gated-session")
     config = make_config(
-        tmp_path,
-        archive=False,
+        target,
+        archive=True,
         pr_repo="ExAmPlE/PrOjEcT",
         pr_number=42,
     )
     _write_deep(
-        tmp_path,
+        target,
         "test-verdict.json",
         {"session_id": recorder.session_id, "passed": True},
     )
-    _write_push_verdict(tmp_path, session_id=recorder.session_id)
+    _write_push_verdict(target, session_id=recorder.session_id)
     _write_remote_verdict(
-        tmp_path, status=remote_status, session_id=recorder.session_id
+        target, status=remote_status, session_id=recorder.session_id
     )
 
-    _archive_run_inner(
-        recorder=recorder,
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        config=config,
         write_snapshot=_write_snapshot(
             recorder,
             phase_events=[
@@ -3611,11 +3683,6 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
                 },
             ],
         ),
-        target_dir=tmp_path,
-        config=config,
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     manifest = json.loads(
@@ -3632,11 +3699,15 @@ def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifac
     archive_dir: Path,
     make_config: MakeConfig,
 ) -> None:
-    """Archived mapping rows, rather than live recorder state, drive phase starts."""
-    from daydream.archive import _archive_run_inner
+    """Archived mapping rows, rather than live recorder state, drive phase starts.
+
+    The strict finalizer is handed no recorder at all — the live recorder built
+    here records no phase event, and the archived states come only from the
+    frozen snapshot's mapping rows."""
     from tests.harness.trajectory import make_recorder
 
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
+    target = _frozen_target(tmp_path)
+    recorder = make_recorder(target, run_flow=DaydreamRunFlow.NORMAL)
     phase_events = [
         {
             "phase": phase.value,
@@ -3649,19 +3720,16 @@ def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifac
     ]
     assert recorder.phase_event_dicts() == []
 
-    _archive_run_inner(
-        recorder=recorder,
-        write_snapshot=_write_snapshot(recorder, phase_events=phase_events),
-        target_dir=tmp_path,
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
         config=make_config(
-            tmp_path,
-            archive=False,
+            target,
+            archive=True,
             pr_repo="example/project",
             pr_number=42,
         ),
-        run_eval=False,
-        work=None,
-        upload=False,
+        write_snapshot=_write_snapshot(recorder, phase_events=phase_events),
     )
 
     manifest = json.loads(
@@ -3938,16 +4006,15 @@ def test_current_archive_survives_invalid_utf8_fix_failures(
     archive_dir: Path,
     make_config: MakeConfig,
 ) -> None:
-    from daydream.archive import _archive_run_inner
-
+    target = _frozen_target(tmp_path)
     session_id = "current-corrupt-fix-sidecar"
     recorder = _MockRecorder(session_id=session_id)
-    deep = tmp_path / ".daydream" / "deep"
+    deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True)
     (deep / "fix-failures.json").write_bytes(b"\xff")
-    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(target, "merged-items.json", {"items": []})
     _write_deep(
-        tmp_path,
+        target,
         "test-verdict.json",
         {"session_id": session_id, "passed": True},
     )
@@ -3962,14 +4029,11 @@ def test_current_archive_survives_invalid_utf8_fix_failures(
         },
     ]
 
-    _archive_run_inner(
-        recorder=cast(Any, recorder),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=make_config(target, archive=True, run_eval=True),
         write_snapshot=_write_snapshot(recorder, phase_events=phase_events),
-        target_dir=tmp_path,
-        config=make_config(tmp_path, archive=False),
-        run_eval=True,
-        work=None,
-        upload=False,
     )
 
     run_dir = archive_dir / "runs" / session_id
@@ -4000,23 +4064,26 @@ def test_nonpublishing_runtime_flows_ignore_matching_push_and_remote_artifacts(
     flow: DaydreamRunFlow,
     expected_pipeline: str,
 ) -> None:
-    from daydream.archive import _archive_run_inner, _flow_push_remote_steps
-    from tests.harness.trajectory import make_recorder
+    from daydream.archive import _flow_push_remote_steps
 
     assert _flow_push_remote_steps(flow, None) == (False, False)
-    recorder = make_recorder(tmp_path, run_flow=flow)
+    target = _frozen_target(tmp_path)
+    recorder = _MockRecorder(session_id="nonpublishing-session", run_flow=flow)
     config = make_config(
-        tmp_path,
-        archive=False,
+        target,
+        archive=True,
         pr_repo="example/project",
         pr_number=42,
     )
-    _write_deep(tmp_path, "merged-items.json", {"items": []})
-    _write_push_verdict(tmp_path, session_id=recorder.session_id)
-    _write_remote_verdict(tmp_path, session_id=recorder.session_id)
+    _write_deep(target, "merged-items.json", {"items": []})
+    _write_push_verdict(target, session_id=recorder.session_id)
+    _write_remote_verdict(target, session_id=recorder.session_id)
 
-    _archive_run_inner(
-        recorder=recorder,
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        run_flow=flow,
+        config=config,
         write_snapshot=_write_snapshot(
             recorder,
             phase_events=(
@@ -4025,11 +4092,6 @@ def test_nonpublishing_runtime_flows_ignore_matching_push_and_remote_artifacts(
                 else []
             ),
         ),
-        target_dir=tmp_path,
-        config=config,
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     manifest = json.loads(
@@ -4048,13 +4110,12 @@ def test_start_at_fix_archive_does_not_require_or_inherit_merge(
     archive_dir: Path,
     make_config: MakeConfig,
 ) -> None:
-    from daydream.archive import _archive_run_inner
-
+    target = _frozen_target(tmp_path)
     session_id = "fix-resume-session"
     recorder = _MockRecorder(session_id=session_id)
-    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
-    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
-    _write_deep(tmp_path, "test-verdict.json", {"session_id": session_id, "passed": True})
+    _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
+    _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+    _write_deep(target, "test-verdict.json", {"session_id": session_id, "passed": True})
     fix_start = {
         "phase": "fix",
         "event": "phase_start",
@@ -4063,14 +4124,11 @@ def test_start_at_fix_archive_does_not_require_or_inherit_merge(
         "scope_id": "fix-scope",
     }
 
-    _archive_run_inner(
-        recorder=cast(Any, recorder),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=make_config(target, archive=True, start_at="fix"),
         write_snapshot=_write_snapshot(recorder, phase_events=[fix_start]),
-        target_dir=tmp_path,
-        config=make_config(tmp_path, archive=False, start_at="fix"),
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     manifest = json.loads(
@@ -4089,21 +4147,17 @@ def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
     archive_dir: Path,
     make_config: MakeConfig,
 ) -> None:
-    from daydream.archive import _archive_run_inner
-
+    target = _frozen_target(tmp_path)
     session_id = "malformed-merge-session"
     recorder = _MockRecorder(session_id=session_id)
-    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
     events = _merge_events(session_id, "not-a-status")
 
-    _archive_run_inner(
-        recorder=cast(Any, recorder),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=make_config(target, archive=True),
         write_snapshot=_write_snapshot(recorder, phase_events=events),
-        target_dir=tmp_path,
-        config=make_config(tmp_path, archive=False),
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     manifest = json.loads(
@@ -4118,8 +4172,8 @@ def test_archive_rejects_frozen_root_from_another_session(
     archive_dir: Path,
     make_config: MakeConfig,
 ) -> None:
-    from daydream.archive import _archive_run_inner
-
+    """A root document carrying another run's session is refused closed."""
+    target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="current-session")
     payload = {
         "session_id": "other-session",
@@ -4141,19 +4195,49 @@ def test_archive_rejects_frozen_root_from_another_session(
         ),
     )
 
-    with pytest.raises(ValueError, match="archive session"):
-        _archive_run_inner(
-            recorder=cast(Any, recorder),
+    with pytest.raises(ValueError, match="frozen root trajectory identity"):
+        _strict_archive(
+            target=target,
+            session_id=recorder.session_id,
+            config=make_config(target, archive=True),
             write_snapshot=snapshot,
-            target_dir=tmp_path,
-            config=make_config(tmp_path, archive=False),
-            run_eval=False,
-            work=None,
-            upload=False,
         )
-    assert not (
-        archive_dir / "runs" / recorder.session_id / "trajectory.json"
-    ).exists()
+    assert not (archive_dir / "runs" / recorder.session_id).exists()
+
+
+def test_archive_rejects_a_sibling_document_from_another_session(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    """A valid root cannot smuggle a fork document bound to another session.
+
+    The root passes provenance validation, so the refusal has to come from the
+    bundle projection — and it must leave no partially assembled archive."""
+    from daydream.archive import ArchiveFinalizationError
+
+    target = _frozen_target(tmp_path)
+    recorder = _MockRecorder(session_id="current-session")
+    root = _write_snapshot(recorder).documents[0]
+    foreign = json.dumps(
+        {"session_id": "other-session", "trajectory_id": "fork-1"}
+    ).encode()
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=recorder.session_id,
+        documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
+    )
+
+    with pytest.raises(ArchiveFinalizationError, match="archive finalization failed"):
+        _strict_archive(
+            target=target,
+            session_id=recorder.session_id,
+            config=make_config(target, archive=True),
+            write_snapshot=snapshot,
+        )
+    assert not (archive_dir / "runs" / recorder.session_id).exists()
+    assert query_runs(archive_dir) == []
 
 
 def test_merge_failed_discriminates_on_merge_key_not_merged_items(
@@ -4254,26 +4338,22 @@ def test_stale_or_malformed_stabilization_failure_is_neutral(
 def test_archive_manifest_fails_matching_stabilization_session(
     tmp_path: Path, archive_dir: Path, make_config: MakeConfig
 ) -> None:
-    from daydream.archive import _archive_run_inner
-
+    target = _frozen_target(tmp_path)
     session_id = "stabilization-session"
-    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
-    _write_deep(tmp_path, "test-verdict.json", {"session_id": session_id, "passed": True})
+    _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
+    _write_deep(target, "test-verdict.json", {"session_id": session_id, "passed": True})
     _write_deep(
-        tmp_path,
+        target,
         "stabilization-failed.json",
         {"session_id": session_id, "reason": "post-test tree did not stabilize"},
     )
     recorder = _MockRecorder(session_id=session_id)
 
-    _archive_run_inner(
-        recorder=cast(Any, recorder),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
+        config=make_config(target, archive=True),
         write_snapshot=_write_snapshot(recorder),
-        target_dir=tmp_path,
-        config=make_config(tmp_path, archive=False),
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
     manifest = json.loads(
@@ -4363,27 +4443,24 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
 
 
 
-def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: MakeConfig) -> None:
-    from daydream.archive import _archive_run_inner
-    from tests.harness.trajectory import make_recorder
-    _write_deep(tmp_path, "merged-items.json", {"items": []})
-    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
-    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
-    recorder = make_recorder(tmp_path)  # run_flow NORMAL; fake config with archive=False
-    config = make_config(tmp_path, archive=False)
-    _archive_run_inner(
-        recorder=recorder,
+def test_merge_failed_archives_failed_pipeline(
+    tmp_path: Path, archive_dir: Path, make_config: MakeConfig
+) -> None:
+    target = _frozen_target(tmp_path)
+    _write_deep(target, "merged-items.json", {"items": []})
+    _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    recorder = _MockRecorder(session_id="merge-failed-session")  # run_flow NORMAL
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        config=make_config(target, archive=True),
         write_snapshot=_write_snapshot(
             recorder,
             phase_events=_merge_events(recorder.session_id, "failed"),
         ),
-        target_dir=tmp_path,
-        config=config,
-        run_eval=False,
-        work=None,
-        upload=False,
     )
-    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
     m = json.loads(manifest_path.read_text())
     assert m["archive_status"] == "complete"   # cleanly archived...
     assert m["pipeline_status"] == "failed"    # ...but the pipeline failed
@@ -4594,33 +4671,30 @@ def test_delete_runs_is_exported() -> None:
 
 
 def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
-    tmp_path: Path, make_config: MakeConfig,
+    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
     """#1113 (D21/D22): a diagram-only run deliberately leaves the previous deep
     review's ``.daydream/deep/`` artifacts on disk, so its own flow label must
     answer "runs no merge/fix/test" — otherwise it archives that run's
     ``merged-items.json`` as its own pipeline state."""
-    from daydream.archive import _archive_run_inner
-    from tests.harness.trajectory import make_recorder
+    target = _frozen_target(tmp_path)
+    _write_deep(target, "merged-items.json", {"items": []})
+    _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    _write_deep(target, "fix-failures.json", {"src/a.py": "reverted"})
 
-    _write_deep(tmp_path, "merged-items.json", {"items": []})
-    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
-    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
-    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
-
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
-    config = make_config(tmp_path, archive=False)
-    _archive_run_inner(
-        recorder=recorder,
-        target_dir=tmp_path,
-        config=config,
+    recorder = _MockRecorder(
+        session_id="diagram-only-session", run_flow=DaydreamRunFlow.DIAGRAM
+    )
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        run_flow=DaydreamRunFlow.DIAGRAM,
+        config=make_config(target, archive=True),
         write_snapshot=_write_snapshot(recorder),
-        run_eval=False,
-        work=None,
-        upload=False,
     )
 
-    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
     m = json.loads(manifest_path.read_text())
     assert m["run"]["flow"] == "diagram"
     assert m["status"] == "complete"
@@ -4643,30 +4717,27 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
 
 
 def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
-    tmp_path: Path, make_config: MakeConfig,
+    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    from daydream.archive import _archive_run_inner
-    from tests.harness.trajectory import make_recorder
-
+    target = _frozen_target(tmp_path)
     _write_deep(
-        tmp_path,
+        target,
         "merged-items.json",
         {"items": [{"file": "src/old.py", "line": 1, "confidence": "HIGH"}]},
     )
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
-    config = make_config(tmp_path, archive=False)
-
-    _archive_run_inner(
-        recorder=recorder,
-        target_dir=tmp_path,
-        config=config,
-        write_snapshot=_write_snapshot(recorder),
-        run_eval=True,
-        work=None,
-        upload=False,
+    recorder = _MockRecorder(
+        session_id="diagram-no-eval-session", run_flow=DaydreamRunFlow.DIAGRAM
     )
 
-    run_dir = get_archive_dir() / "runs" / recorder.session_id
+    _strict_archive(
+        target=target,
+        session_id=recorder.session_id,
+        run_flow=DaydreamRunFlow.DIAGRAM,
+        config=make_config(target, archive=True, run_eval=True),
+        write_snapshot=_write_snapshot(recorder),
+    )
+
+    run_dir = archive_dir / "runs" / recorder.session_id
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert not (run_dir / "evaluation.json").exists()
     assert manifest["metrics"]["total_findings"] is None
@@ -4841,7 +4912,7 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
         workspace_key="workspace",
         session_id=session_id,
         public_source=tmp_path / "source",
-        live_components=tuple((tmp_path / "live").parts),
+        live_root=(tmp_path / "live"),
     )
     monkeypatch.setattr(
         "daydream.eval.analyzer.analyze_session",
@@ -4948,7 +5019,7 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
             "workspace",
             session_id,
             public_source,
-            tuple((tmp_path / "live").parts),
+            tmp_path / "live",
         ),
         config=cast(Any, _MockConfig(run_eval=True)),
         write_snapshot=snapshot,
@@ -5021,7 +5092,7 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
                 session_id, "workspace", frozen, _manifest(frozen), ()
             ),
             artifact_provenance=ArtifactEvidenceProvenance(
-                "workspace", session_id, tmp_path / "source", tuple((tmp_path / "live").parts)
+                "workspace", session_id, tmp_path / "source", tmp_path / "live"
             ),
             config=cast(Any, _MockConfig(run_eval=False, archive=True)),
             write_snapshot=snapshot,
@@ -5029,6 +5100,72 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
             upload=True,
         )
 
+    assert not (get_archive_dir() / "runs" / session_id).exists()
+
+
+def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frozen tree mutated after finalization starts is caught before the external upload."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import ArchiveRecorderProvenance
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+
+    session_id = "strict-upload-mutated"
+    frozen = tmp_path / "frozen"
+    source_run = frozen / ".daydream" / "runs" / session_id
+    source_run.mkdir(parents=True)
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "steps": [],
+            "final_metrics": {},
+            "extra": {},
+        }
+    ).encode()
+    (source_run / "trajectory.json").write_bytes(encoded)
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-09-06T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    )
+    artifacts = ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ())
+    uploads: list[Path] = []
+
+    def mutate_then_resolve(_config: Any) -> str:
+        (source_run / "trajectory.json").write_bytes(encoded + b"\n")
+        return "private/repo"
+
+    def record_upload(run_dir: Path, *_args: Any, **_kwargs: Any) -> bool:
+        uploads.append(run_dir)
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", mutate_then_resolve)
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", record_upload)
+
+    with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
+        finalize_archive_run(
+            recorder_provenance=ArchiveRecorderProvenance(
+                session_id, DaydreamRunFlow.NORMAL, None, None
+            ),
+            artifacts=artifacts,
+            artifact_provenance=ArtifactEvidenceProvenance(
+                "workspace", session_id, tmp_path / "source", tmp_path / "live"
+            ),
+            config=cast(Any, _MockConfig(run_eval=False, archive=True)),
+            write_snapshot=snapshot,
+            work=None,
+            upload=True,
+        )
+
+    assert uploads == []
     assert not (get_archive_dir() / "runs" / session_id).exists()
 
 
@@ -5081,7 +5218,7 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
                 session_id, "workspace", frozen, _manifest(frozen), ()
             ),
             artifact_provenance=ArtifactEvidenceProvenance(
-                "workspace", session_id, tmp_path / "source", tuple((tmp_path / "live").parts)
+                "workspace", session_id, tmp_path / "source", tmp_path / "live"
             ),
             config=cast(
                 Any,

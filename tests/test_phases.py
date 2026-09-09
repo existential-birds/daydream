@@ -60,6 +60,33 @@ def _handoff_turn(body: str) -> tuple[AgentEvent, ...]:
     return _structured_turn({"handoff_prompt": body})
 
 
+def _private_session(tmp_path: Path, work: WorkContext, session_id: str) -> Any:
+    """Open a real private artifact session over *work* under a per-test base.
+
+    Nothing is faked: real ownership resolution, real locking, real filesystem.
+    """
+    from daydream import artifact_visibility as av
+
+    locations = av.private_root_locations(base=(tmp_path / "private").resolve())
+    owner = av.resolve_private_workspace_owner(work.source, locations=locations)
+    return av.open_artifact_session(work, session_id=session_id, owner=owner)
+
+
+def _inline_or_exact_backend(
+    repo: Path, *, inline: bool, events: tuple[AgentEvent, ...] | None = None
+) -> ScriptedBackend:
+    """A backend whose sanctioned-input transport is inline or exact paths.
+
+    A strict audit-root-isolating backend (the Claude ``PreToolUse`` profile)
+    forces the inline transport; an ordinary one keeps exact private paths.
+    """
+    if inline:
+        return ScriptedBackend(
+            events=events, audit_root_isolation="claude-pretooluse-v1", audit_root=repo.resolve()
+        )
+    return ScriptedBackend(events=events)
+
+
 def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
     """Return a finding ``file`` value that must be rejected as unconfined.
 
@@ -1475,12 +1502,7 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
     inline: bool,
 ) -> None:
     """A production fix gets intent/index bytes without an artifact-dir grant."""
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
+    from daydream.artifact_visibility import artifact_dir_for
     from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
@@ -1493,17 +1515,9 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
     git(repo, "add", ".")
     git_commit(repo, "base")
     work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-    if inline:
-        backend = ScriptedBackend(
-            audit_root_isolation="claude-pretooluse-v1",
-            audit_root=repo.resolve(),
-        )
-    else:
-        backend = ScriptedBackend()
+    backend = _inline_or_exact_backend(repo, inline=inline)
 
-    async with open_artifact_session(work, session_id=f"phase-fix-{inline}", owner=owner):
+    async with _private_session(tmp_path, work, f"phase-fix-{inline}"):
         deep = artifact_dir_for(repo) / "deep"
         intent = deep / "intent.md"
         affected = deep / "exploration" / "affected_files.md"
@@ -2088,6 +2102,25 @@ async def test_phase_fix_parallel_forwards_exploration_pointer(
     items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
     await phase_fix_parallel(backend, make_work(tmp_path), items, exploration_dir=exploration_dir)
     assert any("affected_files.md" in prompt for prompt in backend.prompts)
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_drops_pointer_when_index_missing(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """An exploration dir without affected_files.md must not reach fix prompts."""
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_parallel(backend, make_work(tmp_path), items, exploration_dir=exploration_dir)
+    assert backend.prompts
+    assert not any("affected_files.md" in prompt for prompt in backend.prompts)
 
 
 @pytest.mark.asyncio
@@ -4806,12 +4839,7 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """A changed tracked symlink remains a lexical changed-file identity."""
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
+    from daydream.artifact_visibility import artifact_dir_for
     from daydream.phases import _run_failure_summarizer
     from daydream.trajectory import DaydreamRunFlow
 
@@ -4830,16 +4858,13 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     linked.symlink_to(outside_two)
 
     work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
     session_id = "changed-symlink"
-    model_body = (
+    backend = ScriptedBackend(events=_handoff_turn(
         "# Daydream handoff\n\nHANDOFF_SYMLINK_SUCCESS\n\n"
         f"## Changed files\n\n- {repo / 'linked.txt'}\n"
-    )
-    backend = ScriptedBackend(events=_handoff_turn(model_body))
+    ))
 
-    async with open_artifact_session(work, session_id=session_id, owner=owner):
+    async with _private_session(tmp_path, work, session_id):
         live_daydream = artifact_dir_for(repo)
         recorder = TrajectoryRecorder(
             path=live_daydream / "runs" / session_id / "trajectory.json",
@@ -4877,12 +4902,13 @@ def test_failure_summarizer_empty_governed_set_keeps_public_paths_future_only(
     from daydream.phases import _build_failure_summarizer_prompt
 
     public = tmp_path / "source" / ".daydream"
+    run = public / "runs" / "session"
     prompt = _build_failure_summarizer_prompt(
         test_output="failed",
-        trajectory_path=public / "runs" / "session" / "trajectory.json",
-        trajectories_dir=public / "runs" / "session" / "trajectories",
+        trajectory_path=run / "trajectory.json",
+        trajectories_dir=run / "trajectories",
         diff_path=public / "diff.patch",
-        manifest_path=public / "runs" / "session" / "manifest.json",
+        manifest_path=run / "manifest.json",
         deep_dir=public / "deep",
         changed_files=[],
         has_trajectory=True,
@@ -5143,12 +5169,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
     silence_console: Callable[..., None],
     inline: bool,
 ) -> None:
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
+    from daydream.artifact_visibility import artifact_dir_for
     from daydream.phases import phase_cross_stack_merge
     from daydream.prompt_budget import SanctionedInputUnavailable
 
@@ -5160,38 +5181,25 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
     git(repo, "add", ".")
     git_commit(repo, "base")
     work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
 
     def _write_sized(path: Path, prefix: str, size: int) -> Path:
-        payload = prefix + (" " * (size - len(prefix.encode("utf-8"))))
-        path.write_text(payload, encoding="utf-8")
+        path.write_text(prefix + (" " * (size - len(prefix.encode("utf-8")))), encoding="utf-8")
         assert path.stat().st_size == size
         return path
 
-    if inline:
-        backend = ScriptedBackend(
-            events=_structured_turn(_MERGE_ITEMS),
-            audit_root_isolation="claude-pretooluse-v1",
-            audit_root=repo.resolve(),
-        )
-    else:
-        backend = ScriptedBackend(events=_structured_turn(_MERGE_ITEMS))
-    async with open_artifact_session(work, session_id=f"phase-merge-{inline}", owner=owner):
+    backend = _inline_or_exact_backend(
+        repo, inline=inline, events=_structured_turn(_MERGE_ITEMS)
+    )
+    async with _private_session(tmp_path, work, f"phase-merge-{inline}"):
         deep = artifact_dir_for(repo) / "deep"
         deep.mkdir(parents=True)
         intent = _write_sized(deep / "intent.md", "intent", 6_361)
         alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
         dedup = _write_sized(deep / "dedup.json", "[]", 60)
-        python_records = _write_sized(
-            deep / "python-records.json", '{"issues": [], "verdicts": []}', 7_593
-        )
-        generic_records = _write_sized(
-            deep / "generic-records.json", '{"issues": [], "verdicts": []}', 2_180
-        )
-        structural = _write_sized(
-            deep / "structural-records.json", "[]", 7_880
-        )
+        records = '{"issues": [], "verdicts": []}'
+        python_records = _write_sized(deep / "python-records.json", records, 7_593)
+        generic_records = _write_sized(deep / "generic-records.json", records, 2_180)
+        structural = _write_sized(deep / "structural-records.json", "[]", 7_880)
         exploration = deep / "exploration"
         exploration.mkdir()
         _write_sized(exploration / "summary.md", "summary", 613)

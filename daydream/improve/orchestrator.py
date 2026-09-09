@@ -1747,10 +1747,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         ctx.data["plan_exit_code"] = 1 if selected else 0
         return
     assert ctx.work.head_sha is not None
-    prune_stale_reanchor_worktrees(
-        ctx.work.repo,
-        private_workspace_owner=ctx.private_workspace_owner,
-    )
+    prune_stale_reanchor_worktrees(ctx.work.repo, private_workspace_owner=ctx.private_workspace_owner)
     backend = ctx.backend_for("plan_write")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(

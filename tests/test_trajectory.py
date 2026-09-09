@@ -2677,47 +2677,90 @@ async def test_remote_ci_host_phases_record_exact_terminal_reasons(
     assert all(event["metadata"]["duration_ms"] >= 0 for event in ends)
 
 
+class _RecordingSink:
+    """A host document sink that records writes and immutable captures in order."""
+
+    def __init__(self, *, persist: bool = True, fail_on: str | None = None) -> None:
+        self._persist, self._fail_on = persist, fail_on
+        self.writes: list[tuple[Any, str]] = []
+        self.snapshots: list[Any] = []
+        self.recorders: list[Any] = []
+        self.contexts: list[TrajectoryRecorder | None] = []
+        self.order: list[str] = []
+
+    def writer(self, document: Any, status: str) -> None:
+        if self._fail_on in (status, "any"):
+            raise OSError(f"injected {status} output failure")
+        self.order.append(f"writer:{document.trajectory_id}")
+        if self._persist:
+            document.path.parent.mkdir(parents=True, exist_ok=True)
+            document.path.write_bytes(document.json_bytes)
+        self.writes.append((document, status))
+
+    def capture(self, recorder: TrajectoryRecorder, snapshot: Any) -> None:
+        self.order.append("callback")
+        self.contexts.append(get_current_recorder())
+        self.recorders.append(recorder)
+        self.snapshots.append(snapshot)
+
+    @property
+    def written_ids(self) -> list[str]:
+        return [document.trajectory_id for document, _ in self.writes]
+
+    @property
+    def all_complete(self) -> bool:
+        return all(status == "complete" for _, status in self.writes)
+
+
+def _sink_recorder(
+    sink: _RecordingSink, tmp_path: Path, *, session_id: str,
+    artifact_run_dir: Path | None = None, **kwargs: Any,
+) -> TrajectoryRecorder:
+    """A recorder whose documents flow through *sink* rather than its own path."""
+    kwargs.setdefault("run_flow", DaydreamRunFlow.CUSTOM)
+    kwargs.setdefault("target_dir", tmp_path)
+    kwargs.setdefault("agent_model_name", "")
+    kwargs.setdefault("path", (artifact_run_dir or tmp_path / "private") / "trajectory.json")
+    return TrajectoryRecorder(
+        artifact_run_dir=artifact_run_dir, document_writer=sink.writer,
+        session_id=session_id, on_write=sink.capture, **kwargs,
+    )
+
+
+def _host_only_step(recorder: TrajectoryRecorder, cutoff_at: str) -> dict[str, Any]:
+    """The one synthetic step a bound host-only root publishes."""
+    return {
+        "step_id": 1,
+        "timestamp": cutoff_at,
+        "source": "system",
+        "message": "Daydream host-only run snapshot",
+        "extra": {
+            "daydream_run_flow": recorder.run_flow.value,
+            "host_event": "host_only_final_snapshot",
+        },
+    }
+
+
 async def test_bound_empty_root_writes_host_only_final_snapshot(
     tmp_path: Path,
 ) -> None:
     """A P10-bound host-only root reaches its writer and immutable capture."""
     private_run = tmp_path / "private" / "runs" / "host-only"
-    writes: list[tuple[Any, str]] = []
-    callbacks: list[Any] = []
-    order: list[str] = []
-
-    def writer(document: Any, status: str) -> None:
-        order.append("writer")
-        document.path.parent.mkdir(parents=True, exist_ok=True)
-        document.path.write_bytes(document.json_bytes)
-        writes.append((document, status))
-
-    def capture(_recorder: TrajectoryRecorder, snapshot: Any) -> None:
-        order.append("callback")
-        callbacks.append(snapshot)
-
-    recorder = TrajectoryRecorder(
-        path=private_run / "trajectory.json",
-        run_flow=DaydreamRunFlow.CUSTOM,
-        target_dir=tmp_path,
-        artifact_run_dir=private_run,
-        document_writer=writer,
-        agent_model_name="",
-        session_id="host-only",
-        on_write=capture,
+    sink = _RecordingSink()
+    recorder = _sink_recorder(
+        sink, tmp_path, session_id="host-only", artifact_run_dir=private_run
     )
     async with recorder:
         async with trajectory_module.phase_scope(DaydreamPhase.MERGE):
             pass
         assert recorder.steps == []
 
-    assert order == ["writer", "callback"]
-    assert len(writes) == len(callbacks) == 1
-    document, status = writes[0]
-    snapshot = callbacks[0]
+    assert sink.order == ["writer:host-only", "callback"]
+    assert len(sink.writes) == len(sink.snapshots) == 1
+    document, status = sink.writes[0]
+    snapshot = sink.snapshots[0]
     assert status == snapshot.status == "complete"
-    assert snapshot.documents == (document,)
-    assert snapshot.documents[0] is document
+    assert snapshot.documents == (document,) and snapshot.documents[0] is document
     assert document.path.read_bytes() == document.json_bytes
 
     payload = json.loads(document.json_bytes)
@@ -2727,18 +2770,7 @@ async def test_bound_empty_root_writes_host_only_final_snapshot(
     assert payload["trajectory_id"] == payload["session_id"] == "host-only"
     assert payload["extra"]["run_ended_at"] == snapshot.cutoff_at
     assert recorder._run_ended_at == snapshot.cutoff_at
-    assert payload["steps"] == [
-        {
-            "step_id": 1,
-            "timestamp": snapshot.cutoff_at,
-            "source": "system",
-            "message": "Daydream host-only run snapshot",
-            "extra": {
-                "daydream_run_flow": recorder.run_flow.value,
-                "host_event": "host_only_final_snapshot",
-            },
-        }
-    ]
+    assert payload["steps"] == [_host_only_step(recorder, snapshot.cutoff_at)]
     phase_events = payload["extra"]["phase_events"]
     assert [event["event"] for event in phase_events] == ["phase_start", "phase_end"]
     assert [event["phase"] for event in phase_events] == ["merge", "merge"]
@@ -2773,34 +2805,14 @@ async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(
     exception_kind: str,
 ) -> None:
     """Escaping failure stays primary while the complete snapshot admits partial truth."""
-    writes: list[tuple[Any, str]] = []
-    callbacks: list[Any] = []
-    order: list[str] = []
-
-    def writer(document: Any, status: str) -> None:
-        order.append("writer")
-        document.path.parent.mkdir(parents=True, exist_ok=True)
-        document.path.write_bytes(document.json_bytes)
-        writes.append((document, status))
-
-    def capture(_recorder: TrajectoryRecorder, snapshot: Any) -> None:
-        order.append("callback")
-        callbacks.append(snapshot)
-
+    sink = _RecordingSink()
+    session_id = f"host-only-{exception_kind}"
     primary: BaseException = (
         RuntimeError("authoritative body failure")
         if exception_kind == "runtime"
         else anyio.get_cancelled_exc_class()()
     )
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "private" / "trajectory.json",
-        run_flow=DaydreamRunFlow.CUSTOM,
-        target_dir=tmp_path,
-        document_writer=writer,
-        agent_model_name="",
-        session_id=f"host-only-{exception_kind}",
-        on_write=capture,
-    )
+    recorder = _sink_recorder(sink, tmp_path, session_id=session_id)
     caught: BaseException | None = None
     try:
         async with recorder:
@@ -2810,28 +2822,17 @@ async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(
         caught = exc
 
     assert caught is primary
-    assert order == ["writer", "callback"]
-    assert len(writes) == len(callbacks) == 1
-    document, status = writes[0]
-    snapshot = callbacks[0]
+    assert sink.order == [f"writer:{session_id}", "callback"]
+    assert len(sink.writes) == len(sink.snapshots) == 1
+    document, status = sink.writes[0]
+    snapshot = sink.snapshots[0]
     assert status == snapshot.status == "complete"
     assert snapshot.documents == (document,)
     payload = json.loads(document.json_bytes)
     assert atif_validate(payload, validate_images=False)
     assert payload["extra"]["partial"] is True
     assert payload["extra"]["run_ended_at"] == snapshot.cutoff_at
-    assert payload["steps"] == [
-        {
-            "step_id": 1,
-            "timestamp": snapshot.cutoff_at,
-            "source": "system",
-            "message": "Daydream host-only run snapshot",
-            "extra": {
-                "daydream_run_flow": recorder.run_flow.value,
-                "host_event": "host_only_final_snapshot",
-            },
-        }
-    ]
+    assert payload["steps"] == [_host_only_step(recorder, snapshot.cutoff_at)]
     expected_phase_status = "failed" if exception_kind == "runtime" else "cancelled"
     assert payload["extra"]["phase_events"][-1]["status"] == expected_phase_status
     assert recorder.steps == []
@@ -2842,30 +2843,12 @@ async def test_bound_empty_root_with_completed_child_retains_both_documents(
     tmp_path: Path,
 ) -> None:
     """A completed child is retained once behind the synthetic root document."""
-    writes: list[Any] = []
-    callbacks: list[Any] = []
-    order: list[str] = []
-
-    def writer(document: Any, status: str) -> None:
-        assert status == "complete"
-        order.append(f"writer:{document.trajectory_id}")
-        document.path.parent.mkdir(parents=True, exist_ok=True)
-        document.path.write_bytes(document.json_bytes)
-        writes.append(document)
-
-    def capture(_recorder: TrajectoryRecorder, snapshot: Any) -> None:
-        order.append("callback")
-        callbacks.append(snapshot)
-
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "private" / "runs" / "parent" / "trajectory.json",
-        run_flow=DaydreamRunFlow.CUSTOM,
-        target_dir=tmp_path,
-        artifact_run_dir=tmp_path / "private" / "runs" / "parent",
-        document_writer=writer,
-        agent_model_name="",
+    sink = _RecordingSink()
+    recorder = _sink_recorder(
+        sink,
+        tmp_path,
         session_id="parent",
-        on_write=capture,
+        artifact_run_dir=tmp_path / "private" / "runs" / "parent",
     )
     async with recorder:
         async with recorder.fork("completed-child") as child:
@@ -2873,24 +2856,22 @@ async def test_bound_empty_root_with_completed_child_retains_both_documents(
                 observe_text_and_result(invocation, "child evidence")
         assert recorder.steps == []
 
-    assert order == [
+    assert sink.order == [
         f"writer:{child.trajectory_id}",
         f"writer:{recorder.trajectory_id}",
         "callback",
     ]
-    assert [document.trajectory_id for document in writes] == [
-        child.trajectory_id,
-        recorder.trajectory_id,
-    ]
-    assert len(callbacks) == 1
-    snapshot = callbacks[0]
+    assert sink.written_ids == [child.trajectory_id, recorder.trajectory_id]
+    assert sink.all_complete
+    assert len(sink.snapshots) == 1
+    snapshot = sink.snapshots[0]
     assert snapshot.status == "complete"
     assert [document.trajectory_id for document in snapshot.documents] == [
         recorder.trajectory_id,
         child.trajectory_id,
     ]
-    assert snapshot.documents[0] is writes[1]
-    assert snapshot.documents[1] is writes[0]
+    assert snapshot.documents[0] is sink.writes[1][0]
+    assert snapshot.documents[1] is sink.writes[0][0]
     assert sum(
         document.trajectory_id == child.trajectory_id
         for document in snapshot.documents
@@ -2898,18 +2879,7 @@ async def test_bound_empty_root_with_completed_child_retains_both_documents(
 
     root_payload = json.loads(snapshot.documents[0].json_bytes)
     assert atif_validate(root_payload, validate_images=False)
-    assert root_payload["steps"] == [
-        {
-            "step_id": 1,
-            "timestamp": snapshot.cutoff_at,
-            "source": "system",
-            "message": "Daydream host-only run snapshot",
-            "extra": {
-                "daydream_run_flow": recorder.run_flow.value,
-                "host_event": "host_only_final_snapshot",
-            },
-        }
-    ]
+    assert root_payload["steps"] == [_host_only_step(recorder, snapshot.cutoff_at)]
     summaries = root_payload["extra"]["subtrajectories"]
     assert len(summaries) == 1
     assert summaries[0]["trajectory_id"] == child.trajectory_id
@@ -2924,26 +2894,14 @@ async def test_artifact_document_writer_precedes_root_capture_and_is_inherited_b
 ) -> None:
     """The host sink owns root/child bytes while P07 keeps one pure root callback."""
     private_run = tmp_path / "private" / "runs" / "test"
-    writes: list[tuple[str, str, Path, bytes]] = []
-    callbacks: list[Any] = []
-    callback_contexts: list[TrajectoryRecorder | None] = []
-
-    def writer(document: Any, status: str) -> None:
-        writes.append((document.trajectory_id, status, document.path, document.json_bytes))
-
-    def capture(recorder: TrajectoryRecorder, snapshot: Any) -> None:
-        callback_contexts.append(get_current_recorder())
-        callbacks.append((recorder, snapshot, tuple(writes)))
-
-    recorder = TrajectoryRecorder(
-        path=private_run / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        artifact_run_dir=private_run,
-        document_writer=writer,
-        agent_model_name="test",
+    sink = _RecordingSink(persist=False)
+    recorder = _sink_recorder(
+        sink,
+        tmp_path,
         session_id="test",
-        on_write=capture,
+        run_flow=DaydreamRunFlow.NORMAL,
+        artifact_run_dir=private_run,
+        agent_model_name="test",
     )
     async with recorder:
         async with recorder.fork("child") as child:
@@ -2952,21 +2910,18 @@ async def test_artifact_document_writer_precedes_root_capture_and_is_inherited_b
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             observe_text_and_result(invocation, "root")
 
-    assert [item[:2] for item in writes] == [
-        ("test:child", "complete"),
-        ("test", "complete"),
-    ]
-    assert writes[0][2].parent == private_run / "trajectories"
-    assert callbacks and callbacks[0][0] is recorder
-    assert callback_contexts == [recorder]
+    # Both documents reach the sink before the single root capture fires.
+    assert sink.order == ["writer:test:child", "writer:test", "callback"]
+    assert sink.all_complete
+    assert sink.writes[0][0].path.parent == private_run / "trajectories"
+    assert sink.recorders == sink.contexts == [recorder]
     assert get_current_recorder() is None
-    snapshot = callbacks[0][1]
+    snapshot = sink.snapshots[0]
     assert snapshot.status == "complete"
     assert [document.trajectory_id for document in snapshot.documents] == [
         "test",
         "test:child",
     ]
-    assert [item[0] for item in callbacks[0][2]] == ["test:child", "test"]
     assert not recorder.path.exists()
 
 
@@ -2978,24 +2933,15 @@ async def test_private_dispatch_references_captured_child_by_public_logical_path
     target.mkdir()
     session_id = "private-dispatch"
     private_run = tmp_path / "private" / "runs" / session_id
-    written: list[Any] = []
-    captured: list[Any] = []
-
-    def writer(document: Any, status: str) -> None:
-        assert status == "complete"
-        document.path.parent.mkdir(parents=True, exist_ok=True)
-        document.path.write_bytes(document.json_bytes)
-        written.append(document)
-
-    recorder = TrajectoryRecorder(
-        path=private_run / "trajectory.json",
-        run_flow=DaydreamRunFlow.DEEP,
-        target_dir=target,
-        artifact_run_dir=private_run,
-        document_writer=writer,
-        agent_model_name="test",
+    sink = _RecordingSink()
+    recorder = _sink_recorder(
+        sink,
+        tmp_path,
         session_id=session_id,
-        on_write=lambda _recorder, snapshot: captured.append(snapshot),
+        run_flow=DaydreamRunFlow.DEEP,
+        artifact_run_dir=private_run,
+        target_dir=target,
+        agent_model_name="test",
     )
     async with recorder:
         async with trajectory_module.dispatch_scope(
@@ -3010,8 +2956,9 @@ async def test_private_dispatch_references_captured_child_by_public_logical_path
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             observe_text_and_result(invocation, "root")
 
-    assert len(captured) == 1
-    snapshot = captured[0]
+    assert len(sink.snapshots) == 1
+    assert sink.all_complete
+    snapshot = sink.snapshots[0]
     payloads = {
         document.trajectory_id: json.loads(document.json_bytes)
         for document in snapshot.documents
@@ -3040,10 +2987,7 @@ async def test_private_dispatch_references_captured_child_by_public_logical_path
     assert child_document.path == child.path
     assert child_document.path.is_relative_to(private_run)
     assert child.path.read_bytes() == child_document.json_bytes
-    assert [document.trajectory_id for document in written] == [
-        child.trajectory_id,
-        session_id,
-    ]
+    assert sink.written_ids == [child.trajectory_id, session_id]
     assert not (target / ".daydream" / logical_ref).exists()
 
 
@@ -3051,21 +2995,14 @@ async def test_artifact_partial_writer_failure_still_delivers_immutable_capture(
     tmp_path: Path,
 ) -> None:
     """A failed live partial write cannot erase the already prepared P07 bytes."""
-    captured: list[Any] = []
-
-    def fail_writer(_document: Any, status: str) -> None:
-        assert status == "partial"
-        raise OSError("injected partial output failure")
-
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "private" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        artifact_run_dir=tmp_path / "private",
-        document_writer=fail_writer,
-        agent_model_name="test",
+    sink = _RecordingSink(fail_on="partial")
+    recorder = _sink_recorder(
+        sink,
+        tmp_path,
         session_id="test",
-        on_write=lambda _recorder, snapshot: captured.append(snapshot),
+        run_flow=DaydreamRunFlow.NORMAL,
+        artifact_run_dir=tmp_path / "private",
+        agent_model_name="test",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
@@ -3073,9 +3010,10 @@ async def test_artifact_partial_writer_failure_still_delivers_immutable_capture(
         recorder.write_partial()
         recorder.document_writer = None
 
-    assert len(captured) == 2
-    assert captured[0].status == "partial"
-    assert json.loads(captured[0].documents[0].json_bytes)["extra"]["partial"] is True
+    assert len(sink.snapshots) == 2
+    partial = sink.snapshots[0]
+    assert partial.status == "partial"
+    assert json.loads(partial.documents[0].json_bytes)["extra"]["partial"] is True
 
 
 async def test_artifact_final_writer_failure_preserves_existing_primary_exception(
@@ -3083,17 +3021,13 @@ async def test_artifact_final_writer_failure_preserves_existing_primary_exceptio
 ) -> None:
     """A secondary explicit-output failure cannot replace the active body error."""
     primary = RuntimeError("authoritative body failure")
-
-    def fail_writer(_document: Any, _status: str) -> None:
-        raise OSError("secondary output failure")
-
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "explicit.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        document_writer=fail_writer,
-        agent_model_name="test",
+    recorder = _sink_recorder(
+        _RecordingSink(fail_on="any"),
+        tmp_path,
         session_id="test",
+        run_flow=DaydreamRunFlow.NORMAL,
+        agent_model_name="test",
+        path=tmp_path / "explicit.json",
         explicit_path=True,
     )
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -63,7 +63,12 @@ def _neutral_maintenance_fields() -> dict[str, Any]:
     }
 
 
-def _stub_recon_commands(*, all_invalid: bool = False) -> list[dict[str, Any]]:
+def stub_recon_commands(*, all_invalid: bool = False, start_line: int = 5) -> list[dict[str, Any]]:
+    """Two whole-repository verification commands, anchored from ``start_line``.
+
+    The second command's evidence anchor follows on the next line, so a caller
+    validating against a REAL ``pyproject.toml`` can point both at its lines.
+    """
     scope_kind = "unsupported" if all_invalid else "whole-repository"
     return [
         {
@@ -87,7 +92,7 @@ def _stub_recon_commands(*, all_invalid: bool = False) -> list[dict[str, Any]]:
             "evidence": {
                 "kind": "literal-command",
                 "source_path": "pyproject.toml",
-                "line_anchor": {"start_line": 5, "end_line": 5},
+                "line_anchor": {"start_line": start_line, "end_line": start_line},
                 "verbatim_excerpt": 'test-command = "uv run pytest"',
             },
         },
@@ -112,7 +117,7 @@ def _stub_recon_commands(*, all_invalid: bool = False) -> list[dict[str, Any]]:
             "evidence": {
                 "kind": "literal-command",
                 "source_path": "pyproject.toml",
-                "line_anchor": {"start_line": 6, "end_line": 6},
+                "line_anchor": {"start_line": start_line + 1, "end_line": start_line + 1},
                 "verbatim_excerpt": 'scope-command = "git diff --exit-code"',
             },
         },
@@ -421,6 +426,9 @@ class ImproveStubBackend:
         self.group_scoped_findings = False
         self.findings_per_category: int | None = None
         self.fail_vet_titles: set[str] = set()
+        # Fires once on the first plan-writer turn, so a test can mutate the repo
+        # (e.g. advance HEAD) with a plan-write session already open.
+        self.on_first_plan_write: Callable[[], None] | None = None
 
     async def execute(
         self,
@@ -458,6 +466,9 @@ class ImproveStubBackend:
             isinstance(output_schema, dict) and "false_assumption" in output_schema.get("properties", {})
         ):
             marker = "plan-writer"
+            if self.on_first_plan_write is not None:
+                hook, self.on_first_plan_write = self.on_first_plan_write, None
+                hook()
         self.calls.append(
             {
                 "cwd": cwd,
@@ -529,7 +540,7 @@ class ImproveStubBackend:
                     continuation=None,
                 )
                 return
-            commands = self.recon_commands_override or _stub_recon_commands(
+            commands = self.recon_commands_override or stub_recon_commands(
                 all_invalid=self.all_recon_commands_invalid
             )
             commands = [*commands, *self.recon_commands_extra]

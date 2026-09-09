@@ -170,12 +170,11 @@ class _DeepMockBackend:
     def _review_output_path(self, prompt: str) -> Path | None:
         """The review-file path the delivered prompt names.
 
-        The prompt's ``Write your full review to <path>.`` sentence names the
-        session's live artifact tree. Writing there (instead of reconstructing
-        a path under ``target_dir``) matches the sanctioned adapter contract:
-        the public ``.daydream`` tree is detached for the run's duration, so a
-        mid-run write to a reconstructed public path trips the model-cwd
-        artifact gate and fails the run.
+        The prompt names the session's live artifact tree. Writing there rather
+        than reconstructing a path under ``target_dir`` matches the sanctioned
+        adapter contract: the public ``.daydream`` tree is detached for the
+        run's duration, so a mid-run write to a reconstructed public path trips
+        the model-cwd artifact gate and fails the run.
         """
         m = re.search(r"Write your full review to (\S+\.md)\.", prompt)
         return Path(m.group(1)) if m else None

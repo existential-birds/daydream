@@ -123,15 +123,18 @@ async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
     intermittently. Polling until the group is gone makes the assertion
     deterministic — the observable outcome is "no process remains in the group",
     not "the group vanished by the next instruction". The loop exits the moment
-    ``killpg`` raises; the timeout is a failure bound, not a synchronization
-    delay (same contract as ``_wait_for_file``).
+    ``killpg`` raises ProcessLookupError or PermissionError (a recycled pgid);
+    the timeout is a failure bound, not a synchronization delay (same contract
+    as ``_wait_for_file``).
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
     while True:
         try:
             os.killpg(pgid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # EPERM means the pgid was recycled by a foreign-uid process,
+            # i.e. our same-uid group exited.
             return
         if loop.time() > deadline:
             raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")

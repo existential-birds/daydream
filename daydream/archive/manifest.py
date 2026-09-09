@@ -18,7 +18,8 @@ failed.
 Exports:
     MANIFEST_SCHEMA_VERSION: Current schema version string.
     Manifest: Dataclass representing the manifest.
-    build_manifest: Construct a Manifest from run context.
+    build_manifest_from_snapshot: Construct a Manifest from one frozen run
+        snapshot and its run context.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from daydream.runner import RunConfig
-    from daydream.trajectory import RunWriteSnapshot, TrajectoryRecorder
+    from daydream.trajectory import RunWriteSnapshot
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 
@@ -57,52 +58,38 @@ def archive_recorder_provenance_from_snapshot(
     write_snapshot: RunWriteSnapshot,
     run_flow: DaydreamRunFlow,
 ) -> ArchiveRecorderProvenance:
-    """Validate and retain archive identity from the exact frozen root bytes."""
-    if not isinstance(run_flow, DaydreamRunFlow):
-        raise ValueError("run_flow is malformed")
-    if (
-        type(write_snapshot.root_trajectory_id) is not str
-        or not write_snapshot.root_trajectory_id
-        or write_snapshot.root_trajectory_id in (".", "..")
-        or any(
-            character in write_snapshot.root_trajectory_id
-            for character in ("/", "\\", "\0")
-        )
-    ):
+    """Validate and retain archive identity from the exact frozen root bytes.
+
+    The session id is a path segment in the archive, so an empty, dot, or
+    separator-bearing value is refused rather than resolved.
+    """
+    session_id = write_snapshot.root_trajectory_id
+    if not session_id or session_id in (".", "..") or set(session_id) & set("/\\\0"):
         raise ValueError("snapshot session_id is malformed")
     roots = [
-        document
-        for document in write_snapshot.documents
-        if document.trajectory_id == write_snapshot.root_trajectory_id
+        document for document in write_snapshot.documents if document.trajectory_id == session_id
     ]
-    if len(roots) != 1 or type(roots[0].json_bytes) is not bytes:
+    if len(roots) != 1:
         raise ValueError("frozen root trajectory is missing")
     try:
         payload = json.loads(roots[0].json_bytes)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("frozen root trajectory is malformed") from exc
     if not isinstance(payload, dict) or (
-        payload.get("session_id") != write_snapshot.root_trajectory_id
-        or payload.get("trajectory_id") != write_snapshot.root_trajectory_id
+        payload.get("session_id") != session_id or payload.get("trajectory_id") != session_id
     ):
         raise ValueError("frozen root trajectory identity is malformed")
     extra = payload.get("extra", {})
     if not isinstance(extra, dict):
         raise ValueError("frozen root trajectory extra is malformed")
-    pr_number: int | None = None
-    if "pr_number" in extra:
-        candidate_number = extra["pr_number"]
-        if type(candidate_number) is not int or candidate_number <= 0:
-            raise ValueError("frozen root pr_number is malformed")
-        pr_number = candidate_number
-    pr_repo: str | None = None
-    if "pr_repo" in extra:
-        candidate_repo = extra["pr_repo"]
-        if type(candidate_repo) is not str or not candidate_repo:
-            raise ValueError("frozen root pr_repo is malformed")
-        pr_repo = candidate_repo
+    pr_number = extra.get("pr_number")
+    if "pr_number" in extra and (type(pr_number) is not int or pr_number <= 0):
+        raise ValueError("frozen root pr_number is malformed")
+    pr_repo = extra.get("pr_repo")
+    if "pr_repo" in extra and (type(pr_repo) is not str or not pr_repo):
+        raise ValueError("frozen root pr_repo is malformed")
     return ArchiveRecorderProvenance(
-        session_id=write_snapshot.root_trajectory_id,
+        session_id=session_id,
         run_flow=run_flow,
         pr_number=pr_number,
         pr_repo=pr_repo,
@@ -503,11 +490,10 @@ class Manifest:
         }
 
 
-def _build_manifest(
+def build_manifest_from_snapshot(
     *,
     recorder_provenance: ArchiveRecorderProvenance,
-    legacy_recorder: TrajectoryRecorder | None,
-    write_snapshot: RunWriteSnapshot | None,
+    write_snapshot: RunWriteSnapshot,
     config: RunConfig,
     git_ctx: GitContext,
     status: str,
@@ -527,7 +513,8 @@ def _build_manifest(
 
     Args:
         recorder_provenance: Immutable identity for the archived run.
-        legacy_recorder: Recorder used only by the no-snapshot compatibility path.
+        write_snapshot: Frozen trajectory bytes the run totals and timings come
+            from.
         config: The RunConfig for this run.
         git_ctx: Captured git metadata.
         status: Run status (``complete``, ``partial``, ``failed``).
@@ -562,27 +549,22 @@ def _build_manifest(
     Returns:
         A fully populated Manifest.
     """
-    timing_summary = None
-    totals: dict[str, Any]
-    if write_snapshot is not None:
-        from daydream.trajectory import compute_timing_summary, snapshot_trajectories
+    if recorder_provenance.session_id != write_snapshot.root_trajectory_id:
+        raise ValueError("archive provenance does not match frozen snapshot")
+    from daydream.trajectory import compute_timing_summary, snapshot_trajectories
 
-        frozen = snapshot_trajectories(write_snapshot)
-        frozen_root = frozen.get("main")
-        raw_final_metrics = frozen_root.get("final_metrics") if isinstance(frozen_root, dict) else None
-        final_metrics: dict[str, Any] = raw_final_metrics if isinstance(raw_final_metrics, dict) else {}
-        totals = {
-            "prompt": final_metrics.get("total_prompt_tokens") or 0,
-            "completion": final_metrics.get("total_completion_tokens") or 0,
-            "cached": final_metrics.get("total_cached_tokens") or 0,
-            "cost": final_metrics.get("total_cost_usd") or 0.0,
-            "any_cost_seen": final_metrics.get("total_cost_usd") is not None,
-        }
-        timing_summary = compute_timing_summary(write_snapshot)
-    else:
-        if legacy_recorder is None:
-            raise ValueError("legacy manifest construction requires a recorder")
-        totals = legacy_recorder._final_totals  # noqa: SLF001 - legacy direct-builder seam
+    frozen = snapshot_trajectories(write_snapshot)
+    frozen_root = frozen.get("main")
+    raw_final_metrics = frozen_root.get("final_metrics") if isinstance(frozen_root, dict) else None
+    final_metrics: dict[str, Any] = raw_final_metrics if isinstance(raw_final_metrics, dict) else {}
+    totals: dict[str, Any] = {
+        "prompt": final_metrics.get("total_prompt_tokens") or 0,
+        "completion": final_metrics.get("total_completion_tokens") or 0,
+        "cached": final_metrics.get("total_cached_tokens") or 0,
+        "cost": final_metrics.get("total_cost_usd") or 0.0,
+        "any_cost_seen": final_metrics.get("total_cost_usd") is not None,
+    }
+    timing_summary = compute_timing_summary(write_snapshot)
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
     from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
@@ -712,8 +694,9 @@ def _build_manifest(
         m.profile_source_kind = resolved_profile.source_kind
         m.profile_digest = resolved_profile.digest
 
-    # New runs use lifecycle timing from the immutable write snapshot. Legacy
-    # direct builders retain the local-step fallback, which evaluation may fill.
+    # Lifecycle timing comes from the immutable write snapshot. A snapshot the
+    # reducer cannot span (no lifecycle stamps, or a cutoff it cannot match)
+    # leaves the span unset for evaluation to fill below.
     if timing_summary is not None:
         m.wall_clock_seconds = timing_summary.wall_clock_seconds
         m.phase_timings = timing_summary.phase_timings
@@ -724,11 +707,6 @@ def _build_manifest(
             "agent_completeness": timing_summary.agent_completeness,
             "diagnostics": timing_summary.diagnostics,
         }
-    elif write_snapshot is None:
-        if legacy_recorder is None:
-            raise ValueError("legacy manifest construction requires a recorder")
-        m.wall_clock_seconds = legacy_recorder.compute_wall_clock_seconds()
-        m.phase_timings = legacy_recorder.compute_phase_timings()
 
     if evaluation:
         timing = evaluation.get("timing", {})
@@ -764,92 +742,3 @@ def _build_manifest(
         m.cost_per_finding_usd = derived.get("cost_per_finding_usd")
 
     return m
-
-
-def build_manifest(
-    *,
-    recorder: TrajectoryRecorder,
-    config: RunConfig,
-    git_ctx: GitContext,
-    status: str,
-    archive_path: Path,
-    evaluation: dict[str, Any] | None = None,
-    source_path: str | None = None,
-    cwd: str | None = None,
-    fix_failures: dict[str, str] | None = None,
-    fix_leftover_untracked: list[str] | None = None,
-    fix_quality_gate: dict[str, Any] | None = None,
-    recommended_capture: str | None = None,
-    pipeline_status: str = "unknown",
-    phase_states: dict[str, Any] | None = None,
-    provenance: Any | None = None,
-) -> Manifest:
-    """Build a legacy manifest from a live recorder and no frozen snapshot."""
-    recorder_provenance = ArchiveRecorderProvenance(
-        session_id=recorder.session_id,
-        run_flow=recorder.run_flow,
-        pr_number=recorder.pr_number,
-        pr_repo=recorder.pr_repo,
-    )
-    return _build_manifest(
-        recorder_provenance=recorder_provenance,
-        legacy_recorder=recorder,
-        write_snapshot=None,
-        config=config,
-        git_ctx=git_ctx,
-        status=status,
-        archive_path=archive_path,
-        evaluation=evaluation,
-        source_path=source_path,
-        cwd=cwd,
-        fix_failures=fix_failures,
-        fix_leftover_untracked=fix_leftover_untracked,
-        fix_quality_gate=fix_quality_gate,
-        recommended_capture=recommended_capture,
-        pipeline_status=pipeline_status,
-        phase_states=phase_states,
-        provenance=provenance,
-    )
-
-
-def build_manifest_from_snapshot(
-    *,
-    recorder_provenance: ArchiveRecorderProvenance,
-    write_snapshot: RunWriteSnapshot,
-    config: RunConfig,
-    git_ctx: GitContext,
-    status: str,
-    archive_path: Path,
-    evaluation: dict[str, Any] | None = None,
-    source_path: str | None = None,
-    cwd: str | None = None,
-    fix_failures: dict[str, str] | None = None,
-    fix_leftover_untracked: list[str] | None = None,
-    fix_quality_gate: dict[str, Any] | None = None,
-    recommended_capture: str | None = None,
-    pipeline_status: str = "unknown",
-    phase_states: dict[str, Any] | None = None,
-    provenance: Any | None = None,
-) -> Manifest:
-    """Build a production manifest from immutable snapshot/provenance only."""
-    if recorder_provenance.session_id != write_snapshot.root_trajectory_id:
-        raise ValueError("archive provenance does not match frozen snapshot")
-    return _build_manifest(
-        recorder_provenance=recorder_provenance,
-        legacy_recorder=None,
-        write_snapshot=write_snapshot,
-        config=config,
-        git_ctx=git_ctx,
-        status=status,
-        archive_path=archive_path,
-        evaluation=evaluation,
-        source_path=source_path,
-        cwd=cwd,
-        fix_failures=fix_failures,
-        fix_leftover_untracked=fix_leftover_untracked,
-        fix_quality_gate=fix_quality_gate,
-        recommended_capture=recommended_capture,
-        pipeline_status=pipeline_status,
-        phase_states=phase_states,
-        provenance=provenance,
-    )

@@ -240,9 +240,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         type=Path,
         dest="trajectory_path",
         help=(
-            "Write ATIF v1.7 trajectory JSON to PATH (default: publish to "
-            "<target>/.daydream/runs/<session_id>/trajectory.json after "
-            "finalization; explicit external paths receive live updates)"
+            "Write ATIF v1.7 trajectory JSON to PATH (default: publish to <target>/.daydream/runs/"
+            "<session_id>/trajectory.json after finalization; explicit external paths receive live updates)"
         ) if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -266,10 +265,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         default=None,
         metavar="DIR",
         dest="dump_artifacts",
-        help="Merge the finalized run bundle (ATIF trajectory, review output, deep artifacts, "
-             "diffs, findings, manifest, evaluation) into DIR for CI upload. Preserves "
-             "unrelated destination files. Opt-in because the logs may contain sensitive "
-             "data. Works on every flow."
+        help="Merge the finalized run bundle (ATIF trajectory, review output, deep artifacts, diffs, "
+             "findings, manifest, evaluation) into DIR for CI upload. Preserves unrelated destination "
+             "files. Opt-in because the logs may contain sensitive data. Works on every flow."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

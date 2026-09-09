@@ -112,6 +112,29 @@ def head_sha(repo: Path) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
+@pytest.fixture
+def private_locations(tmp_path: Path) -> Any:
+    """Private artifact/operational roots isolated to this test's tmp path."""
+    return private_root_locations(base=tmp_path / "private")
+
+
+@pytest.fixture
+def owner(repo: Path, private_locations: Any) -> Any:
+    """``repo``'s resolved private workspace owner."""
+    return resolve_private_workspace_owner(repo, locations=private_locations)
+
+
+def _forbid_default_private_base(
+    monkeypatch: pytest.MonkeyPatch, reason: str = "unexpected default lookup"
+) -> None:
+    """A supplied owner (or a rejected input) must never reach default storage."""
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError(reason)),
+    )
+
+
 def _finding(*, fingerprint: str = "fp-fix-n-plus-one") -> dict[str, object]:
     return {
         "fingerprint": fingerprint,
@@ -1736,18 +1759,13 @@ def test_reanchor_uses_supplied_private_workspace_owner(
     monkeypatch: pytest.MonkeyPatch,
     repo: Path,
     head_sha: str,
-    tmp_path: Path,
+    private_locations: Any,
+    owner: Any,
 ) -> None:
-    locations = private_root_locations(base=tmp_path / "private")
-    owner = resolve_private_workspace_owner(repo, locations=locations)
     (repo / "README.md").write_text("# changed after planning\n", encoding="utf-8")
     git(repo, "add", "README.md")
     commit(repo, "advance head after plan fan-out")
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
 
     session = PlanWriteSession(
         repo / "daydream_plans",
@@ -1763,7 +1781,7 @@ def test_reanchor_uses_supplied_private_workspace_owner(
     assert landed.is_relative_to(owner.operational_state_root / "operational")
     assert not landed.is_relative_to(owner.artifact_state_root)
     assert not landed.is_relative_to(repo)
-    assert {path.name for path in locations.operational_workspaces.iterdir()} == {
+    assert {path.name for path in private_locations.operational_workspaces.iterdir()} == {
         owner.workspace_key
     }
     session.finish()
@@ -1781,11 +1799,7 @@ def test_plan_write_session_rejects_wrong_owner_before_mutation(
     plans_dir = repo / "daydream_plans"
 
     with pytest.raises(ArtifactVisibilityError, match="Git identity"):
-        PlanWriteSession(
-            plans_dir,
-            planned_at=head_sha,
-            private_workspace_owner=owner,
-        )
+        PlanWriteSession(plans_dir, planned_at=head_sha, private_workspace_owner=owner)
 
     assert not plans_dir.exists()
 
@@ -2021,11 +2035,7 @@ def test_prune_named_reanchor_worktree_rejects_unsafe_names(
 ) -> None:
     from daydream.improve.plans import prune_named_reanchor_worktree
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unsafe name reached storage")),
-    )
+    _forbid_default_private_base(monkeypatch, "unsafe name reached storage")
 
     before = set((repo / ".daydream" / "worktrees").glob("*")) if (
         repo / ".daydream" / "worktrees"
@@ -2106,16 +2116,13 @@ def test_list_and_named_prune_cover_operational_and_legacy_roots(
     monkeypatch: pytest.MonkeyPatch,
     repo: Path,
     tmp_path: Path,
+    owner: Any,
 ) -> None:
     from daydream.improve.plans import (
         list_reanchor_worktrees,
         prune_named_reanchor_worktree,
     )
 
-    owner = resolve_private_workspace_owner(
-        repo,
-        locations=private_root_locations(base=tmp_path / "private"),
-    )
     monkeypatch.setattr(
         artifact_visibility,
         "_default_private_base",
@@ -2144,17 +2151,13 @@ def test_list_and_named_prune_cover_operational_and_legacy_roots(
 
 def test_duplicate_reanchor_name_across_roots_fails_without_mutation(
     repo: Path,
-    tmp_path: Path,
+    owner: Any,
 ) -> None:
     from daydream.improve.plans import (
         list_reanchor_worktrees,
         prune_named_reanchor_worktree,
     )
 
-    owner = resolve_private_workspace_owner(
-        repo,
-        locations=private_root_locations(base=tmp_path / "private"),
-    )
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
     name = "run-duplicate-reanchor"
@@ -2166,11 +2169,7 @@ def test_duplicate_reanchor_name_across_roots_fails_without_mutation(
 
     with pytest.raises(git_ops.GitError, match="ambiguous re-anchor"):
         list_reanchor_worktrees(repo, private_workspace_owner=owner)
-    outcome = prune_named_reanchor_worktree(
-        repo,
-        name,
-        private_workspace_owner=owner,
-    )
+    outcome = prune_named_reanchor_worktree(repo, name, private_workspace_owner=owner)
 
     assert outcome.verdict == PRUNE_GIT_FAILURE
     assert git(repo, "worktree", "list", "--porcelain") == before
@@ -2181,13 +2180,10 @@ def test_duplicate_reanchor_name_across_roots_fails_without_mutation(
 def test_list_reanchors_rejects_symlinked_operational_root_without_following(
     repo: Path,
     tmp_path: Path,
+    owner: Any,
 ) -> None:
     from daydream.improve.plans import list_reanchor_worktrees
 
-    owner = resolve_private_workspace_owner(
-        repo,
-        locations=private_root_locations(base=tmp_path / "private"),
-    )
     outside = tmp_path / "outside"
     outside.mkdir()
     retained = outside / "run-outside-reanchor"
@@ -2208,16 +2204,13 @@ def test_list_reanchors_rejects_symlinked_operational_root_without_following(
 def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
     repo: Path,
     tmp_path: Path,
+    owner: Any,
     lock_state: str,
 ) -> None:
     import os
 
     from daydream.improve.plans import prune_stale_reanchor_worktrees
 
-    owner = resolve_private_workspace_owner(
-        repo,
-        locations=private_root_locations(base=tmp_path / "private"),
-    )
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
     name = "run-same-reanchor"
@@ -2233,10 +2226,7 @@ def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
         git_ops.worktree_lock(repo, target, reason="crashed-run")
         os.utime(git_ops.git_dir(target) / "locked", (0, 0))
 
-    removed = prune_stale_reanchor_worktrees(
-        repo,
-        private_workspace_owner=owner,
-    )
+    removed = prune_stale_reanchor_worktrees(repo, private_workspace_owner=owner)
 
     assert other.is_dir()
     if lock_state == "live":
@@ -2253,49 +2243,47 @@ def _unsafe_legacy_reanchor_namespace(
     *,
     namespace_shape: str,
 ) -> tuple[Path, Path, Path | None]:
+    """Register an out-of-repo worktree, then point the legacy namespace at it."""
     outside = tmp_path / f"outside-{namespace_shape}"
     name = "run-outside-reanchor"
-    if namespace_shape.startswith("ancestor"):
-        external = outside / "worktrees" / name
-    else:
-        external = outside / name
+    external = (
+        outside / "worktrees" / name
+        if namespace_shape.startswith("ancestor")
+        else outside / name
+    )
     git_ops.worktree_add(repo, external, "main", detach=True)
     canary = external / "operator.bin"
     canary.write_bytes(b"outside operator bytes\x00")
-    unsafe_file: Path | None = None
-    if namespace_shape == "ancestor-symlink":
-        (repo / ".daydream").symlink_to(outside, target_is_directory=True)
-    elif namespace_shape == "terminal-symlink":
+    if namespace_shape.startswith("terminal"):
         (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").symlink_to(
-            outside,
-            target_is_directory=True,
-        )
-    elif namespace_shape == "ancestor-file":
-        unsafe_file = repo / ".daydream"
-        unsafe_file.write_bytes(b"operator namespace bytes\x00")
+        anchor = repo / ".daydream" / "worktrees"
     else:
-        (repo / ".daydream").mkdir()
-        unsafe_file = repo / ".daydream" / "worktrees"
-        unsafe_file.write_bytes(b"operator namespace bytes\x00")
-    return external, canary, unsafe_file
+        anchor = repo / ".daydream"
+    if namespace_shape.endswith("symlink"):
+        anchor.symlink_to(outside, target_is_directory=True)
+        return external, canary, None
+    anchor.write_bytes(b"operator namespace bytes\x00")
+    return external, canary, anchor
 
 
+@pytest.mark.parametrize("reanchor_op", ["list", "prune-stale"])
 @pytest.mark.parametrize(
     "namespace_shape",
     ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"],
 )
-def test_list_reanchors_rejects_linked_legacy_namespace(
+def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     repo: Path,
     tmp_path: Path,
+    owner: Any,
     namespace_shape: str,
+    reanchor_op: str,
 ) -> None:
-    from daydream.improve.plans import list_reanchor_worktrees
-
-    owner = resolve_private_workspace_owner(
-        repo,
-        locations=private_root_locations(base=tmp_path / "private"),
+    from daydream.improve.plans import (
+        list_reanchor_worktrees,
+        prune_stale_reanchor_worktrees,
     )
+
+    scan = list_reanchor_worktrees if reanchor_op == "list" else prune_stale_reanchor_worktrees
     external, canary, unsafe_file = _unsafe_legacy_reanchor_namespace(
         repo,
         tmp_path,
@@ -2304,39 +2292,7 @@ def test_list_reanchors_rejects_linked_legacy_namespace(
     before = git(repo, "worktree", "list", "--porcelain")
 
     with pytest.raises(ArtifactVisibilityError, match="legacy re-anchor root"):
-        list_reanchor_worktrees(repo, private_workspace_owner=owner)
-
-    assert external.is_dir()
-    assert canary.read_bytes() == b"outside operator bytes\x00"
-    if unsafe_file is not None:
-        assert unsafe_file.read_bytes() == b"operator namespace bytes\x00"
-    assert git(repo, "worktree", "list", "--porcelain") == before
-
-
-@pytest.mark.parametrize(
-    "namespace_shape",
-    ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"],
-)
-def test_prune_reanchors_rejects_linked_legacy_namespace_before_mutation(
-    repo: Path,
-    tmp_path: Path,
-    namespace_shape: str,
-) -> None:
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
-
-    owner = resolve_private_workspace_owner(
-        repo,
-        locations=private_root_locations(base=tmp_path / "private"),
-    )
-    external, canary, unsafe_file = _unsafe_legacy_reanchor_namespace(
-        repo,
-        tmp_path,
-        namespace_shape=namespace_shape,
-    )
-    before = git(repo, "worktree", "list", "--porcelain")
-
-    with pytest.raises(ArtifactVisibilityError, match="legacy re-anchor root"):
-        prune_stale_reanchor_worktrees(repo, private_workspace_owner=owner)
+        scan(repo, private_workspace_owner=owner)
 
     assert external.is_dir()
     assert canary.read_bytes() == b"outside operator bytes\x00"

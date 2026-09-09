@@ -707,7 +707,9 @@ async def _wait_for_process_group_exit(pgid: int) -> None:
     while time.monotonic() < deadline:
         try:
             os.killpg(pgid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # EPERM means the pgid was recycled by a foreign-uid process,
+            # i.e. our same-uid group exited.
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"remote CI process group {pgid} survived cancellation")
@@ -716,12 +718,9 @@ async def _wait_for_process_group_exit(pgid: int) -> None:
 def _live_deep_dir(artifact_runtime_root: Path) -> Path:
     """Locate the P10 private-live deep dir of the run's one active session.
 
-    ``_step_remote_ci`` writes ``remote-ci-verdict.json`` / ``-handoff.json``
-    through ``ctx.data["dd"]`` = ``deep_dir()`` = ``artifact_dir_for()``,
-    which routes to the session's private live tree
-    (``<runtime>/<workspace-key>/runs/<session>/live/.daydream/deep``), not to
-    the public ``.daydream`` (detached for the run's duration). Exactly one
-    session exists per test tmp path, so the glob is unambiguous.
+    ``_step_remote_ci`` writes its verdict/handoff through ``artifact_dir_for()``,
+    which routes to the session's private live tree, not to the public
+    ``.daydream`` (detached for the run's duration). One session per tmp path.
     """
     matches = sorted(artifact_runtime_root.glob("*/runs/*/live/.daydream/deep"))
     assert len(matches) == 1, f"expected exactly one live deep dir, got {matches}"

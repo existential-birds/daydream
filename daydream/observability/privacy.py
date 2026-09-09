@@ -15,12 +15,10 @@ from urllib.parse import unquote, urlsplit
 
 from daydream.trajectory import redact_structured_text, redact_value
 
-#: Values that mark a feature flag rather than a credential when they appear
-#: under a secret-named environment variable (e.g. ``SOME_AUTH=1`` or
-#: ``HERMES_REDACT_SECRETS=true``). Harvesting such a token as an operator
-#: secret literal-replaces it across all span content, corrupting JSON payloads
-#: (``{"ok":true}`` becomes ``{"ok":[REDACTED_CREDENTIAL]}``) while protecting
-#: nothing — a credential is never a bare boolean or numeric toggle.
+#: A secret-named variable holding one of these (``SOME_AUTH=1``) is a feature
+#: flag, not a credential: harvesting it would literal-replace the token across
+#: all span content (``{"ok":true}`` -> ``{"ok":[REDACTED_CREDENTIAL]}``) while
+#: protecting nothing.
 _FLAG_VALUE_TOKENS = frozenset(
     {"true", "false", "yes", "no", "on", "off", "1", "0", "enabled", "disabled", "null", "none"}
 )
