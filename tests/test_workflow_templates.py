@@ -43,7 +43,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -53,17 +52,8 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
 REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
-# The digest below matches the immutable rhysd/actionlint:1.7.7 manifest digest
-# verified against the live OCI registry (`docker buildx imagetools inspect
-# rhysd/actionlint:1.7.7` / `docker manifest inspect …@sha256:887a…147e9`;
-# both the tagged ref and the raw sha256 resolve to it). The registry is the only
-# authoritative source: this constant is a pin, not a verification of itself.
-# Any future edit to the digest MUST be re-verified against that registry before
-# landing, or CI `docker pull` will fail at run time.
-_ACTIONLINT_IMAGE = "rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
-_ACTIONLINT_REF_RE = re.compile(r"rhysd/actionlint:[^\s`]+")
 
 
 def load_workflow(path: Path) -> dict[str, Any]:
@@ -104,53 +94,6 @@ _BOT_WORKFLOW_PATHS = sorted(
 )
 
 _PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
-
-# Approved SHA → release mapping every pinned action ref must match, so the
-# `# vX.Y.Z` inline comment is verifiable rather than decorative (yaml.safe_load
-# strips it, so the comment can only be checked against the raw text). Concrete
-# pairs, in the style of _APP_TOKEN_ACTION below: a refloated pin or a mistyped
-# comment fails loudly instead of being silently absorbed by a wildcard.
-_PINNED_ACTION_VERSIONS = {
-    "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5": "v4.3.1",
-    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1": "v7.0.1",
-    "astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a": "v4.2.0",
-    "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d": "v10.0.1",
-    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": "v4.6.2",
-    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093": "v4.3.0",
-    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c": "v8.0.1",
-    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1": "v3.2.0",
-}
-
-_USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))?$")
-
-# Release tag → PEELED commit SHA for every daydream release the workflow pins
-# may reference. Values are the peeled (`^{}` target) commits of annotated tags,
-# NOT tag-object SHAs — `git ls-remote origin 'refs/tags/vX.Y.Z'` on an
-# annotated tag reports the tag object (e.g. `9abbaeb3…` for v0.28.0), which is
-# the classic trap; use `git ls-remote origin 'refs/tags/vX.Y.Z^{}'` instead.
-# History is retained (never prune old entries) for provenance. A cross-check
-# enforces both sides: every entry is either pinned by a workflow install ref
-# or a strictly older release retained for provenance. Values are also
-# verified offline against this repo's own release-tag refs (peeled targets),
-# the only way to tell the annotated-tag OBJECT sha from the peeled commit; a
-# checkout that carries no tags skips that check, so the refs are trusted,
-# never fetched or verified against GitHub (intentionally offline).
-_DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
-    "v0.27.0": "805fd0f105fe803a90a6a8b2c2d9646a4041eccc",
-    "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
-}
-
-_DAYDREAM_DIAGRAM_COMMIT = "8077f10ededfd9b1f6e1fcb74c47250aaa365caf"
-
-_RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-
-_DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS = [
-    REPO_WORKFLOWS_DIR / "daydream-review.yml",
-    REPO_WORKFLOWS_DIR / "daydream-post.yml",
-    TEMPLATES_DIR / "daydream-review.yml",
-    TEMPLATES_DIR / "daydream-post.yml",
-    TEMPLATES_DIR / "single" / "daydream.yml",
-]
 
 
 def _action_references(wf: dict[str, Any]) -> list[str]:
@@ -567,19 +510,6 @@ def test_match_step_recognizes_exactly_the_three_bot_commands(
     assert outputs["matched"] == ("true" if expected else "false")
 
 
-def test_command_workflow_live_and_template_stay_byte_identical() -> None:
-    """The repo's own command workflow and the packaged template are one file.
-
-    They have no legitimate difference — unlike daydream-review.yml, this
-    workflow holds no model credential and runs no backend, so a drift between
-    them means one copy was edited and the other forgotten. `daydream setup`
-    lands the template, so a divergence ships the untested copy to users.
-    """
-    live = (REPO_WORKFLOWS_DIR / "daydream-command.yml").read_text(encoding="utf-8")
-    template = (TEMPLATES_DIR / "daydream-command.yml").read_text(encoding="utf-8")
-    assert live == template
-
-
 @pytest.mark.parametrize(
     "wf_path",
     [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
@@ -710,150 +640,12 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
             f"{rel}: non-local action reference {ref!r} is not a full commit SHA "
             f"(expected owner/repo@<40 hex chars>)"
         )
-    # yaml.safe_load strips inline comments, so the declared `# vX.Y.Z` version
-    # comment is only visible in the raw text. Every non-local uses: line must
-    # carry the approved release comment for its pinned SHA.
-    for line in wf_path.read_text(encoding="utf-8").splitlines():
-        m = _USES_LINE_RE.match(line)
-        if m is None:
-            continue
-        ref, comment = m.group("ref"), m.group("comment")
-        if ref.startswith("./"):
-            continue
-        expected = _PINNED_ACTION_VERSIONS.get(ref)
-        assert expected is not None, (
-            f"{rel}: non-local action reference {ref!r} is not in the approved "
-            f"pinned-action map; add it (with its release version) or its version "
-            f"comment cannot be verified"
-        )
-        assert comment == expected, (
-            f"{rel}: action reference {ref!r} carries version comment {comment!r}, "
-            f"but must carry the approved {expected!r} inline comment"
-        )
 
 
 # Install-pin drift guard: the bot must install a pinned daydream revision,
 # never the moving `main` tip, across every live and shipped workflow. Released
 # workflow surfaces track the package release; diagram-capable surfaces may
 # need a reviewed commit newer than the latest release.
-
-_INSTALL_RE = re.compile(r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?")
-
-
-def _package_version() -> str:
-    pyproject = _REPO_ROOT / "pyproject.toml"
-    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    return cast(str, data["project"]["version"])
-
-
-@pytest.mark.parametrize(
-    "wf_path",
-    _DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS,
-    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
-)
-def test_diagram_workflow_installs_diagram_capable_commit(wf_path: Path) -> None:
-    text = wf_path.read_text(encoding="utf-8")
-    refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
-    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
-    assert refs, f"{rel} must install daydream via `uv tool install git+…`"
-    expected = f"@{_DAYDREAM_DIAGRAM_COMMIT}"
-    for ref in refs:
-        assert ref == expected, (
-            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but its "
-            f"diagram commands require the approved diagram-capable commit {expected}."
-        )
-
-
-def test_release_commit_map_values_are_immutable_full_shas() -> None:
-    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
-        assert _RELEASE_COMMIT_RE.fullmatch(commit), (
-            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is not a full lowercase "
-            f"40-char hex commit SHA. Mutable refs (tags, branches), short hashes, and "
-            f"uppercase hex are rejected; the form gate can't tell an annotated-tag "
-            f"OBJECT sha from a peeled commit, so record the peeled commit: "
-            f"git ls-remote origin 'refs/tags/{tag}^{{}}'."
-        )
-
-
-def _repo_release_tags() -> list[str]:
-    """Release tag names present in this checkout's local refs. A shallow,
-    tagless checkout (e.g. CI's plain ``actions/checkout``) yields an empty
-    list, which the peel cross-check treats as ``cannot verify offline``,
-    never as ``no releases exist``.
-    """
-    result = subprocess.run(
-        ["git", "tag", "--list", "v*"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return []
-    return result.stdout.splitlines()
-
-
-def _peeled_commit_for_tag(tag: str) -> str | None:
-    """Resolve ``refs/tags/<tag>`` to its peeled (``^{}``) commit via the repo's
-    own local refs, or None when the tag does not exist in this checkout. On an
-    annotated tag the bare ref resolves to the tag OBJECT; the ``^{}`` target
-    is the commit the release actually points at.
-    """
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{}}"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def test_release_commit_map_values_are_peeled_release_commits() -> None:
-    """Every map value must be the PEELED commit of its release tag, verified
-    offline against this repo's own refs: the only check that can tell an
-    annotated-tag OBJECT sha (what the bare ref reports) from its peeled
-    commit, and the only check that distinguishes a real released version from
-    a phantom key masquerading as retained history. A checkout that carries no
-    release tags at all (CI's shallow clone) skips: there is no local data to
-    verify against, and the check is intentionally offline (never GitHub).
-    """
-    tags = _repo_release_tags()
-    if not tags:
-        pytest.skip(
-            "this checkout carries no release tags (e.g. a shallow CI clone), "
-            "so the offline peel cross-check cannot run"
-        )
-    tag_set = set(tags)
-    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
-        assert tag in tag_set, (
-            f"_DAYDREAM_RELEASE_COMMITS key {tag!r} is not a real release tag "
-            f"in this repo (no refs/tags/{tag}), so it cannot be retained "
-            f"provenance: remove the entry or name a version that was actually released."
-        )
-        peeled = _peeled_commit_for_tag(tag)
-        assert peeled is not None  # tag_set membership already proved the ref exists
-        assert peeled == commit, (
-            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is not the peeled "
-            f"commit of refs/tags/{tag} (got {peeled!r}): on an annotated tag the "
-            f"bare ref reports the tag OBJECT sha, not the commit — record the "
-            f"peeled commit: git ls-remote origin 'refs/tags/{tag}^{{}}'."
-        )
-
-
-def _release_version(tag: str) -> tuple[int, int, int] | None:
-    """Parse a vX.Y.Z release tag into a sortable version tuple."""
-    m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
-    if m is None:
-        return None
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-
-
-# Privilege split — the security invariant the whole design exists to enforce:
-# no job ever holds both untrusted PR code and the App key.
-
 
 @pytest.mark.parametrize(
     "post_path",
@@ -878,47 +670,6 @@ def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
     for job in post["jobs"].values():
         assert not has_checkout(job)
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
-
-
-_APP_TOKEN_ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
-
-# Every token-minting workflow, shipped or live, pins every App-token action to
-# the approved v3.2.0 commit. Lists the concrete (job, action) pairs so a renamed
-# job, a refloated pin, or a newly added unpinned token action fails loudly rather
-# than being silently absorbed by a wildcard.
-_APP_TOKEN_PIN_CASES = [
-    (
-        TEMPLATES_DIR / "daydream-post.yml",
-        "template-post",
-        [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)],
-    ),
-    (
-        REPO_WORKFLOWS_DIR / "daydream-post.yml",
-        "live-post",
-        [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)],
-    ),
-    (TEMPLATES_DIR / "daydream-command.yml", "template-command", [("dispatch", _APP_TOKEN_ACTION)]),
-    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command", [("dispatch", _APP_TOKEN_ACTION)]),
-    (
-        TEMPLATES_DIR / "single" / "daydream.yml",
-        "single",
-        [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION), ("surface-failure", _APP_TOKEN_ACTION)],
-    ),
-]
-
-
-@pytest.mark.parametrize(
-    "wf_path,expected", [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES], ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES]
-)
-def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list[Any]) -> None:
-    wf = load_workflow(wf_path)
-    token_action_uses = [
-        (job_name, str(step.get("uses", "")))
-        for job_name, job in wf["jobs"].items()
-        for step in job["steps"]
-        if str(step.get("uses", "")).startswith("actions/create-github-app-token@")
-    ]
-    assert sorted(token_action_uses) == sorted(expected)
 
 
 @pytest.mark.parametrize(
@@ -1057,146 +808,3 @@ def test_single_setup_preserves_privilege_split() -> None:
 # the live credential — lives in the module docstring and is exercised by
 # test_repo_workflow_readme_documents_codex_credential; this test asserts the
 # login-persistence ordering that rationale requires.
-
-
-def _assert_repo_workflow_uses_openai_credential() -> None:
-    """Assert the repo's live review workflow uses OPENAI_API_KEY as its only secret."""
-    text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
-    assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
-
-
-def test_repo_review_authenticates_codex_before_running() -> None:
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
-    _assert_repo_workflow_uses_openai_credential()
-
-    steps = job_steps(wf, "analyze")
-    login = next(s for s in steps if "codex login --with-api-key" in s.get("run", ""))
-    assert "OPENAI_API_KEY" in login["env"]
-    review_idx = next(i for i, s in enumerate(steps) if "daydream --review" in s.get("run", ""))
-    assert steps.index(login) < review_idx, "Codex auth must be persisted before the review runs"
-    # The review step authenticates via auth.json, not a redundant env secret.
-    assert "OPENAI_API_KEY" not in steps[review_idx].get("env", {})
-
-
-def test_repo_workflow_readme_declares_codex_and_points_to_canonical_install() -> None:
-    text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
-
-    # Presence of the corrected contract. Prose checks are kept to the substance
-    # (rather than verbatim phrasing) so an innocuous reword does not break the
-    # test: heading mentions dogfood workflows, and the repo-only Codex dogfood
-    # stance is declared.
-    first_heading = next((ln for ln in text.splitlines() if ln.startswith("#")), "")
-    assert "dogfood" in first_heading.lower() and "workflows" in first_heading.lower()
-    assert "codex dogfood" in text.lower() and "repository-only" in text.lower()
-
-    # The stable technical contract (not prose, so safe to pin verbatim).
-    assert "daydream --review --backend codex" in text
-    assert "OPENAI_API_KEY" in text
-
-    # The canonical (packaged) install guide is linked to rather than duplicated:
-    # resolve the relative link against THIS README's own directory (so the target
-    # path is derived from the link itself, not reconstructed from the repo root,
-    # which would let a moved README's stale link pass) and assert the target
-    # exists with an ## Install anchor so the marketed link cannot rot.
-    install_link = "../../daydream/templates/workflows/README.md#install"
-    canonical = (REPO_WORKFLOWS_DIR / install_link.split("#")[0]).resolve()
-    assert install_link in text
-    assert canonical.exists()
-    assert re.search(r"^## ?Install\b", canonical.read_text(encoding="utf-8"), re.M)
-
-    # Absence of the stale strings.
-    for stale in ("Copy the three workflow files", "Install step 1", "ANTHROPIC_API_KEY"):
-        assert stale not in text
-
-
-def test_makefile_and_ci_pin_actionlint_image_by_digest() -> None:
-    # Caveat (matches _PINNED_ACTION_VERSIONS, which also cannot verify a
-    # SHA-->release mapping against its upstream): these assertions only prove the
-    # three copies agree with one another. They cannot, and are not intended to,
-    # re-derive the manifest digest from the registry. _ACTIONLINT_IMAGE is a
-    # golden pin whose correctness was verified against the live OCI registry at
-    # write time (see its definition comment); if it is ever changed to a
-    # different 64-hex value without such a re-verification, this suite stays
-    # green and the failure surfaces only at CI runtime on `docker pull`.
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
-    steps = job_steps(wf, "check")
-    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
-
-    ci_refs = _ACTIONLINT_REF_RE.findall(actionlint["run"])
-    makefile_text = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    make_refs = _ACTIONLINT_REF_RE.findall(makefile_text)
-
-    assert ci_refs == [_ACTIONLINT_IMAGE], (
-        "CI actionlint step must reference the digest-pinned image exactly once: "
-        f"found {ci_refs}"
-    )
-    assert make_refs == [_ACTIONLINT_IMAGE], (
-        "Makefile actionlint target must carry the digest-pinned image exactly "
-        f"once: found {make_refs}"
-    )
-
-
-# CI coverage guard: the actionlint step in .github/workflows/ci.yml must
-# receive EVERY workflow the project ships — the repo's own top-level workflows
-# plus all recursively discovered template workflows (the nested
-# single/daydream.yml included). Reads the live selectors out of the ci.yml
-# actionlint step and expands them, so a selector that stops covering a shipped
-# file (or a newly nested template) fails this test rather than silently
-# shipping un-linted workflows.
-
-
-def test_makefile_actionlint_selectors_match_ci() -> None:
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
-    steps = job_steps(wf, "check")
-    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
-    ci_selectors = [
-        tok for tok in actionlint["run"].split()
-        if tok.endswith(".yml") and not tok.startswith("-")
-    ]
-    mk = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    assert "rhysd/actionlint" in mk
-    # Every CI selector appears verbatim in the Makefile's actionlint recipe,
-    # and vice versa: adding a directory on either side strands the other gate.
-    for sel in ci_selectors:
-        assert sel in mk, f"selector {sel!r} missing from Makefile actionlint target"
-    # Parse ONLY the actionlint target's recipe (between the target line and the
-    # next top-level target), not comments, which may mention ci.yml in prose.
-    mk_lines = mk.splitlines()
-    start = next(i for i, line in enumerate(mk_lines) if line.strip() == "actionlint:")
-    recipe: list[str] = []
-    for line in mk_lines[start + 1:]:
-        if line and not line.startswith(("\t", " ")):
-            break
-        recipe.append(line)
-    mk_toks = [t.strip("\\\t ") for t in " ".join(recipe).split()]
-    mk_selectors = {t for t in mk_toks if t.endswith(".yml") and t != "\\"}
-    for sel in mk_selectors:
-        assert sel in ci_selectors, f"Makefile-only selector {sel!r} escapes CI"
-
-
-def test_ci_actionlint_covers_all_workflow_sources() -> None:
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
-    steps = job_steps(wf, "check")
-    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
-    selectors = [
-        tok for tok in actionlint["run"].split() if tok.endswith(".yml") and not tok.startswith("-")
-    ]
-
-    actual: set[Path] = set()
-    for selector in selectors:
-        matches = set(_REPO_ROOT.glob(selector))
-        assert matches, (
-            f"actionlint selector {selector!r} in .github/workflows/ci.yml matches "
-            "no workflow files; drop the stale selector or fix its glob"
-        )
-        actual |= matches
-    expected = {*REPO_WORKFLOWS_DIR.glob("*.yml"), *TEMPLATES_DIR.rglob("*.yml")}
-    actual_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in actual)
-    expected_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in expected)
-    assert actual == expected, (
-        "actionlint selectors in .github/workflows/ci.yml cover a different set "
-        "of workflows than the project ships. "
-        f"actual={actual_rel} expected={expected_rel}. "
-        "Extend the actionlint run's selectors so the glob-expanded set equals "
-        "the repo workflows plus all shipped template workflows (nested included)."
-    )

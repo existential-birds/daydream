@@ -5,9 +5,7 @@ stack routing, tool supervision, trace destinations, and the canonical findings 
 from a top-level `daydream_ext` package, without editing any file under
 `daydream/`. This document is the versioned
 contract: the module shape daydream loads, the exact name inventories a fork
-programs against, and the policy for when those names may change. A drift-guard
-test (`tests/test_extension_contract_doc.py`) pins this document to the
-registered inventories in the code.
+programs against, and the policy for when those names may change.
 
 Current contract version: **`EXTENSION_API_VERSION = 6`** (supported: `6..6`).
 

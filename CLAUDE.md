@@ -25,8 +25,8 @@ make typecheck  # mypy daydream tests
 make deadcode   # whole-project dead-code detection (vulture)
 make test       # pytest -n auto
 make actionlint # actionlint over live + packaged workflows (Docker)
-make rl-check   # standalone RL lockcheck + ruff + mypy + pytest
-make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + rl-check + coverage-report (the gate)
+make rl-check   # standalone RL lockcheck + ruff + mypy + pytest (run by hand when you change rl/)
+make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + coverage-report (the gate)
 ```
 
 ```bash
@@ -278,14 +278,13 @@ Full contract: `docs/extensions.md`.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
   `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest + standalone RL lockcheck/ruff/mypy/pytest (`cd rl/daydream_review_v1`); `scripts/hooks/pre-push` verifies signatures then delegates to it.
+- **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review_v1`.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
   4-space Python, 2-space YAML, 4-space TOML, Makefile tabs, `*.md` trailing-whitespace
   preserved); the `daydream/atif/**` carve-out declares no indent/trim keys
   (a section can add or override inherited keys but never unset them, so
-  `[*.py]` 4-space rules still apply to vendored `.py` files) — pinned by
-  `tests/contract/test_editorconfig_contract.py`.
+  `[*.py]` 4-space rules still apply to vendored `.py` files).
 - **Artifact boundary**: resolve the private owner once from the canonical source; pass that same
   owner and the active artifact session through workspace, recorder, and flow composition. Route
   generated files through the session. Join all writers before freezing immutable evidence;

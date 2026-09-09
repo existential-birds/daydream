@@ -1,21 +1,22 @@
-"""Real-path contract tests for the local and pre-push make gates (issues #388, #717).
+"""Real-path behavior tests for the git hooks (issues #388, #717).
 
-Three contracts are exercised here against the real Makefile and hook script
-from a real git worktree:
+Both hook scripts are executed for real, from a real git worktree. What is
+asserted is behavior with a silent failure mode:
 
-- ``make hooks`` installs the pre-push hook as a worktree-aware symlink,
-  pointing at the invoking worktree's own source file (both primary and linked
-  worktrees).
-- ``make check`` composes every gate CI enforces: the root lock/lint/types/tests
-  suite, the Docker-backed actionlint pass over all workflow templates, and the
-  standalone RL project's four gates — each run from the right working
-  directory.
-- the pre-push hook delegates to ``make check`` after its signature loop.
+- the pre-commit hook lints the git INDEX content, only the staged files, only
+  the in-scope ones, hands raw (never C-quoted) paths to ruff, exits 0 when
+  nothing Python is staged, and propagates a ruff failure;
+- the pre-push hook scrubs Git's inherited ``GIT_DIR``/``GIT_WORK_TREE``/... env
+  before running the gate, so a gate subprocess cannot write into the index of
+  the worktree being pushed.
 
-The composition/delegation tests never execute the real tooling: PATH-shim
-recorders named ``uv``/``docker`` capture ``{command, cwd, args}`` as JSONL so the
-real Makefile dependency graph and the real hook are observable without a Docker
-daemon, a network pull, or a resolver touch.
+Which targets a Makefile recipe happens to depend on, and which command a hook
+shells out to, are deliberately NOT asserted anywhere here: that only restates
+the build back to itself and breaks on every legitimate edit to it.
+
+The tooling itself never runs: PATH-shim recorders named ``uv``/``make``/``docker``
+capture ``{command, cwd, args, stdin}`` as JSONL, so the real hooks are
+observable without a Docker daemon, a network pull, or a resolver touch.
 """
 
 from __future__ import annotations
@@ -31,51 +32,6 @@ from typing import Any
 import pytest
 
 from tests.harness.git_helpers import git as _git
-from tests.test_workflow_templates import (
-    _ACTIONLINT_REF_RE,
-    REPO_WORKFLOWS_DIR,
-    TEMPLATES_DIR,
-    job_steps,
-    load_workflow,
-)
-
-
-@pytest.mark.parametrize("worktree_name", ["main", "linked"])
-def test_hooks_installs_both_hooks_from_worktree(
-    linked_worktree: tuple[Path, Path], worktree_name: str
-) -> None:
-    main_repo, linked = linked_worktree
-    worktree = main_repo if worktree_name == "main" else linked
-
-    # The fixture repo doesn't ship the daydream tooling — drop the real
-    # Makefile + hook scripts into the invoking worktree so `make hooks`
-    # exercises the real recipe against a real worktree topology.
-    repo_root = Path(__file__).resolve().parents[1]
-    shutil.copy(repo_root / "Makefile", worktree / "Makefile")
-    script_dir = worktree / "scripts" / "hooks"
-    script_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(repo_root / "scripts" / "hooks" / "pre-push", script_dir / "pre-push")
-    shutil.copy(repo_root / "scripts" / "hooks" / "pre-commit", script_dir / "pre-commit")
-
-    proc = subprocess.run(
-        ["make", "hooks"],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "Pre-push hook installed" in proc.stdout
-    assert "Pre-commit hook installed" in proc.stdout
-
-    # Installed at Git's worktree-aware resolved path, as a symlink.
-    dest = worktree / _git(worktree, "rev-parse", "--git-path", "hooks/pre-push")
-    assert dest.is_symlink()
-    # The symlink resolves to THIS worktree's source file (never a sibling's).
-    assert dest.resolve() == (worktree / "scripts" / "hooks" / "pre-push").resolve()
-
-    dest_precommit = worktree / _git(worktree, "rev-parse", "--git-path", "hooks/pre-commit")
-    assert dest_precommit.is_symlink()
-    assert dest_precommit.resolve() == (worktree / "scripts" / "hooks" / "pre-commit").resolve()
 
 
 def _install_recording_commands(
@@ -115,10 +71,6 @@ def _install_recording_commands(
         "    json.dump({'command': os.path.basename(sys.argv[0]),\n"
         "               'cwd': os.getcwd(), 'args': sys.argv[1:],\n"
         "               'stdin': stdin,\n"
-        "               'env': {k: os.environ.get(k) for k in\n"
-        "                       ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',\n"
-        "                        'GIT_COMMITTER_NAME',\n"
-        "                        'GIT_COMMITTER_EMAIL')},\n"
         "               'git_local_env': {k: os.environ.get(k) for k in\n"
         "                       ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',\n"
         "                        'GIT_COMMON_DIR', 'GIT_PREFIX')}}, f)\n"
@@ -148,132 +100,6 @@ def _read_command_records(log: Path) -> list[dict[str, Any]]:
         if line.strip():
             records.append(json.loads(line.encode("utf-8")))
     return records
-
-
-def test_check_runs_root_workflow_and_standalone_rl_gates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-
-    # Run the real dependency graph in a disposable checkout. In particular,
-    # coverage-report must not create or remove coverage.xml in the repository
-    # containing this test.
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    shutil.copy(repo_root / "Makefile", checkout / "Makefile")
-    shutil.copytree(REPO_WORKFLOWS_DIR, checkout / ".github" / "workflows")
-    shutil.copytree(TEMPLATES_DIR, checkout / "daydream" / "templates" / "workflows")
-    (checkout / "rl" / "daydream_review_v1").mkdir(parents=True)
-    (checkout / "coverage.xml").touch()
-
-    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "docker", "git"))
-
-    # Strip make's jobserver/MAKELEVEL chatter so the shim children don't get
-    # tangled in an inherited parallel-make env.
-    clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
-    proc = subprocess.run(
-        ["make", "check"],
-        cwd=checkout,
-        capture_output=True,
-        text=True,
-        env=clean_env,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-
-    recs = _read_command_records(log)
-    root_uv = [r for r in recs if r["command"] == "uv" and r["cwd"] == str(checkout)]
-    rl_root = checkout / "rl" / "daydream_review_v1"
-    rl_uv = [r for r in recs if r["command"] == "uv" and r["cwd"] == str(rl_root)]
-
-    # Required root gates are asserted as a set of commands, not a positional
-    # transcript, so adding an independent gate does not invalidate this test.
-    root_commands = {tuple(r["args"]) for r in root_uv}
-    assert {
-        ("lock", "--check"),
-        ("sync", "--all-extras"),
-        ("run", "ruff", "check", "daydream", "tests"),
-        ("run", "vulture", "--config", "pyproject.toml", "daydream", "tests"),
-        ("run", "mypy", "daydream", "tests"),
-        ("run", "pytest", "-n", "auto", "--cov", "--cov-branch",
-         "--cov-report=term-missing", "--cov-report=xml"),
-    } <= root_commands
-
-    # The standalone RL project has its own lock, sync, lint, type, and test
-    # gates, all executed from that project's directory.
-    rl_commands = {tuple(r["args"]) for r in rl_uv}
-    assert {
-        ("lock", "--check"),
-        ("sync",),
-        ("run", "ruff", "check", "."),
-        ("run", "mypy", "daydream_review_v1", "tests"),
-        ("run", "pytest"),
-    } <= rl_commands
-
-    docker_records = [r for r in recs if r["command"] == "docker"]
-    assert any(r["args"] == ["info"] and r["cwd"] == str(checkout) for r in docker_records)
-    run_records = [r for r in docker_records if r["args"][:2] == ["run", "--rm"]]
-    assert run_records
-    docker = run_records[0]["args"]
-    # actionlint runs with the CI image digest and checks every shipped workflow
-    # file. The file set is a lower bound so newly added workflows do not make
-    # this command-composition contract stale.
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
-    steps = job_steps(wf, "check")
-    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
-    (image_ref,) = _ACTIONLINT_REF_RE.findall(actionlint["run"])
-
-    mount_at = docker.index("-v")
-    assert docker[mount_at + 1] == f"{checkout}:/repo"
-    assert [a for a in docker if a.endswith(":/repo")] == [f"{checkout}:/repo"]
-    w_at = docker.index("-w")
-    assert docker[w_at + 1] == "/repo"
-    assert image_ref in docker
-    image_idx = docker.index(image_ref)
-    assert "-color" in docker
-    assert docker[image_idx + 1] == "-color"
-    file_args = docker[image_idx + 2 :]
-    expected_files = {
-        *(p.relative_to(repo_root).as_posix() for p in REPO_WORKFLOWS_DIR.glob("*.yml")),
-        *(p.relative_to(repo_root).as_posix() for p in TEMPLATES_DIR.rglob("*.yml")),
-    }
-    assert expected_files <= set(file_args)
-    assert len(file_args) == len(set(file_args))
-
-    # Standalone RL project: carries the same neutral git identity as
-    # ci.yml's 'Configure git identity' step (the suite commits into throwaway
-    # fixtures with no per-repo identity) as rl-check-scoped PROCESS
-    # ENVIRONMENT — never as `git config --global`, which would silently
-    # overwrite the invoking user's own identity — then its lock/sync/lint/
-    # types/tests, run from its dir (mirroring ci.yml's rl-check job's
-    # explicit `uv sync`). No `git config` subprocess may appear anywhere in
-    # the walk.
-    ci_identity_env = {
-        "GIT_AUTHOR_NAME": "daydream CI",
-        "GIT_AUTHOR_EMAIL": "ci@daydream.invalid",
-        "GIT_COMMITTER_NAME": "daydream CI",
-        "GIT_COMMITTER_EMAIL": "ci@daydream.invalid",
-    }
-    rl_check_commands = {
-        ("lock", "--check"),
-        ("sync",),
-        ("run", "ruff", "check", "."),
-        ("run", "mypy", "daydream_review_v1", "tests"),
-        ("run", "pytest"),
-    }
-    # Only the rl-check target's commands carry the CI identity env (the
-    # deadcode RL scan is a make-level dependency invoked by the root recipe,
-    # outside rl-check's env-exporting block).
-    for args in rl_check_commands:
-        matches = [r for r in rl_uv if tuple(r["args"]) == args]
-        assert matches
-        assert all(r["env"] == ci_identity_env for r in matches), (
-            f"RL command {args} must carry exactly the neutral CI identity "
-            "in its environment"
-        )
-    assert all(
-        rec["command"] != "git" or rec["args"][:2] != ["config", "--global"]
-        for rec in recs
-    ), "no command may mutate the global git configuration"
 
 
 def _stage_file(worktree: Path, relpath: str, content: str) -> None:
@@ -437,9 +263,19 @@ def test_pre_commit_propagates_ruff_failure(
     assert "ruff" in proc.stdout.lower() or "ruff" in proc.stderr.lower()
 
 
-def test_pre_push_delegates_quality_gate_to_make_check(
+def test_pre_push_scrubs_inherited_git_env_from_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The gate subprocess must not inherit the pushing worktree's git env.
+
+    Git exports ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE``/
+    ``GIT_COMMON_DIR``/``GIT_PREFIX`` to hooks, so without the
+    ``git rev-parse --local-env-vars`` scrub every gate subprocess that builds
+    its own throwaway repository would write into the index of the worktree
+    being pushed instead of honoring ``git -C <repo>``. Silent and destructive.
+
+    Which target the hook runs is not asserted: that is the Makefile's business.
+    """
     repo_root = Path(__file__).resolve().parents[1]
     _install_recording_commands(tmp_path, monkeypatch, ("make", "uv", "docker"))
     log = tmp_path / "command-log.jsonl"
@@ -464,9 +300,5 @@ def test_pre_push_delegates_quality_gate_to_make_check(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "✓ All checks passed" in proc.stdout
 
-    recs = _read_command_records(log)
-    assert len(recs) == 1
-    assert recs[0]["command"] == "make"
-    assert recs[0]["cwd"] == str(repo_root)
-    assert recs[0]["args"] == ["check"]
-    assert all(recs[0]["git_local_env"][name] is None for name in inherited_git_env)
+    gate = next(r for r in _read_command_records(log) if r["command"] == "make")
+    assert all(gate["git_local_env"][name] is None for name in inherited_git_env)

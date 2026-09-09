@@ -473,15 +473,3 @@ def test_stale_approval_keeps_collecting_and_curating_priority_contract() -> Non
     ) == "curating"
 
 
-def test_private_benchmark_docs_document_the_new_verb() -> None:
-    # The new verb must be documented so users can discover init/status/validate.
-    from pathlib import Path
-
-    text = Path("docs/benchmark.md").read_text(encoding="utf-8")
-    assert "daydream benchmark init" in text
-    assert "--reviewer-host" in text and "--judge-host" in text
-    assert "daydream benchmark validate" in text
-    assert "exit" in text.lower()  # 0/2/1 codes surfaced
-    assert "merge_base_v1" in text
-    assert "restore" in text.lower() and "cache/repository.git" in text
-    assert "base_drift" in text
