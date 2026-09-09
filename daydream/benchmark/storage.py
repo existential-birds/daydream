@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
@@ -25,6 +24,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+
+from daydream.json_utils import atomic_write_bytes
 
 
 class WorkspaceError(Exception):
@@ -98,26 +99,14 @@ def load_json_strict(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
-    """Atomically write ``content`` to ``path`` via same-dir temp + ``os.replace``.
+    """Atomically write ``content`` to ``path`` via the shared primitive.
 
-    Mirrors :func:`daydream.json_utils.atomic_write_json` (temp + replace +
-    fsync) but enforces a strict file mode on the final path and creates parent
-    directories as private ``0700`` chains.
+    Delegates to :func:`daydream.json_utils.atomic_write_bytes` with the same
+    hardening this module always had (strict final file mode, private 0700
+    parent chains, file fsync before the rename).
     """
     ensure_private_dir(path.parent)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-        os.chmod(path, mode)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(tmp)
-        raise
+    atomic_write_bytes(path, content, mode=mode, fsync=True)
 
 
 def atomic_write_json(path: Path, data: Any, *, mode: int = 0o600) -> None:

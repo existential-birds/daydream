@@ -179,6 +179,123 @@ def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
     assert backend.call_count == 0
 
 
+def test_revalidate_skips_rehash_when_identity_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry revalidation re-reads a file only when its stat identity changed.
+
+    The capture already streamed and hashed the exact bytes; while the
+    ``(dev, ino, size, mtime_ns)`` identity still matches, a retry attempt
+    must not re-read or re-hash the payload (#1162 efficiency item).
+    """
+    from daydream import prompt_budget
+
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(
+        backend, tmp_path, {"artifact": artifact}, read_only=False
+    )
+
+    capture_calls = 0
+    real_capture = prompt_budget._capture_input
+
+    def counted_capture(*args: object, **kwargs: object) -> object:
+        nonlocal capture_calls
+        capture_calls += 1
+        return real_capture(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(prompt_budget, "_capture_input", counted_capture)
+
+    # Unchanged file: identity matches, so no re-read/re-hash happens.
+    prepared.revalidate(backend, tmp_path, read_only=False)
+    assert capture_calls == 0
+
+    # Touched file (size changed): the full capture runs and fails closed.
+    artifact.write_text("captured but longer now", encoding="utf-8")
+    with pytest.raises(SanctionedInputUnavailable, match="changed"):
+        prepared.revalidate(backend, tmp_path, read_only=False)
+    assert capture_calls == 1
+
+    # Same-length rewrite keeps size but advances mtime: still re-captured.
+    capture_calls = 0
+    os.utime(artifact, ns=(1_000_000_000, 1_000_000_000))
+    with pytest.raises(SanctionedInputUnavailable, match="changed"):
+        prepared.revalidate(backend, tmp_path, read_only=False)
+    assert capture_calls == 1
+
+
+def test_revalidate_fails_closed_when_captured_file_vanishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing captured input is re-captured and surfaces the real error."""
+    from daydream import prompt_budget
+
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(
+        backend, tmp_path, {"artifact": artifact}, read_only=False
+    )
+    artifact.unlink()
+
+    capture_calls = 0
+    real_capture = prompt_budget._capture_input
+
+    def counted_capture(*args: object, **kwargs: object) -> object:
+        nonlocal capture_calls
+        capture_calls += 1
+        return real_capture(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(prompt_budget, "_capture_input", counted_capture)
+
+    with pytest.raises(SanctionedInputUnavailable, match="unavailable"):
+        prepared.revalidate(backend, tmp_path, read_only=False)
+    assert capture_calls == 1
+
+
+def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The identity fast path enforces the aggregate byte cap fail-closed.
+
+    White-box: an item whose stat identity is unchanged must never silently
+    push the running aggregate past the cap — the skip path raises exactly
+    like an over-budget fresh capture would, without re-reading the file.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    from daydream import prompt_budget
+
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(
+        backend, tmp_path, {"artifact": artifact}, read_only=False
+    )
+    captured = prepared.inputs[0]
+
+    def failing_capture(*args: object, **kwargs: object) -> object:
+        raise AssertionError("over-budget item must fail closed without re-capture")
+
+    def always_unchanged(item: object) -> bool:
+        return True
+
+    monkeypatch.setattr(prompt_budget, "_capture_input", failing_capture)
+    monkeypatch.setattr(prompt_budget, "_unchanged_since_capture", always_unchanged)
+
+    over_budget = dataclass_replace(
+        captured,
+        size=prompt_budget.SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1,
+    )
+    exhausted = dataclass_replace(prepared, inputs=(over_budget,))
+    with pytest.raises(SanctionedInputUnavailable, match="aggregate input budget"):
+        exhausted.revalidate(backend, tmp_path, read_only=False)
+
+
 def test_prepare_sanctioned_inputs_rejects_invalid_utf8_and_symlinks(tmp_path: Path) -> None:
     invalid = tmp_path / "invalid.txt"
     invalid.write_bytes(b"\xff")

@@ -105,9 +105,9 @@ def get_archive_dir() -> Path:
 
 def _validate_frozen_artifacts(artifacts: ArtifactTreeSnapshot) -> None:
     """Reject a frozen tree that changed before a strict host consumer."""
-    from daydream.artifact_visibility import _manifest
+    from daydream.artifact_visibility import manifest_tree
 
-    if _manifest(artifacts.root) != artifacts.manifest:
+    if manifest_tree(artifacts.root) != artifacts.manifest:
         raise ArchiveFinalizationError("frozen artifact tree changed before archive")
 
 
@@ -326,11 +326,10 @@ def finalize_archive_run(
             from daydream.archive import hub
 
             hub_repo_id = hub.resolve_hub_repo(config)
+            _validate_frozen_artifacts(artifacts)
             if hub_repo_id:
-                _validate_frozen_artifacts(artifacts)
                 if not hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id):
                     raise ArchiveFinalizationError("archive upload failed")
-                _validate_frozen_artifacts(artifacts)
         if config.dump_artifacts:
             if dump_path is None:
                 raise ArchiveFinalizationError("dump finalization path is missing")
@@ -338,7 +337,6 @@ def finalize_archive_run(
 
             if not scan.scan_run_dir(assembly_dir).clean:
                 raise ArchiveFinalizationError("dump artifact secret scan refused publication")
-            _validate_frozen_artifacts(artifacts)
             dump_started = True
             shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
         _validate_frozen_artifacts(artifacts)

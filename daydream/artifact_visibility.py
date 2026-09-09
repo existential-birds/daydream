@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
 import anyio
 
 from daydream import git_ops
+from daydream.json_utils import atomic_write_bytes
 
 if TYPE_CHECKING:
     from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
@@ -444,7 +445,13 @@ def validate_private_directory(path: Path, *, label: str, allow_absent: bool = F
 
 
 def _create_private_directory(path: Path) -> None:
-    """Create ``path`` and every missing ancestor as a mode-0700 real directory."""
+    """Create ``path`` and missing parents as private 0700 directories, durably.
+
+    Every created directory is chmod'ed to ``0o700`` immediately after its
+    mkdir (umask-immune), the parent entry of every creation is fsync'ed, and
+    the final directory is validated as a real, private directory — a symlink
+    anywhere in the ancestry fails closed instead of being chmod'ed through.
+    """
     missing: list[Path] = []
     cursor = path
     while not cursor.exists() and not cursor.is_symlink():
@@ -634,44 +641,22 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _atomic_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    """Atomically persist one canonical-JSON manifest document.
+
+    Compact sorted separators (byte-exact for all persisted manifests) with a
+    trailing newline, file fsync before the rename, and a parent-directory
+    fsync after it. A thin policy wrapper over the shared
+    :func:`daydream.json_utils.atomic_write_bytes` primitive; the exclusive
+    O_EXCL temp creation the module previously maintained is provided by the
+    same same-directory mkstemp + rename exchange.
+    """
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink()
-        raise
-    finally:
-        os.close(fd)
+    atomic_write_bytes(path, encoded, fsync=True, dir_fsync=True, mode=0o600)
 
 
 def _atomic_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    try:
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, mode)
-        _fsync_file(path)
-        _fsync_directory(path.parent)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink()
-        raise
-    finally:
-        os.close(fd)
+    """Atomically persist raw bytes at a strict mode (private artifact files)."""
+    atomic_write_bytes(path, content, fsync=True, dir_fsync=True, mode=mode)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -821,6 +806,23 @@ def _manifest(
         if path.exists() or path.is_symlink():
             _walk(root, path, entries, inodes, digest=digest)
     return tuple(entries)
+
+
+def manifest_tree(
+    root: Path,
+    names: Sequence[str] | None = None,
+    *,
+    digest: bool = True,
+) -> tuple[ArtifactManifestEntry, ...]:
+    """Public narrow seam over the strict artifact-tree manifest enumeration.
+
+    The one sanctioned way for a host-side consumer outside this module (e.g.
+    the strict archive finalization boundary) to re-enumerate and digest an
+    immutable artifact tree. It rejects symlinked roots, nonregular entries,
+    duplicate normalized names, and duplicate filesystem aliases exactly as
+    the module's own boundary manifests do.
+    """
+    return _manifest(root, names, digest=digest)
 
 
 def _manifest_payload(entries: tuple[ArtifactManifestEntry, ...]) -> dict[str, object]:
@@ -1341,10 +1343,15 @@ def _transfer_entry(
     relative: str,
     expected: ArtifactManifestEntry,
     transaction: Path,
+    record_intent: bool = True,
 ) -> None:
     moved = stage / "entries" / relative
     moved.parent.mkdir(parents=True, exist_ok=True)
-    _record_transfer_intent(stage, path=path, relative=relative, expected=expected)
+    if record_intent:
+        # Solo-transfer path: one fsynced intent immediately before the move.
+        # Batched callers (_remove_manifested) write every intent durably up
+        # front instead, so the intent ledger is never a per-entry rewrite.
+        _record_transfer_intent(stage, path=path, relative=relative, expected=expected)
     observer = _transfer_observer
     if observer is not None:
         observer(path, moved)
@@ -1411,15 +1418,43 @@ def _remove_manifested(
         purpose=purpose,
         record_id=record_id,
     )
-    for entry in entries:
-        if entry.kind == "file":
-            _transfer_entry(
-                root / entry.path,
-                stage=stage,
-                relative=entry.path,
-                expected=entry,
-                transaction=transaction,
-            )
+    file_entries = [entry for entry in entries if entry.kind == "file"]
+    if file_entries:
+        # Durable-before-move invariant: every transfer intent for this stage
+        # is written in ONE fsynced, fully validated intents.json payload
+        # before the first os.replace. A crash mid-loop therefore replays a
+        # complete intent set during recovery — strictly stronger than the
+        # former per-entry rewrite (which fsynced the whole ledger before
+        # each move but never guaranteed the set was complete before the
+        # first move).
+        owner = _load_json(stage / "stage-owner.json")
+        intents = [
+            {
+                "index": index,
+                "record_id": owner["record_id"],
+                "source": str(root / entry.path),
+                "relative": entry.path,
+                "expected": asdict(entry),
+            }
+            for index, entry in enumerate(file_entries)
+        ]
+        _atomic_json(
+            stage / "intents.json",
+            {
+                "schema_version": _SCHEMA_VERSION,
+                "stage_id": owner["stage_id"],
+                "intents": intents,
+            },
+        )
+    for entry in file_entries:
+        _transfer_entry(
+            root / entry.path,
+            stage=stage,
+            relative=entry.path,
+            expected=entry,
+            transaction=transaction,
+            record_intent=False,
+        )
     if remove_directories:
         for entry in _deepest_first_directories(entries):
             target = root / entry.path
@@ -3202,6 +3237,20 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
         )
 
 
+class _SessionState(str, Enum):
+    """Lifecycle of an :class:`ArtifactSession`.
+
+    Exactly the state strings the session always cycled through; ``str``-based
+    so serialized diagnostics and comparisons keep their prior textual form.
+    """
+
+    ACTIVE = "active"
+    FROZEN = "frozen"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    CLOSED = "closed"
+
+
 class ArtifactSession:
     """Held workspace lease and strict live-path router for one run."""
 
@@ -3219,7 +3268,7 @@ class ArtifactSession:
         self._repo_fd = repo_fd
         self._canonical_entries = canonical_entries
         self._detach_transaction = detach_transaction
-        self._state: Literal["active", "frozen", "publishing", "published", "closed"] = "active"
+        self._state = _SessionState.ACTIVE
         self._destinations: list[RoutedDestination] = []
         self._routed: list[_RoutedRecord] = []
         self._trajectory_route: TrajectoryOutputRoute | None = None
@@ -3246,7 +3295,7 @@ class ArtifactSession:
         )
 
     def _require_active(self) -> None:
-        if self._state != "active":
+        if self._state is not _SessionState.ACTIVE:
             raise ArtifactVisibilityError("artifact session is frozen and no longer writable")
 
     def _route_repo(self, repo: Path) -> None:
@@ -3782,11 +3831,11 @@ class ArtifactSession:
             destinations=tuple(self._destinations),
         )
         self._frozen_snapshot = result
-        self._state = "frozen"
+        self._state = _SessionState.FROZEN
         return result
 
     def finalization_merge_path(self, route: RoutedDestination, *, snapshot: ArtifactTreeSnapshot) -> Path:
-        if self._state != "frozen" or snapshot is not self._frozen_snapshot:
+        if self._state is not _SessionState.FROZEN or snapshot is not self._frozen_snapshot:
             raise ArtifactVisibilityError("artifact session is not ready for frozen finalization")
         if not any(route is registered for registered in self._destinations):
             raise ArtifactVisibilityError("artifact destination route identity mismatch")
@@ -3816,7 +3865,7 @@ class ArtifactSession:
                 _fsync_directory(late_parent.parent)
 
     def finalize_frozen(self, snapshot: ArtifactTreeSnapshot, *, disposition: ArtifactDisposition) -> None:
-        if self._state != "frozen":
+        if self._state is not _SessionState.FROZEN:
             raise ArtifactVisibilityError("artifact session is not ready for frozen publication")
         if snapshot is not self._frozen_snapshot:
             raise ArtifactVisibilityError("frozen artifact snapshot identity mismatch")
@@ -3832,7 +3881,7 @@ class ArtifactSession:
         if disposition is ArtifactDisposition.ROLLBACK:
             self._restore_prior()
             self._retire_late_paths()
-            self._state = "published"
+            self._state = _SessionState.PUBLISHED
             return
         public_entries = tuple(
             entry
@@ -3916,7 +3965,7 @@ class ArtifactSession:
                 )
             _retire_transaction(self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_RECONCILED)
             raise
-        self._state = "publishing"
+        self._state = _SessionState.PUBLISHING
         (transaction / "public-backup").mkdir()
         _fsync_directory(transaction)
         mark(state=_Transition.PUBLISH_BACKED_UP)
@@ -3948,7 +3997,7 @@ class ArtifactSession:
         )
         _retire_source_stage(self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key)
         _retire_transaction(self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_VERIFIED)
-        self._state = "published"
+        self._state = _SessionState.PUBLISHED
 
     def _restore_prior(self) -> None:
         canonical = self.layout.state_root / "canonical"
@@ -3990,18 +4039,33 @@ class ArtifactSession:
         )
 
     def _close(self) -> None:
-        self._state = "closed"
+        self._state = _SessionState.CLOSED
         fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         os.close(self._lock_fd)
         os.close(self._repo_fd)
 
 
-def artifact_dir_for(repo: Path) -> Path:
-    session = _SESSION.get()
-    if session is None:
+def artifact_dir_for(repo: Path, *, session: ArtifactSession | None = None, allow_standalone: bool = True) -> Path:
+    """Routed ``.daydream`` path for *repo* (one explicit-or-bound session).
+
+    Resolution order (#1162): an explicitly passed ``session`` wins and is
+    routed with the usual fail-closed repo identity checks; otherwise the
+    bound channel (``_SESSION``, the documented extension contract) is used;
+    otherwise the legacy ``repo/.daydream`` path is returned only when
+    ``allow_standalone`` is set — intentional standalone phase calls keep
+    working (docs/extensions.md), while strict callers can pass
+    ``allow_standalone=False`` to fail closed instead of silently writing the
+    public tree when no session is bound.
+    """
+    resolved = session if session is not None else _SESSION.get()
+    if resolved is None:
+        if not allow_standalone:
+            raise ArtifactVisibilityError(
+                "no artifact session is bound and standalone artifact routing is not allowed"
+            )
         return repo / _DAYDREAM
-    session._route_repo(repo)
-    return session.daydream_dir
+    resolved._route_repo(repo)
+    return resolved.daydream_dir
 
 
 def artifact_session_active() -> bool:
@@ -4009,12 +4073,22 @@ def artifact_session_active() -> bool:
     return _SESSION.get() is not None
 
 
-def review_output_path_for(repo: Path) -> Path:
-    session = _SESSION.get()
-    if session is None:
+def review_output_path_for(
+    repo: Path,
+    *,
+    session: ArtifactSession | None = None,
+    allow_standalone: bool = True,
+) -> Path:
+    """Routed ``.review-output.md`` path for *repo* (see :func:`artifact_dir_for`)."""
+    resolved = session if session is not None else _SESSION.get()
+    if resolved is None:
+        if not allow_standalone:
+            raise ArtifactVisibilityError(
+                "no artifact session is bound and standalone artifact routing is not allowed"
+            )
         return repo / _REVIEW_OUTPUT
-    session._route_repo(repo)
-    return session.review_output
+    resolved._route_repo(repo)
+    return resolved.review_output
 
 
 def assert_model_cwd_clean(cwd: Path) -> None:

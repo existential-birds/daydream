@@ -3082,12 +3082,150 @@ _HELPERS: dict[str, tuple[Callable[..., None], tuple[int, ...]]] = {
 }
 
 
+async def test_transfer_intents_are_durable_before_first_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every transfer intent is persisted before the first entry move (#1162).
+
+    The former per-entry rewrite fsynced the whole ledger before each move;
+    batching the writes must keep at least that guarantee, so when the first
+    ``os.replace`` fires the stage's ``intents.json`` must already contain the
+    complete, validated intent set for the detach.
+    """
+    source = tmp_path / "source"
+    _init_repo(source)
+    seeded = _seed_public_artifacts(source)
+
+    observed_at_first_move: dict[str, Any] = {}
+
+    def capture_first_move(path: Path, moved: Path) -> None:
+        if "stage" in observed_at_first_move:
+            return
+        stage = next(
+            (candidate for candidate in moved.parents if (candidate / "stage-owner.json").is_file()),
+            None,
+        )
+        observed_at_first_move["stage"] = stage
+        observed_at_first_move["path"] = path
+        observed_at_first_move["intents"] = (
+            json.loads((stage / "intents.json").read_text(encoding="utf-8"))
+            if stage is not None and (stage / "intents.json").is_file()
+            else None
+        )
+
+    monkeypatch.setattr(artifact_visibility, "_transfer_observer", capture_first_move)
+    async with open_artifact_session(_work(source), session_id="intents-durability"):
+        pass
+
+    assert observed_at_first_move, "the detach must transfer at least one entry"
+    intents = observed_at_first_move["intents"]
+    assert intents is not None, "intents.json must be durable before the first move"
+    assert intents["schema_version"] == artifact_visibility._SCHEMA_VERSION
+    expected_files = sorted(entry.path for entry in seeded if entry.kind == "file")
+    assert expected_files, "seeded public artifacts must include files"
+    assert sorted(cast(str, intent["relative"]) for intent in intents["intents"]) == expected_files
+    first_source = Path(cast(str, observed_at_first_move["path"]))
+    assert str(first_source) in [cast(str, intent["source"]) for intent in intents["intents"]]
+
+
+async def test_routed_path_accessors_resolve_explicit_session_over_fallbacks(
+    tmp_path: Path,
+) -> None:
+    """Single-channel routing matrix for artifact_dir_for/review_output_path_for (#1162).
+
+    Pins the #1162 seam: an explicit ``session`` wins, the bound channel
+    (``_SESSION``) is honored for extension steps, the documented standalone
+    legacy path remains the no-session compatibility story, and strict
+    callers can fail closed with ``allow_standalone=False``.
+    """
+    source = tmp_path / "source"
+    _init_repo(source)
+    work = _work(source)
+
+    # No session bound: documented legacy standalone path, unchanged.
+    assert artifact_dir_for(work.repo) == source / ".daydream"
+    assert review_output_path_for(work.repo) == source / ".review-output.md"
+
+    async with open_artifact_session(work, session_id="routing-seam") as session:
+        # Explicit session wins even though the ContextVar is also bound.
+        assert artifact_dir_for(work.repo, session=session) == session.daydream_dir
+        assert (
+            review_output_path_for(work.repo, session=session)
+            == session.review_output
+        )
+        # Bound channel (the documented extension contract) still routes.
+        assert artifact_dir_for(work.repo) == session.daydream_dir
+        assert review_output_path_for(work.repo) == session.review_output
+
+    # Session closed: bound channel is empty again, standalone path resumes.
+    assert artifact_dir_for(work.repo) == source / ".daydream"
+
+    # Explicit fail-closed seam for strict callers (e.g. a future composition
+    # root that must never silently write the public tree).
+    with pytest.raises(ArtifactVisibilityError, match="standalone artifact routing"):
+        artifact_dir_for(work.repo, allow_standalone=False)
+    with pytest.raises(ArtifactVisibilityError, match="standalone artifact routing"):
+        review_output_path_for(work.repo, allow_standalone=False)
+
+    # A bound session satisfies allow_standalone=False (it is a real session).
+    async with open_artifact_session(work, session_id="routing-strict") as session:
+        assert artifact_dir_for(work.repo, allow_standalone=False) == session.daydream_dir
+        assert (
+            review_output_path_for(work.repo, allow_standalone=False)
+            == session.review_output
+        )
+
+
 def _main() -> None:
     action, *arguments = sys.argv[1:]
     if action not in _HELPERS:
         raise SystemExit(f"unknown storage-spike helper action: {action}")
     handler, strings = _HELPERS[action]
     handler(*(value if index in strings else Path(value) for index, value in enumerate(arguments)))
+
+
+def test_create_private_directory_rejects_symlinked_leaf(tmp_path: Path) -> None:
+    """A symlinked final component fails closed at the leaf validation.
+
+    The leaf keeps the ``validate_private_directory`` contract ("must be a
+    real directory") exactly as before the consolidation; ancestors are
+    covered by the restored ancestry scan.
+    """
+    target = tmp_path / "storage" / "runs"
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-secret"
+    outside.mkdir()
+    target.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ArtifactVisibilityError, match="real directory"):
+        artifact_visibility._create_private_directory(target)
+
+    assert outside.is_dir()
+    assert list(outside.iterdir()) == []
+
+
+def test_create_private_directory_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    """A symlink anywhere in the ancestry fails closed (#1162 review finding).
+
+    The collapsed helper must keep the ancestry lstat scan the deleted
+    ``_ensure_private_directory`` enforced: creation must never mkdir through
+    a symlinked ancestor or chmod through the link.
+    """
+    outside = tmp_path / "outside-secret"
+    outside.mkdir()
+    (tmp_path / "storage").mkdir()
+    (tmp_path / "storage" / "live-link").symlink_to(outside, target_is_directory=True)
+    # The missing-child walk stops at the first existing ancestor (the
+    # symlink itself); the ancestry scan must reject it fail-closed.
+    linked_target = tmp_path / "storage" / "live-link" / "runs" / "deep"
+
+    with pytest.raises(ArtifactVisibilityError, match="symlink"):
+        artifact_visibility._create_private_directory(linked_target)
+
+    assert outside.is_dir()
+    assert list(outside.iterdir()) == []
+    assert not (outside / "runs").exists()
 
 
 if __name__ == "__main__":

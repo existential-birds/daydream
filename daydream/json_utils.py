@@ -17,6 +17,61 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+def _fsync_directory(path: Path) -> None:
+    """Best-effort fsync of a directory entry (durable rename publication)."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_bytes(
+    path: Path,
+    content: bytes,
+    *,
+    fsync: bool = True,
+    dir_fsync: bool = False,
+    mode: int | None = None,
+) -> None:
+    """Atomically write ``content`` to ``path`` (same-dir temp + ``os.replace``).
+
+    The single shared crash-safe write primitive. The temp file is created
+    exclusively in ``path``'s directory so the rename never crosses
+    filesystems; a crash mid-write leaves either the prior file or nothing.
+    Parent directories are created as needed. On failure the temp file is
+    removed best-effort and the original exception re-raised.
+
+    Knobs let callers preserve (or strengthen) their prior hardening:
+
+    - ``fsync``: flush + fsync the file *before* the rename.
+    - ``mode``: when given, the temp file is chmod'ed to this mode before the
+      rename and the final path is chmod'ed again after it (the post-rename
+      chmod is umask-immune and covers a pre-existing destination).
+    - ``dir_fsync``: fsync the parent directory after the rename so the new
+      name survives a crash.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+            f.flush()
+            if fsync:
+                os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        if mode is not None:
+            os.chmod(path, mode)
+        if dir_fsync:
+            _fsync_directory(path.parent)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def atomic_write_json(
     path: Path,
     data: Any,
@@ -26,30 +81,21 @@ def atomic_write_json(
     default: Callable[[Any], Any] | None = None,
     trailing_newline: bool = False,
     fsync: bool = True,
+    dir_fsync: bool = False,
+    mode: int | None = None,
 ) -> None:
     """Atomically write ``data`` as JSON to ``path`` (tempfile + ``os.replace``).
 
     The temp file lives in ``path``'s directory so the rename never crosses
     filesystems; a crash mid-write leaves either the prior file or nothing.
     Parent directories are created as needed. On failure the temp file is
-    removed best-effort and the original exception re-raised.
+    removed best-effort and the original exception re-raised. ``fsync``,
+    ``dir_fsync``, and ``mode`` forward to :func:`atomic_write_bytes`.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=indent, sort_keys=sort_keys, default=default)
     if trailing_newline:
         text += "\n"
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            if fsync:
-                f.flush()
-                os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(tmp)
-        raise
+    atomic_write_bytes(path, text.encode("utf-8"), fsync=fsync, dir_fsync=dir_fsync, mode=mode)
 
 
 def extract_json(text: str) -> Any:

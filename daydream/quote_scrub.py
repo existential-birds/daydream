@@ -8,14 +8,13 @@ This module provides a deterministic, backend-agnostic scrub: a pure
 changed-file driver that rewrites only the lines the fix pass added, in place.
 """
 
-import os
 import stat
-import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
 from daydream.generated_files import is_generated_file
 from daydream.git_ops import GitError, diff_worktree_against
+from daydream.json_utils import atomic_write_bytes
 
 # U+201C LEFT DOUBLE QUOTATION MARK / U+201D RIGHT DOUBLE QUOTATION MARK -> "
 # U+2018 LEFT SINGLE QUOTATION MARK / U+2019 RIGHT SINGLE QUOTATION MARK -> '
@@ -116,7 +115,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     a sibling temp file, preserve the original file's permission bits, and
     ``os.replace`` it into place — the original bytes survive any write
     failure and the final swap is atomic. The temp file is cleaned up on any
-    failure.
+    failure. The rename is made durable with a parent-directory fsync.
 
     Raises:
         OSError: On any write failure (after cleaning up the temp file).
@@ -126,25 +125,11 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         # os.replace here would swap the link's directory entry for a regular
         # file and destroy the symlink. Write to the link target instead.
         path = path.resolve()
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        try:
-            mode = stat.S_IMODE(path.stat().st_mode)
-        except OSError:
-            mode = None
-        with os.fdopen(fd, "wb") as tmp:
-            tmp.write(data)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        if mode is not None:
-            os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = None
+    atomic_write_bytes(path, data, fsync=True, dir_fsync=True, mode=mode)
 
 
 def scrub_smart_quotes_changed_files(

@@ -42,6 +42,8 @@ class PreparedSanctionedInput:
     path: Path
     text: str | None
     sha256: str
+    device: int
+    inode: int
     size: int
     mtime_ns: int
 
@@ -96,6 +98,17 @@ class PreparedSanctionedInputs:
             raise SanctionedInputUnavailable("sanctioned input transport mode changed before model execution")
         aggregate = 0
         for item in self.inputs:
+            if _unchanged_since_capture(item):
+                # The capture already streamed and hashed these exact bytes,
+                # so the re-read/re-hash is redundant — but the aggregate cap
+                # stays enforced exactly as a fresh capture would enforce it.
+                max_bytes, _, _ = _transport_allowance(self.transport, aggregate)
+                if item.size > max_bytes:
+                    raise SanctionedInputUnavailable(
+                        f"sanctioned input {item.label!r} exceeds remaining aggregate input budget"
+                    )
+                aggregate += item.size
+                continue
             current = _capture_input(item.label, item.path, self.transport, aggregate)
             aggregate += current.size
             if current != item:
@@ -109,6 +122,32 @@ def _canonical_cwd(cwd: Path) -> Path:
         raise SanctionedInputUnavailable("sanctioned input cwd is unavailable") from exc
 
 
+def _unchanged_since_capture(item: PreparedSanctionedInput) -> bool:
+    """Whether *item*'s file still carries the identity the capture attested.
+
+    The ``(dev, ino, size, mtime_ns)`` tuple is the same identity
+    :func:`_capture_input` validates internally; matching it re-validates file
+    identity without a per-attempt re-read. A missing, unreadable, or replaced
+    file returns ``False`` so the caller performs the full capture and
+    surfaces its original fail-closed errors.
+    """
+    try:
+        metadata = item.path.lstat()
+    except OSError:
+        return False
+    identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+    return identity == (item.device, item.inode, item.size, item.mtime_ns)
+
+
+def _transport_allowance(transport: SanctionedInputTransport, aggregate: int) -> tuple[int, bool, str]:
+    """Remaining per-item byte allowance under *transport* after *aggregate* bytes."""
+    if transport is SanctionedInputTransport.INLINE:
+        return max(SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES - aggregate, 0), False, "byte budget"
+    remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
+    aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
+    return max(min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining), 0), aggregate_limit, "file byte limit"
+
+
 def _capture_input(
     label: str, path: Path, transport: SanctionedInputTransport, aggregate: int
 ) -> PreparedSanctionedInput:
@@ -118,16 +157,7 @@ def _capture_input(
     than the aggregate ceiling admits. ``fstat`` before and after bounds the
     captured bytes to one immutable revision of one inode.
     """
-    aggregate_limit = False
-    limit_name = "byte budget"
-    if transport is SanctionedInputTransport.INLINE:
-        max_bytes = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES - aggregate
-    else:
-        remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
-        max_bytes = min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining)
-        aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
-        limit_name = "file byte limit"
-    max_bytes = max(max_bytes, 0)
+    max_bytes, aggregate_limit, limit_name = _transport_allowance(transport, aggregate)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
     fd = -1
@@ -175,6 +205,8 @@ def _capture_input(
         path=lexical,
         text=payload.decode("utf-8") if payload is not None else None,
         sha256=digest.hexdigest(),
+        device=before.st_dev,
+        inode=before.st_ino,
         size=before.st_size,
         mtime_ns=before.st_mtime_ns,
     )

@@ -163,6 +163,61 @@ def _pointer_dir(
     return exploration_dir
 
 
+def _exploration_inline_budgeted(backend: Backend, work: WorkContext, *, read_only: bool) -> bool:
+    """Whether exploration files are sized against the shared INLINE aggregate.
+
+    Mirrors the advisory-budget rule: when an INLINE transport is active
+    (strict audit roots, read-only disposable clones, sandboxed Osprey),
+    exploration files that would overflow the shared inline AGGREGATE budget
+    must degrade (be excluded) rather than hard-fail the phase at capture
+    time. The post-capture ``inline_transport`` remains authoritative for
+    prompt shaping; this pre-check only sizes advisory inputs.
+    """
+    return artifact_session_active() and (
+        sanctioned_transport_for(backend, work.repo, read_only=read_only)
+        is SanctionedInputTransport.INLINE
+    )
+
+
+def _budgeted_exploration_inputs(
+    exploration_dir: Path | None,
+    *,
+    inline_budgeted: bool,
+) -> dict[str, Path | None]:
+    """Size the exploration pair against the shared inline aggregate.
+
+    Greedy include in declaration order (summary first) while the running
+    total stays within a single INLINE aggregate budget, so two files that
+    fit separately but not together degrade to the surviving prefix instead
+    of raising SanctionedInputUnavailable at capture time.
+    """
+    if exploration_dir is None:
+        return {"exploration-summary": None, "exploration-affected-files": None}
+    if not inline_budgeted:
+        return {
+            "exploration-summary": exploration_dir / "summary.md",
+            "exploration-affected-files": exploration_dir / "affected_files.md",
+        }
+    remaining = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+    sized: dict[str, Path | None] = {}
+    for label, file_name in (
+        ("exploration-summary", "summary.md"),
+        ("exploration-affected-files", "affected_files.md"),
+    ):
+        path = exploration_dir / file_name
+        try:
+            size = path.stat().st_size
+        except OSError:
+            sized[label] = None
+            continue
+        if size <= remaining:
+            sized[label] = path
+            remaining -= size
+        else:
+            sized[label] = None
+    return sized
+
+
 TEST_OUTPUT_TAIL_LINES = 100
 
 _PR_BODY_MAX_CHARS = 8000
@@ -4501,49 +4556,14 @@ async def phase_understand_intent(
     # degradation below applies to the exploration context only. The
     # post-capture ``inline_transport`` below remains authoritative; this
     # pre-check only sizes advisory inputs.)
-    exploration_inline_budgeted = (
-        session_active
-        and sanctioned_transport_for(backend, work.repo, read_only=True)
-        is SanctionedInputTransport.INLINE
-    )
-
-    def _budgeted_exploration_inputs() -> dict[str, Path | None]:
-        """Size the exploration pair against the shared inline aggregate.
-
-        Greedy include in declaration order (summary first) while the running
-        total stays within a single INLINE aggregate budget, so two files that
-        fit separately but not together degrade to the surviving prefix
-        instead of raising SanctionedInputUnavailable at capture time.
-        """
-        if exploration_dir is None:
-            return {"exploration-summary": None, "exploration-affected-files": None}
-        if not exploration_inline_budgeted:
-            return {
-                "exploration-summary": exploration_dir / "summary.md",
-                "exploration-affected-files": exploration_dir / "affected_files.md",
-            }
-        remaining = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-        sized: dict[str, Path | None] = {}
-        for label, file_name in (
-            ("exploration-summary", "summary.md"),
-            ("exploration-affected-files", "affected_files.md"),
-        ):
-            path = exploration_dir / file_name
-            try:
-                size = path.stat().st_size
-            except OSError:
-                sized[label] = None
-                continue
-            if size <= remaining:
-                sized[label] = path
-                remaining -= size
-            else:
-                sized[label] = None
-        return sized
+    exploration_inline_budgeted = _exploration_inline_budgeted(backend, work, read_only=True)
 
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
-        {"diff": diff_path if inline_diff is None else None, **_budgeted_exploration_inputs()},
+        {
+            "diff": diff_path if inline_diff is None else None,
+            **_budgeted_exploration_inputs(exploration_dir, inline_budgeted=exploration_inline_budgeted),
+        },
         read_only=True,
     )
     prompt = get_registry().prompt("intent")(
@@ -4673,49 +4693,14 @@ async def phase_alternative_review(
     # read-only disposable clones, sandboxed Osprey). (The over-budget diff
     # itself is a separate pre-existing capture limit on those transports;
     # this pre-check only sizes advisory inputs.)
-    exploration_inline_budgeted = (
-        artifact_session_active()
-        and sanctioned_transport_for(backend, work.repo, read_only=False)
-        is SanctionedInputTransport.INLINE
-    )
-
-    def _budgeted_exploration_inputs() -> dict[str, Path | None]:
-        """Size the exploration pair against the shared inline aggregate.
-
-        Greedy include in declaration order (summary first) while the running
-        total stays within a single INLINE aggregate budget, so two files that
-        fit separately but not together degrade to the surviving prefix
-        instead of raising SanctionedInputUnavailable at capture time.
-        """
-        if exploration_dir is None:
-            return {"exploration-summary": None, "exploration-affected-files": None}
-        if not exploration_inline_budgeted:
-            return {
-                "exploration-summary": exploration_dir / "summary.md",
-                "exploration-affected-files": exploration_dir / "affected_files.md",
-            }
-        remaining = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-        sized: dict[str, Path | None] = {}
-        for label, file_name in (
-            ("exploration-summary", "summary.md"),
-            ("exploration-affected-files", "affected_files.md"),
-        ):
-            path = exploration_dir / file_name
-            try:
-                size = path.stat().st_size
-            except OSError:
-                sized[label] = None
-                continue
-            if size <= remaining:
-                sized[label] = path
-                remaining -= size
-            else:
-                sized[label] = None
-        return sized
+    exploration_inline_budgeted = _exploration_inline_budgeted(backend, work, read_only=False)
 
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
-        {"diff": diff_path if inline_diff is None else None, **_budgeted_exploration_inputs()},
+        {
+            "diff": diff_path if inline_diff is None else None,
+            **_budgeted_exploration_inputs(exploration_dir, inline_budgeted=exploration_inline_budgeted),
+        },
     )
     prompt = get_registry().prompt("alternatives")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["alternatives"].content,
