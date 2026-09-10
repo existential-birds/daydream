@@ -364,9 +364,13 @@ def test_receipt_has_no_credentials_or_source() -> None:
 
 @pytest.fixture
 def ws_factory() -> Any:
-    """Build a workspace with ``127.0.0.1`` on the judge host allowlist."""
+    """Build a workspace with ``127.0.0.1`` on the judge host allowlist.
 
-    def _build(tmp_path: Path) -> Any:
+    Pass ``judge_allowed_hosts`` to allowlist a different judge host (e.g. the
+    claude-cli provider's ``api.anthropic.com``).
+    """
+
+    def _build(tmp_path: Path, *, judge_allowed_hosts: tuple[str, ...] = ("127.0.0.1",)) -> Any:
         ws = tmp_path / "ws"
         (ws / "runtime").mkdir(parents=True)
         (ws / "benchmark.yaml").write_text(json.dumps({
@@ -380,7 +384,7 @@ def ws_factory() -> Any:
                         "reviewer_data": "source_snapshot",
                         "reviewer_allowed_hosts": ["review.example"],
                         "judge_data": "finding_text_and_location_only",
-                        "judge_allowed_hosts": ["127.0.0.1"],
+                        "judge_allowed_hosts": list(judge_allowed_hosts),
                         "archive": "disabled", "uploads": "disabled"},
             "pull_requests": [],
             "cases": [],
@@ -431,6 +435,29 @@ def _scripted_responses(pairs: Any, *, mislabel_count: Any=0) -> Any:
         verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
         responses.extend([verdict] * 3)
     return responses
+
+
+def _scripted_cli_runner(responses: Any) -> tuple[Any, Any]:
+    """Fake ClaudeCliJudgeClient's subprocess seam: one scripted verdict per call.
+
+    Each call returns a fake proc with ``returncode`` 0 and one CLI-style
+    stdout payload (``{"result": "<verdict json>"}``); responses are consumed
+    in order, matching ``_judge_pairs``' deterministic pair-by-pair driver.
+    """
+
+    class FakeProc:
+        returncode = 0
+        stdout = ""
+
+    i = [0]
+
+    async def runner(self: Any, argv: Any, env: Any) -> Any:
+        payload = {"result": json.dumps(responses[i[0] % len(responses)])}
+        i[0] += 1
+        FakeProc.stdout = json.dumps(payload)
+        return FakeProc()
+
+    return runner, i
 
 
 class TestCalibrateAcceptance:
@@ -587,3 +614,62 @@ def test_calibrate_judge_handler_threads_claude_oauth_token(
     assert seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-tok-sentinel"
     # Whitelisted but not exported -> None, not an ambient leak via dict(os.environ).
     assert seen["env"]["DAYDREAM_JUDGE_PROVIDER"] is None
+
+
+def test_calibrate_judge_claude_cli_composed_path(
+    tmp_path: Path,
+    ws_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composed real path: handler -> run_calibration -> _build_client -> CLI.
+
+    The only seam faked is the Claude Code CLI subprocess runner; the threaded
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is exercised through the packaged judge's own
+    fail-closed presence gate (``score_review._build_client``) -- the behavior
+    the env threading exists to enable -- not by stubbing run_calibration.
+    """
+    from daydream.benchmark import cli
+    from daydream.benchmark.harbor import calibrate as cal
+
+    ws = ws_factory(tmp_path, judge_allowed_hosts=("api.anthropic.com",))
+    monkeypatch.delenv("DAYDREAM_JUDGE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "claude-cli")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok-sentinel")
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
+    sr = cal._load_judge_template()
+    fake, counter = _scripted_cli_runner(_scripted_responses(cal._load_fixture()))
+    monkeypatch.setattr(sr.ClaudeCliJudgeClient, "_default_runner", fake)
+    code = cli._handle_benchmark_command(["calibrate-judge", str(ws), "--yes"])
+    assert code == 0
+    assert (ws / "runtime" / "calibration-receipt.json").exists()
+    assert counter[0] == 72          # all 72 judge calls went through the fake runner
+
+
+def test_calibrate_judge_claude_cli_missing_token_fails_closed(
+    tmp_path: Path,
+    ws_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No ambient token: the composed path fails closed before any CLI call.
+
+    Entered through the production handler with the claude-cli provider and no
+    ``CLAUDE_CODE_OAUTH_TOKEN``; the packaged judge's presence gate refuses the
+    run (exit 1, bounded stderr diagnostic, no receipt) instead of shelling the
+    real ``claude`` binary unpaid.
+    """
+    from daydream.benchmark import cli
+
+    ws = ws_factory(tmp_path, judge_allowed_hosts=("api.anthropic.com",))
+    monkeypatch.delenv("DAYDREAM_JUDGE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "claude-cli")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
+    capsys.readouterr()
+    code = cli._handle_benchmark_command(["calibrate-judge", str(ws), "--yes"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "missing CLAUDE_CODE_OAUTH_TOKEN" in err
+    assert not (ws / "runtime" / "calibration-receipt.json").exists()
