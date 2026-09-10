@@ -954,7 +954,7 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, mo
 def test_replay_fake_pi_marker_requirement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    replay_env: None,
+    replay_env: None,  # noqa - vulture: pytest fixture arg (side-effect env setup)
     marker: bool,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
