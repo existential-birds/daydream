@@ -1392,8 +1392,20 @@ def test_show_returns_file_bytes_at_ref(tmp_path: Path) -> None:
 
 def test_show_raises_on_missing_path(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
-    with pytest.raises(GitError):
+    with pytest.raises(git_ops.PathAbsentError):
         git_ops.show(repo, "HEAD", "nope.txt")
+
+
+def test_show_raises_a_plain_error_when_the_object_store_is_damaged(tmp_path: Path) -> None:
+    """Absence recognition is positive-only: an unreadable blob is not a missing path."""
+    repo = _make_repo_with_main(tmp_path)
+    blob = _git(repo, "rev-parse", "HEAD:base.txt").strip()
+    (repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+
+    with pytest.raises(GitError) as excinfo:
+        git_ops.show(repo, "HEAD", "base.txt")
+
+    assert not isinstance(excinfo.value, git_ops.PathAbsentError)
 
 
 def test_grep_returns_matching_paths(tmp_path: Path) -> None:

@@ -2649,7 +2649,9 @@ def _handle_post_findings_command(argv: list[str]) -> int:
 
     Returns:
         ``0`` on success (including "no new findings"); ``1`` on validation,
-        inventory, or post failure.
+        inventory, or post failure. A rejected diagram payload degrades — the
+        diagram is dropped with a warning and the findings still post
+        (issue #1176) — so it is not a post-findings failure.
     """
     from daydream import pr_review
     from daydream.ui import create_console, print_warning

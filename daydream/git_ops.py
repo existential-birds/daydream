@@ -240,6 +240,20 @@ class GitTimeoutError(GitError):
     """
 
 
+class PathAbsentError(GitError):
+    """Raised when a repository path is *proven* absent at a ref.
+
+    Narrower than the generic :class:`GitError` so a caller can tell "the file
+    is not there" apart from "the read never happened" — an inability to read
+    (auth, transport, throttling, a missing ``gh`` binary, a damaged object
+    store, malformed output) must never be reported as a missing path. Only
+    the two reads that fetch a path at a ref raise it — :func:`show` and
+    :func:`gh_file_at_ref` — and only when the read positively established the
+    absence, so a caller classifies on the type alone rather than guessing
+    from which source the failure came.
+    """
+
+
 class DeadlineExpired(GitError):
     """Raised before a GitHub request when its shared deadline has expired."""
 
@@ -1435,16 +1449,26 @@ def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
     return output or None
 
 
+_GIT_PATH_ABSENT_RE = re.compile(r"does not exist in|exists on disk, but not in")
+
+
 def show(repo: Path, ref: str, path: str) -> bytes:
     """Return the raw bytes of *path* at *ref* via ``git show``.
 
     Raises:
-        GitError: If ``git show`` fails (e.g. path missing at that revision).
+        PathAbsentError: If git's own diagnostic proves *path* is not in *ref*.
+        GitError: If ``git show`` fails for any other reason — a timeout, a
+            damaged object store, an OS-level failure. Recognition is
+            positive-only, like :func:`_gh_failure_is_absence`: a failure git
+            did not name as a missing path is never reported as one.
     """
     proc = _run_git(repo, ["show", f"{ref}:{path}"], timeout=30, capture_bytes=True)
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
-        raise GitError(f"git show {ref}:{path} failed: {stderr.strip()}")
+        message = f"git show {ref}:{path} failed: {stderr.strip()}"
+        if _GIT_PATH_ABSENT_RE.search(stderr):
+            raise PathAbsentError(message)
+        raise GitError(message)
     return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
 
 
@@ -4209,6 +4233,20 @@ def _decode_github_base64(content: str, what: str) -> bytes:
         raise GitError(f"{what} returned undecodable base64 content") from exc
 
 
+_GH_HTTP_404_RE = re.compile(r"\bHTTP 404\b")
+
+
+def _gh_failure_is_absence(exc: GitError) -> bool:
+    """Whether a ``gh`` failure carries gh's established 404 diagnostic.
+
+    ``gh`` renders the HTTP status into its stderr as ``... (HTTP 404)``, which
+    :func:`gh_api` preserves in the message it raises. Recognition is
+    positive-only, like :func:`_pr_view_is_absent`: a failure with no
+    recognized status is never claimed to be an absence.
+    """
+    return _GH_HTTP_404_RE.search(str(exc)) is not None
+
+
 def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
     """Return the bytes of *path* at commit *ref* via the GitHub contents API.
 
@@ -4223,8 +4261,10 @@ def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
     becomes part of the endpoint.
 
     Raises:
-        GitError: If the slug, ref, or path is malformed; if *path* is absent
-            at *ref* or does not name a file; or if the API call fails.
+        PathAbsentError: If *path* is proven absent at *ref* — the contents
+            call answered 404, or the response does not name a file.
+        GitError: If the slug, ref, or path is malformed, or if the API call
+            fails for any reason that does not establish absence.
     """
     owner_repo = split_owner_repo(slug)
     if owner_repo is None or not all(_GITHUB_NAME_RE.fullmatch(part) for part in owner_repo):
@@ -4237,9 +4277,14 @@ def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
     relative = path[2:] if path.startswith("./") else path
     base = f"repos/{owner}/{name}"
     where = f"{slug}@{ref}:{relative}"
-    payload = gh_api(repo, f"{base}/contents/{quote(relative)}?ref={ref}", idempotent=True)
+    try:
+        payload = gh_api(repo, f"{base}/contents/{quote(relative)}?ref={ref}", idempotent=True)
+    except GitError as exc:
+        if _gh_failure_is_absence(exc):
+            raise PathAbsentError(str(exc)) from exc
+        raise
     if not isinstance(payload, dict) or payload.get("type") != "file":
-        raise GitError(f"{where} does not name a file")
+        raise PathAbsentError(f"{where} does not name a file")
     content = payload.get("content")
     if payload.get("encoding") == "base64" and isinstance(content, str):
         return _decode_github_base64(content, where)

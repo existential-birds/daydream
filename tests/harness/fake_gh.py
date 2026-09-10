@@ -183,7 +183,10 @@ def _serve_api_response(
         while True:
             time.sleep(3600)
     if value is None:
-        return 1, "", f"fake gh: 404 {key} (no such resource)\n"
+        # Real ``gh`` renders the status into stderr as ``... (HTTP 404)``, and
+        # callers classify absence off that token (``_gh_failure_is_absence``),
+        # so the fake must carry it or a "404" here is not a 404 under test.
+        return 1, "", f"gh: Not Found (HTTP 404)\nfake gh: {key} (no such resource)\n"
     return 0, _emit(value, jq), ""
 
 
