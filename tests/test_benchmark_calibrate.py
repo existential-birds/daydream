@@ -562,3 +562,28 @@ def test_calibrate_judge_handler_forwards_yes_and_dir(
     code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path), "--yes"])
     capsys.readouterr()
     assert code == 0 and seen == {"ws": str(tmp_path), "yes": True}
+
+
+def test_calibrate_judge_handler_threads_claude_oauth_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import daydream.benchmark.harbor.calibrate as cal
+    from daydream.benchmark import cli
+    seen: dict[str, Any] = {}
+
+    def fake_run(workspace: Any, *, yes: Any, env: Any, http: Any) -> int:
+        seen["env"] = env
+        return 0
+
+    monkeypatch.setattr(cal, "run_calibration", fake_run)
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok-sentinel")
+    monkeypatch.delenv("DAYDREAM_JUDGE_PROVIDER", raising=False)
+    code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path), "--yes"])
+    capsys.readouterr()
+    assert code == 0
+    assert seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-tok-sentinel"
+    # Whitelisted but not exported -> None, not an ambient leak via dict(os.environ).
+    assert seen["env"]["DAYDREAM_JUDGE_PROVIDER"] is None
