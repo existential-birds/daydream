@@ -500,19 +500,25 @@ def test_delivery_snapshot_states_and_flush_are_independent(monkeypatch: pytest.
 
 
 def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Encode/budget exhaustion before a send still records a ledger outcome."""
+    """Pre-send budget exhaustion records the exact unverified diagnostics.
+
+    The first export exhausts the one-deadline budget through retry backoff
+    (the wait-against-deadline pre-check fires inside the loop); the second
+    export re-enters the loop with zero remaining budget. Each exit must
+    carry its exact ledger diagnostic code, never a silent return.
+    """
     with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
         _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        # First export exhausts the one-deadline budget via retry backoff;
-        # the second export exits the attempt loop before any send.
         exporter.export(_spans())
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 0
         assert snapshot["unverified"] >= 1
+        assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
         exporter.export(_spans())
         snapshot = exporter.delivery_snapshot()
         assert snapshot["unverified"] >= 2
+        assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
         exporter.shutdown()
 
 

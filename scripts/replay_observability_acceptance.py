@@ -209,12 +209,17 @@ def _validate_destinations(manifest: dict[str, Any]) -> tuple[str, ...]:
 
     The manifest's ``destinations`` block is load-bearing: editing it fails
     this gate instead of silently drifting from what the replay enforces.
+    A missing or malformed block is a validation failure, not a crash.
     """
-    destinations_block = manifest.get("destinations", {})
+    destinations_block = manifest.get("destinations")
+    if not isinstance(destinations_block, dict):
+        raise ReplayValidationError("Manifest must carry a destinations block")
     required = destinations_block.get("required")
     forbidden = destinations_block.get("forbidden", [])
-    if sorted(required) != ["honeyhive", "langsmith", "otlp"]:
+    if not isinstance(required, list) or sorted(required) != ["honeyhive", "langsmith", "otlp"]:
         raise ReplayValidationError("Manifest destinations.required must be exactly otlp,honeyhive,langsmith")
+    if not isinstance(forbidden, list):
+        raise ReplayValidationError("Manifest destinations.forbidden must be a list")
     raw = os.environ.get("DAYDREAM_TRACE_TO", "")
     destinations = tuple(name.strip() for name in raw.split(",") if name.strip())
     if set(destinations) != set(required):
@@ -235,7 +240,9 @@ def _validate_authorization() -> None:
 
 def _validate_acceptance_marker(manifest: dict[str, Any]) -> None:
     """Acceptance contract bound to the manifest, not tool-local literals."""
-    acceptance = manifest.get("acceptance", {})
+    acceptance = manifest.get("acceptance")
+    if not isinstance(acceptance, dict):
+        raise ReplayValidationError("Manifest must carry an acceptance block")
     expected_kind = acceptance.get("kind")
     marker_key = acceptance.get("resource_marker_key")
     if expected_kind != "sanitized_protocol_replay" or marker_key != "daydream.acceptance.kind":
