@@ -353,8 +353,11 @@ def _handle_benchmark_calibrate(args: argparse.Namespace) -> int:
             "DAYDREAM_JUDGE_BASE_URL",
             "DAYDREAM_JUDGE_ALLOWED_HOSTS",
             # Claude judge credentials (issue #966 symmetry): threaded so the
-            # claude-cli judge provider can authenticate via the ambient OAuth
-            # token — same gap the run handler closed for the claude reviewer.
+            # packaged judge's fail-closed presence gate admits the claude-cli
+            # provider — the spawned CLI subprocess authenticates via the
+            # ambient OAuth token (score_review copies os.environ for it), not
+            # through this env dict — same gap the run handler closed for the
+            # claude reviewer.
             "CLAUDE_CODE_OAUTH_TOKEN",
         )
     }
