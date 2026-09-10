@@ -1,0 +1,12 @@
+{"type":"session","sessionId":"pi_ses_gen"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"thinking","thinking":"THINKING_PLACEHOLDER_ONE"},{"type":"text","text":"TEXT_PLACEHOLDER_ONE"}]}}
+{"type":"message_end","message":{"role":"assistant","timestamp":1788690314289,"responseModel":"glm-4.6","provider":"nous","responseId":"resp_gen_01","stopReason":"toolUse","content":[{"type":"thinking","thinking":"THINKING_PLACEHOLDER_ONE"},{"type":"text","text":"TEXT_PLACEHOLDER_ONE"},{"type":"toolCall","id":"call_001","name":"read_file","arguments":{"path":"src/example.py"}}],"usage":{"input":10392,"output":8401,"cacheRead":76544,"cacheWrite":0,"reasoning":8260,"cost":{"total":0.002}}}}
+{"type":"tool_execution_start","toolCallId":"call_001","toolName":"read_file","args":{"path":"src/example.py"}}
+{"type":"tool_execution_end","toolCallId":"call_001","toolName":"read_file","result":{"content":[{"type":"text","text":"FILE_PLACEHOLDER"}]},"isError":false}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"TEXT_PLACEHOLDER_TWO"}]}}
+{"type":"message_end","message":{"role":"assistant","timestamp":1788690455762,"responseModel":"glm-4.6","provider":"nous","responseId":"resp_gen_02","stopReason":"stop","content":[{"type":"text","text":"TEXT_PLACEHOLDER_TWO"}],"usage":{"input":100,"output":40,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":{"total":0.00005}}}}
+{"type":"turn_end","message":{"role":"assistant","responseModel":"glm-4.6","provider":"nous","stopReason":"stop","usage":{"input":10492,"output":8441,"cacheRead":76544,"cacheWrite":0,"cost":{"total":0.00205}}}}
+{"type":"agent_end","messages":[]}

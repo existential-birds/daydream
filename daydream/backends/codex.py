@@ -26,6 +26,7 @@ from typing import Any
 from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
+    CodexRequestConfig,
     ContinuationToken,
     CostEvent,
     DiagnosticEvent,
@@ -680,11 +681,33 @@ class CodexBackend:
                 # path appears in the bytes written to the isolated subprocess.
                 prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
 
+            # P18 Task 1: closed typed effective-config admission from the
+            # exact argv built above. max_turns and persist_session are
+            # accepted-but-not-passed on this CLI surface, so they stay
+            # None (documented unavailability, never an effective claim).
+            codex_resume_applied = (
+                continuation is not None and continuation.backend == "codex"
+            )
+            codex_resume_thread: str | None = None
+            if continuation is not None and codex_resume_applied:
+                thread_value = continuation.data.get("thread_id")
+                codex_resume_thread = thread_value if isinstance(thread_value, str) else None
             yield RequestEvent(
                 prompt=prompt, model_name=model_name, output_schema=output_schema,
                 reasoning_effort=self.reasoning_effort,
-                session_id=(continuation.data.get("thread_id")
-                            if continuation is not None and continuation.backend == "codex" else None),
+                session_id=codex_resume_thread,
+                config=CodexRequestConfig(
+                    sandbox_mode=(
+                        "read-only" if read_only else "danger-full-access"
+                    ),
+                    experimental_json=True,
+                    native_output_schema=schema_path is not None,
+                    read_only_isolation=read_only and execution_cwd != cwd,
+                    continuation_mode="resume" if codex_resume_applied else "fresh",
+                    model_mode="single",
+                ),
+                model_source="configured",
+                session_source="configured" if codex_resume_applied else None,
             )
 
             transport = CliTransport(
@@ -1105,6 +1128,7 @@ class CodexBackend:
                             model_name=model_name,
                             provider_name=provider_name,
                             usage_scope="invocation",
+                            measurement_source="turn_end",
                         )
                     yield CostEvent(
                         cost_usd=synth_cost,
@@ -1114,6 +1138,8 @@ class CodexBackend:
                         reasoning_tokens=reasoning_tokens,
                         model_name=model_name,
                         provider_name=provider_name,
+                        measurement_source="turn_end",
+                        cost_source="estimated",
                     )
 
                     if output_schema and last_agent_text:

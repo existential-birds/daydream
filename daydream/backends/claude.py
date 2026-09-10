@@ -28,6 +28,7 @@ from claude_agent_sdk.types import (
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION_V1,
     AgentEvent,
+    ClaudeRequestConfig,
     ContinuationToken,
     CostEvent,
     MetricsEvent,
@@ -814,6 +815,24 @@ class ClaudeBackend:
         if agents:
             options.agents = agents
 
+        # P18 Task 1: closed typed effective-config admission, populated from
+        # the exact options built above (never from config files/env).
+        # - read_only/persist_session are actual passed controls (execute args).
+        # - continuation_mode is "resume" only when a claude-minted token was
+        #   applied; "fresh" otherwise. Fork is not a Claude surface.
+        # - A nonempty agents mapping makes the request aggregate
+        #   multi-model-capable without inspecting any AgentDefinition.
+        resume_applied = (
+            continuation is not None
+            and continuation.backend == "claude"
+            and bool(continuation.data.get("session_id"))
+        )
+        agents_nonempty = bool(agents)
+        allowed_tools = options.allowed_tools
+        audit_tools = options.allowed_tools if audit_guard is not None else None
+        audit_tools_count = len(audit_tools) if audit_tools else None
+        audit_tools_present = bool(audit_tools) if audit_tools is not None else None
+
         structured_result: Any = None
         # SDK session id from the terminal ResultMessage; minted into the
         # ContinuationToken so a later call can --resume this conversation.
@@ -834,6 +853,24 @@ class ClaudeBackend:
             session_id=options.resume,
             reasoning_effort=self.reasoning_effort,
             output_schema=output_schema,
+            config=ClaudeRequestConfig(
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+                continuation_mode="resume" if resume_applied else "fresh",
+                model_mode="multi_or_dynamic" if agents_nonempty else "single",
+                permission_mode="bypassPermissions",
+                allowed_tools_count=len(allowed_tools) if allowed_tools else None,
+                allowed_tools_present=bool(allowed_tools),
+                audit_tools_count=audit_tools_count,
+                audit_tools_present=audit_tools_present,
+                setting_sources_present=bool(options.setting_sources),
+                native_output_format=output_format is not None,
+                buffer_limit_bytes=10 * 1024 * 1024,
+                hooks_enabled=True,
+            ),
+            model_source="configured",
+            session_source="host_generated" if resume_applied else None,
         )
 
         async with ClaudeSDKClient(options=options) as client:
@@ -889,6 +926,7 @@ class ClaudeBackend:
                                 cost_usd=None,
                                 model_name=last_assistant_model,
                                 cache_creation_tokens=msg_usage.get("cache_creation_input_tokens"),
+                                measurement_source="message_end",
                             )
                         yield TurnEndEvent(message_id=getattr(msg, "message_id", "") or "")
 
@@ -937,6 +975,8 @@ class ClaudeBackend:
                                 provider_name=provider,
                                 cache_creation_tokens=usage.get("cache_creation_input_tokens"),
                                 model_usage=model_usage,
+                                measurement_source="terminal",
+                                cost_source="reported" if msg.total_cost_usd is not None else None,
                             )
                         terminal_result = ResultEvent(
                             structured_output=structured_result,

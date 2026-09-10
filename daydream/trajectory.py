@@ -31,7 +31,7 @@ from contextlib import (
     suppress,
 )
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -1507,6 +1507,329 @@ def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
     return extra
 
 
+# --- P18 Task 2: pending-generation lifecycle (binding decisions 1/4/5) ------
+#
+# Provider generation drafts stay UNENDED until billing ownership resolves.
+# Immutable provider choice + timing seal at ``message_end`` before tools;
+# each draft ends exactly once at its sealed historical end after late usage.
+# Bounds: 512 drafts / 10 MiB retained choice bytes; overflow drains with
+# structural/unbilled-or-none diagnostics, never invented usage. No age limit
+# rejects the 395.332-second case; terminal/cancel paths drain. Native
+# timestamps are non-bool bounded int ms converted exactly to ns;
+# missing/invalid/reversed evidence falls back explicitly — no clamping, no
+# fake RFC3339. Billing owner closes before export to one of
+# ``unresolved | generation_children | structural_attempt | none`` (decision 5).
+
+MAX_PENDING_GENERATION_DRAFTS = 512
+MAX_RETAINED_CHOICE_BYTES = 10 * 1024 * 1024
+_MAX_NATIVE_UNIX_MS = (2**63 - 1) // 1_000_000
+
+_CAP_DIAGNOSTIC_DRAFTS = f"generation_pending_cap:{MAX_PENDING_GENERATION_DRAFTS}_sealed_drafts"
+_CAP_DIAGNOSTIC_BYTES = f"generation_pending_cap:{MAX_RETAINED_CHOICE_BYTES}_retained_choice_bytes"
+_CONTRADICTION_DIAGNOSTIC = "billing_contradiction:child_sum_mismatches_terminal_total"
+
+
+@dataclass
+class _GenerationDraft:
+    """One provider-generation draft pending billing-ownership resolution."""
+
+    generation_id: str
+    sealed: bool = False
+    ended: bool = False
+    billed: bool = False
+    boundary_complete: bool = True
+    choice_parts: list[dict[str, Any]] = field(default_factory=list)
+    native_started_at_unix_ms: int | None = None
+    native_started_at_unix_ns: int | None = None
+    sealed_end_unix_ns: int | None = None
+    ended_at_unix_ns: int | None = None
+    duration_ns: int | None = None
+    start_fallback: str | None = None
+    response_id: str | None = None
+    model_name: str | None = None
+    provider_name: str | None = None
+    finish_reason: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "generation_id": self.generation_id,
+            "sealed": self.sealed,
+            "ended": self.ended,
+            "billed": self.billed,
+            "boundary_complete": self.boundary_complete,
+            "choice_parts": list(self.choice_parts),
+            "native_started_at_unix_ms": self.native_started_at_unix_ms,
+            "native_started_at_unix_ns": self.native_started_at_unix_ns,
+            "sealed_end_unix_ns": self.sealed_end_unix_ns,
+            "ended_at_unix_ns": self.ended_at_unix_ns,
+            "duration_ns": self.duration_ns,
+            "start_fallback": self.start_fallback,
+            "response_id": self.response_id,
+            "model_name": self.model_name,
+            "provider_name": self.provider_name,
+            "finish_reason": self.finish_reason,
+        }
+        if self.usage:
+            record["usage"] = dict(self.usage)
+        return record
+
+
+class _GenerationLedger:
+    """Invocation-local pending-generation lifecycle and billing ownership.
+
+    Binding decisions 1/4/5: a draft opens on ``GenerationStartEvent`` and
+    seals on ``GenerationEndEvent`` (choice + timing frozen before tool
+    execution), then stays UNENDED until ``finalize()`` — the invocation
+    terminal/cancel/error path — resolves the billing owner and ends each
+    draft exactly once at its sealed historical end. Overflow (512 drafts /
+    10 MiB choice bytes) drains every retained draft immediately with one
+    fixed count-only diagnostic, locks ownership to structural-or-none, and
+    keeps later children unbilled/custom.
+    """
+
+    def __init__(self) -> None:
+        self._drafts: list[_GenerationDraft] = []
+        self._by_id: dict[str, _GenerationDraft] = {}
+        self._sealed_pending = 0
+        self._retained_choice_bytes = 0
+        self._cap_engaged = False
+        self._children_after_cap = False
+        self._owner = "unresolved"
+        self._resolved = False
+        self._authoritative_total: dict[str, Any] | None = None
+        self._diagnostics: list[str] = []
+
+    def has_drafts(self) -> bool:
+        return bool(self._drafts)
+
+    def open(self, event: Any) -> None:
+        generation_id = getattr(event, "generation_id", None)
+        if not isinstance(generation_id, str) or not generation_id:
+            return
+        if generation_id in self._by_id:
+            return  # idempotent: a generation opens once
+        if self._cap_engaged:
+            self._children_after_cap = True
+        self._drafts.append(
+            _GenerationDraft(
+                generation_id=generation_id,
+                boundary_complete=bool(getattr(event, "boundary_complete", True)),
+            )
+        )
+        self._by_id[generation_id] = self._drafts[-1]
+
+    def seal(self, event: Any) -> None:
+        generation_id = getattr(event, "generation_id", None)
+        draft = self._by_id.get(generation_id) if isinstance(generation_id, str) else None
+        if draft is None or draft.sealed:
+            return
+        draft.sealed = True
+        draft.boundary_complete = bool(getattr(event, "boundary_complete", True))
+        self._seal_timing(draft, event)
+        serialized = [asdict(part) for part in (getattr(event, "choice_parts", ()) or ())]
+        if self._cap_engaged:
+            # Overflow mode: later children stay unbilled/custom and their
+            # retained content is never admitted.
+            self._children_after_cap = True
+            draft.ended = True
+            draft.ended_at_unix_ns = draft.sealed_end_unix_ns
+            return
+        added = sum(len(json.dumps(part, sort_keys=True, separators=(",", ":"))) for part in serialized)
+        if self._retained_choice_bytes + added >= MAX_RETAINED_CHOICE_BYTES:
+            self._engage_cap(_CAP_DIAGNOSTIC_BYTES)
+            return
+        draft.choice_parts = serialized
+        self._retained_choice_bytes += added
+        self._sealed_pending += 1
+        if self._sealed_pending > MAX_PENDING_GENERATION_DRAFTS:
+            self._engage_cap(_CAP_DIAGNOSTIC_DRAFTS)
+            return
+
+    def _seal_timing(self, draft: _GenerationDraft, event: Any) -> None:
+        """Freeze strict native timing at the sealed boundary (decision 4)."""
+        response_id = getattr(event, "response_id", None)
+        model_name = getattr(event, "model_name", None)
+        provider_name = getattr(event, "provider_name", None)
+        finish_reason = getattr(event, "finish_reason", None)
+        draft.response_id = response_id if isinstance(response_id, str) else None
+        draft.model_name = model_name if isinstance(model_name, str) else None
+        draft.provider_name = provider_name if isinstance(provider_name, str) else None
+        draft.finish_reason = finish_reason if isinstance(finish_reason, str) else None
+        ended_ns = getattr(event, "ended_at_unix_ns", None)
+        if isinstance(ended_ns, bool) or not isinstance(ended_ns, int):
+            ended_ns = None
+        draft.sealed_end_unix_ns = ended_ns
+        native_ms = getattr(event, "native_started_at_unix_ms", None)
+        if native_ms is None:
+            draft.start_fallback = "missing"
+            return
+        if isinstance(native_ms, bool) or type(native_ms) is not int:
+            draft.start_fallback = "invalid"
+            return
+        if not 0 <= native_ms <= _MAX_NATIVE_UNIX_MS:
+            draft.start_fallback = "invalid"
+            return
+        native_ns = native_ms * 1_000_000  # exact multiplication, no clamping
+        if ended_ns is not None and native_ns > ended_ns:
+            # A native start after the sealed host end is an explicit
+            # incomplete boundary — never reordered or clamped.
+            draft.start_fallback = "reversed"
+            return
+        draft.native_started_at_unix_ms = native_ms
+        draft.native_started_at_unix_ns = native_ns
+        if ended_ns is not None:
+            draft.duration_ns = ended_ns - native_ns
+
+    def _engage_cap(self, diagnostic: str) -> None:
+        if self._cap_engaged:
+            return
+        self._cap_engaged = True
+        self._children_after_cap = True
+        self._diagnostics.append(diagnostic)
+        self._drain_all(clear_content=True)
+
+    def _drain_all(self, *, clear_content: bool) -> None:
+        for draft in self._drafts:
+            if not draft.ended:
+                draft.ended = True
+                draft.ended_at_unix_ns = draft.sealed_end_unix_ns
+                if clear_content:
+                    draft.choice_parts = []
+        self._sealed_pending = 0
+        self._retained_choice_bytes = 0
+
+    def record_usage(
+        self,
+        generation_id: str,
+        *,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_tokens: int | None,
+        cost_usd: float | None,
+        reasoning_tokens: int | None,
+    ) -> None:
+        """Record late per-generation usage (custom evidence, never invented)."""
+        draft = self._by_id.get(generation_id)
+        if draft is None or draft.usage:
+            return
+        usage: dict[str, Any] = {}
+        for key, value in (
+            ("input_tokens", input_tokens),
+            ("output_tokens", output_tokens),
+            ("cached_tokens", cached_tokens),
+            ("cost_usd", cost_usd),
+            ("reasoning_tokens", reasoning_tokens),
+        ):
+            if value is not None:
+                usage[key] = value
+        draft.usage = usage
+
+    def record_authoritative_total(
+        self,
+        *,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_tokens: int | None,
+        cost_usd: float | None,
+        reasoning_tokens: int | None,
+    ) -> None:
+        """Record the authoritative terminal total once; contradictions fail closed."""
+        incoming = {
+            key: value
+            for key, value in (
+                ("input_tokens", input_tokens),
+                ("output_tokens", output_tokens),
+                ("cached_tokens", cached_tokens),
+                ("cost_usd", cost_usd),
+                ("reasoning_tokens", reasoning_tokens),
+            )
+            if value is not None
+        }
+        if self._authoritative_total is None:
+            self._authoritative_total = incoming or None
+            return
+        # Exact duplicates are idempotent; differing totals fail closed to an
+        # explicit contradiction diagnostic and never rewrite the stored total.
+        if incoming != {key: self._authoritative_total.get(key) for key in incoming}:
+            self._diagnostics.append(_CONTRADICTION_DIAGNOSTIC)
+
+    def finalize(self) -> None:
+        """Terminal/cancel/error drain: end every draft once, then close ownership."""
+        if self._resolved:
+            return
+        self._drain_all(clear_content=False)
+        self._resolve_owner()
+        self._resolved = True
+
+    def _resolve_owner(self) -> None:
+        drafts = self._drafts
+        total = self._authoritative_total
+        if not drafts:
+            # Opaque (Claude/Codex/Osprey) failed-attempt bills with zero
+            # generations keep their structural bill; nothing at all stays
+            # unresolved.
+            self._owner = "structural_attempt" if total is not None else "unresolved"
+            return
+        if total is None:
+            # Partial-only evidence is custom and native-billed nowhere.
+            self._owner = "none"
+            return
+        # Only sealed, complete boundaries are allocatable children; an
+        # unsealed or incomplete-boundary draft is partial evidence, so the
+        # chain owns the bill and children never bill.
+        allocatable = [draft for draft in drafts if draft.sealed and draft.boundary_complete]
+        if self._cap_engaged:
+            # Cap drain finalized every retained draft exactly once with no
+            # native bill (the cap invariant above): post-cap drafts may
+            # carry usage whose sums happen to match the authoritative
+            # total, but cap-drained drafts are custom evidence only and
+            # must never allocate the chain's bill to children.
+            self._owner = "structural_attempt" if total is not None else "none"
+            return
+        if len(allocatable) != len(drafts):
+            self._owner = "structural_attempt"
+            return
+        if not all(draft.usage for draft in allocatable):
+            # Partial children + authoritative total: bill the chain only;
+            # children retain custom non-billed evidence.
+            self._owner = "structural_attempt"
+            return
+        child_input = sum(
+            draft.usage.get("input_tokens", 0)
+            for draft in allocatable
+            if isinstance(draft.usage.get("input_tokens"), int)
+        )
+        child_output = sum(
+            draft.usage.get("output_tokens", 0)
+            for draft in allocatable
+            if isinstance(draft.usage.get("output_tokens"), int)
+        )
+        total_input = total.get("input_tokens")
+        total_output = total.get("output_tokens")
+        if (total_input is not None and child_input != total_input) or (
+            total_output is not None and child_output != total_output
+        ):
+            # Complete children contradicting the authoritative total fail
+            # closed: neither side is rewritten, nothing is billed.
+            self._diagnostics.append(_CONTRADICTION_DIAGNOSTIC)
+            self._owner = "none"
+            return
+        self._owner = "generation_children"
+        for draft in allocatable:
+            draft.billed = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "drafts": [draft.to_dict() for draft in self._drafts],
+            "billing_owner": self._owner,
+            "resolved": self._resolved,
+            "authoritative_total": (dict(self._authoritative_total) if self._authoritative_total else None),
+            "diagnostics": list(self._diagnostics),
+            "children_after_cap": self._children_after_cap,
+        }
+
+
 @dataclass
 class Invocation:
     """Per-``run_agent()`` recording scope for one model conversation.
@@ -1561,6 +1884,11 @@ class Invocation:
     _inv_metrics_sum: _InvMetricsSum = field(
         default_factory=lambda: _InvMetricsSum(prompt=0, completion=0, cached=0, cost=0.0)
     )
+    # P18 Task 2: pending-generation lifecycle (binding decisions 1/4/5).
+    # Drafts open on GenerationStartEvent, seal at GenerationEndEvent and stay
+    # UNENDED until finish() resolves the billing owner; terminal/cancel/error
+    # paths drain every draft exactly once at its sealed historical end.
+    _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -1734,6 +2062,8 @@ class Invocation:
         from daydream.backends import (
             CostEvent,
             DiagnosticEvent,
+            GenerationEndEvent,
+            GenerationStartEvent,
             MetricsEvent,
             ResultEvent,
             TextEvent,
@@ -1883,6 +2213,18 @@ class Invocation:
                 cached_tokens=event.cached_tokens,
                 cost_usd=event.cost_usd,
             )
+            # P18 T2: late per-generation usage is custom evidence on the
+            # matching draft (never invented); the ledger reconciles it
+            # against the authoritative terminal total at resolution.
+            if event.generation_id:
+                self._generation_ledger.record_usage(
+                    event.generation_id,
+                    input_tokens=event.prompt_tokens,
+                    output_tokens=event.completion_tokens,
+                    cached_tokens=event.cached_tokens,
+                    cost_usd=event.cost_usd,
+                    reasoning_tokens=event.reasoning_tokens,
+                )
         elif isinstance(event, CostEvent):
             # End-of-call signal — fold the CostEvent's per-dimension
             # take-max residual delta onto the open/metrics step (or mint a
@@ -1891,6 +2233,30 @@ class Invocation:
             # not inlined inside _dispatch (cuts the dispatch complexity
             # concentration; issue #747).
             self._fold_cost_event(event)
+            # P18 T2: the authoritative terminal total is recorded once for
+            # billing-owner resolution. Exact duplicates are idempotent;
+            # contradictory totals fail closed and never rewrite the stored
+            # total or an already-closed owner.
+            if event.measurement_source in ("terminal", "session"):
+                # Terminal (Pi/Claude end-of-call) and session (Osprey
+                # session_end) aggregates are authoritative invocation totals;
+                # per-turn/per-message sources never close the bill.
+                self._generation_ledger.record_authoritative_total(
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    cached_tokens=event.cached_tokens,
+                    cost_usd=event.cost_usd,
+                    reasoning_tokens=event.reasoning_tokens,
+                )
+        elif isinstance(event, GenerationStartEvent):
+            # P18 T2: open an invocation-local logical draft. The host
+            # generation ID is custom correlation, never ``gen_ai.response.id``.
+            self._generation_ledger.open(event)
+        elif isinstance(event, GenerationEndEvent):
+            # P18 T2: seal the complete typed ordered provider choice and the
+            # strict native timing at message_end (before tools). The draft
+            # stays UNENDED until billing ownership resolves at finish().
+            self._generation_ledger.seal(event)
         elif isinstance(event, ResultEvent):
             if event.model_name:
                 if self._open_step_dict is not None:
@@ -2138,11 +2504,28 @@ class Invocation:
         After the final step close, every tool call still in flight (no
         matching ``ToolResultEvent`` arrived) gets a synthetic
         ``ObservationResult`` marker appended to its host Step so no tool call
-        dangles without a terminal outcome.
+        dangles without a terminal outcome. The P18 generation ledger's
+        terminal drain also runs here: on success, error, cancellation or
+        ``BaseException`` every pending draft ends exactly once at its sealed
+        historical end and the billing owner closes (decision 1/5).
         """
         self._close_open_step()
         self._emit_incomplete_call_markers()
+        self._generation_ledger.finalize()
         self.recorder._extend_steps(self.steps)
+
+    def generation_lifecycle(self) -> dict[str, Any]:
+        """Return the P18 pending-generation lifecycle summary for this invocation.
+
+        Shape: ``drafts`` (one entry per generation: sealed choice parts,
+        strict native timing, late usage, billed flag), ``billing_owner``
+        (``unresolved | generation_children | structural_attempt | none``),
+        ``authoritative_total``, fixed ``diagnostics`` and
+        ``children_after_cap``. Surfaced as
+        ``Trajectory.extra["subtrajectories"][...]["generation_lifecycle"]``
+        when the invocation carried generation evidence.
+        """
+        return self._generation_ledger.to_dict()
 
 
 @dataclass
@@ -2901,6 +3284,11 @@ class TrajectoryRecorder:
                 "step_ids": [s.step_id for s in inv.steps],
             }
         )
+        # P18 T2: surface the pending-generation lifecycle only when the
+        # invocation actually carried generation evidence — invocations with
+        # no generation events keep the exact legacy subtrajectory shape.
+        if inv._generation_ledger.has_drafts():
+            self._subtrajectories[-1]["generation_lifecycle"] = inv._generation_ledger.to_dict()
 
     def _recursive_invocation_summaries(self) -> list[dict[str, Any]]:
         """Flatten document-qualified invocation evidence through nested forks."""
@@ -3280,9 +3668,7 @@ class TrajectoryRecorder:
         if registry is not None:
             registry.retain(document)
 
-    def _write_document(
-        self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
-    ) -> None:
+    def _write_document(self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]) -> None:
         """Write one frozen document through the host sink, or straight to disk."""
         if self.document_writer is not None:
             self.document_writer(document, status)
