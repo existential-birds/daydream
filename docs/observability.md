@@ -273,3 +273,96 @@ expires. The runtime does not start another shutdown against that exporter.
 
 For a custom destination, see the
 [trace exporter extension contract](extensions.md#trace-exporters).
+
+## Field contract and versioned matrix
+
+Every emitted field is frozen in [observability-fields.md](observability-fields.md):
+name, source backend/event, source authority/provenance, owning span, type,
+unit, cardinality, derivation, completeness, capture/redaction, generic OTLP
+disposition, HoneyHive canonical destination, LangSmith native destination,
+offline test node, live evidence status, and applicability/omission reason. The
+matrix also lists per-backend unavailable/inapplicable rows, the compatibility
+alias table and removal policy, and an AC-01..AC-31 traceability appendix
+validated against the Task 0 acceptance ledger. The machine-readable subset
+used by the readback verifier is
+`tests/fixtures/observability_contract/readback-matrix.json`; it may only
+shrink relative to the markdown matrix.
+
+## Native readback verification
+
+After a run shuts down, `scripts/verify_observability_readback.py` proves the
+stored HoneyHive/LangSmith native trees against an immutable receipt:
+
+```bash
+HH_API_URL=... HH_API_KEY=... LANGSMITH_API_KEY=... \
+python scripts/verify_observability_readback.py \
+  --receipt /path/to/receipt.json --result /path/to/result.json --deadline 30
+```
+
+The verifier keeps ONE immutable monotonic deadline (`--deadline`, default 30s)
+across every request, capped streamed JSON-body read, stability poll and
+backoff. It owns exactly one `httpx.AsyncClient(trust_env=False,
+follow_redirects=False)` — no redirects are ever followed — closes it on every
+exit path, and each request runs
+as `async with client.stream(...)` under `anyio.fail_after(remaining)`. A
+deadline expiry emits only the fixed redacted `READBACK_TIMEOUT` disposition
+and starts no further request or poll; timeout output never contains a URL,
+header, response body, exception text or credential. Real loopback peers that
+delay response headers or trickle a JSON body cannot extend a 0.12-second
+verifier budget past 0.35 seconds; the peer observes connection closure within
+one second and the request log proves no later page or stability poll began.
+Responses are capped at
+4 MiB + 1 byte and malformed/incomplete/trailing JSON fails closed. The input
+receipt is validated BEFORE any client is constructed; the standalone result
+receipt is written atomically and contains only destination, IDs, counts,
+names, types, booleans, stable hashes and pass/fail matrix rows.
+
+HoneyHive is read through the documented `POST /v1/events/search` endpoint
+with an exact-session `session_id` filter, pages 1..1000, strict
+`{events, count}` validation, duplicate/wrong-session/malformed rejection,
+and two stable complete post-shutdown snapshots. LangSmith is read through the
+documented `POST /runs/query` discovery with exact `daydream.run.id` equality
+in one explicit project and a bounded start time; the verifier requires one
+trace/root, freezes only the vendor-returned IDs, then uses the documented
+exact `id`/`trace_id` read semantics and reaches two equal complete tree
+snapshots before the deadline. It never derives IDs from HoneyHive or from the
+Daydream UUID. Keys come only from the environment; base URLs are validated
+with the same production policy as the exporters.
+
+The sanitized protocol replay is a separate operator boundary:
+`scripts/replay_observability_acceptance.py` accepts only the checked-in
+manifest-pinned sanitized fixture (byte/hash pinned in
+`tests/fixtures/observability_contract/replay-manifest.json`) and a clean
+public disposable repository whose origin is on the manifest allowlist; it
+requires a caller-provided external fake `pi` executable at the subprocess
+boundary, validates authorization and the exact destination set
+(`otlp,honeyhive,langsmith`) BEFORE constructing exporters, sets
+`daydream.acceptance.kind=sanitized_protocol_replay`, drives the REAL
+PiBackend/run_agent/trace_run path once with its own bounded loopback OTLP
+wire oracle, requires local wire success, and writes an immutable receipt
+labeled `sanitized_protocol_replay` with model-call count 0, operational cost
+$0 and hashes/IDs only. The historical-equivalent reported cost ($0.00402781)
+rides as labeled synthetic telemetry, never actual provider billing.
+
+API storage evidence is never UI evidence: `stored contract passed` is
+distinct from `UI not inspected`. Authenticated UI observation of the derived
+agent label remains a separate, mandatory gate (HoneyHive UI explicitly)
+before #1156 closes.
+
+## Vendor acknowledgment realities (binding decision 8)
+
+LangSmith's canonical OTLP success acknowledgment is HTTP 200 with a
+zero-byte body and **no Content-Type header** (confirmed with real exports
+and minimal probes, 2026-09-09). The owned transport classifies any
+`200` response whose content type is missing or not
+`application/x-protobuf` as `OTLP_MALFORMED_ACK` and records it
+`unverified` in the per-destination ledger — per binding decision 8,
+absence of the protobuf content type is terminal/unverified, and
+acceptance counts are never invented from non-conforming acks. LangSmith
+does store the payload (proven exclusively by the native readback gate,
+never by the ack), so with that destination the ledger will show
+`delivered=0 / unverified` even when storage succeeded. Delivery to
+LangSmith is therefore judged by `scripts/verify_observability_readback.py`
+results, not by the exporter ack ledger. HoneyHive returns the canonical
+protobuf-content-type empty ack and is classified `empty_ok` (full
+success).

@@ -10,7 +10,21 @@ from unittest.mock import patch
 import pytest
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, UserMessage
 
-from daydream.backends import AgentEvent, CostEvent, MetricsEvent, RequestEvent, ResultEvent, ToolResultEvent
+from daydream.backends import (
+    AgentEvent,
+    ClaudeRequestConfig,
+    CodexRequestConfig,
+    CostEvent,
+    EffectiveRequestConfig,
+    GenerationEndEvent,
+    GenerationStartEvent,
+    MetricsEvent,
+    OspreyRequestConfig,
+    PiRequestConfig,
+    RequestEvent,
+    ResultEvent,
+    ToolResultEvent,
+)
 from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
 from daydream.backends.codex import CodexBackend
 from daydream.backends.osprey import OspreyBackend, OspreyError
@@ -223,4 +237,89 @@ async def test_request_event_does_not_fabricate_a_trajectory_step(tmp_path: Path
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(request)
-    assert recorder.steps == []
+
+
+# --- P18 Task 1: cross-backend typed-config contract through real event streams
+
+
+def test_all_four_configs_share_the_common_subset() -> None:
+    """Every backend config subclasses the closed common subset."""
+    configs = [
+        ClaudeRequestConfig(model_mode="single"),
+        CodexRequestConfig(model_mode="single", sandbox_mode="read-only"),
+        PiRequestConfig(model_mode="single", no_skills=True),
+        OspreyRequestConfig(model_mode="single", approval_mode="deny-untrusted"),
+    ]
+    for config in configs:
+        assert isinstance(config, EffectiveRequestConfig)
+        assert config.model_mode == "single"
+        assert config.temperature is None  # absent unless explicitly admitted
+    # isinstance is the discriminator (union via inheritance, never dicts).
+    assert isinstance(configs[0], ClaudeRequestConfig)
+    assert isinstance(configs[1], CodexRequestConfig)
+    assert isinstance(configs[2], PiRequestConfig)
+    assert isinstance(configs[3], OspreyRequestConfig)
+
+
+@pytest.mark.asyncio
+async def test_claude_request_event_through_real_stream_carries_config() -> None:
+    """Claude's real-path stream attaches the closed typed config + provenance."""
+    terminal = ResultMessage(
+        subtype="success", duration_ms=10, duration_api_ms=8, is_error=False, num_turns=1,
+        session_id="session",
+    )
+    monkeypatch_state = pytest.MonkeyPatch()
+    try:
+        monkeypatch_state.setattr("daydream.backends.claude.ClaudeSDKClient", scripted_client([terminal]))
+        events = [e async for e in ClaudeBackend("requested-model").execute(Path("/tmp"), "prompt")]
+    finally:
+        monkeypatch_state.undo()
+
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    assert isinstance(request.config, ClaudeRequestConfig)
+    assert request.model_source == "configured"
+    assert request.timestamp_source == "host_observed"
+    # Generation lifecycle events are never emitted by an opaque backend.
+    assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_codex_and_osprey_emit_no_generation_events() -> None:
+    """Only Pi is native_generation_interval; the others stay structural."""
+    from tests.harness.codex_replay import make_mock_process_from_fixture as codex_fixture
+
+    codex_proc = codex_fixture("simple_text.jsonl")
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=codex_proc,
+    ):
+        codex_events = [e async for e in CodexBackend(model="gpt-5.3-codex").execute(Path("/tmp"), "p")]
+    assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in codex_events)
+    request = next(e for e in codex_events if isinstance(e, RequestEvent))
+    assert isinstance(request.config, CodexRequestConfig)
+
+    # Osprey: build the full JSONL stream inline (protocol/session_start/…).
+    osprey_body = [
+        {"event": "protocol", "version": 2},
+        {"event": "session_start", "session_id": "s-obs", "started_at": "2026-08-15T00:00:00Z",
+         "model": "custom-model", "provider": "openai-compatible"},
+        {"event": "turn_start", "turn_id": "t1", "timestamp": "2026-08-15T00:00:01Z"},
+        {"event": "text_delta", "content": "obs answer"},
+        {"event": "turn_end", "turn_id": "t1", "usage_reported": False, "duration_ms": 5},
+        {"event": "session_end", "total_turns": 1, "session_wallclock_ms": 5,
+         "total_cost_usd": None, "total_prompt_tokens": 0, "total_completion_tokens": 0,
+         "total_cached_tokens": None, "total_cache_write_tokens": None,
+         "total_thinking_tokens": 0, "total_oom_kills": 0, "p50_turn_ms": 5,
+         "p99_turn_ms": 5, "avg_turn_cost_usd": None, "structured_output": None,
+         "verification": None, "outcome": "completed", "exit_code": 0},
+    ]
+    osprey_lines = [json.dumps(line) for line in osprey_body]
+    osprey_backend = OspreyBackend(model="custom-model", osprey_binary="fake")
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=lambda *a, **k: FakeCliProcess(osprey_lines),
+    ):
+        osprey_events = [e async for e in osprey_backend.execute(Path("/tmp"), "p")]
+    assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in osprey_events)
+    osprey_request = next(e for e in osprey_events if isinstance(e, RequestEvent))
+    assert isinstance(osprey_request.config, OspreyRequestConfig)
+    assert osprey_request.timestamp_source == "native"

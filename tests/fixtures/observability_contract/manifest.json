@@ -1,0 +1,49 @@
+{
+  "source": {
+    "type": "git_commit",
+    "repo": "open-telemetry/semantic-conventions-genai",
+    "commit": "94f432d7126f5884d30a2cdde6f4e89908ebb6fd",
+    "retrieved_at": "2026-09-08T17:55:48Z",
+    "url": "https://github.com/open-telemetry/semantic-conventions-genai/tree/94f432d7126f5884d30a2cdde6f4e89908ebb6fd",
+    "note": "Upstream marks the instrumentation schema URL as TODO at this commit; no schema_url is fabricated. Only the exact registry and four content schemas below are pinned. spans.yaml is included to derive span-class requirement expressions (CLIENT vs INTERNAL invoke_agent provider requirement); manifest.yaml was retrieved and reviewed but not pinned (no derived fields)."
+  },
+  "files": {
+    "registry.yaml": {
+      "url": "https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/94f432d7126f5884d30a2cdde6f4e89908ebb6fd/model/gen-ai/registry.yaml",
+      "bytes": 43067,
+      "sha256": "8381a0cd47111869d2fbcf847da357504ba7a554ad2ed6c3d4b416d346f9f4fa"
+    },
+    "spans.yaml": {
+      "url": "https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/94f432d7126f5884d30a2cdde6f4e89908ebb6fd/model/gen-ai/spans.yaml",
+      "bytes": 38428,
+      "sha256": "7bc1a3025319821cf8fc3e730e827149a9640ef2e4227bdb5abb02eed7faef69"
+    },
+    "gen-ai-input-messages.json": {
+      "url": "https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/94f432d7126f5884d30a2cdde6f4e89908ebb6fd/model/gen-ai/gen-ai-input-messages.json",
+      "bytes": 20355,
+      "sha256": "034fcd8c87f1e013f3a5a5018503210e2bee4d2499c361823b96e906d40a50ad"
+    },
+    "gen-ai-output-messages.json": {
+      "url": "https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/94f432d7126f5884d30a2cdde6f4e89908ebb6fd/model/gen-ai/gen-ai-output-messages.json",
+      "bytes": 21615,
+      "sha256": "cb1e0296de9a5c15237f4e49af2f13e1409ffc9a671f89767da20ad986f37461"
+    },
+    "gen-ai-system-instructions.json": {
+      "url": "https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/94f432d7126f5884d30a2cdde6f4e89908ebb6fd/model/gen-ai/gen-ai-system-instructions.json",
+      "bytes": 1783,
+      "sha256": "208195efb86d3d8ebb604d81ee8ff49215aea82f2ec81e7f0fc743690748da30"
+    },
+    "gen-ai-tool-definitions.json": {
+      "url": "https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/94f432d7126f5884d30a2cdde6f4e89908ebb6fd/model/gen-ai/gen-ai-tool-definitions.json",
+      "bytes": 3227,
+      "sha256": "023501e9835139703d4b475c86d3d6b6b11dee2ccc08ea6c8ab48d173b89aa80"
+    }
+  },
+  "derive": {
+    "names": "Every emitted gen_ai.* production literal must be provable from registry.yaml attributes (name-level derivation).",
+    "types": "Scalar/array types (string, int, any/template) are asserted against registry.yaml type fields for emitted attributes.",
+    "enums": "gen_ai.operation.name, gen_ai.provider.name, gen_ai.output.type, and schema FinishReason members are asserted against pinned members; Daydream only emits known members.",
+    "requirement": "CLIENT gen_ai.invoke_agent requires gen_ai.provider.name (required) per spans.yaml; INTERNAL gen_ai.invoke_agent must not fabricate it. Emitted attribute values must satisfy pinned enum membership.",
+    "schemas": "Representative Daydream input/output/system/tool JSON validates against the four pinned draft-07 content schemas."
+  }
+}

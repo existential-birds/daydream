@@ -1,0 +1,90 @@
+{
+    "schema_version": 1,
+    "contract_version": "94f432d",
+    "note": "Machine-readable subset of docs/observability-fields.md used by scripts/verify_observability_readback.py for stored-field comparisons. The authoritative expanded matrix (source/type/unit/owner/provenance/completeness/privacy/bounds/vendor/test/readback) is the versioned markdown document; this subset may only shrink relative to it, never add a field the doc omits. Vendor-reality notes (native readback evidence, 2026-09-09): HoneyHive elides empty config/metrics/feedback containers on returned events and synthesizes one aggregate 'session' event per session, so those containers are conditional (type-checked when present) rather than required; HoneyHive routes events into the session via the session_id filter only when the span carries traceloop.association.properties.* identity (see docs identity rows: All spans). LangSmith stores the OpenLLMetry association property daydream_run_id as run metadata at extra.metadata and rejects dotted-key metadata filters; top-level metadata/invocation_params/usage_metadata are not projected by /runs/query and are therefore conditional. LangSmith additionally enforces a ~24-hour OTLP ingest window on span start times (live 422: 'start_time for post must be within ≈24 hours of current time'); the sanitized protocol replay deliberately pins generation timestamps to its manifest's historical interval, so a replay whose pinned interval is older than the window is structurally absent from LangSmith — the verifier reports this as an honest READBACK_NOT_FOUND (zero discovered runs), never as root ambiguity.",
+    "forbidden_vendor_fields": [
+        "_detectedAgent",
+        "_detectedAgentDisplayName",
+        "_agentsDetected",
+        "_pathToDisplayNameMap"
+    ],
+    "identity_metadata_keys": [
+        "daydream.run.id",
+        "daydream.session.id",
+        "daydream.trajectory.id",
+        "traceloop.association.properties.session_id"
+    ],
+    "honeyhive": {
+        "search_path": "/v1/events/search",
+        "page_limit_low": 1,
+        "page_limit_high": 1000,
+        "required_event_keys": {
+            "session_id": "string",
+            "event_name": "string",
+            "event_type": "string",
+            "metadata": "object",
+            "user_properties": "object"
+        },
+        "conditional_event_keys": {
+            "config": "object",
+            "metrics": "object",
+            "feedback": "array",
+            "inputs": "object",
+            "outputs": "object"
+        },
+        "conditional_metadata_keys": {
+            "agent_name": "string",
+            "agent_description": "string",
+            "agent_id": "string",
+            "span_kind": "string"
+        }
+    },
+    "langsmith": {
+        "query_path": "/runs/query",
+        "identity_metadata_key": "daydream_run_id",
+        "required_run_keys": {
+            "id": "string",
+            "name": "string",
+            "run_type": "string",
+            "status": "string",
+            "trace_id": "string",
+            "start_time": "string",
+            "end_time": "string",
+            "parent_run_id": "string_or_null"
+        },
+        "conditional_run_keys": {
+            "metadata": "object",
+            "invocation_params": "object",
+            "usage_metadata": "object",
+            "ls_agent_type": "string"
+        },
+        "root_required": true,
+        "single_trace_required": true
+    },
+    "expected_shape": {
+        "representative_real_run": {
+            "note": "Generic structural expectations only; live vendor counts are recorded, not asserted. One root, one session, at least one chain/agent aggregate, at least one generation child, at least one tool sibling; no forbidden vendor fields.",
+            "generations_min": 1,
+            "tools_min": 1
+        },
+        "sanitized_protocol_replay": {
+            "note": "Exact historical-equivalent reconciliation for the manifest-pinned sanitized replay (see tests/fixtures/observability_contract/replay-manifest.json).",
+            "generations": 2,
+            "tools": 1,
+            "session_id": "pi_ses_replay",
+            "model_name": "glm-5.3-flash",
+            "provider_name": "nous",
+            "response_ids": [
+                "resp_replay_01",
+                "resp_replay_02"
+            ],
+            "native_started_at_unix_ms": 1788690314289,
+            "sealed_end_unix_ns": 1788690709621000000,
+            "duration_ns": 395332000000,
+            "normalized_input_tokens": 86936,
+            "output_tokens": 8401,
+            "reasoning_tokens": 8260,
+            "reported_cost_usd": 0.00402781
+        }
+    }
+}

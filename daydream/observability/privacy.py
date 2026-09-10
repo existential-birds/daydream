@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import string
 import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -22,6 +23,97 @@ from daydream.trajectory import redact_structured_text, redact_value
 _FLAG_VALUE_TOKENS = frozenset(
     {"true", "false", "yes", "no", "on", "off", "1", "0", "enabled", "disabled", "null", "none"}
 )
+
+#: Resource keys whose values are treated as credentials: the key is retained
+#: but the value is replaced before export. Key names themselves never carry
+#: secrets; values under these names do. The stems match credential-denoting
+#: names (``api_key``, ``AUTH_TOKEN``, ``secret``, ``bearer``) without claiming
+#: every key-shaped name such as ``unicode.key``.
+_RESOURCE_SECRET_KEY = re.compile(r"api[_-]?key|auth|token|secret|passw(or)?d|credential|bearer|private[_-]?key", re.I)
+
+_HEX_DIGITS = frozenset(string.hexdigits)
+
+#: Fixed diagnostic for a rejected operator resource variable. It never echoes
+#: a pair, key, or value fragment.
+RESOURCE_DIAGNOSTIC = (
+    "OTEL_RESOURCE_ATTRIBUTES ignored: malformed, invalid, or duplicate operator resource settings; "
+    "using Daydream defaults"
+)
+
+
+class ResourceParseError(ValueError):
+    """A strict operator-resource parse failure; never carries input fragments."""
+
+
+def _percent_decode(text: str) -> str:
+    """Decode OTel-style percent escapes strictly as UTF-8; no lenient fallback."""
+    raw = bytearray()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "%":
+            escape = text[index + 1 : index + 3]
+            if len(escape) != 2 or any(item not in _HEX_DIGITS for item in escape):
+                raise ResourceParseError()
+            raw.append(int(escape, 16))
+            index += 3
+        else:
+            raw.extend(char.encode("utf-8"))
+            index += 1
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ResourceParseError() from None
+
+
+def _has_control_character(text: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in text)
+
+
+def parse_operator_resource_attributes(raw: str) -> dict[str, str]:
+    """Parse one operator resource variable; reject the whole value on any error.
+
+    Every accepted value stays a string. A malformed pair, malformed percent
+    escape, empty or control-character key, control character in a value, or a
+    duplicate key (including aliases that collide only after percent decoding)
+    raises :class:`ResourceParseError` — callers discard the entire variable.
+    """
+    attributes: dict[str, str] = {}
+    if not raw:
+        return attributes
+    for pair in raw.split(","):
+        if not pair:
+            continue
+        key, separator, value = pair.partition("=")
+        if not separator:
+            raise ResourceParseError()
+        decoded_key = _percent_decode(key)
+        decoded_value = _percent_decode(value)
+        if not decoded_key or _has_control_character(decoded_key) or _has_control_character(decoded_value):
+            raise ResourceParseError()
+        if decoded_key in attributes:
+            raise ResourceParseError()
+        attributes[decoded_key] = decoded_value
+    return attributes
+
+
+def sanitize_operator_resource_attributes(
+    attributes: Mapping[str, str], policy: PrivacyPolicy
+) -> dict[str, str]:
+    """Return the privacy-filtered copy of accepted operator resource entries.
+
+    Secret-like keys keep a stable key with the value replaced; all other keys
+    and values are scrubbed of operator secret literals. Keys and values remain
+    strings.
+    """
+    sanitized: dict[str, str] = {}
+    for key, value in attributes.items():
+        safe_key = policy.text(key)
+        if _RESOURCE_SECRET_KEY.search(safe_key):
+            sanitized[safe_key] = "[REDACTED_CREDENTIAL]"
+        else:
+            sanitized[safe_key] = policy.text(value)
+    return sanitized
 
 
 class PrivacyPolicy:

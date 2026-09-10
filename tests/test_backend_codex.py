@@ -4,8 +4,11 @@
 import asyncio
 import json
 import logging
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -17,6 +20,8 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import (
+    CodexRequestConfig,
+    ContinuationToken,
     CostEvent,
     DiagnosticEvent,
     MetricsEvent,
@@ -2127,3 +2132,161 @@ async def test_issue1124_stored_commands_are_replayable() -> None:
     assert starts["cmd_6"] == 'python -c "print(1)"'
     assert starts["cmd_7"] == "/bin/zsh -lc 'unbalanced"
     assert starts["cmd_8"] == "make test"
+
+
+# --- P18 Task 1: effective request-config admission at the Codex argv seam ---
+
+
+@pytest.mark.asyncio
+async def test_request_event_config_matches_exact_argv() -> None:
+    """The admitted config equals the argv actually built (full-access default)."""
+    captured_argv: dict[str, Any] = {}
+
+    def _capturing_exec(*args: Any, **kwargs: Any) -> Any:
+        captured_argv["argv"] = list(args)
+        return make_mock_process_from_fixture("simple_text.jsonl")
+
+    backend = CodexBackend(model="gpt-5.3-codex")
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=_capturing_exec,
+    ):
+        events = [event async for event in backend.execute(Path("/tmp"), "hello")]
+
+    argv = captured_argv["argv"]
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, CodexRequestConfig)
+    # Exact argv correspondence.
+    assert config.sandbox_mode == argv[argv.index("--sandbox") + 1] == "danger-full-access"
+    assert config.experimental_json is True and "--experimental-json" in argv
+    assert config.native_output_schema is False and "--output-schema" not in argv
+    assert config.read_only_isolation is False
+    assert config.continuation_mode == "fresh"
+    assert config.model_mode == "single"
+    # Accepted-but-ignored controls stay explicitly unavailable.
+    assert config.max_turns is None  # max_turns never passed to this CLI
+    assert config.persist_session is None  # accepted, not passed
+    assert request.model_name == "gpt-5.3-codex"
+    assert request.model_source == "configured"
+    assert request.provider_name is None  # CLI never acknowledges provider here
+    assert request.provider_source is None
+    assert request.timestamp_source == "host_observed"
+
+
+@pytest.mark.asyncio
+async def test_request_event_config_read_only_sandbox_and_isolation() -> None:
+    """read_only on a worktree root admits read-only sandbox + clone isolation."""
+    from tests.harness.fake_cli_process import FakeCliProcess
+
+    worktree = Path(tempfile.mkdtemp(prefix="codex-p18-ro-"))
+    subprocess_run = subprocess.run
+    # Make the cwd a genuine git worktree root via the real git binary.
+    env = dict(os.environ)
+    env.pop("GIT_DIR", None)
+    init = subprocess_run(
+        ["git", "init", "-q", str(worktree)], env=env, capture_output=True, check=True,
+    )
+    assert init.returncode == 0
+    (worktree / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess_run(["git", "-C", str(worktree), "add", "seed.txt"], env=env, check=True)
+    subprocess_run(
+        ["git", "-C", str(worktree), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "seed"],
+        env=env, check=True,
+    )
+
+    captured_argv: dict[str, Any] = {}
+    ro_item = {
+        "type": "agent_message", "id": "m1", "content": [{"type": "text", "text": "ro"}],
+    }
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "th_ro"}),
+        json.dumps({"type": "item.completed", "item": ro_item}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+    ]
+
+    def _spawner(argv: list[str], **kwargs: Any) -> FakeCliProcess:
+        captured_argv["argv"] = list(argv)
+        return FakeCliProcess(lines)
+
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=lambda *a, **k: _spawner(list(a)),
+    ):
+        backend = CodexBackend(model="gpt-5.3-codex")
+        events = [event async for event in backend.execute(worktree, "hello", read_only=True)]
+
+    argv = captured_argv["argv"]
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, CodexRequestConfig)
+    assert config.sandbox_mode == "read-only"
+    assert config.read_only_isolation is True  # disposable clone (execution_cwd != cwd)
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert config.native_output_schema is False
+    shutil.rmtree(worktree, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_request_event_config_resume_and_schema() -> None:
+    """Resume admits continuation_mode=resume; a schema admits native output."""
+    from tests.harness.fake_cli_process import FakeCliProcess
+
+    captured_argv: dict[str, Any] = {}
+
+    def _spawner(argv: list[str], **kwargs: Any) -> FakeCliProcess:
+        captured_argv["argv"] = list(argv)
+        return FakeCliProcess(lines)
+
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    res_item = {
+        "type": "agent_message", "id": "m1",
+        "content": [{"type": "text", "text": "{\"ok\": true}"}],
+    }
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "th_res"}),
+        json.dumps({"type": "item.completed", "item": res_item}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+    ]
+
+    token = ContinuationToken(backend="codex", data={"thread_id": "th_old"})
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=lambda *a, **k: _spawner(list(a)),
+    ):
+        backend = CodexBackend(model="gpt-5.3-codex")
+        events = [
+            event
+            async for event in backend.execute(
+                Path("/tmp"), "hello", output_schema=schema, continuation=token,
+            )
+        ]
+
+    argv = captured_argv["argv"]
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, CodexRequestConfig)
+    assert config.continuation_mode == "resume"
+    assert config.native_output_schema is True
+    assert "--output-schema" in argv
+    assert "resume" in argv
+    assert request.session_id == "th_old"
+    assert request.session_source == "configured"
+    # The prompt travels on stdin, never as a positional argv element.
+    assert "hello" not in argv
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_events_carry_turn_end_and_estimated_provenance() -> None:
+    """Codex synthesizes cost (estimated) at turn_end (invocation scope)."""
+    backend = CodexBackend(model="gpt-5.3-codex")
+    events = await _run_fixture(backend, "say", "simple_text.jsonl")
+
+    metrics = [e for e in events if isinstance(e, MetricsEvent)]
+    costs = [e for e in events if isinstance(e, CostEvent)]
+    assert metrics and costs
+    assert all(m.measurement_source == "turn_end" for m in metrics)
+    assert all(m.usage_scope == "invocation" for m in metrics)
+    assert all(c.measurement_source == "turn_end" for c in costs)
+    assert all(c.cost_source == "estimated" for c in costs)

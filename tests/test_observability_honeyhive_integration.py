@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream import runner
 from daydream.backends import (
     CostEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
+    TextChoicePart,
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
@@ -61,6 +65,7 @@ async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
                     cached_tokens=20,
                     cache_creation_tokens=5,
                     reasoning_tokens=6,
+                    measurement_source="terminal",
                 ),
                 ResultEvent({"answer": "safe"}, None, finish_reason="stop"),
             ]
@@ -79,7 +84,7 @@ async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
     assert json.loads((feature_branch_repo / ".daydream/observability-result.json").read_text()) == {"answer": "safe"}
     generic_spans = {span["spanId"]: span for span in generic.spans}
     assert len(honeyhive.spans) == len(generic_spans) == 5
-    type_mapping = {"run": "chain", "step": "chain", "agent": "chain", "attempt": "model", "tool": "tool"}
+    type_mapping = {"run": "chain", "step": "chain", "agent": "chain", "attempt": "chain", "tool": "tool"}
     trajectory_paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
     assert len(trajectory_paths) == 1
     session_id = json.loads(trajectory_paths[0].read_text())["session_id"]
@@ -166,3 +171,83 @@ async def test_honeyhive_outage_preserves_result_and_generic_export(
     assert all(attributes(span)["honeyhive_event_type"] for span in honeyhive.spans)
     assert "Failed to export" in caplog.text
     assert _SECRET not in caplog.text
+
+
+async def test_honeyhive_generation_child_is_model_and_attempt_stays_chain(
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real Pi-style stream yields one model child per approved generation.
+
+    The structural attempt and the logical agent remain chain; only the sealed
+    generation becomes a HoneyHive model event, and the exactly-once historical
+    end survives to the wire (issue #1156 AC-10/AC-18).
+    """
+
+    ext_dir.write_module(_FLOW)
+    install_backend(
+        ScriptedBackend(
+            events=[
+                RequestEvent(_PROMPT, model_name="pi-model", provider_name="pi"),
+                GenerationStartEvent(generation_id="gen-one", observed_at_unix_ns=1788690314289000000),
+                GenerationEndEvent(
+                    generation_id="gen-one",
+                    native_started_at_unix_ms=1788690314289,
+                    ended_at_unix_ns=1788690709621000000,
+                    end_source="host_observed_message_end",
+                    choice_parts=(TextChoicePart(text=_REPLY),),
+                    response_id="late-response",
+                    model_name="pi-model",
+                    provider_name="pi",
+                    finish_reason="stop",
+                ),
+                TextEvent(_REPLY),
+                MetricsEvent(
+                    message_id="",
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    cached_tokens=None,
+                    cost_usd=0.001,
+                    generation_id="gen-one",
+                ),
+                CostEvent(
+                    cost_usd=0.001,
+                    input_tokens=10,
+                    output_tokens=2,
+                    measurement_source="terminal",
+                ),
+                ResultEvent({"answer": "safe"}, None, finish_reason="stop"),
+            ]
+        )
+    )
+    with otlp_collector() as honeyhive:
+        _configure(monkeypatch, honeyhive.base_url, "honeyhive")
+        monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
+        assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
+
+    by_kind: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for span in honeyhive.spans:
+        native = attributes(span)
+        by_kind.setdefault(native["daydream.span.kind"], []).append((span, native))
+    assert set(by_kind) == {"run", "step", "agent", "attempt", "generation"}
+    generation_raw, generation = by_kind["generation"][0]
+    attempt_raw, attempt = by_kind["attempt"][0]
+    assert attempt["honeyhive_event_type"] == "chain"
+    assert attempt_raw["parentSpanId"] == by_kind["agent"][0][0]["spanId"]
+    assert generation["honeyhive_event_type"] == "model"
+    # The generation child hangs under the attempt and ends at the sealed
+    # historical host message_end (1788690709621000000 ns).
+    assert generation_raw["parentSpanId"] == attempt_raw["spanId"]
+    assert generation_raw["startTimeUnixNano"] == "1788690314289000000"
+    assert generation_raw["endTimeUnixNano"] == "1788690709621000000"
+    assert generation["daydream.generation.billed"] is True
+    # One billable owner: the model child carries the native usage/cost and
+    # the structural chain does not double-bill it.
+    assert generation["honeyhive_metadata.prompt_tokens"] == 10
+    assert generation["honeyhive_metadata.cost"] == 0.001
+    assert not any(key.startswith("honeyhive_metadata.") for key in attempt)
+    # Standard agent identity on the logical agent scope.
+    assert by_kind["agent"][0][1]["gen_ai.agent.name"] == "review"

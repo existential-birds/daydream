@@ -7,8 +7,10 @@ from typing import Any, cast
 import pytest
 
 from daydream.backends import (
+    ClaudeRequestConfig,
     ContinuationToken,
     CostEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -1370,3 +1372,145 @@ def test_is_background_bash(payload: Any, background: bool) -> None:
     from daydream.backends.claude import _is_background_bash
 
     assert _is_background_bash(payload) is background
+
+
+# --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
+
+
+@pytest.mark.asyncio
+async def test_request_event_carries_typed_config_from_exact_sdk_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RequestEvent.config mirrors the options the SDK client actually received."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(monkeypatch, _capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), "capture config"):
+        events.append(event)
+
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, ClaudeRequestConfig)
+    # Common subset: max_turns not passed -> None (never an effective claim).
+    assert config.max_turns is None
+    assert config.read_only is False
+    assert config.persist_session is True
+    assert config.continuation_mode == "fresh"
+    # Claude main-model-only surface is single-model-capable.
+    assert config.model_mode == "single"
+    # Backend-specific: exact implemented facts (never guessed defaults).
+    assert config.permission_mode == "bypassPermissions"
+    assert config.allowed_tools_count == 6
+    assert config.allowed_tools_present is True
+    assert config.audit_tools_count is None
+    assert config.audit_tools_present is None
+    assert config.setting_sources_present is True
+    assert config.native_output_format is False
+    assert config.buffer_limit_bytes == 10 * 1024 * 1024
+    assert config.hooks_enabled is True
+    # Provenance: configured model, no claimed provider, host-observed stamp.
+    assert request.model_name == "opus"
+    assert request.model_source == "configured"
+    assert request.provider_name is None
+    assert request.provider_source is None
+    assert request.timestamp_source == "host_observed"
+
+
+@pytest.mark.asyncio
+async def test_request_event_requires_multi_or_dynamic_for_nonempty_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nonempty agents mapping makes the aggregate multi-model-capable."""
+    events = await _drive_with_agents(monkeypatch)
+
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, ClaudeRequestConfig)
+    assert config.model_mode == "multi_or_dynamic"
+    # Agent definitions are never inspected or exported: no prompt/model of
+    # any specialist leaks into the admitted config.
+    assert not hasattr(config, "agents")
+    assert not hasattr(config, "agent_definitions")
+    # The exact main-model Daydream provenance is preserved.
+    assert request.model_name == "opus"
+    assert request.model_source == "configured"
+
+
+async def _drive_with_agents(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Drive execute with a nonempty agents mapping and collect the events."""
+    from claude_agent_sdk.types import AgentDefinition
+
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(monkeypatch, _capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+    specialists: dict[str, AgentDefinition] = {
+        "pattern-scanner": AgentDefinition(
+            description="Scan patterns", prompt="Scan", model="sonnet",
+        ),
+    }
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), "fan out", agents=specialists):
+        events.append(event)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_request_event_read_only_and_max_turns_are_admitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actually-passed max_turns/read_only appear; accepted-but-ignored do not exist."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(monkeypatch, _capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), "go", max_turns=7, read_only=True):
+        events.append(event)
+
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, ClaudeRequestConfig)
+    assert config.max_turns == 7  # passed -> admitted (never interpreted as max tokens)
+    assert config.read_only is True
+    assert config.allowed_tools_count == 6  # allowed_tools unchanged by read_only
+    assert config.hooks_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_request_event_resume_provenance_is_host_generated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed claude session is continuation_mode=resume with host provenance."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(monkeypatch, _capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+    token = ContinuationToken(backend="claude", data={"session_id": "sess-42"})
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), "again", continuation=token):
+        events.append(event)
+
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, ClaudeRequestConfig)
+    assert config.continuation_mode == "resume"
+    assert request.session_id == "sess-42"
+    assert request.session_source == "host_generated"
+
+
+@pytest.mark.asyncio
+async def test_request_event_output_schema_sets_native_output_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schema request admits native_output_format=True at the SDK options."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(monkeypatch, _capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), "structured", output_schema={"type": "object"}):
+        events.append(event)
+
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    config = request.config
+    assert isinstance(config, ClaudeRequestConfig)
+    assert config.native_output_format is True
+    assert request.output_schema == {"type": "object"}

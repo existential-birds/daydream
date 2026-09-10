@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "kind": "sanitized_protocol_replay",
+  "note": "Manifest-pinned sanitized Pi protocol replay fixture. The replay tool (scripts/replay_observability_acceptance.py) accepts ONLY this fixture byte-for-byte (SHA-256 pin below), a clean public disposable repo whose origin remote URL appears in public_repo_allowlist, and a caller-provided external fake `pi` executable whose file content contains the fake_pi_identity_marker. All identity facts below are the expected wire assertions; the receipt labels reported cost as synthetic historical-equivalent telemetry, never actual provider billing.",
+  "fixture": {
+    "path": "tests/fixtures/pi_jsonl/long_generation_replay.jsonl",
+    "bytes": 1680,
+    "sha256": "f7aa6f6206ba8811d15ee68f0938c6ef193d64393197836c054f0d73ddfbdaf3",
+    "identity": {
+      "session_id": "pi_ses_replay",
+      "response_ids": ["resp_replay_01", "resp_replay_02"],
+      "model_name": "glm-5.3-flash",
+      "provider_name": "nous",
+      "native_started_at_unix_ms": 1788690314289,
+      "first_message_end_receipt_unix_ns": 1788690709621000000,
+      "duration_ns": 395332000000,
+      "normalized_input_tokens": 86936,
+      "output_tokens": 8401,
+      "reasoning_tokens": 8260,
+      "reported_cost_usd": 0.00402781
+    }
+  },
+  "public_repo_allowlist": [
+    "https://github.com/earendil-works/pi-coding-agent.git",
+    "https://github.com/existential-birds/daydream.git"
+  ],
+  "fake_pi_identity_marker": "daydream-sanitized-protocol-replay-fake-pi",
+  "destinations": {
+    "required": ["otlp", "honeyhive", "langsmith"],
+    "forbidden": ["codex", "claude", "osprey"]
+  },
+  "acceptance": {
+    "kind": "sanitized_protocol_replay",
+    "resource_marker_key": "daydream.acceptance.kind",
+    "model_call_count_expected": 0,
+    "operational_cost_usd_expected": 0
+  }
+}

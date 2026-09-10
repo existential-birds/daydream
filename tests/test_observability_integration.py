@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,7 +24,7 @@ from daydream.observability.config import ObservabilityConfig
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.otlp import attributes, otlp_collector
+from tests.harness.otlp import TraceCollector, attributes, otlp_collector
 
 _SECRET = "opaque-observability-credential-73951"
 _PROMPT = "Review the observability sample and return its answer."
@@ -65,7 +66,8 @@ def _backend() -> ScriptedBackend:
                      cached_tokens=20, cache_creation_tokens=5, cost_usd=0.004,
                      model_name="observed-model", provider_name="observed-provider"),
         CostEvent(cost_usd=0.004, input_tokens=100, output_tokens=12, cached_tokens=20,
-                  cache_creation_tokens=5, model_name="observed-model", provider_name="observed-provider"),
+                  cache_creation_tokens=5, model_name="observed-model", provider_name="observed-provider",
+                  measurement_source="terminal"),
         ResultEvent(structured_output={"answer": "safe"}, continuation=None, model_name="observed-model",
                     provider_name="observed-provider", session_id="native-session-one", finish_reason="stop"),
     ])
@@ -122,8 +124,15 @@ async def test_runner_exports_complete_portable_trace(
     assert billed["gen_ai.usage.output_tokens"] == 12
     assert billed["gen_ai.request.model"] == "observed-model"
     assert billed["gen_ai.response.model"] == "observed-model"
-    assert billed["gen_ai.operation.name"] == "chat"
+    # T4: the attempt aggregate is structural (invoke_agent), never chat. With
+    # the terminal authoritative total and no generation children, the closed
+    # billing owner is the structural chain (binding decision 5).
+    assert billed["gen_ai.operation.name"] == "invoke_agent"
+    assert billed["daydream.billing.owner"] == "structural_attempt"
     assert billed["daydream.invocation.aggregate"] is True
+    assert billed["gen_ai.agent.name"] == "review"
+    assert attributes(agent)["gen_ai.agent.name"] == "review"
+    assert attributes(agent)["daydream.agent.role"] == "root"
     assert billed["gen_ai.response.finish_reasons"] == ["stop"]
     assert billed["gen_ai.provider.name"] == "observed-provider"
     assert _PROMPT in billed["gen_ai.input.messages"]
@@ -149,7 +158,9 @@ async def test_runner_exports_complete_portable_trace(
     assert paths == {dict(otlp="/v1/traces", langsmith="/otel/v1/traces",
                           honeyhive="/opentelemetry/v1/traces")[destination]}
     if destination == "langsmith":
-        assert billed["langsmith.span.kind"] == "llm"
+        # T4: the structural attempt aggregate is a chain; only approved
+        # generations are llm spans.
+        assert billed["langsmith.span.kind"] == "chain"
         assert attributes(tool)["langsmith.span.kind"] == "tool"
         assert all(attributes(span)["langsmith.span.kind"] == "chain" for span in (roots[0], phase, agent))
         usage = json.loads(billed["langsmith.usage_metadata"])
@@ -386,3 +397,59 @@ async def test_workspace_failure_exports_root_before_a_trajectory_exists(
     assert "daydream.trajectory.id" not in identity
     assert "traceloop.association.properties.session_id" not in identity
     assert not (tmp_path / ".daydream/runs").exists()
+
+
+# --- P18 Task 3: sanitized resource reaches every destination identically ------
+
+
+def receiver_requests_resource(request: dict[str, Any]) -> dict[str, Any]:
+    from tests.harness.otlp import attributes as decode_attributes
+
+    first = request["body"]["resourceSpans"][0]
+    return decode_attributes(first["resource"])
+
+
+def resources_on_wire(receiver: TraceCollector) -> list[dict[str, Any]]:
+    return [receiver_requests_resource(request) for request in receiver.requests]
+
+
+async def test_all_destinations_receive_same_sanitized_resource(
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from importlib.metadata import version as package_version
+
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "deployment.environment.name=offline-audit,"
+        "service.name=false-operator,telemetry.sdk.name=not-otel,telemetry.sdk.version=9.9.9,"
+        "service.instance.id=operator-instance-uuid,api_key=opaque-resource-secret",
+    )
+    monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
+    ext_dir.write_module(_FLOW)
+    install_backend(_backend())
+    try:
+        with otlp_collector() as generic, otlp_collector() as langsmith, otlp_collector() as honeyhive:
+            _configure(monkeypatch, generic.base_url, "otlp,langsmith,honeyhive")
+            monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
+            monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
+            assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
+        for receiver in (generic, langsmith, honeyhive):
+            resources = resources_on_wire(receiver)
+            assert resources, "no resource spans decoded"
+            for resource in resources:
+                assert resource["service.name"] == "daydream"
+                assert resource["service.version"] == package_version("daydream")
+                assert resource["telemetry.sdk.name"] == "opentelemetry"
+                assert resource["telemetry.sdk.language"] == "python"
+                assert resource["telemetry.sdk.version"] == package_version("opentelemetry-sdk")
+                assert resource["service.instance.id"] == "operator-instance-uuid"
+                assert resource["deployment.environment.name"] == "offline-audit"
+                assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
+                assert "opaque-resource-secret" not in json.dumps(resource)
+        assert resources_on_wire(generic) == resources_on_wire(langsmith) == resources_on_wire(honeyhive)
+    finally:
+        monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)

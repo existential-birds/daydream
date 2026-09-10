@@ -21,14 +21,19 @@ import pytest
 from daydream.backends import (
     ContinuationToken,
     CostEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
+    PiRequestConfig,
     RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
+    ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    unix_ms_to_ns,
 )
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import (
@@ -47,7 +52,7 @@ from daydream.backends.pi import (
     _render_tool_result,
     _schema_instruction,
 )
-from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.stub_backend import silence as _silence
 
@@ -1578,3 +1583,240 @@ async def test_pi_falls_back_to_pi_thinking_when_no_effort_resolved(monkeypatch:
 
     flat_args, _ = await _run_and_capture_args(backend)
     assert flat_args[flat_args.index("--thinking") + 1] == "high"
+
+
+# --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----
+
+
+def test_pi_replay_fixture_is_sanitized_labeled() -> None:
+    """The replay fixture carries no real private content — placeholders only."""
+    fixture = FIXTURES_DIR / "generation_lifecycle.jsonl"
+    text = fixture.read_text(encoding="utf-8")
+    # Placeholder-marked content everywhere; exact pinned numbers only.
+    assert "THINKING_PLACEHOLDER_ONE" in text
+    assert "TEXT_PLACEHOLDER" in text
+    assert "FILE_PLACEHOLDER" in text
+    assert "src/example.py" in text  # synthetic argument path, not a real one
+    assert "1788690314289" in text
+    # No real artifact content: the pinned historical blob text is absent.
+    assert "395.332" not in text.split("\n")[0]
+
+
+@pytest.mark.asyncio
+async def test_pi_generation_lifecycle_start_end_pair_around_tool() -> None:
+    """Two assistant generations: start before, end sealed at message_end before tools."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "go"):
+            events.append(event)
+
+    starts = [e for e in events if isinstance(e, GenerationStartEvent)]
+    ends = [e for e in events if isinstance(e, GenerationEndEvent)]
+    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
+    assert len(starts) == 2 and len(ends) == 2
+
+    first_end = ends[0]
+    assert first_end.generation_id == starts[0].generation_id
+    # Host invocation-local UUID correlation, never a provider identity.
+    assert len(first_end.generation_id) == 36
+    assert first_end.response_id == "resp_gen_01"  # native, attached to the end
+    assert first_end.response_id != first_end.generation_id
+    assert first_end.model_name == "glm-4.6" and first_end.provider_name == "nous"
+    assert first_end.finish_reason == "toolUse"
+    assert first_end.end_source == "host_observed_message_end"
+    assert first_end.boundary_complete is True
+
+    # Ordered complete provider choice: reasoning, text, tool-call (provider order).
+    kinds = [part.kind for part in first_end.choice_parts]
+    assert kinds == ["reasoning", "text", "tool_call"]
+    tool_part = first_end.choice_parts[2]
+    assert isinstance(tool_part, ToolCallChoicePart)
+    assert tool_part.call_id == "call_001"
+    assert tool_part.name == "read_file"
+    assert tool_part.arguments == {"path": "src/example.py"}
+
+    # The tool execution is a later sibling linked by call ID and does not
+    # author or duplicate the choice part.
+    assert tool_starts[0].id == "call_001"
+    ordering = [type(e).__name__ for e in events]
+    assert ordering.index("GenerationEndEvent") < ordering.index("ToolStartEvent")
+    assert len([p for p in first_end.choice_parts if p.kind == "tool_call"]) == 1
+
+    # Second generation: text-only choice, distinct correlation ID.
+    second_end = ends[1]
+    assert second_end.generation_id == starts[1].generation_id
+    assert second_end.generation_id != first_end.generation_id
+    assert [p.kind for p in second_end.choice_parts] == ["text"]
+    assert second_end.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_pi_native_ms_start_converts_exactly_and_chronology_holds() -> None:
+    """Native Unix-ms start → exact ns; end receipt is host-observed and later."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "go"):
+            events.append(event)
+
+    ends = [e for e in events if isinstance(e, GenerationEndEvent)]
+    first = ends[0]
+    # Exact producer shape: multiplication-only conversion of 1788690314289 ms.
+    assert first.native_started_at_unix_ms == 1788690314289
+    assert first.native_started_at_unix_ms is not None
+    assert unix_ms_to_ns(first.native_started_at_unix_ms) == 1788690314289000000
+    # Host end receipt is a Unix-ns instant at/after the native start.
+    assert first.ended_at_unix_ns >= unix_ms_to_ns(first.native_started_at_unix_ms)
+
+
+@pytest.mark.asyncio
+async def test_pi_user_and_tool_results_do_not_create_generations() -> None:
+    """Only assistant message boundaries create generation events."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "go"):
+            events.append(event)
+
+    # The fixture has exactly two assistant messages → exactly two pairs.
+    # Tool execution events and turn boundaries are not generations.
+    assert len([e for e in events if isinstance(e, GenerationStartEvent)]) == 2
+    tool_events = [e for e in events if isinstance(e, (ToolStartEvent, ToolResultEvent))]
+    assert tool_events
+    assert all(
+        not isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in tool_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_pi_turn_end_carries_native_identity() -> None:
+    """Per-turn finish reason/model/provider land on the matching TurnEndEvent."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "go"):
+            events.append(event)
+
+    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
+    assert turn_ends
+    final = turn_ends[-1]
+    assert final.finish_reason == "stop"
+    assert final.model_name == "glm-4.6"
+    assert final.provider_name == "nous"
+    assert final.model_source == "native"
+    assert final.provider_source == "native"
+    assert final.message_id == ""  # Pi exposes no native message id
+    assert final.message_id_source is None
+    assert final.timestamp_source == "host_observed"
+
+
+@pytest.mark.asyncio
+async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pi config mirrors argv: read-only tools, no-skills, emulated schema."""
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.delenv("PI_API_KEY", raising=False)
+    backend = PiBackend(model="glm-5.2")
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    flat_args, _ = await _run_and_capture_args(
+        backend, "structured please", output_schema=schema, read_only=True,
+        persist_session=False,
+    )
+
+    request_events: list[RequestEvent] = []
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        async for event in PiBackend(model="glm-5.2").execute(
+            Path("/tmp"), "structured please", output_schema=schema, read_only=True,
+            persist_session=False,
+        ):
+            if isinstance(event, RequestEvent):
+                request_events.append(event)
+    request = request_events[0]
+    config = request.config
+    assert isinstance(config, PiRequestConfig)
+    # Exact argv correspondence for each admitted control.
+    assert config.read_only is True
+    assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep"
+    assert config.selected_tools_count == 4 and config.selected_tools_present is True
+    assert config.no_skills is True and "--no-skills" in flat_args
+    assert config.schema_emulated is True  # no native Pi schema flag
+    assert config.persist_session is False and "--no-session" in flat_args
+    assert config.continuation_mode == "fresh"
+    assert config.model_mode == "single"
+    assert config.max_turns is None  # accepted by daydream, never passed to Pi
+    # System preamble is invocation-level content, never a config value.
+    assert request.system_prompt is not None and "tool-call budget" in request.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_pi_multi_turn_fixture_produces_two_turn_end_boundaries() -> None:
+    """Two text turns → two TurnEndEvents, each with its own native identity."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("multi_turn.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "go"):
+            events.append(event)
+
+    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
+    assert len(turn_ends) == 2
+    assert [t.finish_reason for t in turn_ends] == ["stop", "stop"]
+    assert all(t.model_name == "glm-4.6" for t in turn_ends)
+
+
+@pytest.mark.asyncio
+async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:
+    """An errored turn keeps identity native where exposed; outcome stays custom."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("error_turn.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError):
+            async for _ in backend.execute(Path("/tmp"), "go"):
+                pass
+
+    # The error fixture carries no model/provider on the boundary; identity
+    # fields must stay None, never a fabricated value.
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        collected: list[Any] = []
+        mock_proc2 = make_mock_process_from_fixture("error_turn.jsonl")
+        with patch(
+            "daydream.backends._transport.asyncio.create_subprocess_exec",
+            return_value=mock_proc2,
+        ):
+            try:
+                async for event in PiBackend(model="glm-5.2").execute(Path("/tmp"), "go"):
+                    collected.append(event)
+            except PiError:
+                pass
+    turn_ends = [e for e in collected if isinstance(e, TurnEndEvent)]
+    assert turn_ends
+    error_turn = turn_ends[-1]
+    assert error_turn.finish_reason == "error"
+    # glm model absent in the error fixture message → no claimed identity.
+    assert error_turn.model_name is None or error_turn.model_name == "glm-5.2"
+
+
+@pytest.mark.asyncio
+async def test_pi_usage_events_carry_turn_end_and_terminal_provenance() -> None:
+    """Pi turn usage is turn_end-sourced; terminal totals are reported cost."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "go"):
+            events.append(event)
+
+    metrics = [e for e in events if isinstance(e, MetricsEvent)]
+    assert metrics
+    assert all(m.measurement_source == "turn_end" for m in metrics)
+
+    costs = [e for e in events if isinstance(e, CostEvent)]
+    assert costs
+    terminal = costs[-1]
+    assert terminal.measurement_source == "terminal"
+    assert terminal.cost_source == "reported"

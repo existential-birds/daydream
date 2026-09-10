@@ -29,6 +29,7 @@ import logging
 import math
 import os
 import re
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -38,15 +39,25 @@ from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     CostEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
+    PiRequestConfig,
+    ReasoningChoicePart,
     RequestEvent,
     ResultEvent,
+    TextChoicePart,
     TextEvent,
     ThinkingEvent,
+    ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    _admit_json_value,
+    _admit_native_unix_ms,
+    _new_generation_id,
     resolve_fanout_concurrency,
+    unix_ms_to_ns,
 )
 from daydream.backends._subprocess import (
     DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
@@ -643,6 +654,13 @@ class PiBackend:
 
         args.append(full_prompt)
 
+        # P18 Task 1: generation lifecycle correlation state (Pi only —
+        # native_generation_interval class). One open generation per
+        # assistant message; user/tool-result lifecycle never creates one.
+        open_generation_id: str | None = None
+        # Host receipt of assistant message_start (Unix ns, host clock).
+        generation_start_ns: int | None = None
+
         session_id: str | None = None
         last_assistant_text: str | None = None
         structured_result: Any = None
@@ -670,6 +688,8 @@ class PiBackend:
                     cost_usd=total_cost, input_tokens=total_input, output_tokens=total_output,
                     cached_tokens=total_cache_read, cache_creation_tokens=total_cache_write,
                     model_name=last_model, provider_name=last_provider,
+                    measurement_source="terminal",
+                    cost_source="reported" if total_cost is not None else None,
                 ),
                 ResultEvent(
                     structured_output=structured_result,
@@ -682,10 +702,27 @@ class PiBackend:
                 ),
             )
 
+        # P18 Task 1: closed typed effective-config admission from the exact
+        # argv built above. max_turns is accepted-but-not-enforced by Pi (no
+        # native flag) so it stays None; output_schema is emulated by prompt
+        # appendix (schema_emulated=True whenever a schema was supplied).
         yield RequestEvent(
             prompt=full_prompt, system_prompt=_PI_SYSTEM_PREAMBLE, model_name=self.model,
             provider_name=provider, session_id=effective_session_id,
             reasoning_effort=thinking, output_schema=output_schema,
+            config=PiRequestConfig(
+                read_only=read_only,
+                persist_session=persist_session,
+                continuation_mode="resume" if resume_id is not None else "fresh",
+                model_mode="single",
+                selected_tools_count=4 if read_only else None,
+                selected_tools_present=read_only,
+                no_skills=True,
+                schema_emulated=output_schema is not None,
+            ),
+            model_source="configured",
+            provider_source="configured" if provider is not None else None,
+            session_source="host_generated" if resume_id is None else "configured",
         )
 
         try:
@@ -750,12 +787,29 @@ class PiBackend:
                     saw_turn_start = True
                     saw_finish_reason = False
 
+                elif event_type == "message_start":
+                    msg = event.get("message") or {}
+                    if msg.get("role") == "assistant" and open_generation_id is None:
+                        # P18: host receipt of the assistant generation start.
+                        # Host-observed only — never relabeled as provider
+                        # request start; the native start comes from the
+                        # completed message's Unix-ms timestamp at message_end.
+                        open_generation_id = _new_generation_id()
+                        generation_start_ns = time.time_ns()
+                        assert generation_start_ns is not None  # just assigned
+                        yield GenerationStartEvent(
+                            generation_id=open_generation_id,
+                            observed_at_unix_ns=generation_start_ns,
+                            boundary_complete=True,
+                        )
+
                 elif event_type == "message_end":
                     msg = event.get("message") or {}
                     if msg.get("role") == "assistant":
                         last_model = msg.get("responseModel") or msg.get("model") or last_model
                         last_provider = msg.get("provider") or last_provider
                         text_parts: list[str] = []
+                        choice_parts: list[Any] = []
                         for block in msg.get("content") or []:
                             if not isinstance(block, dict):
                                 continue
@@ -765,12 +819,76 @@ class PiBackend:
                                 if text:
                                     yield TextEvent(text=text)
                                     text_parts.append(text)
+                                    choice_parts.append(TextChoicePart(text=text))
                             elif btype == "thinking":
                                 thinking_text = block.get("thinking", "")
                                 if thinking_text:
                                     yield ThinkingEvent(text=thinking_text)
+                                    choice_parts.append(ReasoningChoicePart(text=thinking_text))
+                            elif btype == "toolCall":
+                                # P18: the provider choice already carries the
+                                # exact call ID/name/arguments at message_end;
+                                # the later tool execution links by this call ID
+                                # and never authors or duplicates the choice part.
+                                call_id = block.get("id")
+                                call_name = block.get("name")
+                                if isinstance(call_id, str) and call_id and isinstance(call_name, str) and call_name:
+                                    arguments_admitted, _arguments_diag = _admit_json_value(
+                                        block.get("arguments")
+                                    )
+                                    if arguments_admitted is not None or block.get("arguments") is None:
+                                        try:
+                                            choice_parts.append(
+                                                ToolCallChoicePart(
+                                                    call_id=call_id,
+                                                    name=call_name,
+                                                    arguments=(
+                                                        arguments_admitted
+                                                        if arguments_admitted is not None
+                                                        else {}
+                                                    ),
+                                                )
+                                            )
+                                        except ValueError:
+                                            # Unsafe tool identity never enters the
+                                            # provider choice (fixed admission policy).
+                                            pass
                         if text_parts:
                             last_assistant_text = "".join(text_parts)
+                        # P18: seal the generation exactly once at the matching
+                        # assistant message_end, before any tool execution.
+                        if open_generation_id is not None:
+                            ended_at_ns = time.time_ns()
+                            native_start_ms, _start_diag = _admit_native_unix_ms(
+                                msg.get("timestamp")
+                            )
+                            # Chronology: a native start after the host end
+                            # receipt is an explicit incomplete boundary, never
+                            # clamped or reordered.
+                            if (
+                                native_start_ms is not None
+                                and generation_start_ns is not None
+                                and unix_ms_to_ns(native_start_ms) > generation_start_ns
+                            ):
+                                native_start_ms = None
+                            yield GenerationEndEvent(
+                                generation_id=open_generation_id,
+                                native_started_at_unix_ms=native_start_ms,
+                                ended_at_unix_ns=ended_at_ns,
+                                end_source="host_observed_message_end",
+                                choice_parts=tuple(choice_parts),
+                                response_id=(
+                                    msg.get("responseId")
+                                    if isinstance(msg.get("responseId"), str) and msg.get("responseId")
+                                    else None
+                                ),
+                                model_name=last_model,
+                                provider_name=last_provider,
+                                finish_reason=msg.get("stopReason") if msg.get("stopReason") is not None else None,
+                                boundary_complete=True,
+                            )
+                            open_generation_id = None
+                            generation_start_ns = None
 
                 elif event_type == "tool_execution_start":
                     active_tool_calls += 1
@@ -826,8 +944,21 @@ class PiBackend:
                             model_name=last_model,
                             provider_name=last_provider,
                             cache_creation_tokens=created if isinstance(created, int) else None,
+                            measurement_source="turn_end",
                         )
-                    yield TurnEndEvent(message_id="")
+                    # P18: per-turn identity where the Pi stream actually
+                    # exposes it (stopReason on turn_end.message; response
+                    # model/provider already tracked). Pi supplies no native
+                    # message id, so message_id stays "" with configured/
+                    # absent provenance; timing stays host-observed.
+                    yield TurnEndEvent(
+                        message_id="",
+                        finish_reason=stop_reason if stop_reason is not None else None,
+                        model_name=last_model,
+                        provider_name=last_provider,
+                        model_source="native",
+                        provider_source="native" if last_provider is not None else None,
+                    )
                     if stop_reason == "error":
                         for terminal in terminal_events():
                             yield terminal

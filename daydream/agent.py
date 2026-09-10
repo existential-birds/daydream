@@ -31,6 +31,8 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     DiagnosticEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -870,6 +872,16 @@ async def _run_agent(
                                     )
                                 # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
                                 # CostEvent branch so isinstance order is correct.
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, (GenerationStartEvent, GenerationEndEvent)):
+                                # P18 T1/T2 seam: the pending-generation ledger is
+                                # recorder-only evidence (no UI, no logging). The
+                                # telemetry observer already saw the event at the
+                                # top of the loop; forward it so the invocation
+                                # ledger seals drafts and resolves the single
+                                # billing owner before the attempt scope exits.
                                 if inv is not None:
                                     inv.observe(event)
 
