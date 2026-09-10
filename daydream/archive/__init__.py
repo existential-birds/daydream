@@ -339,8 +339,15 @@ def finalize_archive_run(
             hub_repo_id = hub.resolve_hub_repo(config)
             _validate_frozen_artifacts(artifacts)
             if hub_repo_id:
-                if not hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id):
-                    raise ArchiveFinalizationError("archive upload failed")
+                # A False disposition is a skip (no HF_TOKEN, no huggingface_hub),
+                # a fail-closed secret refusal, or a transport failure — and
+                # upload_run_bundle has already warned with the reason in every
+                # case. None of them is a reason to discard a completed review:
+                # issue #981 requires refusing the upload "while preserving the
+                # local run", and the refusal itself happens inside the callee,
+                # before anything reaches the Hub. Raising here would only throw
+                # the local bundle away without containing anything extra.
+                hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id)
         if config.dump_artifacts:
             if dump_path is None:
                 raise ArchiveFinalizationError("dump finalization path is missing")

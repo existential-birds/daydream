@@ -74,11 +74,6 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     attempts on a commit-conflict shape (concurrent commits from parallel
     processes), backing off exponentially between attempts.
 
-    Note: this function's "never raises" contract is honored here, but its only
-    caller converts a ``False`` return into an ``ArchiveFinalizationError``.
-    That contract violation between a function and its caller is tracked
-    separately and deliberately not addressed here.
-
     Returns:
         True on success, False when skipped or failed.
     """

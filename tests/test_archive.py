@@ -5047,8 +5047,15 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The external uploader's False disposition is a closed host failure."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    """A refused upload withholds the Hub copy and keeps the local archive.
+
+    Issue #981 requires refusing the upload "while preserving the local run",
+    and ``upload_run_bundle`` documents that it never raises so the archive
+    callback cannot fail the run. The refusal already happened inside the
+    callee, before anything reached the Hub, so failing finalization here would
+    discard a completed review without containing anything extra.
+    """
+    from daydream.archive import finalize_archive_run
     from daydream.archive.manifest import ArchiveRecorderProvenance
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
@@ -5076,30 +5083,34 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
         root_trajectory_id=session_id,
         documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
     )
+    uploaded: list[tuple[Any, ...]] = []
+
+    def _refuse(*args: object, **_kwargs: object) -> bool:
+        uploaded.append(args)
+        return False
+
     monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", lambda _config: "private/repo")
-    monkeypatch.setattr(
-        "daydream.archive.hub.upload_run_bundle",
-        lambda *_args, **_kwargs: False,
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _refuse)
+
+    finalize_archive_run(
+        recorder_provenance=ArchiveRecorderProvenance(
+            session_id, DaydreamRunFlow.NORMAL, None, None
+        ),
+        artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ()),
+        artifact_provenance=ArtifactEvidenceProvenance(
+            "workspace", session_id, tmp_path / "source", tmp_path / "live"
+        ),
+        config=cast(Any, _MockConfig(run_eval=False, archive=True)),
+        write_snapshot=snapshot,
+        work=None,
+        upload=True,
     )
 
-    with pytest.raises(ArchiveFinalizationError, match="upload"):
-        finalize_archive_run(
-            recorder_provenance=ArchiveRecorderProvenance(
-                session_id, DaydreamRunFlow.NORMAL, None, None
-            ),
-            artifacts=ArtifactTreeSnapshot(
-                session_id, "workspace", frozen, _manifest(frozen), ()
-            ),
-            artifact_provenance=ArtifactEvidenceProvenance(
-                "workspace", session_id, tmp_path / "source", tmp_path / "live"
-            ),
-            config=cast(Any, _MockConfig(run_eval=False, archive=True)),
-            write_snapshot=snapshot,
-            work=None,
-            upload=True,
-        )
-
-    assert not (get_archive_dir() / "runs" / session_id).exists()
+    assert len(uploaded) == 1, "the upload must still be attempted and refused by the callee"
+    archive_dir = get_archive_dir()
+    assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
+    assert len(query_runs(archive_dir, "session_id = ?", (session_id,))) == 1
+    assert not list(archive_dir.glob("runs/.*.finalizing"))
 
 
 def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
