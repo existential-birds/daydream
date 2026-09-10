@@ -1779,6 +1779,14 @@ class _GenerationLedger:
         # unsealed or incomplete-boundary draft is partial evidence, so the
         # chain owns the bill and children never bill.
         allocatable = [draft for draft in drafts if draft.sealed and draft.boundary_complete]
+        if self._cap_engaged:
+            # Cap drain finalized every retained draft exactly once with no
+            # native bill (the cap invariant above): post-cap drafts may
+            # carry usage whose sums happen to match the authoritative
+            # total, but cap-drained drafts are custom evidence only and
+            # must never allocate the chain's bill to children.
+            self._owner = "structural_attempt" if total is not None else "none"
+            return
         if len(allocatable) != len(drafts):
             self._owner = "structural_attempt"
             return
@@ -3660,9 +3668,7 @@ class TrajectoryRecorder:
         if registry is not None:
             registry.retain(document)
 
-    def _write_document(
-        self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
-    ) -> None:
+    def _write_document(self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]) -> None:
         """Write one frozen document through the host sink, or straight to disk."""
         if self.document_writer is not None:
             self.document_writer(document, status)

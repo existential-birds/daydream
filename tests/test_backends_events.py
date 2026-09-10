@@ -71,9 +71,7 @@ def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
             {"code": "parser_gap", "message": "unknown item", "metadata": {"count": 2}},
             id="diagnostic-event",
         ),
-        pytest.param(
-            ThinkingEvent, {"text": "reasoning..."}, {"text": "reasoning..."}, id="thinking-event"
-        ),
+        pytest.param(ThinkingEvent, {"text": "reasoning..."}, {"text": "reasoning..."}, id="thinking-event"),
         pytest.param(
             ToolStartEvent,
             {"id": "t1", "name": "Bash", "input": {"command": "ls"}},
@@ -283,7 +281,9 @@ def _rejected_configs() -> list[tuple[type[Any], dict[str, Any], str]]:
 
 @pytest.mark.parametrize(("config_cls", "kwargs", "field_name"), _rejected_configs())
 def test_admission_contract_construction_rejects_wrong_types(
-    config_cls: type[Any], kwargs: dict[str, Any], field_name: str,
+    config_cls: type[Any],
+    kwargs: dict[str, Any],
+    field_name: str,
 ) -> None:
     """Wrong booleans-as-ints, NaN, negatives, and invalid enums fail construction."""
     with pytest.raises(ValueError, match=field_name):
@@ -295,9 +295,14 @@ def test_admission_contract_construction_rejects_wrong_types(
     [
         pytest.param(
             EffectiveRequestConfig,
-            {"temperature": 0.0, "max_turns": 2**63 - 1, "read_only": False,
-             "persist_session": True, "continuation_mode": "resume",
-             "model_mode": "multi_or_dynamic"},
+            {
+                "temperature": 0.0,
+                "max_turns": 2**63 - 1,
+                "read_only": False,
+                "persist_session": True,
+                "continuation_mode": "resume",
+                "model_mode": "multi_or_dynamic",
+            },
             id="effective-boundaries-and-zero",
         ),
         pytest.param(
@@ -307,33 +312,40 @@ def test_admission_contract_construction_rejects_wrong_types(
         ),
         pytest.param(
             ClaudeRequestConfig,
-            {"permission_mode": "bypassPermissions", "allowed_tools_count": 0,
-             "allowed_tools_present": False, "buffer_limit_bytes": 0},
+            {
+                "permission_mode": "bypassPermissions",
+                "allowed_tools_count": 0,
+                "allowed_tools_present": False,
+                "buffer_limit_bytes": 0,
+            },
             id="claude-zeros-retained",
         ),
         pytest.param(
             CodexRequestConfig,
-            {"sandbox_mode": "read-only", "native_output_schema": True,
-             "read_only_isolation": True},
+            {"sandbox_mode": "read-only", "native_output_schema": True, "read_only_isolation": True},
             id="codex-closed-modes",
         ),
         pytest.param(
             PiRequestConfig,
-            {"selected_tools_count": 4, "selected_tools_present": True,
-             "no_skills": True, "schema_emulated": True},
+            {"selected_tools_count": 4, "selected_tools_present": True, "no_skills": True, "schema_emulated": True},
             id="pi-effective-controls",
         ),
         pytest.param(
             OspreyRequestConfig,
-            {"approval_mode": "deny-untrusted", "sandbox": True,
-             "max_turns": 0, "empty_completion_threshold": 0,
-             "observation_admission_bytes": 2 * 1024 * 1024},
+            {
+                "approval_mode": "deny-untrusted",
+                "sandbox": True,
+                "max_turns": 0,
+                "empty_completion_threshold": 0,
+                "observation_admission_bytes": 2 * 1024 * 1024,
+            },
             id="osprey-zeros-and-closed-mode",
         ),
     ],
 )
 def test_admission_contract_accepts_exact_zero_and_boundaries(
-    config_cls: type[Any], kwargs: dict[str, Any],
+    config_cls: type[Any],
+    kwargs: dict[str, Any],
 ) -> None:
     """Zero, int64 boundary and closed-mode values construct and are preserved."""
     config = config_cls(**kwargs)
@@ -375,21 +387,45 @@ def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
     from daydream.backends import _admit_identity_label
 
     # Ordinary namespace spellings pass unchanged.
-    for safe in ("opus", "claude-opus-4-5-20250901", "nous/deepseek-v4", "openai/gpt-5.2",
-                 "provider//model", "glm-4.6"):
+    for safe in (
+        "opus",
+        "claude-opus-4-5-20250901",
+        "nous/deepseek-v4",
+        "openai/gpt-5.2",
+        "provider//model",
+        "glm-4.6",
+    ):
         admitted, diagnostic = _admit_identity_label(safe, max_chars=256, context="model")
         assert admitted == safe and diagnostic is None, safe
 
     # Controls, bidi, private paths, redaction-changed values, wrong types.
-    for unsafe in ("/Users/ka/private/model", "C:\\repo\\model", "~/secret",
-                   "home/ka/model", "Users/ka/model", "a\x00b", "a\nb", "a\tb",
-                   "abc\u202ered", "abc\u200blad", "line\u2028sep",
-                   "AKIAIOSFODNN7EXAMPLE", "password=hunter2", "x-API-key: v",
-                   "m" * 257, "", None, 5, 1.5, b"model"):
+    for unsafe in (
+        "/Users/ka/private/model",
+        "C:\\repo\\model",
+        "~/secret",
+        "home/ka/model",
+        "Users/ka/model",
+        "a\x00b",
+        "a\nb",
+        "a\tb",
+        "abc\u202ered",
+        "abc\u200blad",
+        "line\u2028sep",
+        "AKIAIOSFODNN7EXAMPLE",
+        "password=hunter2",
+        "x-API-key: v",
+        "m" * 257,
+        "",
+        None,
+        5,
+        1.5,
+        b"model",
+    ):
         admitted, diagnostic = _admit_identity_label(unsafe, max_chars=256, context="model")
         assert admitted is None and diagnostic is not None, repr(unsafe)
         assert diagnostic.code.startswith("config_identity_") or diagnostic.code in (
-            "config_bool_type_rejected", "config_float_type_rejected",
+            "config_bool_type_rejected",
+            "config_float_type_rejected",
             "config_int_type_rejected",
         )
 
@@ -433,43 +469,45 @@ def test_native_unix_ms_validation_bounds_and_conversion() -> None:
     assert ms is None and diagnostic is None
 
 
-def test_ordered_identity_list_whole_overflow_omission() -> None:
+def test_observed_identity_lists_whole_overflow_omission() -> None:
     """A 17-entry model list omits the entire list with a fixed overflow code."""
-    from daydream.backends import _admit_ordered_identity_list
+    from daydream.observability.spans import _admit_observed_identity_list
 
-    admitted, member_diagnostic, overflow_diagnostic = _admit_ordered_identity_list(
-        [f"model-{i}" for i in range(16)], max_chars=256, context="models",
+    admitted, diagnostic = _admit_observed_identity_list(
+        [f"model-{i}" for i in range(16)],
+        max_chars=256,
+        context="models",
     )
     assert admitted is not None and len(admitted) == 16
-    assert member_diagnostic is None and overflow_diagnostic is None
+    assert diagnostic is None
 
-    admitted, member_diagnostic, overflow_diagnostic = _admit_ordered_identity_list(
-        [f"model-{i}" for i in range(17)], max_chars=256, context="models",
+    admitted, diagnostic = _admit_observed_identity_list(
+        [f"model-{i}" for i in range(17)],
+        max_chars=256,
+        context="models",
     )
-    assert admitted is None and member_diagnostic is None
-    assert overflow_diagnostic is not None
-    assert overflow_diagnostic.code == "config_list_overflow"
-    assert overflow_diagnostic.detail == "17"  # total distinct count only
+    assert admitted is None
+    assert diagnostic is not None
+    code, detail = diagnostic.split(":", 1)
+    assert code == "config_list_overflow"
+    assert detail == "17"  # total distinct count only
 
     # One unsafe member poisons the whole list (no partial lists).
-    admitted, member_diagnostic, overflow_diagnostic = _admit_ordered_identity_list(
-        ["ok/model", "/Users/ka/secret"], max_chars=256, context="models",
+    admitted, diagnostic = _admit_observed_identity_list(
+        ["ok/model", "/Users/ka/secret"],
+        max_chars=256,
+        context="models",
     )
-    assert admitted is None and member_diagnostic is not None
+    assert admitted is None and diagnostic is not None
+    assert diagnostic.split(":", 1)[0] == "config_list_member_unsafe"
 
 
-def test_name_presence_lists_reveal_counts_only() -> None:
-    """Name lists reduce to exact count + presence; elements never cross."""
-    from daydream.backends import _admit_name_presence_list
+def test_pi_selected_tools_count_derives_from_read_only_tool_constant() -> None:
+    """The Pi read-only tool count derives from the argv tool list, not a copy."""
+    from daydream.backends.pi import _PI_READ_ONLY_TOOLS
 
-    count, present, diagnostic = _admit_name_presence_list(["Read", "Bash", "Grep"], "tools")
-    assert (count, present, diagnostic) == (3, True, None)
-    count, present, diagnostic = _admit_name_presence_list([], "tools")
-    assert (count, present, diagnostic) == (0, False, None)
-    count, present, diagnostic = _admit_name_presence_list(None, "tools")
-    assert (count, present, diagnostic) == (0, False, None)
-    count, present, diagnostic = _admit_name_presence_list("Bash", "tools")
-    assert count == 0 and present is False and diagnostic is not None
+    assert len(_PI_READ_ONLY_TOOLS.split(",")) == 4
+    assert _PI_READ_ONLY_TOOLS == "read,find,ls,grep"
 
 
 def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
@@ -503,8 +541,10 @@ def test_generation_lifecycle_events_are_in_the_agent_event_union() -> None:
     """GenerationStart/End participate in AgentEvent; timestamps default to Z."""
     start = GenerationStartEvent(generation_id="g-1", observed_at_unix_ns=1)
     end = GenerationEndEvent(
-        generation_id="g-1", native_started_at_unix_ms=None,
-        ended_at_unix_ns=2, end_source="fallback",
+        generation_id="g-1",
+        native_started_at_unix_ms=None,
+        ended_at_unix_ns=2,
+        end_source="fallback",
     )
     assert isinstance(start, AgentEvent)
     assert isinstance(end, AgentEvent)
@@ -531,7 +571,9 @@ def test_request_event_defaults_preserve_backward_compatibility() -> None:
     assert legacy.timestamp_source == "host_observed"
 
     provenanced = RequestEvent(
-        "p", model_name="m", model_source="configured",
+        "p",
+        model_name="m",
+        model_source="configured",
         timestamp_source="native",
     )
     assert provenanced.model_source == "configured"
@@ -550,8 +592,12 @@ def test_turn_end_event_defaults_preserve_backward_compatibility() -> None:
     assert ev.timestamp_source == "host_observed"
 
     ev2 = TurnEndEvent(
-        message_id="m1", finish_reason="stop", model_name="glm-4.6",
-        provider_name="nous", model_source="native", provider_source="native",
+        message_id="m1",
+        finish_reason="stop",
+        model_name="glm-4.6",
+        provider_name="nous",
+        model_source="native",
+        provider_source="native",
     )
     assert ev2.finish_reason == "stop"
     assert ev2.model_source == "native"
@@ -568,8 +614,13 @@ def test_measurement_events_carry_closed_provenance() -> None:
     assert legacy.measurement_source is None  # legacy record, not an assessed claim
 
     metrics = MetricsEvent(
-        message_id="m1", prompt_tokens=1, completion_tokens=2, cached_tokens=None,
-        cost_usd=None, measurement_source="message_end", generation_id="g-1",
+        message_id="m1",
+        prompt_tokens=1,
+        completion_tokens=2,
+        cached_tokens=None,
+        cost_usd=None,
+        measurement_source="message_end",
+        generation_id="g-1",
     )
     assert metrics.measurement_source == "message_end"
     assert metrics.generation_id == "g-1"

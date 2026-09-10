@@ -257,11 +257,16 @@ def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
         else "OTEL_EXPORTER_OTLP_ENDPOINT"
     )
     raw_endpoint = os.environ.get(endpoint_setting, "http://localhost:4318")
-    parsed = urlsplit(raw_endpoint)
-    if parsed.path in ("", "/"):
-        endpoint = raw_endpoint.rstrip("/") + "/v1/traces"
+    # Stock OTel 1.44 semantics (pinned exporter ground truth): the shared
+    # endpoint always gets the traces path appended — even when it already
+    # carries a path (https://collector.example.com/otlp becomes
+    # /otlp/v1/traces) — while a signal-specific endpoint is used exactly
+    # as supplied, whatever its path.
+    is_signal_specific = endpoint_setting == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+    if is_signal_specific:
+        endpoint = raw_endpoint
     else:
-        endpoint = raw_endpoint  # exact signal path: appended-to shared vs signal-specific
+        endpoint = raw_endpoint.rstrip("/") + "/v1/traces"
     header_pairs = _otlp_http_headers_from_env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS")
     headers = tuple(header_pairs.items())
     certificate = os.environ.get(

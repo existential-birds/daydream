@@ -153,10 +153,7 @@ def encode_batch(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
     """
     request = sdk_encode_spans(list(spans))
     wire_spans = [
-        wire_span
-        for resource in request.resource_spans
-        for scope in resource.scope_spans
-        for wire_span in scope.spans
+        wire_span for resource in request.resource_spans for scope in resource.scope_spans for wire_span in scope.spans
     ]
     if len(wire_spans) != len(spans):
         raise ObservabilityError("OTLP encoder changed span count; refusing to repair a mismatched batch")
@@ -170,10 +167,9 @@ def encode_batch(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
         if len(wire.links) != len(source.links):
             raise ObservabilityError("OTLP encoder changed link count; refusing to repair a mismatched batch")
         for source_link, wire_link in zip(source.links, wire.links, strict=True):
-            if (
-                wire_link.trace_id != source_link.context.trace_id.to_bytes(16, "big")
-                or wire_link.span_id != source_link.context.span_id.to_bytes(8, "big")
-            ):
+            if wire_link.trace_id != source_link.context.trace_id.to_bytes(
+                16, "big"
+            ) or wire_link.span_id != source_link.context.span_id.to_bytes(8, "big"):
                 raise ObservabilityError("OTLP encoder changed link identity; refusing to repair a mismatched batch")
             _repair_link(wire_link, source_link)
     return request
@@ -420,6 +416,12 @@ class HttpxOtlpTransport:
             now = anyio.current_time()
             left = deadline - now
             if left <= 0:
+                # Encode/budget exhaustion before (or between) sends: record
+                # the outcome like every other failure exit instead of
+                # dropping it silently from the delivery ledger.
+                self._ledger.record_unverified(
+                    "OTLP_RETRY_BUDGET_EXHAUSTED" if attempt else "OTLP_DEADLINE_EXCEEDED_BEFORE_SEND"
+                )
                 return last
             try:
                 with anyio.fail_after(left):
@@ -493,7 +495,7 @@ class HttpxOtlpTransport:
         return True
 
     def shutdown(self) -> None:
-        """OPEN -> CLOSING -> CLOSED exactly once; client close on the portal."""
+        """OPEN -> CLOSING -> CLOSED exactly once; client closed via the portal."""
         with self._lock:
             if self._state != "OPEN":
                 self._state = "CLOSED"
@@ -502,8 +504,19 @@ class HttpxOtlpTransport:
             client, portal_cm = self._client, self._portal_cm
             self._client = None
         try:
-            if client is not None:
-                portal_cm.__exit__(None, None, None)  # stops the loop, closes client via call below
+            if portal_cm is not None and client is not None:
+                # Close the owned AsyncClient through the portal BEFORE the
+                # portal stops: the pool's keep-alive connections must be
+                # closed by the client itself, and once the portal's loop
+                # stops it can no longer run async cleanup. A close failure
+                # is logged and never blocks the exactly-once portal stop.
+                try:
+                    self._portal.call(client.aclose)
+                except Exception:  # noqa: BLE001 - sanitized transport failure seam
+                    _logger.warning("Failed to close owned OTLP HTTP client cleanly", exc_info=True)
+                portal_cm.__exit__(None, None, None)
+            elif portal_cm is not None:
+                portal_cm.__exit__(None, None, None)
         finally:
             self._state = "CLOSED"
 
@@ -524,9 +537,7 @@ def build_http_transport(
 ) -> HttpxOtlpTransport:
     """Resolve the typed HTTP config and construct the owned transport."""
     reject_credential_provider_settings(environ if environ is not None else _default_environ())
-    verify = resolve_ssl_context(
-        certificate_file=certificate_file, client_cert=client_cert, client_key=client_key
-    )
+    verify = resolve_ssl_context(certificate_file=certificate_file, client_cert=client_cert, client_key=client_key)
     cert = (client_cert, client_key) if client_cert and client_key else client_cert
     config = HttpTransportConfig(
         endpoint=endpoint,

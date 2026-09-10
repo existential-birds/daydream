@@ -243,9 +243,7 @@ class _OspreyProtocolState:
         if self.active_turn_id is None:
             raise OspreyProtocolError("turn_end without turn_start")
         if turn_id != self.active_turn_id:
-            raise OspreyProtocolError(
-                f"turn_end {turn_id!r} does not match active turn {self.active_turn_id!r}"
-            )
+            raise OspreyProtocolError(f"turn_end {turn_id!r} does not match active turn {self.active_turn_id!r}")
         self.active_turn_id = None
 
     def start_tool_call(self, call_id: str) -> None:
@@ -363,9 +361,7 @@ class OspreyBackend:
         self.ultracode = ultracode
         self.tool_search_mode = tool_search_mode
         self.osprey_home = osprey_home
-        self.fanout_concurrency = resolve_fanout_concurrency(
-            "DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4
-        )
+        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4)
         self._transports: list[CliTransport] = []
 
     def build_command(
@@ -400,9 +396,7 @@ class OspreyBackend:
         read_only = options.read_only
         persist_session = options.persist_session
         tool_search_mode = options.tool_search_mode
-        selected_tool_search = (
-            tool_search_mode if tool_search_mode is not None else self.tool_search_mode
-        )
+        selected_tool_search = tool_search_mode if tool_search_mode is not None else self.tool_search_mode
         if selected_tool_search is not None:
             raise OspreyUnsupportedOption(
                 "tool_search_mode",
@@ -607,8 +601,7 @@ class OspreyBackend:
                     break
                 except ValueError as exc:
                     raise OspreyProtocolError(
-                        "Osprey stdout JSONL line exceeded the "
-                        f"{_OSPREY_STDOUT_LIMIT_BYTES}-byte limit"
+                        f"Osprey stdout JSONL line exceeded the {_OSPREY_STDOUT_LIMIT_BYTES}-byte limit"
                     ) from exc
                 if not raw_line:
                     continue
@@ -616,8 +609,7 @@ class OspreyBackend:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError as exc:
                     raise OspreyProtocolError(
-                        "Osprey emitted a non-JSON line in JSONL mode: "
-                        f"{_bounded_diagnostics([raw_line])}"
+                        f"Osprey emitted a non-JSON line in JSONL mode: {_bounded_diagnostics([raw_line])}"
                     ) from exc
                 if not isinstance(event, dict):
                     raise OspreyProtocolError("Osprey JSONL event must be an object")
@@ -654,40 +646,34 @@ class OspreyBackend:
                     # values never cross this boundary — presence booleans
                     # only; the header's native timestamp distinguishes via
                     # ``timestamp_source="native"``.
-                    max_turns_applied = (
-                        command[command.index("--max-turns") + 1]
-                        if "--max-turns" in command else None
-                    )
+                    max_turns_applied = command[command.index("--max-turns") + 1] if "--max-turns" in command else None
                     yield RequestEvent(
-                        prompt=prompt, model_name=session_model, provider_name=provider,
-                        session_id=session_id, reasoning_effort=self.effort or self.reasoning_effort,
-                        output_schema=output_schema, timestamp=started_at,
+                        prompt=prompt,
+                        model_name=session_model,
+                        provider_name=provider,
+                        session_id=session_id,
+                        reasoning_effort=self.effort or self.reasoning_effort,
+                        output_schema=output_schema,
+                        timestamp=started_at,
                         config=OspreyRequestConfig(
-                            temperature=(
-                                float(self.temperature)
-                                if self.temperature is not None
-                                else None
-                            ),
+                            temperature=(float(self.temperature) if self.temperature is not None else None),
                             read_only=read_only,
                             continuation_mode=(
-                                "fork" if (continuation is not None and continuation.data.get("mode") == "fork")
-                                else "resume" if continuation is not None else "fresh"
+                                "fork"
+                                if (continuation is not None and continuation.data.get("mode") == "fork")
+                                else "resume"
+                                if continuation is not None
+                                else "fresh"
                             ),
                             model_mode="single",
                             persona_present=self.persona is not None,
                             toolset_present=self.toolset is not None,
-                            approval_mode=(
-                                "deny-untrusted"
-                                if self.approval == "deny-untrusted"
-                                else None
-                            ),
+                            approval_mode=("deny-untrusted" if self.approval == "deny-untrusted" else None),
                             sandbox=self.sandbox,
                             immutable_surface=self.immutable_runtime_surface,
                             compress_context=self.compress_context,
                             ultracode=self.ultracode,
-                            max_turns=(
-                                int(max_turns_applied) if max_turns_applied is not None else max_turns
-                            ),
+                            max_turns=(int(max_turns_applied) if max_turns_applied is not None else max_turns),
                             turn_timeout=self.turn_timeout,
                             stream_idle_timeout_secs=self.stream_idle_timeout_secs,
                             streaming_timeout_secs=self.streaming_timeout_secs,
@@ -746,21 +732,31 @@ class OspreyBackend:
                         cached_tokens=_optional_non_negative_int(event, "total_cached_tokens"),
                         cache_creation_tokens=_optional_non_negative_int(event, "total_cache_write_tokens"),
                         reasoning_tokens=_optional_non_negative_int(event, "total_thinking_tokens"),
-                        model_name=session_model, provider_name=provider,
+                        model_name=session_model,
+                        provider_name=provider,
                         measurement_source="session",
                         cost_source="reported" if total_cost is not None else None,
                     )
                     yield ResultEvent(
                         structured_output=terminal_structured_output,
                         continuation=(
-                            ContinuationToken(backend="osprey", data={
-                                "session_id": session_id, "provider": provider,
-                                "model": session_model, "outcome": terminal_outcome,
-                                "exit_code": terminal_exit_code,
-                            }) if terminal_outcome in _SUCCESS_OUTCOMES else None
+                            ContinuationToken(
+                                backend="osprey",
+                                data={
+                                    "session_id": session_id,
+                                    "provider": provider,
+                                    "model": session_model,
+                                    "outcome": terminal_outcome,
+                                    "exit_code": terminal_exit_code,
+                                },
+                            )
+                            if terminal_outcome in _SUCCESS_OUTCOMES
+                            else None
                         ),
-                        model_name=session_model, provider_name=provider,
-                        session_id=session_id, finish_reason=terminal_outcome,
+                        model_name=session_model,
+                        provider_name=provider,
+                        session_id=session_id,
+                        finish_reason=terminal_outcome,
                         duration_ms=_optional_non_negative_int(event, "session_wallclock_ms"),
                     )
                     continue
@@ -849,13 +845,9 @@ class OspreyBackend:
                     turn_model = event.get("model")
                     yield TurnEndEvent(
                         message_id=turn_id,
-                        model_name=(
-                            turn_model
-                            if isinstance(turn_model, str) and turn_model
-                            else session_model
-                        ),
+                        model_name=(turn_model if isinstance(turn_model, str) and turn_model else session_model),
                         provider_name=provider,
-                        model_source="native" if isinstance(turn_model, str) and turn_model else "native",
+                        model_source="native",
                         provider_source="native",
                     )
                     turn_started_at = None
@@ -869,9 +861,7 @@ class OspreyBackend:
                                 continue
                             data = message.get("data")
                             if not isinstance(data, dict) or not isinstance(data.get("content"), str):
-                                raise OspreyProtocolError(
-                                    "message_end result requires string data.content"
-                                )
+                                raise OspreyProtocolError("message_end result requires string data.content")
                             turn_text_emitted = True
                             yield TextEvent(data["content"])
                 elif event_name == "failed":
@@ -910,9 +900,7 @@ class OspreyBackend:
             if not saw_session_end:
                 raise OspreyProtocolError("Osprey stream ended without session_end")
             if terminal_exit_code is not None and terminal_exit_code != returncode:
-                raise OspreyProtocolError(
-                    "session_end exit_code does not match subprocess return code"
-                )
+                raise OspreyProtocolError("session_end exit_code does not match subprocess return code")
             if terminal_outcome not in _SUCCESS_OUTCOMES:
                 detail = failed_message or f"exit_code={terminal_exit_code!r}"
                 raise OspreyTerminalError(terminal_outcome or "unknown", detail)

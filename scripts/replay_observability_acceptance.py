@@ -26,7 +26,8 @@ test monkeypatch or a model call. It:
 - reproduces the manifest-pinned host receipt clock for ``message_end`` so the
   exact 395.332-second historical interval and native-ms conversion are
   reconciled deterministically (the pin is applied ONLY for this admitted
-  replay kind, exactly as plan Task 7 requires; the reported $0.00402781 is
+  replay kind and restored to the host clock immediately after the traced
+  run, exactly as plan Task 7 requires; the reported $0.00402781 is
   labeled synthetic historical-equivalent telemetry, never actual billing);
 - never includes private repository prompts: the invocation prompt is a fixed
   public placeholder and the receipt contains no prompts, responses, tool
@@ -49,6 +50,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,6 +69,11 @@ from daydream.json_utils import atomic_write_json
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.runtime import associate_run_trajectory, trace_run
 from daydream.trajectory import DaydreamPhase
+
+# Pristine host clock captured at import, before any replay pin: the restore
+# hook always reinstates THIS reference, so repeated in-process replays can
+# never leave the stdlib clock skewed.
+_stdlib_real_time_ns = time.time_ns
 
 _REPLAY_PROMPT = "Sanitized protocol replay: report the README's stated purpose."
 
@@ -98,8 +105,10 @@ def _load_manifest(path: Path, *, expected_kind: str = "sanitized_protocol_repla
     if manifest.get("kind") != expected_kind:
         raise ReplayValidationError("Replay manifest kind must be sanitized_protocol_replay")
     fixture = manifest.get("fixture")
-    if not isinstance(fixture, dict) or not isinstance(fixture.get("sha256"), str) or not isinstance(
-        fixture.get("bytes"), int
+    if (
+        not isinstance(fixture, dict)
+        or not isinstance(fixture.get("sha256"), str)
+        or not isinstance(fixture.get("bytes"), int)
     ):
         raise ReplayValidationError("Replay manifest fixture pin (sha256/bytes) is required")
     if not isinstance(manifest.get("public_repo_allowlist"), list):
@@ -133,9 +142,7 @@ def _validate_fixture(path: Path, fixture_pin: dict[str, Any]) -> None:
 
 
 def _git(args: list[str], *, cwd: Path) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=30, check=False
-    )
+    result = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=30, check=False)
     return result.stdout.strip()
 
 
@@ -197,14 +204,25 @@ def _validate_fake_pi(path: Path, marker: str, *, fixture_raw: bytes, timeout_s:
         raise ReplayValidationError("Fake pi stdout does not replay the pinned sanitized fixture")
 
 
-def _validate_destinations() -> tuple[str, ...]:
-    """Exactly local generic OTLP + the two explicitly enabled vendor destinations."""
+def _validate_destinations(manifest: dict[str, Any]) -> tuple[str, ...]:
+    """Destinations bound to the manifest: required set exactly, forbidden absent.
+
+    The manifest's ``destinations`` block is load-bearing: editing it fails
+    this gate instead of silently drifting from what the replay enforces.
+    """
+    destinations_block = manifest.get("destinations", {})
+    required = destinations_block.get("required")
+    forbidden = destinations_block.get("forbidden", [])
+    if sorted(required) != ["honeyhive", "langsmith", "otlp"]:
+        raise ReplayValidationError("Manifest destinations.required must be exactly otlp,honeyhive,langsmith")
     raw = os.environ.get("DAYDREAM_TRACE_TO", "")
     destinations = tuple(name.strip() for name in raw.split(",") if name.strip())
-    if set(destinations) != {"otlp", "honeyhive", "langsmith"}:
+    if set(destinations) != set(required):
         raise ReplayValidationError(
             "DAYDREAM_TRACE_TO must be exactly 'otlp,honeyhive,langsmith' for the sanitized replay"
         )
+    if set(destinations) & set(forbidden):
+        raise ReplayValidationError("Manifest forbidden destinations must not be enabled")
     return destinations
 
 
@@ -215,8 +233,17 @@ def _validate_authorization() -> None:
         raise ReplayValidationError("LANGSMITH_API_KEY is required for the langsmith destination")
 
 
-def _validate_acceptance_marker() -> None:
-    if os.environ.get("DAYDREAM_ACCEPTANCE_KIND") != "sanitized_protocol_replay":
+def _validate_acceptance_marker(manifest: dict[str, Any]) -> None:
+    """Acceptance contract bound to the manifest, not tool-local literals."""
+    acceptance = manifest.get("acceptance", {})
+    expected_kind = acceptance.get("kind")
+    marker_key = acceptance.get("resource_marker_key")
+    if expected_kind != "sanitized_protocol_replay" or marker_key != "daydream.acceptance.kind":
+        raise ReplayValidationError(
+            "Manifest acceptance.kind/resource_marker_key must pin "
+            "sanitized_protocol_replay on daydream.acceptance.kind"
+        )
+    if os.environ.get("DAYDREAM_ACCEPTANCE_KIND") != expected_kind:
         raise ReplayValidationError("DAYDREAM_ACCEPTANCE_KIND must be sanitized_protocol_replay")
 
 
@@ -284,8 +311,8 @@ class _OtlpReceiver:
 # ---------------------------------------------------------------------------
 
 
-def _pin_replay_clock(pinned_first_end_ns: int) -> None:
-    """Pin the host-observed ``message_end`` receipt exactly as Task 7 requires.
+def _pin_replay_clock(pinned_first_end_ns: int) -> Callable[[], None]:
+    """Pin the host-observed ``message_end`` receipt and return a restore hook.
 
     Mirrors the test-side pin (``_pin_first_message_end_receipt``) but as an
     operator-level deterministic clock: the FIRST host receipt read lands one
@@ -293,6 +320,12 @@ def _pin_replay_clock(pinned_first_end_ns: int) -> None:
     lands exactly on the pinned ns; later receipts advance by real elapsed ns
     (monotonic, never backward). This is what makes the exact 395.332-second
     historical interval reproducible through the REAL PiBackend.
+
+    The pin deliberately replaces the process-global stdlib ``time.time_ns``
+    inside the REAL ``backends.pi`` module. The caller MUST invoke the
+    returned callable (in a ``finally``) so the host clock is restored even
+    on failure or cancellation — an unguarded global mutation would skew
+    every later in-process consumer, e.g. a pytest worker's remaining tests.
     """
     # The stdlib ``time`` module is the same object ``pi.py`` imports; pin the
     # host receipt clock there so the REAL backends.pi reads land deterministically.
@@ -316,10 +349,16 @@ def _pin_replay_clock(pinned_first_end_ns: int) -> None:
 
     if not isinstance(pinned_first_end_ns, int) or pinned_first_end_ns <= 0:
         raise ReplayValidationError("Manifest pinned first message_end receipt must be a positive int")
+
+    def _restore_pinned_clock() -> None:
+        _stdlib_time.time_ns = _stdlib_real_time_ns
+
     # Deliberate operator pin of the host receipt clock inside the REAL
-    # backends.pi module, exactly as the task-7 replay requires it.
+    # backends.pi module, exactly as the task-7 replay requires it; the
+    # caller restores via the returned hook in a finally.
     setattr(_stdlib_time, "time_ns", pinned_time_ns)
     _ = pi_module  # backends.pi reads time.time_ns via the shared stdlib module
+    return _restore_pinned_clock
 
 
 # ---------------------------------------------------------------------------
@@ -416,9 +455,7 @@ async def _run_traced(
     return spans, resources, list(receiver.batches)
 
 
-def _require_local_wire_success(
-    spans: list[dict[str, Any]], resources: list[dict[str, Any]]
-) -> dict[str, Any]:
+def _require_local_wire_success(spans: list[dict[str, Any]], resources: list[dict[str, Any]]) -> dict[str, Any]:
     """Local generic OTLP wire success + exact wire reconciliation facts."""
     if not spans:
         raise ReplayValidationError("Local OTLP wire captured no spans: local wire success required")
@@ -500,8 +537,8 @@ def run_replay(
         return 1
     try:
         _validate_authorization()
-        _validate_acceptance_marker()
-        _validate_destinations()
+        _validate_acceptance_marker(manifest)
+        _validate_destinations(manifest)
     except ReplayValidationError as exc:
         print(f"verdict=fail gate=authorization detail={exc}")
         return 1
@@ -519,16 +556,23 @@ def run_replay(
         return 1
     identity = manifest.get("fixture", {}).get("identity", {})
     pinned_end = identity.get("first_message_end_receipt_unix_ns")
+    if not isinstance(pinned_end, int):
+        print("verdict=fail gate=clock detail=Manifest must pin the first message_end receipt")
+        return 1
     try:
-        if not isinstance(pinned_end, int):
-            raise ReplayValidationError("Manifest must pin the first message_end receipt")
-        _pin_replay_clock(pinned_end)
+        restore_clock = _pin_replay_clock(pinned_end)
     except ReplayValidationError as exc:
         print(f"verdict=fail gate=clock detail={exc}")
         return 1
     try:
-        spans, resources, wire_batches = anyio.run(_run_traced, manifest, repo_path, fake_pi)
-        facts = _require_local_wire_success(spans, resources)
+        try:
+            spans, resources, wire_batches = anyio.run(_run_traced, manifest, repo_path, fake_pi)
+            facts = _require_local_wire_success(spans, resources)
+        finally:
+            # The pinned stdlib clock is restored on every path — success,
+            # failure, or cancellation — so the host clock is never left
+            # skewed for later in-process consumers.
+            restore_clock()
     except Exception as exc:  # noqa: BLE001 - operator-facing boundary
         print(f"verdict=fail gate=wire detail={type(exc).__name__}")
         return 1

@@ -67,9 +67,7 @@ def test_manifest_pins_expected_commit_and_files() -> None:
     for name, entry in files.items():
         raw = (SEMCONV_DIR / name).read_bytes()
         assert entry["bytes"] == len(raw), f"{name}: byte length drifted"
-        assert (
-            hashlib.sha256(raw).hexdigest() == entry["sha256"]
-        ), f"{name}: sha256 drifted"
+        assert hashlib.sha256(raw).hexdigest() == entry["sha256"], f"{name}: sha256 drifted"
         assert (
             entry["url"].startswith("https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/")
             and SEMCONV_COMMIT in entry["url"]
@@ -142,7 +140,10 @@ def test_registry_covers_every_production_genai_literal() -> None:
     assert not unknown, f"production emits names not in the pinned registry: {sorted(unknown)}"
     # Aliases and owned names must also remain actually absent from the pinned
     # registry (they are compatibility spellings or derived custom fields).
-    assert not (literals & reg_names) & (_DOCUMENTED_ALIASES | _DAYDREAM_OWNED) or True
+    # gen_ai.system is a destination-side alias spelling only: production never
+    # emits it as a source literal, so no alias may shadow a pinned name.
+    assert not literals & reg_names & _DOCUMENTED_ALIASES
+    assert not literals & reg_names & _DAYDREAM_OWNED
     # The canonical standard names the plan adopts must exist in the registry.
     for canonical in (
         "gen_ai.request.reasoning.level",
@@ -169,9 +170,7 @@ def test_registry_covers_every_production_genai_literal() -> None:
 
 def test_registry_types_match_production_literal_usage() -> None:
     attrs = _registry_attributes()
-    source = "\n".join(
-        p.read_text(encoding="utf-8") for p in DAYDREAM_SRC.rglob("*.py")
-    )
+    source = "\n".join(p.read_text(encoding="utf-8") for p in DAYDREAM_SRC.rglob("*.py"))
     # usage token attributes are ints in the registry; production emits them
     # (the canonical cache_write spelling arrives with Task 1's alias rename —
     # at baseline only the documented legacy alias is emitted, and the pinned

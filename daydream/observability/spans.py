@@ -16,6 +16,11 @@ from opentelemetry.context import Context
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from daydream.backends import (
+    _DIAG_LIST_MEMBER_UNSAFE,
+    _DIAG_LIST_OVERFLOW,
+    _MAX_MODEL_NAME_CHARS,
+    _MAX_ORDERED_IDENTITY_ENTRIES,
+    _MAX_PROVIDER_NAME_CHARS,
     AgentEvent,
     CostEvent,
     DiagnosticEvent,
@@ -31,6 +36,7 @@ from daydream.backends import (
     ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
+    _admit_identity_label,
     unix_ms_to_ns,
 )
 from daydream.observability.runtime import current_session
@@ -45,27 +51,58 @@ _scope_attributes: ContextVar[dict[str, Any]] = ContextVar("daydream_trace_attri
 # enclosing agent scope marks a span subagent; sibling phases and retries never
 # change the depth (T4: root/subagent semantics on actual scopes only).
 _agent_depth: ContextVar[int] = ContextVar("daydream_agent_depth", default=0)
-_INHERITED_ATTRIBUTES = frozenset({
-    "daydream.run.id",
-    "daydream.session.id",
-    "daydream.trajectory.id",
-    "daydream.trajectory.descriptor",
-    "daydream.flow",
-    "daydream.step",
-    "daydream.phase",
-    "daydream.iteration",
-    "daydream.stack",
-    "daydream.backend",
-    "daydream.attempt",
-    "daydream.agent.name",
-    "traceloop.association.properties.daydream_run_id",
-    "traceloop.association.properties.session_id",
-})
 
 
-def associate_trajectory_identity(
-    session_id: str, *, trajectory_id: str | None = None
-) -> None:
+def _admit_observed_identity_list(
+    values: list[str] | None, *, max_chars: int, context: str
+) -> tuple[tuple[str, ...] | None, str | None]:
+    """Admit an ordered distinct observed-identity list capped at 16 entries.
+
+    Task 1's whole-list-overflow rule applied to the observed emission side:
+    on any unsafe member or count overflow the whole list is omitted and one
+    fixed diagnostic (plus, for overflow, the total distinct count as the
+    diagnostic detail) is recorded — never a partial list that would look
+    authoritative.
+    """
+    if values is None:
+        return None, None
+    if not isinstance(values, (list, tuple)):
+        return None, f"{_DIAG_LIST_MEMBER_UNSAFE}:{context}"
+    distinct: list[str] = []
+    for value in values:
+        admitted, _diagnostic = _admit_identity_label(value, max_chars=max_chars, context=context)
+        if admitted is None:
+            return None, f"{_DIAG_LIST_MEMBER_UNSAFE}:{context}"
+        if admitted not in distinct:
+            distinct.append(admitted)
+    if len(distinct) > _MAX_ORDERED_IDENTITY_ENTRIES:
+        # Whole-list overflow: omit everything, record only the fixed code
+        # and the total distinct count (a count is metadata, not identity).
+        return None, f"{_DIAG_LIST_OVERFLOW}:{len(distinct)}"
+    return tuple(distinct), None
+
+
+_INHERITED_ATTRIBUTES = frozenset(
+    {
+        "daydream.run.id",
+        "daydream.session.id",
+        "daydream.trajectory.id",
+        "daydream.trajectory.descriptor",
+        "daydream.flow",
+        "daydream.step",
+        "daydream.phase",
+        "daydream.iteration",
+        "daydream.stack",
+        "daydream.backend",
+        "daydream.attempt",
+        "daydream.agent.name",
+        "traceloop.association.properties.daydream_run_id",
+        "traceloop.association.properties.session_id",
+    }
+)
+
+
+def associate_trajectory_identity(session_id: str, *, trajectory_id: str | None = None) -> None:
     """Propagate a late-bound trajectory identity to scopes opened afterwards.
 
     ``associate_run_trajectory`` patches the root span, but scopes opened
@@ -158,7 +195,13 @@ class SpanScope:
             )
             self.span = self.session.tracer.start_span(
                 self.session.policy.text(self.name),
-                kind=SpanKind.CLIENT if self.kind == "attempt" else SpanKind.INTERNAL,
+                # Every Daydream scope — logical agents and retry attempts
+                # alike — is an in-process (local CLI/SDK) invocation, so no
+                # span here is a CLIENT remote-service boundary (binding
+                # decision 6: CLIENT requires a proven remote agent service
+                # with the exact provider known at creation). Only sealed
+                # provider generations below are CLIENT model spans.
+                kind=SpanKind.INTERNAL,
                 context=Context() if self.kind == "run" else None,
             )
             self._context = trace.use_span(
@@ -634,9 +677,7 @@ class AttemptObserver:
             if value is not None:
                 span.set_attribute(key, session.policy.value(value))
         if native_start_ns is not None and event.ended_at_unix_ns is not None:
-            span.set_attribute(
-                "daydream.generation.duration_ns", event.ended_at_unix_ns - native_start_ns
-            )
+            span.set_attribute("daydream.generation.duration_ns", event.ended_at_unix_ns - native_start_ns)
         if event.choice_parts and self.capture:
             # Provider-choice content is full-capture evidence (field matrix:
             # "Full content except counts/identity", full mode only) — metadata
@@ -782,16 +823,27 @@ class AttemptObserver:
             self.scope.attrs(attrs)
             if self.usage_metadata:
                 self.scope.attrs({"daydream.message_usage": list(self.usage_metadata.values())})
-            self.scope.attrs({"daydream.models": self.models or None, "daydream.providers": self.providers or None})
+            admitted_models, model_diagnostic = _admit_observed_identity_list(
+                self.models, max_chars=_MAX_MODEL_NAME_CHARS, context="models"
+            )
+            admitted_providers, provider_diagnostic = _admit_observed_identity_list(
+                self.providers, max_chars=_MAX_PROVIDER_NAME_CHARS, context="providers"
+            )
+            for diagnostic in (model_diagnostic, provider_diagnostic):
+                if diagnostic is not None:
+                    code = diagnostic.split(":", 1)[0]
+                    self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
+            self.scope.attrs(
+                {
+                    "daydream.models": list(admitted_models) if admitted_models else None,
+                    "daydream.providers": list(admitted_providers) if admitted_providers else None,
+                }
+            )
             if self.diagnostic_counts:
                 self.scope.attrs(
                     {
-                        "daydream.backend_diagnostic.codes": list(
-                            self.diagnostic_counts
-                        ),
-                        "daydream.backend_diagnostic.counts": list(
-                            self.diagnostic_counts.values()
-                        ),
+                        "daydream.backend_diagnostic.codes": list(self.diagnostic_counts),
+                        "daydream.backend_diagnostic.counts": list(self.diagnostic_counts.values()),
                     }
                 )
             if self.capture:

@@ -442,6 +442,37 @@ class TestUnbilledOrNoneCapOwner:
         inv.finish()
         assert _summary(inv)["billing_owner"] == "structural_attempt"
 
+    def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, tmp_path: Path) -> None:
+        """Cap drain locks ownership: matching usage sums must not bill children.
+
+        Post-cap drafts may carry late usage whose input/output sums equal the
+        authoritative total. The documented cap invariant (no native bill on
+        cap-drained children) must win: the owner stays structural and every
+        draft remains custom/unbilled, never ``generation_children``.
+        """
+        recorder = make_recorder(tmp_path)
+        inv = _iq(recorder)
+        for i in range(513):
+            gid = f"g{i:04d}"
+            inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
+            inv.observe(_end_event(generation_id=gid))
+            inv.observe(
+                MetricsEvent(
+                    message_id=gid,
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.001,
+                    generation_id=gid,
+                )
+            )
+        _total(recorder, inv, input_tokens=513, output_tokens=513)
+        inv.finish()
+        summary = _summary(inv)
+        assert summary["children_after_cap"] is True
+        assert summary["billing_owner"] == "structural_attempt"
+        assert all(draft["billed"] is False for draft in summary["drafts"])
+
     def test_cap_drain_without_total_owner_none(self, tmp_path: Path) -> None:
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)

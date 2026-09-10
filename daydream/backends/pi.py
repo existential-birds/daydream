@@ -131,6 +131,7 @@ def _configured_pi_model(cwd: Path) -> str | None:
             return model
     return None
 
+
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at
 # the CLI layer; Pi does not, so the default DeepSeek model burns its
@@ -411,9 +412,8 @@ def _render_tool_result(result: Any) -> str:
         return result if isinstance(result, str) else ("" if result is None else json.dumps(result))
     content = result.get("content")
     if result.get("details") not in (None, "") or (
-        isinstance(content, list) and any(
-            not isinstance(block, dict) or block.get("type") != "text" for block in content
-        )
+        isinstance(content, list)
+        and any(not isinstance(block, dict) or block.get("type") != "text" for block in content)
     ):
         return json.dumps(result, ensure_ascii=False)
     if isinstance(content, list):
@@ -613,11 +613,7 @@ class PiBackend:
         child_env = os.environ.copy()
         child_env.pop("PI_API_KEY", None)
         if api_key:
-            native_key_name = (
-                _PI_PROVIDER_API_KEY_ENV.get(provider.casefold())
-                if provider
-                else None
-            )
+            native_key_name = _PI_PROVIDER_API_KEY_ENV.get(provider.casefold()) if provider else None
             if native_key_name is None:
                 logger.warning(
                     "PI_API_KEY could not be mapped to a native credential "
@@ -685,9 +681,13 @@ class PiBackend:
             native_session = session_id or effective_session_id
             return (
                 CostEvent(
-                    cost_usd=total_cost, input_tokens=total_input, output_tokens=total_output,
-                    cached_tokens=total_cache_read, cache_creation_tokens=total_cache_write,
-                    model_name=last_model, provider_name=last_provider,
+                    cost_usd=total_cost,
+                    input_tokens=total_input,
+                    output_tokens=total_output,
+                    cached_tokens=total_cache_read,
+                    cache_creation_tokens=total_cache_write,
+                    model_name=last_model,
+                    provider_name=last_provider,
                     measurement_source="terminal",
                     cost_source="reported" if total_cost is not None else None,
                 ),
@@ -695,10 +695,13 @@ class PiBackend:
                     structured_output=structured_result,
                     continuation=(
                         ContinuationToken(backend="pi", data={"session_id": native_session})
-                        if persist_session and native_session and finish_reason != "error" else None
+                        if persist_session and native_session and finish_reason != "error"
+                        else None
                     ),
-                    model_name=last_model, provider_name=last_provider,
-                    session_id=native_session, finish_reason=finish_reason,
+                    model_name=last_model,
+                    provider_name=last_provider,
+                    session_id=native_session,
+                    finish_reason=finish_reason,
                 ),
             )
 
@@ -707,15 +710,19 @@ class PiBackend:
         # native flag) so it stays None; output_schema is emulated by prompt
         # appendix (schema_emulated=True whenever a schema was supplied).
         yield RequestEvent(
-            prompt=full_prompt, system_prompt=_PI_SYSTEM_PREAMBLE, model_name=self.model,
-            provider_name=provider, session_id=effective_session_id,
-            reasoning_effort=thinking, output_schema=output_schema,
+            prompt=full_prompt,
+            system_prompt=_PI_SYSTEM_PREAMBLE,
+            model_name=self.model,
+            provider_name=provider,
+            session_id=effective_session_id,
+            reasoning_effort=thinking,
+            output_schema=output_schema,
             config=PiRequestConfig(
                 read_only=read_only,
                 persist_session=persist_session,
                 continuation_mode="resume" if resume_id is not None else "fresh",
                 model_mode="single",
-                selected_tools_count=4 if read_only else None,
+                selected_tools_count=len(_PI_READ_ONLY_TOOLS.split(",")) if read_only else None,
                 selected_tools_present=read_only,
                 no_skills=True,
                 schema_emulated=output_schema is not None,
@@ -738,18 +745,12 @@ class PiBackend:
             self._transports.append(transport)
             await transport.start()
 
-            response_idle_timeout_s = stream_idle_timeout_s(
-                default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
-            )
-            tool_idle_timeout_s = stream_idle_timeout_s(
-                default=DEFAULT_STREAM_IDLE_TIMEOUT_S
-            )
+            response_idle_timeout_s = stream_idle_timeout_s(default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S)
+            tool_idle_timeout_s = stream_idle_timeout_s(default=DEFAULT_STREAM_IDLE_TIMEOUT_S)
             active_tool_calls = 0
             is_first_line = True
             async for raw_line in transport.lines(
-                lambda: tool_idle_timeout_s
-                if active_tool_calls > 0
-                else response_idle_timeout_s
+                lambda: tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
             ):
                 if not raw_line:
                     continue
@@ -833,9 +834,7 @@ class PiBackend:
                                 call_id = block.get("id")
                                 call_name = block.get("name")
                                 if isinstance(call_id, str) and call_id and isinstance(call_name, str) and call_name:
-                                    arguments_admitted, _arguments_diag = _admit_json_value(
-                                        block.get("arguments")
-                                    )
+                                    arguments_admitted, _arguments_diag = _admit_json_value(block.get("arguments"))
                                     if arguments_admitted is not None or block.get("arguments") is None:
                                         try:
                                             choice_parts.append(
@@ -843,9 +842,7 @@ class PiBackend:
                                                     call_id=call_id,
                                                     name=call_name,
                                                     arguments=(
-                                                        arguments_admitted
-                                                        if arguments_admitted is not None
-                                                        else {}
+                                                        arguments_admitted if arguments_admitted is not None else {}
                                                     ),
                                                 )
                                             )
@@ -859,9 +856,7 @@ class PiBackend:
                         # assistant message_end, before any tool execution.
                         if open_generation_id is not None:
                             ended_at_ns = time.time_ns()
-                            native_start_ms, _start_diag = _admit_native_unix_ms(
-                                msg.get("timestamp")
-                            )
+                            native_start_ms, _start_diag = _admit_native_unix_ms(msg.get("timestamp"))
                             # Chronology: a native start after the host end
                             # receipt is an explicit incomplete boundary, never
                             # clamped or reordered.
@@ -922,9 +917,7 @@ class PiBackend:
                     created = usage["cacheWrite"]
                     cost = usage["cost_total"]
                     if isinstance(inp, int):
-                        inp += (cached if isinstance(cached, int) else 0) + (
-                            created if isinstance(created, int) else 0
-                        )
+                        inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
                         total_input = (total_input or 0) + inp
                     if isinstance(outp, int):
                         total_output = (total_output or 0) + outp
@@ -1000,15 +993,9 @@ class PiBackend:
             if returncode is not None and returncode != 0:
                 stderr_tail = "\n".join(stderr_lines[-10:])
                 if stderr_lines:
-                    detail = (
-                        f"\nPi CLI output (last {len(stderr_lines)} "
-                        f"non-JSON lines):\n{stderr_tail}"
-                    )
+                    detail = f"\nPi CLI output (last {len(stderr_lines)} non-JSON lines):\n{stderr_tail}"
                 else:
-                    detail = (
-                        "\n(no non-JSON output captured — pi may have "
-                        "crashed before writing to stdout)"
-                    )
+                    detail = "\n(no non-JSON output captured — pi may have crashed before writing to stdout)"
                 raise PiError(
                     f"Pi CLI exited with return code {returncode}.{detail}",
                     retryable=_is_retryable_exit_code(returncode),

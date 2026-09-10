@@ -225,23 +225,34 @@ class _ClaudeResultWithUsage(MockResultMessage):
 
 
 def _claude_messages(canary: str) -> list[Any]:
-    usage = {"input_tokens": 60, "output_tokens": 12, "cache_read_input_tokens": 20,
-             "cache_creation_input_tokens": 5}
+    usage = {"input_tokens": 60, "output_tokens": 12, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 5}
     return [
         _ClaudeAssistantWithUsage(
             content=[MockToolUseBlock(id="tool-claude-1", name="Read", input={"path": "src/main.py"})],
-            model="claude-opus-4-5-20250901", usage=usage, message_id="msg-claude-1",
+            model="claude-opus-4-5-20250901",
+            usage=usage,
+            message_id="msg-claude-1",
         ),
-        MockUserMessage(content=[MockToolResultBlock(tool_use_id="tool-claude-1",
-                                                     content=f"tool result {canary}", is_error=False)]),
+        MockUserMessage(
+            content=[MockToolResultBlock(tool_use_id="tool-claude-1", content=f"tool result {canary}", is_error=False)]
+        ),
         _ClaudeAssistantWithUsage(
             content=[MockTextBlock(f"done {canary}")],
-            model="claude-opus-4-5-20250901", usage=usage, message_id="msg-claude-2",
+            model="claude-opus-4-5-20250901",
+            usage=usage,
+            message_id="msg-claude-2",
         ),
         _ClaudeResultWithUsage(
-            subtype="success", duration_ms=150, duration_api_ms=120, is_error=False,
-            num_turns=2, session_id="native-claude-session", stop_reason="end_turn",
-            total_cost_usd=0.021, usage=usage, result=f"done {canary}",
+            subtype="success",
+            duration_ms=150,
+            duration_api_ms=120,
+            is_error=False,
+            num_turns=2,
+            session_id="native-claude-session",
+            stop_reason="end_turn",
+            total_cost_usd=0.021,
+            usage=usage,
+            result=f"done {canary}",
         ),
     ]
 
@@ -278,8 +289,9 @@ async def test_claude_real_backend_runner_trace_sdk_options_and_config(
     captured: dict[str, Any] = {}
     messages = _claude_messages(canary)
     scripted = scripted_client(messages, captured=captured)
-    patch_claude_sdk(monkeypatch, scripted,
-                     assistant_message=_ClaudeAssistantWithUsage, result_message=_ClaudeResultWithUsage)
+    patch_claude_sdk(
+        monkeypatch, scripted, assistant_message=_ClaudeAssistantWithUsage, result_message=_ClaudeResultWithUsage
+    )
 
     requests: list[RequestEvent] = []
     backend = _RecordingClaudeBackend(requests, model="claude-opus-5")
@@ -287,9 +299,7 @@ async def test_claude_real_backend_runner_trace_sdk_options_and_config(
 
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="claude")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="claude")) == 0
 
     assert json.loads((feature_branch_repo / ".daydream/protocol-result.json").read_text())["output"].endswith(
         f"done {canary}"
@@ -324,12 +334,12 @@ async def test_claude_real_backend_runner_trace_sdk_options_and_config(
     assert billed["daydream.models"] == ["claude-opus-4-5-20250901"]
     assert billed["gen_ai.response.finish_reasons"] == ["end_turn"]
     assert billed["gen_ai.conversation.id"] == "native-claude-session"
-    # Attempt kind on the wire: every backend runs a remote agent (external
-    # CLI/SDK boundary) whose provider is fixed by the run config, so the
-    # attempt scope is the CLIENT boundary (spans.py:142 creates attempt
-    # scopes as SpanKind.CLIENT) — the plan's CLIENT rule (proved remote
-    # agent + provider known at creation), not local INTERNAL.
-    assert attempt["kind"] == "SPAN_KIND_CLIENT"
+    # Attempt kind on the wire: Daydream agents are local CLI/SDK
+    # invocations, so attempts are INTERNAL/custom invoke_agent per the
+    # frozen plan ("use INTERNAL/custom for local CLI/in-process or
+    # provider-unknown cases across all four adapters"); only sealed
+    # provider generations are CLIENT model spans.
+    assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     assert "gen_ai.provider.name" not in billed or billed["gen_ai.provider.name"]
     _assert_leak_free(receiver, canary)
 
@@ -352,11 +362,16 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
     captured: dict[str, Any] = {}
     requests: list[RequestEvent] = []
     scripted = scripted_client(_claude_messages(canary), captured=captured)
-    patch_claude_sdk(monkeypatch, scripted,
-                     assistant_message=_ClaudeAssistantWithUsage, result_message=_ClaudeResultWithUsage)
-    agents = {"pattern-scanner": AgentDefinition(
-        description="scan patterns", prompt="scan", model="sonnet",
-    )}
+    patch_claude_sdk(
+        monkeypatch, scripted, assistant_message=_ClaudeAssistantWithUsage, result_message=_ClaudeResultWithUsage
+    )
+    agents = {
+        "pattern-scanner": AgentDefinition(
+            description="scan patterns",
+            prompt="scan",
+            model="sonnet",
+        )
+    }
     backend = _RecordingClaudeBackend(requests, model="claude-opus-5")
     events = []
     async for event in backend.execute(Path("/tmp"), f"scan {canary}", agents=agents):
@@ -405,9 +420,7 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
 
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="codex")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="codex")) == 0
 
     # External argv shape, recorded at the real transport spawn seam. Codex
     # omits the cwd kwarg when the execution cwd equals the caller's cwd.
@@ -441,7 +454,9 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
     tool_attrs = attributes(tools[0])
     assert tool_attrs["gen_ai.tool.name"] == "shell"
     assert tool_attrs["daydream.tool.error"] is False
-    assert attempt["kind"] == "SPAN_KIND_CLIENT"
+    # Daydream attempts are INTERNAL/custom invoke_agent (local CLI/SDK
+    # invocation; frozen plan). Only sealed provider generations are CLIENT.
+    assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
 
@@ -456,7 +471,9 @@ async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
     canary = _CANARIES["codex"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch, "codex", lines=[
+        monkeypatch,
+        "codex",
+        lines=[
             '{"type":"thread.started","thread_id":"th_two_turns"}',
             '{"type":"turn.started"}',
             '{"type":"item.started","item":{"id":"item_0","type":"command_execution",'
@@ -476,9 +493,7 @@ async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
     )
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="codex")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="codex")) == 0
     spans = receiver.spans
     tools = _kind(spans, "tool")
     assert len(tools) == 2
@@ -532,9 +547,7 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
 
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="pi")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
 
     # External argv shape, recorded at the real transport spawn seam.
     argv, spawn_kwargs = _spawner(spawner)
@@ -602,8 +615,9 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     assert billed["gen_ai.usage.output_tokens"] == 8401
     assert billed["gen_ai.usage.cost"] == pytest.approx(0.00402781)
     assert "daydream.generation.duration_ns" not in billed
-    # The attempt scope is the remote-agent CLIENT boundary (spans.py:142).
-    assert attempt["kind"] == "SPAN_KIND_CLIENT"
+    # Daydream attempts are INTERNAL/custom invoke_agent (local CLI/SDK
+    # invocation; frozen plan). Only sealed provider generations are CLIENT.
+    assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
 
@@ -637,15 +651,12 @@ async def test_pi_metadata_mode_omits_generation_choice_content(
     install_fake_cli_process(monkeypatch, "pi", lines=lines)
     _pin_first_message_end_receipt(monkeypatch, 1788690709621000000)
 
-    expected_paths = {"otlp": "/v1/traces", "honeyhive": "/opentelemetry/v1/traces",
-                      "langsmith": "/otel/v1/traces"}
+    expected_paths = {"otlp": "/v1/traces", "honeyhive": "/opentelemetry/v1/traces", "langsmith": "/otel/v1/traces"}
     with otlp_collector() as receiver:
         _vendor_env(monkeypatch, vendor, receiver.base_url)
         monkeypatch.setenv("DAYDREAM_TRACE_TO", vendor)
         monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="pi")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
 
     spans = receiver.spans
     generations = _kind(spans, "generation")
@@ -691,7 +702,8 @@ async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
     canary = _CANARIES["pi"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch, "pi",
+        monkeypatch,
+        "pi",
         lines=_replay_lines("generation_lifecycle.jsonl", {"src/example.py": f"src/{canary}.py"}),
     )
     # Deterministic host message_end receipt strictly between the two native
@@ -700,9 +712,7 @@ async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
     _pin_first_message_end_receipt(monkeypatch, 1788690315000000000)
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="pi")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
     spans = receiver.spans
     generations = _kind(spans, "generation")
     assert len(generations) == 2
@@ -727,26 +737,64 @@ async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
 def _osprey_lines(canary: str) -> list[str]:
     return [
         json.dumps({"event": "protocol", "version": 2}),
-        json.dumps({
-            "event": "session_start", "session_id": "native-osprey-session",
-            "started_at": "2026-09-09T12:00:00Z", "model": "osprey-native-model",
-            "provider": "osprey-native-provider",
-        }),
+        json.dumps(
+            {
+                "event": "session_start",
+                "session_id": "native-osprey-session",
+                "started_at": "2026-09-09T12:00:00Z",
+                "model": "osprey-native-model",
+                "provider": "osprey-native-provider",
+            }
+        ),
         json.dumps({"event": "turn_start", "turn_id": "t1", "timestamp": "2026-09-09T12:00:01Z"}),
         json.dumps({"event": "thinking_delta", "content": f"osprey thinking {canary}"}),
         json.dumps({"event": "text_delta", "content": f"osprey answer {canary}"}),
-        json.dumps({"event": "tool_call", "tool_call_id": "call_osp_1", "tool_name": "read",
-                    "arguments": {"path": "src/osp.py"}}),
-        json.dumps({"event": "tool_result", "tool_call_id": "call_osp_1", "tool_name": "read",
-                    "status": "success", "content": "file body", "duration_ms": 41}),
-        json.dumps({"event": "turn_end", "turn_id": "t1", "usage_reported": True, "duration_ms": 90,
-                    "prompt_tokens": 30, "completion_tokens": 6, "cached_tokens": 4,
-                    "cache_write_tokens": 2, "thinking_tokens": 3, "cost_usd": "0.007"}),
-        json.dumps({"event": "session_end", "outcome": "completed", "exit_code": 0,
-                    "total_cost_usd": "0.007", "total_prompt_tokens": 30,
-                    "total_completion_tokens": 6, "total_cached_tokens": 4,
-                    "total_cache_write_tokens": 2, "total_thinking_tokens": 3,
-                    "session_wallclock_ms": 120}),
+        json.dumps(
+            {
+                "event": "tool_call",
+                "tool_call_id": "call_osp_1",
+                "tool_name": "read",
+                "arguments": {"path": "src/osp.py"},
+            }
+        ),
+        json.dumps(
+            {
+                "event": "tool_result",
+                "tool_call_id": "call_osp_1",
+                "tool_name": "read",
+                "status": "success",
+                "content": "file body",
+                "duration_ms": 41,
+            }
+        ),
+        json.dumps(
+            {
+                "event": "turn_end",
+                "turn_id": "t1",
+                "usage_reported": True,
+                "duration_ms": 90,
+                "prompt_tokens": 30,
+                "completion_tokens": 6,
+                "cached_tokens": 4,
+                "cache_write_tokens": 2,
+                "thinking_tokens": 3,
+                "cost_usd": "0.007",
+            }
+        ),
+        json.dumps(
+            {
+                "event": "session_end",
+                "outcome": "completed",
+                "exit_code": 0,
+                "total_cost_usd": "0.007",
+                "total_prompt_tokens": 30,
+                "total_completion_tokens": 6,
+                "total_cached_tokens": 4,
+                "total_cache_write_tokens": 2,
+                "total_thinking_tokens": 3,
+                "session_wallclock_ms": 120,
+            }
+        ),
     ]
 
 
@@ -763,9 +811,7 @@ async def test_osprey_strict_protocol_fixture_through_runner(
     spawner = install_fake_cli_process(monkeypatch, "osprey", lines=_osprey_lines(canary))
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="osprey")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="osprey")) == 0
 
     # External argv shape, recorded at the real transport spawn seam.
     argv, _spawn_kwargs = _spawner(spawner)
@@ -790,8 +836,9 @@ async def test_osprey_strict_protocol_fixture_through_runner(
     assert attributes(tool)["daydream.tool.status"] == "success"
     # No generation child: Osprey is not native_generation_interval.
     assert _kind(spans, "generation") == []
-    # The attempt scope is the remote-agent CLIENT boundary (spans.py:142).
-    assert attempt["kind"] == "SPAN_KIND_CLIENT"
+    # Daydream attempts are INTERNAL/custom invoke_agent (local CLI/SDK
+    # invocation; frozen plan). Only sealed provider generations are CLIENT.
+    assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
 
@@ -830,14 +877,13 @@ async def test_attempt_input_messages_validate_against_pinned_schema(
     canary = _CANARIES["pi"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch, "pi",
+        monkeypatch,
+        "pi",
         lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
     )
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="pi")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
     import jsonschema
 
     schema = json.loads(
@@ -877,17 +923,15 @@ async def test_generic_http_protobuf_reaches_every_destination(
     canary = _CANARIES["pi"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch, "pi",
+        monkeypatch,
+        "pi",
         lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
     )
-    expected_paths = {"otlp": "/v1/traces", "honeyhive": "/opentelemetry/v1/traces",
-                      "langsmith": "/otel/v1/traces"}
+    expected_paths = {"otlp": "/v1/traces", "honeyhive": "/opentelemetry/v1/traces", "langsmith": "/otel/v1/traces"}
     with otlp_collector() as receiver:
         _vendor_env(monkeypatch, vendor, receiver.base_url)
         monkeypatch.setenv("DAYDREAM_TRACE_TO", vendor)
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="pi")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
     assert receiver.requests
     assert {request["path"] for request in receiver.requests} == {expected_paths[vendor]}
     headers = receiver.requests[0]["headers"]
@@ -918,9 +962,7 @@ async def test_generic_grpc_transport_reaches_real_loopback_server(
         # when the endpoint carries an explicit http:// scheme); the loopback
         # server is plaintext, so the endpoint must say so.
         _configure_otlp(monkeypatch, f"http://{receiver.base_url}", protocol="grpc")
-        assert await runner.run(
-            _flow_config(make_config, feature_branch_repo, backend="osprey")
-        ) == 0
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="osprey")) == 0
     assert receiver.requests
     assert _attempt(receiver.spans)
     metadata = receiver.requests[0]["headers"]
@@ -954,9 +996,7 @@ async def test_grpc_outage_fails_open_and_review_completes(
         # (not a TLS-misconfiguration failure) is what the test asserts.
         _configure_otlp(monkeypatch, f"http://{receiver.base_url}", protocol="grpc")
         with anyio.fail_after(30):
-            assert await runner.run(
-                _flow_config(make_config, feature_branch_repo, backend="osprey")
-            ) == 0
+            assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="osprey")) == 0
     assert json.loads((feature_branch_repo / ".daydream/protocol-result.json").read_text())["output"].endswith(
         _CANARIES["osprey"]
     )
@@ -976,14 +1016,24 @@ class _PiRetryFixture:
             json.dumps({"type": "session", "sessionId": "pi_ses_retry"}),
             json.dumps({"type": "agent_start"}),
             json.dumps({"type": "turn_start"}),
-            json.dumps({"type": "message_end", "message": {"role": "assistant",
-                                                           "content": [{"type": "text", "text": "partial"}]}}),
-            json.dumps({"type": "turn_end", "message": {
-                "role": "assistant", "content": [{"type": "text", "text": "partial"}],
-                "stopReason": "error", "errorMessage": "429 too many requests",
-                "usage": {"input": 500, "output": 20, "cacheRead": 0,
-                          "cost": {"total": 0.003}},
-            }}),
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "partial"}],
+                        "stopReason": "error",
+                        "errorMessage": "429 too many requests",
+                        "usage": {"input": 500, "output": 20, "cacheRead": 0, "cost": {"total": 0.003}},
+                    },
+                }
+            ),
             json.dumps({"type": "agent_end", "messages": []}),
         ]
 

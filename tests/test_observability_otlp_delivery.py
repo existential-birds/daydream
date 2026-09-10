@@ -180,9 +180,7 @@ def test_http_partial_success_positive_rejection_is_terminal_no_retry(
         (501, False),
     ],
 )
-def test_http_retry_only_for_429_502_503_504(
-    monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool
-) -> None:
+def test_http_retry_only_for_429_502_503_504(monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool) -> None:
     with scripted_otlp_collector([ScriptedResponse(status=status), ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -305,9 +303,7 @@ def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.parametrize("env_var", _CREDENTIAL_PROVIDER_VARS)
-def test_private_credential_provider_rejected_before_any_send(
-    monkeypatch: pytest.MonkeyPatch, env_var: str
-) -> None:
+def test_private_credential_provider_rejected_before_any_send(monkeypatch: pytest.MonkeyPatch, env_var: str) -> None:
     with scripted_otlp_collector([ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         monkeypatch.setenv(env_var, "tests.fixtures.opaque_provider:make_session")
@@ -397,9 +393,7 @@ def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(
             detail = any_pb2.Any()
             detail.Pack(retry)
             context.send_initial_metadata(())
-            context.set_trailing_metadata(
-                (("grpc-status-details-bin", detail.SerializeToString()),)
-            )
+            context.set_trailing_metadata((("grpc-status-details-bin", detail.SerializeToString()),))
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted")
         return ExportTraceServiceResponse()
 
@@ -449,9 +443,7 @@ def test_grpc_unavailable_is_terminal_under_owned_policy(monkeypatch: pytest.Mon
 
 
 def test_grpc_scheme_precedence_over_insecure_variable(monkeypatch: pytest.MonkeyPatch) -> None:
-    def receive(
-        request: ExportTraceServiceRequest, context: grpc.ServicerContext
-    ) -> ExportTraceServiceResponse:
+    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         return ExportTraceServiceResponse()
 
     exporter = _generic_grpc(monkeypatch, receive, OTEL_EXPORTER_OTLP_INSECURE="false")
@@ -505,3 +497,58 @@ def test_delivery_snapshot_states_and_flush_are_independent(monkeypatch: pytest.
         assert snapshot["delivered"] == 0
         assert exporter.force_flush() is True  # SDK flush is not delivery acceptance
         exporter.shutdown()
+
+
+def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Encode/budget exhaustion before a send still records a ledger outcome."""
+    with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
+        _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        # First export exhausts the one-deadline budget via retry backoff;
+        # the second export exits the attempt loop before any send.
+        exporter.export(_spans())
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 0
+        assert snapshot["unverified"] >= 1
+        exporter.export(_spans())
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["unverified"] >= 2
+        exporter.shutdown()
+
+
+def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stock OTel semantics: shared endpoint paths get /v1/traces appended."""
+    with otlp_collector() as receiver:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url + "/otlp-prefix")
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter.export(_spans())
+        assert receiver.requests[-1]["path"] == "/otlp-prefix/v1/traces"
+        exporter.shutdown()
+
+
+def test_generic_signal_specific_endpoint_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A signal-specific endpoint is used exactly as supplied, path included."""
+    with otlp_collector() as receiver:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", receiver.base_url + "/custom/ingest")
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter.export(_spans())
+        assert receiver.requests[-1]["path"] == "/custom/ingest"
+        exporter.shutdown()
+
+
+def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shutdown closes the owned AsyncClient through the portal before it stops."""
+    with otlp_collector() as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter.export(_spans())
+        assert len(receiver.spans) == 1
+        # Reach into the transport seam the shutdown contract owns.
+        transport = exporter._transport
+        client = transport._client
+        assert client is not None
+        exporter.shutdown()
+        assert client.is_closed
+        # Exactly-once shutdown stays exactly-once even when the client is gone.
+        exporter.shutdown()
+        assert transport._state == "CLOSED"

@@ -177,9 +177,7 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(
         "attempt",
         "run",
     ]
-    attempt_span = next(
-        span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt"
-    )
+    attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
     attrs = dict(attempt_span.attributes or {})
     assert attrs["daydream.backend_diagnostic.codes"] == (
         "parser_[REDACTED_CREDENTIAL]",
@@ -192,10 +190,7 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(
     assert "not observable" not in encoded
     for span in spans:
         if span is not attempt_span:
-            assert not any(
-                key.startswith("daydream.backend_diagnostic")
-                for key in (span.attributes or {})
-            )
+            assert not any(key.startswith("daydream.backend_diagnostic") for key in (span.attributes or {}))
 
 
 def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogCaptureFixture) -> None:
@@ -243,7 +238,8 @@ async def test_run_spans_survive_flag_valued_secret_env_var(monkeypatch: pytest.
 @pytest.mark.anyio
 @pytest.mark.parametrize("stall_during", ["export", "shutdown"])
 async def test_shutdown_deadline_is_total_and_shutdown_once(
-    stall_during: str, caplog: pytest.LogCaptureFixture,
+    stall_during: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     release = threading.Event()
 
@@ -736,7 +732,11 @@ async def test_ambient_context_restored_after_exception_and_cancellation() -> No
             async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
                 raise RuntimeError("boom")
         current = otel_trace.get_current_span()
-        assert current.get_span_context().span_id == 0 or True
+        # The exception path detached the run's span context: the ambient
+        # span after both failed runs is the INVALID span (span_id 0), not a
+        # leftover run scope masquerading as current.
+        assert current.get_span_context().span_id == 0
+        assert not current.is_recording()
         assert otel_context.get_value("workflow_name") == sentinel
     finally:
         otel_context.detach(ambient)
@@ -843,8 +843,11 @@ async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(
     assert agent_attrs["daydream.agent.name"] == "review"
     assert agent_attrs["daydream.agent.role"] == "root"
     assert agent_attrs["gen_ai.operation.name"] == "invoke_agent"
-    tool_absent = all("traceloop.entity.path" not in (span.attributes or {}) for span in spans if
-                      (span.attributes or {}).get("daydream.span.kind") in ("attempt",))
+    tool_absent = all(
+        "traceloop.entity.path" not in (span.attributes or {})
+        for span in spans
+        if (span.attributes or {}).get("daydream.span.kind") in ("attempt",)
+    )
     assert tool_absent
     _assert_no_ambient_enrichment(spans, sentinel)
 

@@ -51,10 +51,11 @@ For a self-hosted base that requires `/api/v1`, include that prefix in the base 
 Daydream appends `/otel/v1/traces`. Set `LANGSMITH_WORKSPACE_ID` when the API key
 requires an explicit workspace; it becomes the `x-tenant-id` header.
 
-Attempts appear as LLM runs, structural scopes as chains, and tool executions as
-tools. The destination adds LangSmith's native usage metadata to preserve known
-cache/reasoning token details and reported cost. Parent spans rely on LangSmith's
-aggregation; they do not repeat attempt usage.
+Logical agents and backend attempts appear as chains, sealed provider generation
+children as LLM runs, and tool executions as tools. The destination adds
+LangSmith's native usage metadata to preserve known cache/reasoning token
+details and reported cost. Parent spans rely on LangSmith's aggregation; they
+do not repeat child usage.
 
 Endpoint and field mappings follow the
 [LangSmith OpenTelemetry integration](https://docs.langchain.com/langsmith/trace-with-opentelemetry).
@@ -109,11 +110,13 @@ Use a write-enabled project API key, not a workspace control-plane key. You do n
 need a workspace ID header; the project key determines its workspace as well.
 
 HoneyHive creates a session around each run through its OTLP session-creation
-attributes. Run spans, steps, and logical agents appear as chains, backend attempts
-as model events, and tool executions as tools. The adapter maps known cost,
-cache-read/write counts, and reasoning tokens into native metadata fields on
-attempts only. It preserves the portable attributes and does not change spans sent
-to other destinations.
+attributes. Run spans, steps, logical agents, and backend attempts appear as
+chains, sealed provider generation children as model events, and tool
+executions as tools. The adapter maps known cost, cache-read/write counts, and
+reasoning tokens into native metadata fields on the spans that own the billing
+(generation model events; structural attempts keep custom evidence without
+model classification). It preserves the portable attributes and does not change
+spans sent to other destinations.
 
 HoneyHive documents a $0.10 initial session cost in its
 [normalizer](https://docs.honeyhive.ai/v2/sdk-reference/semconv-reference). Its displayed

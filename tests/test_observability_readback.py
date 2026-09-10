@@ -555,9 +555,7 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     assert resolution["method"] == "GET"
     discovery = discovered[1]
     assert discovery["session"] == [session_id]
-    assert discovery["filter"] == (
-        f"and(eq(metadata_key, 'daydream_run_id'), eq(metadata_value, '{run_id}'))"
-    )
+    assert discovery["filter"] == (f"and(eq(metadata_key, 'daydream_run_id'), eq(metadata_value, '{run_id}'))")
     assert discovery.get("start_time") == data["started_at"]
     # Exact-ID reads: one for the frozen root id, two stable tree snapshots.
     ops = [d for d in discovered if "id" in d]
@@ -674,13 +672,12 @@ class _LoopbackPeer:
         if self.trickle:
             try:
                 conn.sendall(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                    b"Content-Length: 1000000\r\n\r\n{\"events\":"
+                    b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\n\r\n{"events":'
                 )
                 for _ in range(50):
                     conn.sendall(b"[]")
                     time.sleep(0.05)
-                conn.sendall(b",\"count\":0}")
+                conn.sendall(b',"count":0}')
             except OSError:
                 pass
         # Delay headers indefinitely in the plain case; then observe client
@@ -707,9 +704,7 @@ class _LoopbackPeer:
 
 
 @pytest.mark.parametrize("trickle", [False, True])
-def test_immutable_budget_truncates_slow_peers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trickle: bool
-) -> None:
+def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
     """0.12s budget: return before 0.35s, peer observes close within 1s, no later poll."""
     receipt = _write_receipt(tmp_path)
     peer = _LoopbackPeer(trickle=trickle)
@@ -822,7 +817,9 @@ def _fake_pi_script(tmp_path: Path, *, marker: bool = True, fixture_path: Path |
 
 
 def test_replay_gate_fixture_hash_mismatch_fails_before_send(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay_env: None  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
     bad_fixture = tmp_path / "bad.jsonl"
@@ -847,7 +844,9 @@ def test_replay_gate_fixture_hash_mismatch_fails_before_send(
 
 
 def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay_env: None  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
     fk = _fake_pi_script(tmp_path)
@@ -885,7 +884,9 @@ def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
 
 
 def test_replay_gate_real_pi_or_wrong_output_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay_env: None  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
     repo = _public_fixture_repo(tmp_path)
@@ -910,9 +911,7 @@ def test_replay_gate_real_pi_or_wrong_output_fails(
     assert "marker" in buffer.getvalue() or "replay" in buffer.getvalue()
 
 
-def test_replay_gate_wrong_destinations_or_missing_auth_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HH_API_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
     monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
@@ -953,7 +952,10 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(
 
 @pytest.mark.parametrize("marker", [False, True])
 def test_replay_fake_pi_marker_requirement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay_env: None, marker: bool  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replay_env: None,
+    marker: bool,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
     repo = _public_fixture_repo(tmp_path)
@@ -985,9 +987,7 @@ def test_replay_fake_pi_marker_requirement(
 # ---------------------------------------------------------------------------
 
 
-def test_replay_receipt_is_accepted_by_verifier_validator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_replay_receipt_is_accepted_by_verifier_validator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The replay tool's receipt must validate under the verifier's schema.
 
     The two operator scripts are one pipeline: the replay tool writes the
@@ -1150,7 +1150,7 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
                     run_type="chain",
                     metadata={"daydream_run_id": run_id, "daydream.session.id": "dd-session-1"},
                 )
-            ]
+            ],
         },
     }
     matrix = json.loads((FIXTURES / "readback-matrix.json").read_text())
@@ -1162,8 +1162,7 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
         "billed-bad",
         "29cb884b-712b-4de4-b478-3652932ff5dc",
         event_type="chain",
-        **{"daydream.run.id": run_id, "gen_ai.usage.cost": 0.00402781,
-           "gen_ai.response.model": "some-other-model"},
+        **{"daydream.run.id": run_id, "gen_ai.usage.cost": 0.00402781, "gen_ai.response.model": "some-other-model"},
     )
     data["honeyhive"] = {"rows": [bad, first, second]}
     rows = _verifier.compare_stored(data, matrix, acceptance_kind="sanitized_protocol_replay")
@@ -1194,9 +1193,7 @@ def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
     assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
 
 
-def test_replay_then_verify_end_to_end_on_fake_vendors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_replay_then_verify_end_to_end_on_fake_vendors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Full operator chain: replay tool writes the receipt the verifier accepts.
 
     The replay runs hermetically (fake vendors, loopback OTLP oracle, fake pi
@@ -1295,10 +1292,7 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(
         fake_ls.close()
 
 
-
-def test_replay_full_hermetic_run_writes_labeled_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_replay_full_hermetic_run_writes_labeled_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The complete sanitized replay through real PiBackend/run_agent/trace_run.
 
     Vendor destinations are fake loopback OTLP/HTTP endpoints; the local
@@ -1356,6 +1350,12 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(
         assert receipt["labels"]["reported_cost"].startswith("synthetic")
         # Both vendor destinations must have been reached by the real exporters.
         assert fake_hh.requests and fake_ls.requests
+        # The pinned replay clock must be restored to the host clock when the
+        # replay returns (guarded global environment: never skew the host or
+        # the pytest worker's later tests).
+        import time as _stdlib_time
+
+        assert _stdlib_time.time_ns is _replay._stdlib_real_time_ns
     finally:
         fake_hh.close()
         fake_ls.close()

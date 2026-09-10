@@ -157,12 +157,9 @@ class EvidenceDiagnostic:
 
 def _has_unicode_controls(value: str) -> bool:
     """Reject C0/C1 controls and bidi/line-separator format characters."""
-    return (
-        bool(_BIDI_CODEPOINTS_RE.search(value))
-        or any(
-            unicodedata.category(ch) in _CONTROL_CATEGORIES | _BIDI_FORMAT_CATEGORIES | _LINE_SEPARATOR_CATEGORIES
-            for ch in value
-        )
+    return bool(_BIDI_CODEPOINTS_RE.search(value)) or any(
+        unicodedata.category(ch) in _CONTROL_CATEGORIES | _BIDI_FORMAT_CATEGORIES | _LINE_SEPARATOR_CATEGORIES
+        for ch in value
     )
 
 
@@ -345,53 +342,6 @@ def _admit_json_value(value: Any, depth: int = 0) -> tuple[Any, EvidenceDiagnost
             admitted_map[key] = item_value
         return admitted_map, None
     return None, EvidenceDiagnostic(_DIAG_JSON_VALUE, "json_type")
-
-
-def _admit_ordered_identity_list(
-    values: Any,
-    *,
-    max_chars: int,
-    context: str,
-) -> tuple[tuple[str, ...] | None, EvidenceDiagnostic | None, EvidenceDiagnostic | None]:
-    """Admit an ordered distinct identity list capped at 16 entries.
-
-    On any unsafe member or count overflow the whole list is omitted and only
-    a fixed diagnostic (plus, for overflow, the total distinct count in the
-    detail) is returned — never a partial list that would look authoritative.
-    """
-    if not isinstance(values, (list, tuple)):
-        return None, EvidenceDiagnostic(_DIAG_LIST_MEMBER_UNSAFE, context), None
-    distinct: list[str] = []
-    for value in values:
-        admitted, diagnostic = _admit_identity_label(value, max_chars=max_chars, context=context)
-        if admitted is None:
-            return None, diagnostic, None
-        if admitted not in distinct:
-            distinct.append(admitted)
-    if len(distinct) > _MAX_ORDERED_IDENTITY_ENTRIES:
-        # Whole-list overflow: omit everything, report only the fixed code and
-        # the total distinct count (a count is metadata, not identity).
-        return (
-            None,
-            None,
-            EvidenceDiagnostic(_DIAG_LIST_OVERFLOW, f"{len(distinct)}"),
-        )
-    return tuple(distinct), None, None
-
-
-def _admit_name_presence_list(values: Any, context: str) -> tuple[int, bool, EvidenceDiagnostic | None]:
-    """Reduce a backend name list to (exact count, presence, diagnostic).
-
-    Arbitrary string elements never cross this boundary (P18: persona/toolset
-    labels, Claude allowed/audit tools, Pi selected tools are count/presence
-    only). A non-list input is (0, False, diagnostic) — absence of evidence,
-    not a zero claim.
-    """
-    if values is None:
-        return 0, False, None
-    if not isinstance(values, (list, tuple, frozenset, set)):
-        return 0, False, EvidenceDiagnostic(_DIAG_LIST_MEMBER_UNSAFE, context)
-    return len(values), len(values) > 0, None
 
 
 class _AdmissionBase:
@@ -579,13 +529,28 @@ class OspreyRequestConfig(EffectiveRequestConfig):
         _require_bool(self.compress_context, "compress_context")
         _require_bool(self.ultracode, "ultracode")
         for int_field in (
-            "max_turns", "turn_timeout", "stream_idle_timeout_secs", "streaming_timeout_secs",
-            "empty_completion_threshold", "driver_max_retries", "compress_min_bytes",
-            "tool_result_cap", "tool_result_head", "tool_result_tail", "tool_result_max_lines",
-            "retry_failure_threshold", "no_progress_family_threshold", "no_progress_family_window",
-            "no_progress_artifact_threshold", "no_progress_suppression_window", "max_subagents",
-            "llm_rpm", "observation_update_bytes", "observation_inline_bytes",
-            "observation_admission_bytes", "vars_count",
+            "max_turns",
+            "turn_timeout",
+            "stream_idle_timeout_secs",
+            "streaming_timeout_secs",
+            "empty_completion_threshold",
+            "driver_max_retries",
+            "compress_min_bytes",
+            "tool_result_cap",
+            "tool_result_head",
+            "tool_result_tail",
+            "tool_result_max_lines",
+            "retry_failure_threshold",
+            "no_progress_family_threshold",
+            "no_progress_family_window",
+            "no_progress_artifact_threshold",
+            "no_progress_suppression_window",
+            "max_subagents",
+            "llm_rpm",
+            "observation_update_bytes",
+            "observation_inline_bytes",
+            "observation_admission_bytes",
+            "vars_count",
         ):
             _require_nonnegative_int(getattr(self, int_field), int_field)
 
@@ -1164,6 +1129,7 @@ class Backend(Protocol):
                 accept and ignore this option.
         """
         ...
+
     async def cancel(self) -> None:
         """Cancel every active invocation on this backend.
 
@@ -1242,6 +1208,7 @@ def create_backend(
 
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
+
         return ClaudeBackend(
             model=model or DEFAULT_CLAUDE_MODEL,
             reasoning_effort=reasoning_effort,
@@ -1252,12 +1219,15 @@ def create_backend(
         raise AuditIsolationError(name, "unsupported_backend")
     if name == "codex":
         from daydream.backends.codex import CodexBackend
+
         return CodexBackend(model=model or DEFAULT_CODEX_MODEL, reasoning_effort=reasoning_effort)
     if name == "pi":
         from daydream.backends.pi import PiBackend
+
         return PiBackend(model=model, cwd=cwd, reasoning_effort=reasoning_effort)
     if name == "osprey":
         from daydream.backends.osprey import OspreyBackend
+
         return OspreyBackend(
             model=model,
             cwd=cwd,
