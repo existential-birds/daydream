@@ -876,11 +876,11 @@ def test_post_findings_drops_diagram_evidence_absent_from_immutable_head(
 def test_post_findings_drops_a_citation_absent_from_the_local_checkout(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The source-keyed classification: a local read failure IS an absent path.
+    """A local read git itself names as a missing path IS an absent citation.
 
-    Guards the ``head.read_locally`` half of ``unreadable()`` — the checkout
-    holds the head commit, so ``git show`` failing on ``a.py`` proves the path
-    is not there and must not degrade to "could not be read".
+    Guards the ``git show`` half of ``unreadable()`` — git answers "does not
+    exist in <sha>", which proves absence, so the verdict must not degrade to
+    "could not be read".
     """
     (git_repo / "b.py").write_text("def other():\n    return 1\n")
     git(git_repo, "add", "b.py")
@@ -895,6 +895,32 @@ def test_post_findings_drops_a_citation_absent_from_the_local_checkout(
     printed = _console_text(capsys)
     assert "flowchart diagram evidence is missing from immutable head: a.py" in printed
     assert "could not be read from immutable head" not in printed
+
+
+def test_post_findings_reports_a_damaged_local_object_as_unreadable_not_missing(
+    fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A local read that fails for any other reason is the poster's problem.
+
+    The checkout holds the head commit and the citation, but its blob is gone
+    from the object store, so ``git show`` fails without naming a missing
+    path. Blaming the artifact for that sends an operator hunting a forgery.
+    """
+    (git_repo / "a.py").write_text("def run():\n    return 1\n")
+    git(git_repo, "add", "a.py")
+    head_sha = commit(git_repo, "add flowchart source")
+    blob = git(git_repo, "rev-parse", f"{head_sha}:a.py").strip()
+    (git_repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+    artifact = _write_artifact(
+        git_repo / "findings.json", [], diagrams=_flowchart_payload(), head_sha=head_sha,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=head_sha, target=git_repo))
+
+    assert code == 0
+    printed = _console_text(capsys)
+    assert "flowchart diagram evidence could not be read from immutable head" in printed
+    assert "is missing from immutable head" not in printed
 
 
 # --- Issue #1167: head evidence without a checkout ---------------------------
@@ -1099,6 +1125,42 @@ def test_post_findings_reports_a_throttled_read_as_unreadable_not_missing(
     assert "is missing from immutable head" not in printed
 
 
+def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A path no read could be attempted for is the artifact's defect.
+
+    The spec schema applies its ``pattern`` with ``re.search``, whose ``$``
+    matches before a trailing newline, so ``a.py\\n`` reaches the fullmatch in
+    ``_HeadEvidence.read`` and fails it. No read happened, so the verdict must
+    name the bad path rather than report the poster as unable to read.
+    """
+    payload = _flowchart_payload()
+    flowchart = payload["results"]["flowchart"]
+    flowchart["spec_final"]["root"]["file"] = "a.py\n"
+    for node in flowchart["spec_final"]["nodes"]:
+        node["evidence"]["file"] = "a.py\n"
+    for element in flowchart["grounding"]["elements"]:
+        element["defined_at"] = "a.py\n:1"
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
+        diagrams=payload,
+        head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    printed = _console_text(capsys)
+    assert "flowchart diagram evidence cites an invalid repository path: 'a.py\\n'" in printed
+    assert "could not be read from immutable head" not in printed
+    assert _contents_calls(fake_gh) == []
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "```mermaid" not in posts[0].payload["body"]
+
+
 @pytest.mark.parametrize(
     ("label", "response"),
     [
@@ -1117,8 +1179,8 @@ def test_post_findings_reports_an_unreadable_api_head_as_unreadable(
     """Every contents-API failure that is not proven absence reads as unreadable.
 
     Two of these never reach ``_gh_error_for`` as a recognizable status (the
-    undecodable body is raised by ``_parse_gh_json``), which is why the
-    classification is keyed on the read's source rather than on stderr.
+    undecodable body is raised by ``_parse_gh_json``), which is why absence is
+    claimed only where the read positively proved it.
     """
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
     artifact = _write_artifact(

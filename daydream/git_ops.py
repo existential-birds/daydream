@@ -245,9 +245,12 @@ class PathAbsentError(GitError):
 
     Narrower than the generic :class:`GitError` so a caller can tell "the file
     is not there" apart from "the read never happened" — an inability to read
-    (auth, transport, throttling, a missing ``gh`` binary, malformed output)
-    must never be reported as a missing path. Only :func:`gh_file_at_ref`
-    raises it, and only when its own read positively established the absence.
+    (auth, transport, throttling, a missing ``gh`` binary, a damaged object
+    store, malformed output) must never be reported as a missing path. Only
+    the two reads that fetch a path at a ref raise it — :func:`show` and
+    :func:`gh_file_at_ref` — and only when the read positively established the
+    absence, so a caller classifies on the type alone rather than guessing
+    from which source the failure came.
     """
 
 
@@ -1446,16 +1449,26 @@ def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
     return output or None
 
 
+_GIT_PATH_ABSENT_RE = re.compile(r"does not exist in|exists on disk, but not in")
+
+
 def show(repo: Path, ref: str, path: str) -> bytes:
     """Return the raw bytes of *path* at *ref* via ``git show``.
 
     Raises:
-        GitError: If ``git show`` fails (e.g. path missing at that revision).
+        PathAbsentError: If git's own diagnostic proves *path* is not in *ref*.
+        GitError: If ``git show`` fails for any other reason — a timeout, a
+            damaged object store, an OS-level failure. Recognition is
+            positive-only, like :func:`_gh_failure_is_absence`: a failure git
+            did not name as a missing path is never reported as one.
     """
     proc = _run_git(repo, ["show", f"{ref}:{path}"], timeout=30, capture_bytes=True)
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
-        raise GitError(f"git show {ref}:{path} failed: {stderr.strip()}")
+        message = f"git show {ref}:{path} failed: {stderr.strip()}"
+        if _GIT_PATH_ABSENT_RE.search(stderr):
+            raise PathAbsentError(message)
+        raise GitError(message)
     return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
 
 

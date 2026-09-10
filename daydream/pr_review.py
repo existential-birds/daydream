@@ -2151,20 +2151,12 @@ class _HeadEvidence:
                 self._local = False
         return self._local
 
-    @property
-    def read_locally(self) -> bool:
-        """Which source :meth:`read` uses: the local checkout, or the contents API.
-
-        The decision is memoized, so a caller classifying a failure from
-        :meth:`read` sees the same branch that produced it.
-        """
-        return self._reads_locally()
-
     def read(self, path: str) -> bytes:
         """Return *path*'s bytes at the head SHA.
 
         Raises:
-            GitError: If the file cannot be read at that commit, from either source.
+            PathAbsentError: If either source proved *path* absent at that commit.
+            GitError: If the file could not be read at all.
         """
         cached = self._bytes.get(path)
         if cached is not None:
@@ -2211,18 +2203,22 @@ def _diagram_head_evidence_problem(
     def unreadable(path: str, exc: GitError) -> str:
         """Tell an absent citation apart from one that could not be read.
 
-        Which of the two a failure is depends on the source it came from. The
-        local ``git show`` branch runs only once the head commit is proven
-        present, so a failure there really is an absent path. The contents-API
-        branch cannot distinguish absence from an inability to read — auth,
-        transport, throttling, a missing ``gh`` binary, malformed output all
-        arrive as a bare :class:`GitError` — so it may claim absence only when
-        the read positively proved it. Both drop the diagram, but an absent
-        path is the artifact's problem and an unreadable one is the poster's:
-        reporting the second as the first sends an operator hunting a forged
-        artifact that does not exist.
+        Neither source can tell the two apart after the fact — a timeout, a
+        damaged object store, auth, transport, throttling, a missing ``gh``
+        binary and malformed output all arrive as a bare :class:`GitError`
+        from either — so absence is claimed only where the read itself proved
+        it and raised :class:`PathAbsentError`. Both drop the diagram, but an
+        absent path is the artifact's problem and an unreadable one is the
+        poster's: reporting the second as the first sends an operator hunting
+        a forged artifact that does not exist.
+
+        A citation no read could ever have been attempted for — the grammar
+        :meth:`_HeadEvidence.read` re-checks as a fullmatch — is neither, and
+        is named as the artifact defect it is.
         """
-        if head.read_locally or isinstance(exc, PathAbsentError):
+        if not valid_repository_file_path(path):
+            return f"{kind} diagram evidence cites an invalid repository path: {path!r}"
+        if isinstance(exc, PathAbsentError):
             return f"{kind} diagram evidence is missing from immutable head: {path}"
         return f"{kind} diagram evidence could not be read from immutable head: {exc}"
 
