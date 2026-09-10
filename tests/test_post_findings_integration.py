@@ -43,6 +43,17 @@ def cli_main(argv: list[str]) -> int:
     raise AssertionError("cli.main() must exit via sys.exit")
 
 
+def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
+    """Captured stdout with Rich panel borders and line wrapping collapsed.
+
+    ``print_warning`` renders a bordered panel, so a message longer than the
+    panel width is broken across lines with box characters between the halves
+    — a substring check against the raw capture fails on the wrap.
+    """
+    out = capsys.readouterr().out
+    return " ".join(out.translate({ord(char): " " for char in "│╭╮╰╯─"}).split())
+
+
 def _post_argv(
     artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,
 ) -> list[str]:
@@ -694,8 +705,8 @@ def test_post_findings_all_matched_no_approve_without_flag(
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_rejects_forged_diagram_grounding_attestation(
-    fake_gh: FakeGh, git_repo: Path,
+def test_post_findings_drops_forged_diagram_grounding_attestation(
+    fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     (git_repo / "a.py").write_text("def run():\n    return 1\n")
     git(git_repo, "add", "a.py")
@@ -784,12 +795,16 @@ def test_post_findings_rejects_forged_diagram_grounding_attestation(
         _post_argv(artifact, head_sha=head_sha, target=git_repo) + ["--bot-login", "daydream"]
     )
 
-    assert code == 1
-    assert fake_gh.calls("POST") == []
+    assert code == 0
+    assert "Diagram dropped (the findings are still posted)" in _console_text(capsys)
+    # No review is posted because the artifact's one finding is already on the
+    # PR, so the run reaches the no-new-findings short-circuit -- NOT because a
+    # forged diagram fails the run closed, which it no longer does (#1176).
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_rejects_forged_sequence_grounding_attestation(
-    fake_gh: FakeGh, git_repo: Path,
+def test_post_findings_drops_forged_sequence_grounding_attestation(
+    fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     (git_repo / "api.py").write_text(
         "from worker import worker\n"
@@ -817,12 +832,15 @@ def test_post_findings_rejects_forged_sequence_grounding_attestation(
 
     code = cli_main(_post_argv(artifact, head_sha=head_sha, target=git_repo))
 
-    assert code == 1
-    assert fake_gh.calls("POST") == []
+    assert code == 0
+    assert "Diagram dropped (the findings are still posted)" in _console_text(capsys)
+    # The artifact carries no findings, so the run reaches the no-new-findings
+    # short-circuit -- not the old fail-closed diagram gate (#1176).
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_rejects_diagram_evidence_absent_from_immutable_head(
-    fake_gh: FakeGh, git_repo: Path,
+def test_post_findings_drops_diagram_evidence_absent_from_immutable_head(
+    fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     (git_repo / "a.py").write_text("def run():\n    return 1\n")
     git(git_repo, "add", "a.py")
@@ -845,8 +863,38 @@ def test_post_findings_rejects_diagram_evidence_absent_from_immutable_head(
         _post_argv(artifact, head_sha=head_sha, target=git_repo) + ["--bot-login", "daydream"]
     )
 
-    assert code == 1
-    assert fake_gh.calls("POST") == []
+    assert code == 0
+    # The artifact carries no findings, so the run reaches the no-new-findings
+    # short-circuit -- not the old fail-closed diagram gate (#1176).
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
+    # The local `git show` branch has proven the head commit present, so an
+    # out-of-range citation is still reported as absent, never as unreadable.
+    printed = _console_text(capsys)
+    assert "is missing from immutable head" in printed
+
+
+def test_post_findings_drops_a_citation_absent_from_the_local_checkout(
+    fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The source-keyed classification: a local read failure IS an absent path.
+
+    Guards the ``head.read_locally`` half of ``unreadable()`` — the checkout
+    holds the head commit, so ``git show`` failing on ``a.py`` proves the path
+    is not there and must not degrade to "could not be read".
+    """
+    (git_repo / "b.py").write_text("def other():\n    return 1\n")
+    git(git_repo, "add", "b.py")
+    head_sha = commit(git_repo, "head without the cited file")
+    artifact = _write_artifact(
+        git_repo / "findings.json", [], diagrams=_flowchart_payload(), head_sha=head_sha,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=head_sha, target=git_repo))
+
+    assert code == 0
+    printed = _console_text(capsys)
+    assert "flowchart diagram evidence is missing from immutable head: a.py" in printed
+    assert "could not be read from immutable head" not in printed
 
 
 # --- Issue #1167: head evidence without a checkout ---------------------------
@@ -956,10 +1004,15 @@ def test_post_findings_reads_oversized_evidence_through_the_blob_endpoint(
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 
-def test_post_findings_rejects_api_evidence_that_contradicts_the_spec(
-    fake_gh: FakeGh, tmp_path: Path,
+def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Evidence fetched over the API is adjudicated exactly as a checkout's is."""
+    """Issue #1176: the contradicted diagram is dropped, the findings still post.
+
+    Evidence fetched over the API is adjudicated exactly as a checkout's is,
+    but a rejected diagram costs only the diagram — the review that carries
+    the artifact's validated findings is posted without a mermaid block.
+    """
     _serve_contents(fake_gh, "a.py", "x = 1\n")  # no `run` definition, one line
     artifact = _write_artifact(
         tmp_path / "findings.json",
@@ -970,23 +1023,56 @@ def test_post_findings_rejects_api_evidence_that_contradicts_the_spec(
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
-    assert code == 1
-    assert fake_gh.calls("POST") == []
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "Real finding" in json.dumps(posts[0].payload)
+    assert "```mermaid" not in posts[0].payload["body"]
+    printed = _console_text(capsys)
+    assert "Diagram dropped (the findings are still posted)" in printed
 
 
-def test_post_findings_rejects_evidence_absent_from_the_api_head(
-    fake_gh: FakeGh, tmp_path: Path,
+def test_post_findings_drops_evidence_absent_from_the_api_head(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A 404 at the head SHA is a missing citation, not a reason to post anyway."""
-    fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=None)  # 404
+    """A 404 at the head SHA is a missing citation, not an unreadable one."""
+    fake_gh.set_response(
+        "GET", "repos/o/r/contents/a.py", value={"__error__": "gh: Not Found (HTTP 404)"},
+    )
     artifact = _write_artifact(
         tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
     )
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
-    assert code == 1
-    assert fake_gh.calls("POST") == []
+    assert code == 0
+    # The artifact carries no findings, so the run reaches the no-new-findings
+    # short-circuit -- not the old fail-closed diagram gate (#1176).
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
+    # gh's own 404 diagnostic is the only positive proof of absence over the
+    # API, and it must survive as ``PathAbsentError`` all the way to the wording.
+    printed = _console_text(capsys)
+    assert "is missing from immutable head" in printed
+    assert "could not be read from immutable head" not in printed
+
+
+def test_post_findings_drops_a_non_file_api_response_as_a_missing_citation(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A directory (or symlink) at the cited path is the second proof of absence."""
+    fake_gh.set_response(
+        "GET", "repos/o/r/contents/a.py", value={"type": "dir", "path": "a.py"},
+    )
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    printed = _console_text(capsys)
+    assert "is missing from immutable head" in printed
+    assert "could not be read from immutable head" not in printed
 
 
 def test_post_findings_reports_a_throttled_read_as_unreadable_not_missing(
@@ -1004,11 +1090,141 @@ def test_post_findings_reports_a_throttled_read_as_unreadable_not_missing(
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
-    assert code == 1
-    assert fake_gh.calls("POST") == []
-    printed = " ".join(capsys.readouterr().out.split())
+    assert code == 0
+    # The artifact carries no findings, so the run reaches the no-new-findings
+    # short-circuit -- not the old fail-closed diagram gate (#1176).
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
+    printed = _console_text(capsys)
     assert "could not be read from immutable head" in printed
     assert "is missing from immutable head" not in printed
+
+
+@pytest.mark.parametrize(
+    ("label", "response"),
+    [
+        ("forbidden", {"__error__": "gh: HTTP 403: Resource not accessible by integration"}),
+        ("unauthorized", {"__error__": "gh: HTTP 401: Bad credentials"}),
+        ("undecodable", {"__stdout__": "<html>proxy error</html>"}),
+    ],
+)
+def test_post_findings_reports_an_unreadable_api_head_as_unreadable(
+    fake_gh: FakeGh,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    label: str,
+    response: dict[str, str],
+) -> None:
+    """Every contents-API failure that is not proven absence reads as unreadable.
+
+    Two of these never reach ``_gh_error_for`` as a recognizable status (the
+    undecodable body is raised by ``_parse_gh_json``), which is why the
+    classification is keyed on the read's source rather than on stderr.
+    """
+    fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    printed = _console_text(capsys)
+    assert "could not be read from immutable head" in printed, label
+    assert "is missing from immutable head" not in printed, label
+
+
+def test_post_findings_posts_findings_when_an_unreadable_diagram_is_dropped(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #1176 for the unreadable half: a throttled read costs only the diagram.
+
+    The poster's own inability to read head evidence must not discard findings
+    that passed schema, fingerprint and event-fact validation.
+    """
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/contents/a.py",
+        value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
+    )
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
+        diagrams=_flowchart_payload(),
+        head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "Real finding" in json.dumps(posts[0].payload)
+    assert "```mermaid" not in posts[0].payload["body"]
+    printed = _console_text(capsys)
+    assert "Diagram dropped (the findings are still posted)" in printed
+    assert "could not be read from immutable head" in printed
+
+
+def test_post_findings_minimizes_stale_threads_on_a_degraded_artifact(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A degraded artifact takes the ordinary no-diagram path, minimization included.
+
+    Documented consequence of the #1176 degrade: the run no longer returns
+    above ``fetch_prior_findings``, so an empty findings list reconciles as it
+    always has and the bot's own resolved threads are minimized.
+    """
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/contents/a.py",
+        value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
+    )
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True,
+    )
+    artifact = _write_artifact(
+        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
+
+    assert code == 0
+    assert sum(
+        "minimizeComment" in call.payload.get("query", "")
+        for call in fake_gh.calls("POST", "graphql")
+    ) == 1
+    assert "Diagram dropped (the findings are still posted)" in _console_text(capsys)
+
+
+def test_post_findings_approves_on_clean_with_a_degraded_artifact(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """Documented consequence of the #1176 degrade: APPROVE becomes reachable.
+
+    ``can_approve`` reads findings only, never diagrams, so a low-severity-only
+    artifact whose diagram was dropped approves exactly as a diagram-less one.
+    """
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/contents/a.py",
+        value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
+    )
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Nit", severity="low")],
+        diagrams=_flowchart_payload(),
+        head_sha=_API_HEAD_SHA,
+    )
+
+    code = cli_main(
+        _post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path) + ["--approve-on-clean"]
+    )
+
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "APPROVE"
+    assert "```mermaid" not in posts[0].payload["body"]
 
 
 def test_post_findings_matched_high_blocks_approval(

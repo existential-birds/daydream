@@ -50,7 +50,7 @@ from daydream.extensions import (
     SummaryFinding,
     get_registry,
 )
-from daydream.git_ops import GitError, RateLimitError
+from daydream.git_ops import GitError, PathAbsentError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.repository_paths import valid_repository_file_path
 from daydream.severity import normalize_severity
@@ -2131,7 +2131,7 @@ class _HeadEvidence:
     show``; otherwise the same immutable bytes come from GitHub's contents API
     at that exact SHA (issue #1167). The privileged poster deliberately never
     checks out PR code, so without the second source every artifact carrying a
-    rendered diagram would be rejected there — findings included.
+    rendered diagram would lose its diagram there.
     """
 
     def __init__(self, target_dir: Path, head_sha: str, repo_slug: str | None) -> None:
@@ -2150,6 +2150,15 @@ class _HeadEvidence:
             except GitError:
                 self._local = False
         return self._local
+
+    @property
+    def read_locally(self) -> bool:
+        """Which source :meth:`read` uses: the local checkout, or the contents API.
+
+        The decision is memoized, so a caller classifying a failure from
+        :meth:`read` sees the same branch that produced it.
+        """
+        return self._reads_locally()
 
     def read(self, path: str) -> bytes:
         """Return *path*'s bytes at the head SHA.
@@ -2200,15 +2209,22 @@ def _diagram_head_evidence_problem(
     )
 
     def unreadable(path: str, exc: GitError) -> str:
-        """Name the two reasons a citation cannot be read apart.
+        """Tell an absent citation apart from one that could not be read.
 
-        Both reject the payload, but a throttled read is the poster's problem
-        and an absent path is the artifact's — reporting the first as the
-        second sends an operator hunting a forged artifact that does not exist.
+        Which of the two a failure is depends on the source it came from. The
+        local ``git show`` branch runs only once the head commit is proven
+        present, so a failure there really is an absent path. The contents-API
+        branch cannot distinguish absence from an inability to read — auth,
+        transport, throttling, a missing ``gh`` binary, malformed output all
+        arrive as a bare :class:`GitError` — so it may claim absence only when
+        the read positively proved it. Both drop the diagram, but an absent
+        path is the artifact's problem and an unreadable one is the poster's:
+        reporting the second as the first sends an operator hunting a forged
+        artifact that does not exist.
         """
-        if isinstance(exc, RateLimitError):
-            return f"{kind} diagram evidence could not be read from immutable head: {exc}"
-        return f"{kind} diagram evidence is missing from immutable head: {path}"
+        if head.read_locally or isinstance(exc, PathAbsentError):
+            return f"{kind} diagram evidence is missing from immutable head: {path}"
+        return f"{kind} diagram evidence could not be read from immutable head: {exc}"
 
     def check(evidence: dict[str, Any]) -> str | None:
         path = evidence["file"]
@@ -2455,7 +2471,10 @@ def post_findings_from_artifact(
     Returns:
         ``0`` on success (including "no new findings"); ``1`` when the
         artifact fails validation, the prior-finding inventory fails, or the
-        review POST fails.
+        review POST fails. A rejected *diagram* payload is not a failure: the
+        diagram is dropped with a warning and the findings still post
+        (issue #1176). Only a ``kind == "diagram"`` artifact, which has no
+        findings to save, still exits ``1``.
     """
     # Late imports: ``findings`` and ``reconcile`` both import this module at
     # module level (one-way by design), so the poster flow resolves them at
@@ -2517,10 +2536,14 @@ def post_findings_from_artifact(
             head_sha=pr.head_sha,
             repo_slug=repo,
         )
+        # Issue #1176: a diagram problem must not discard findings that passed
+        # their own schema, fingerprint and event-fact validation. Dropping the
+        # diagram already keeps it off GitHub, which is the whole of what the
+        # confused-deputy gate requires; exiting 1 only adds the lost comment.
         if problem is not None:
-            print_error(console, "Diagram Payload Rejected", problem)
-            return 1
-        diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
+            print_warning(console, f"Diagram dropped (the findings are still posted): {problem}")
+        else:
+            diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
 
     try:
         prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
