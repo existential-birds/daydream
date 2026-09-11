@@ -17,6 +17,7 @@ from daydream.pr_review import (
     DAYDREAM_FOOTER,
     ParsedIssue,
     PRInfo,
+    ReviewRenderers,
     _format_body_section,
     _format_file_level_body,
     _format_inline_body,
@@ -24,9 +25,12 @@ from daydream.pr_review import (
     alt_issues_to_parsed,
     build_payload,
     classify,
+    default_render_finding,
+    default_render_summary,
     extract_anchors,
     parse_finding_markers,
     parsed_issues_from_items,
+    resolve_review_renderers,
     snap_to_hunk,
 )
 from daydream.run_context import InteractionPolicy, RunContext
@@ -37,82 +41,64 @@ _gh_available = shutil.which("gh") is not None
 gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
 
 SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
-
-
-def test_resolve_trajectory_paths_uses_private_artifact_run_for_siblings(
-    tmp_path: Path,
-) -> None:
-    """Renderer discovery follows the recorder route, not the model checkout."""
-    from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
-
-    private_run = tmp_path / "private" / "runs" / "session"
-    sibling_dir = private_run / "trajectories"
-    sibling_dir.mkdir(parents=True)
-    sibling = sibling_dir / "review.json"
-    sibling.write_text("{}", encoding="utf-8")
-    public_decoy = tmp_path / "source" / ".daydream" / "runs" / "session" / "trajectories"
-    public_decoy.mkdir(parents=True)
-    (public_decoy / "decoy.json").write_text("{}", encoding="utf-8")
-    recorder = TrajectoryRecorder(
-        path=private_run / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path / "source",
-        artifact_run_dir=private_run,
-        agent_model_name="test",
-        session_id="session",
-    )
-
-    paths, cleanup = pr_review._resolve_trajectory_paths(recorder)
-
-    assert cleanup is None
-    assert paths == [sibling]
-    assert all("decoy" not in path.name for path in paths)
+BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summary)
 
 
 def test_finding_and_summary_markdown_is_byte_stable() -> None:
-    i = ParsedIssue(path="a.py", line=3, title="T", body="B rationale",
-                    severity="high", confidence="HIGH", fingerprint="a" * 64)
-    assert _format_inline_body(i) == (SNAP / "inline.md").read_text()
-    assert _format_file_level_body(replace(i, is_cross_stack=True)) == (SNAP / "file_level.md").read_text()
-    section = _format_body_section([replace(i, line=None),
-                                    replace(i, path="b.py", line=None, fingerprint="b" * 64)])
+    i = ParsedIssue(
+        path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH", fingerprint="a" * 64
+    )
+    assert _format_inline_body(i, renderers=BUILTIN_RENDERERS) == (SNAP / "inline.md").read_text()
+    assert (
+        _format_file_level_body(replace(i, is_cross_stack=True), renderers=BUILTIN_RENDERERS)
+        == (SNAP / "file_level.md").read_text()
+    )
+    section = _format_body_section(
+        [replace(i, line=None), replace(i, path="b.py", line=None, fingerprint="b" * 64)], renderers=BUILTIN_RENDERERS
+    )
     assert section == (SNAP / "summary_body.md").read_text()
 
 
 def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -> None:
-    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
+
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    prev = get_registry()
-    set_registry(reg)
-    try:
-        body = _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64))
-    finally:
-        set_registry(prev)
-    assert "CUSTOM::inline::T" in body            # custom content used
-    assert DAYDREAM_FOOTER in body                 # host still injects footer
-    assert parse_finding_markers(body) == ["a" * 64]  # host still injects marker
+    body = _format_inline_body(
+        ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64),
+        renderers=resolve_review_renderers(reg),
+    )
+    assert "CUSTOM::inline::T" in body
+    assert DAYDREAM_FOOTER in body
+    assert parse_finding_markers(body) == ["a" * 64]
 
 
 def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
-    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
+
     def boom(finding: Any, ctx: Any) -> str:
         raise RuntimeError("boom")
+
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", boom)
-    prev = get_registry()
-    set_registry(reg)
-    try:
-        with caplog.at_level("WARNING"):
-            body = _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B rationale",
-                                                   severity="high", confidence="HIGH", fingerprint="a" * 64))
-    finally:
-        set_registry(prev)
-    assert body == (SNAP / "inline.md").read_text()      # byte-identical default
+    with caplog.at_level("WARNING"):
+        body = _format_inline_body(
+            ParsedIssue(
+                path="a.py",
+                line=3,
+                title="T",
+                body="B rationale",
+                severity="high",
+                confidence="HIGH",
+                fingerprint="a" * 64,
+            ),
+            renderers=resolve_review_renderers(reg),
+        )
+    assert body == (SNAP / "inline.md").read_text()
     assert "finding" in caplog.text and "boom" in caplog.text
 
 
@@ -120,63 +106,62 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_c
 
 
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
-    pr: PRInfo,
-    monkeypatch: pytest.MonkeyPatch,
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
 
     def summary_renderer(ctx: Any) -> Any:
-        rows = [f"<details><summary>{f.finding.path} — {f.finding.title}</summary>\n{f.body_block}\n</details>"
-                for f in ctx.findings]
+        rows = [
+            f"<details><summary>{f.finding.path} — {f.finding.title}</summary>\n{f.body_block}\n</details>"
+            for f in ctx.findings
+        ]
         return "**Custom Summary**\n\n" + "\n".join(rows)
 
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("summary", summary_renderer)
-    prev = get_registry()
-    set_registry(reg)
-    try:
-        classified = pr_review._ClassifiedIssues(
-            body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)])
-        payload = build_payload(pr, classified)
-    finally:
-        set_registry(prev)
+    classified = pr_review._ClassifiedIssues(
+        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
+    )
+    payload = build_payload(
+        pr,
+        classified,
+        renderers=resolve_review_renderers(reg),
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     body = payload["body"]
     assert "**Custom Summary**" in body
-    assert "<summary>b.py — File note</summary>" in body   # metadata drove the label
-    assert parse_finding_markers(body) == ["b" * 64]         # host marker preserved inside the block
-    assert body.rstrip().endswith("</sub>")                  # host footer still last
+    assert "<summary>b.py — File note</summary>" in body
+    assert parse_finding_markers(body) == ["b" * 64]
+    assert body.rstrip().endswith("</sub>")
 
 
 def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    prev = get_registry()
-    set_registry(reg)
-    try:
-        classified = pr_review._ClassifiedIssues(
-            body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)])
-        body = build_payload(pr, classified)["body"]
-    finally:
-        set_registry(prev)
-    assert "CUSTOM::summary::File note" in body               # finding override reaches the summary section
-    assert parse_finding_markers(body) == ["b" * 64]           # host marker still injected
+    classified = pr_review._ClassifiedIssues(
+        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
+    )
+    body = build_payload(
+        pr,
+        classified,
+        renderers=resolve_review_renderers(reg),
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )["body"]
+    assert "CUSTOM::summary::File note" in body
+    assert parse_finding_markers(body) == ["b" * 64]
 
 
 def test_summary_renderer_falls_back_and_warns_on_error(
-    pr: PRInfo,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
 
     def boom(ctx: Any) -> str:
         raise RuntimeError("kaboom")
@@ -185,17 +170,29 @@ def test_summary_renderer_falls_back_and_warns_on_error(
     register_builtins(reg)
     reg.override_renderer("summary", boom)
     classified = pr_review._ClassifiedIssues(
-        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
-                               confidence="MEDIUM", severity="low", fingerprint="b" * 64)])
-    default_body = build_payload(pr, classified)["body"]       # baseline via builtins
-    prev = get_registry()
-    set_registry(reg)
-    try:
-        with caplog.at_level("WARNING"):
-            body = build_payload(pr, classified)["body"]
-    finally:
-        set_registry(prev)
-    assert body == default_body                                 # byte-identical fallback
+        body_only=[
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="MEDIUM",
+                severity="low",
+                fingerprint="b" * 64,
+            )
+        ]
+    )
+    default_body = build_payload(
+        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    )["body"]
+    with caplog.at_level("WARNING"):
+        body = build_payload(
+            pr,
+            classified,
+            renderers=resolve_review_renderers(reg),
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )["body"]
+    assert body == default_body
     assert "summary" in caplog.text and "kaboom" in caplog.text
 
 
@@ -216,7 +213,7 @@ def test_inline_body_has_footer_and_tags() -> None:
         confidence="HIGH",
         severity="high",
     )
-    body = pr_review._format_inline_body(issue)
+    body = pr_review._format_inline_body(issue, renderers=BUILTIN_RENDERERS)
     assert "**Null deref**" in body
     assert "severity: `high`" in body
     assert "confidence: `HIGH`" in body
@@ -231,21 +228,25 @@ def test_inline_body_has_footer_and_tags() -> None:
 
 def test_inline_body_carries_parseable_marker() -> None:
     issue = ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="ab12" * 16)
-    body = _format_inline_body(issue)
+    body = _format_inline_body(issue, renderers=BUILTIN_RENDERERS)
     assert parse_finding_markers(body) == ["ab12" * 16]
     assert DAYDREAM_FOOTER in body  # marker does not displace the footer
 
 
 def test_no_marker_without_fingerprint() -> None:
-    assert parse_finding_markers(
-        _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B"))
-    ) == []
+    assert (
+        parse_finding_markers(
+            _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B"), renderers=BUILTIN_RENDERERS)
+        )
+        == []
+    )
 
 
 def test_body_section_markers_one_per_fingerprinted_issue() -> None:
-    issues = [ParsedIssue(path="a.py", line=None, title=f"T{i}", body="B",
-                          fingerprint=f"{i:064x}") for i in range(2)]
-    assert parse_finding_markers(_format_body_section(issues)) == [f"{i:064x}" for i in range(2)]
+    issues = [ParsedIssue(path="a.py", line=None, title=f"T{i}", body="B", fingerprint=f"{i:064x}") for i in range(2)]
+    assert parse_finding_markers(_format_body_section(issues, renderers=BUILTIN_RENDERERS)) == [
+        f"{i:064x}" for i in range(2)
+    ]
 
 
 def test_alt_issues_to_parsed_produces_one_per_file() -> None:
@@ -465,9 +466,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     assert result.inline[1]["line"] == 106
 
 
-def test_build_payload_reviewed_commit_line_first_in_review_info(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """M1/M4: the reviewed-commit line is rendered, fully linked (S1),
     and precedes Model/Cost and Severity/Confidence in the review-info block."""
     classified = pr_review._ClassifiedIssues(
@@ -484,14 +483,13 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(
     )
     # Feed the enriched renderer a real fixture trajectory so run-info
     # fields (Model/Cost/Tokens) render instead of the fallback stub.
-    fixture = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None))
-    payload = build_payload(pr, classified)
+    payload = build_payload(
+        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    )
     body = payload["body"]
 
     expected = (
-        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`]"
-        f"(https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})"
+        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`](https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})"
     )
     assert expected in body
     # Ordering: the commit line precedes the enriched run-info fields
@@ -504,17 +502,12 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(
     assert body.index(expected) < body.index("- **Confidence:**")
 
 
-def test_build_payload_reviewed_commit_survives_run_info_fallback(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """M2: renderer degradation to 'run details unavailable' must not hide
     the reviewed-commit line (host-injection, Key Decision 2)."""
-    monkeypatch.setattr(
-        pr_review,
-        "_render_review_info_block",
-        pr_comment_renderer._render_fallback,
+    payload = build_payload(
+        pr, pr_review._ClassifiedIssues(), renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer._render_fallback()
     )
-    payload = build_payload(pr, pr_review._ClassifiedIssues())
     body = payload["body"]
     assert "*run details unavailable*" in body  # degraded run-info present
     assert (
@@ -530,47 +523,37 @@ def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(
     the head commit, while owner/repo (the POST target) stay the base repo."""
     fork_pr = replace(pr, head_repo="forky/widgets")
     payload = build_payload(
-        fork_pr, pr_review._ClassifiedIssues(), run_info_override="test run info"
+        fork_pr, pr_review._ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
     )
     body = payload["body"]
-    assert (
-        "- **Reviewed commit:** [`head123`]"
-        "(https://github.com/forky/widgets/commit/head123)" in body
-    )
+    assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
 
 def test_build_payload_blocks_forged_reviewed_commit_line(
     pr: PRInfo,
 ) -> None:
-    """A hostile run_info_override containing a crafted reviewed-commit line
+    """A hostile run_info containing a crafted reviewed-commit line
     must not render a second, forged line below the trusted one (issue 2)."""
     payload = build_payload(
         pr,
         pr_review._ClassifiedIssues(),
-        run_info_override=(
+        run_info=(
             "test run info\n"
-            "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
-            + "e" * 40 + ")\n"
+            "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/" + "e" * 40 + ")\n"
             "*run details unavailable*"
         ),
+        renderers=BUILTIN_RENDERERS,
     )
     body = payload["body"]
-    commit_lines = [
-        line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")
-    ]
+    commit_lines = [line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")]
     assert len(commit_lines) == 1
-    assert (
-        "- **Reviewed commit:** [`head123`]"
-        "(https://github.com/acme/widgets/commit/head123)" in body
-    )
+    assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
     assert "evil/widgets" not in body
     assert "e" * 40 not in body
 
 
-def test_build_payload_shape(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_shape(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         body_only=[
@@ -595,25 +578,15 @@ def test_build_payload_shape(
         ],
     )
 
-    # S1: feed the enriched renderer a real Task-4 fixture trajectory by
-    # stubbing _resolve_trajectory_paths to return a single fixture path.
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    payload = build_payload(
+        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
     )
-    monkeypatch.setattr(
-        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
-    )
-
-    payload = build_payload(pr, classified)
     assert payload["commit_id"] == "head123"
     assert payload["event"] == "COMMENT"
     assert payload["comments"] == classified.inline
 
     body = payload["body"]
-    assert (
-        "- **Reviewed commit:** [`head123`]"
-        "(https://github.com/acme/widgets/commit/head123)" in body
-    )
+    assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
     # Title header.
     assert "**Code Review Summary**" in body
     # Bottom-of-comment wizard footer (DAYDREAM_FOOTER) carries the version.
@@ -646,9 +619,7 @@ def test_build_payload_shape(
     assert body.rstrip().endswith("</sub>")
 
 
-def test_build_payload_approves_when_clean_and_enabled(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """approve_on_clean=True + zero high/medium findings -> event APPROVE."""
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
@@ -673,14 +644,14 @@ def test_build_payload_approves_when_clean_and_enabled(
             )
         ],
     )
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    )
-    monkeypatch.setattr(
-        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
-    )
 
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "APPROVE"
     assert "no high/medium findings" in payload["body"]
     # F3: the reviewed SHA is pinned on every payload, APPROVE included.
@@ -688,14 +659,10 @@ def test_build_payload_approves_when_clean_and_enabled(
     # Approval prefix added; rest of body format intact.
     assert "**Code Review Summary**" in payload["body"]
     # The approval line is first, before the summary header.
-    assert payload["body"].index("no high/medium findings") < payload["body"].index(
-        "**Code Review Summary**"
-    )
+    assert payload["body"].index("no high/medium findings") < payload["body"].index("**Code Review Summary**")
 
 
-def test_build_payload_keeps_comment_when_high_finding(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_keeps_comment_when_high_finding(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """approve_on_clean=True but a high-severity finding -> event COMMENT."""
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
@@ -720,21 +687,19 @@ def test_build_payload_keeps_comment_when_high_finding(
             )
         ],
     )
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    )
-    monkeypatch.setattr(
-        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
-    )
 
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
 
-def test_build_payload_keeps_comment_when_medium_finding(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_keeps_comment_when_medium_finding(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """approve_on_clean=True but a medium-severity finding -> event COMMENT."""
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
@@ -759,14 +724,14 @@ def test_build_payload_keeps_comment_when_medium_finding(
             )
         ],
     )
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    )
-    monkeypatch.setattr(
-        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
-    )
 
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
@@ -778,18 +743,16 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
     """A None-severity issue must not crash the clean computation."""
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
-        inline_issues=[
-            ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)
-        ],
-    )
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    )
-    monkeypatch.setattr(
-        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+        inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "APPROVE"
 
 
@@ -817,14 +780,14 @@ def test_build_payload_keeps_comment_when_off_vocabulary_severity(
             )
         ],
     )
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    )
-    monkeypatch.setattr(
-        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
-    )
 
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
@@ -1123,9 +1086,7 @@ def _assumed_context(answer: str) -> RunContext:
 
 
 @pytest.mark.asyncio
-async def test_post_skips_when_no_pr(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_post_skips_when_no_pr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: None)
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -1137,6 +1098,8 @@ async def test_post_skips_when_no_pr(
         tmp_path,
         [ParsedIssue(path="x.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     assert warnings and "No open PR" in warnings[0]
     assert status == pr_review.PostStatus.NO_PR
@@ -1161,18 +1124,16 @@ async def test_post_fails_with_safe_diagnostic_when_pr_lookup_errors(
         tmp_path,
         [ParsedIssue(path="x.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
 
     assert status == pr_review.PostStatus.FAILED
-    assert errors == [
-        ("PR Lookup Failed", "gh pr list failed: authentication required")
-    ]
+    assert errors == [("PR Lookup Failed", "gh pr list failed: authentication required")]
 
 
 @pytest.mark.asyncio
-async def test_post_succeeds_and_prints_url(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
-) -> None:
+async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
     """On a successful submit the URL is forwarded to print_success."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
@@ -1185,9 +1146,7 @@ async def test_post_succeeds_and_prints_url(
     )
     captured: dict[str, Any] = {}
 
-    def fake_submit(
-        _td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any
-    ) -> tuple[str | None, str | None]:
+    def fake_submit(_td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any) -> tuple[str | None, str | None]:
         captured["payload"] = payload
         return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
 
@@ -1205,6 +1164,8 @@ async def test_post_succeeds_and_prints_url(
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
         run_context=_assumed_context("yes"),
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     # The payload that would be POSTed was assembled and forwarded.
     assert captured["payload"]["commit_id"] == pr.head_sha
@@ -1240,9 +1201,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
     )
     captured: dict[str, Any] = {}
 
-    def fake_submit(
-        _td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any
-    ) -> tuple[str | None, str | None]:
+    def fake_submit(_td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any) -> tuple[str | None, str | None]:
         captured["payload"] = payload
         return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
 
@@ -1256,6 +1215,8 @@ async def test_post_payload_approves_when_clean_and_enabled(
         console=_FakeConsole(),  # type: ignore[arg-type]
         approve_on_clean=True,
         run_context=_assumed_context("yes"),
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     assert captured["payload"]["event"] == "APPROVE"
     assert "no high/medium findings" in captured["payload"]["body"]
@@ -1281,9 +1242,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
         ),
     )
     err = "gh api /repos/acme/widgets/pulls/42/reviews failed: HTTP 422 (payload preserved at /tmp/x.json)"
-    monkeypatch.setattr(
-        pr_review, "_submit_review", lambda *_a, **_k: (None, err)
-    )
+    monkeypatch.setattr(pr_review, "_submit_review", lambda *_a, **_k: (None, err))
     warnings: list[str] = []
     monkeypatch.setattr(
         pr_review,
@@ -1297,6 +1256,8 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
         run_context=_assumed_context("yes"),
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     assert warnings
     assert "no comments were posted" in warnings[0].lower()
@@ -1306,9 +1267,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
 
 
 @pytest.mark.asyncio
-async def test_post_skipped_when_user_declines(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
-) -> None:
+async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
         pr_review,
@@ -1333,6 +1292,8 @@ async def test_post_skipped_when_user_declines(
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
         run_context=_assumed_context("no"),
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     assert not submit_called
     assert status == pr_review.PostStatus.NOTHING_TO_POST
@@ -1349,7 +1310,11 @@ async def test_post_review_from_report_empty_items_is_nothing_to_post(
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
     status = await pr_review.post_review_to_pr_from_report(
-        tmp_path, merged, console=_FakeConsole()  # type: ignore[arg-type]
+        tmp_path,
+        merged,
+        console=_FakeConsole(),  # type: ignore[arg-type]
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     assert status == pr_review.PostStatus.NOTHING_TO_POST
 
@@ -1364,14 +1329,10 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     merged.write_text(json.dumps({"items": []}))
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues()
-    )
+    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
     captured: dict[str, Any] = {}
 
-    def fake_submit(
-        _td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any
-    ) -> tuple[str | None, str | None]:
+    def fake_submit(_td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any) -> tuple[str | None, str | None]:
         captured["payload"] = payload
         return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
 
@@ -1385,6 +1346,8 @@ async def test_post_review_from_report_empty_items_posts_diagram(
         console=_FakeConsole(),  # type: ignore[arg-type]
         post=True,
         diagram_blocks=blocks,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
 
     assert status == pr_review.PostStatus.POSTED
@@ -1751,12 +1714,24 @@ def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         inline_issues=[
-            ParsedIssue(path="a.py", line=10, title="t", body="b",
-                        severity="low", location_distrust=True,
-                        severity_before_demotion="high")
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                severity="low",
+                location_distrust=True,
+                severity_before_demotion="high",
+            )
         ],
     )
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "COMMENT"
 
 
@@ -1769,12 +1744,24 @@ def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
         classified = pr_review._ClassifiedIssues(
             inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
             inline_issues=[
-                ParsedIssue(path="a.py", line=10, title="t", body="b",
-                            severity="low", location_distrust=True,
-                            severity_before_demotion=before)
+                ParsedIssue(
+                    path="a.py",
+                    line=10,
+                    title="t",
+                    body="b",
+                    severity="low",
+                    location_distrust=True,
+                    severity_before_demotion=before,
+                )
             ],
         )
-        payload = build_payload(pr, classified, approve_on_clean=True)
+        payload = build_payload(
+            pr,
+            classified,
+            approve_on_clean=True,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
         assert payload["event"] == "APPROVE"
 
 
@@ -1823,20 +1810,20 @@ def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> N
     assert fields.severity is None  # not the string "none"
 
 
-def test_null_severity_does_not_block_approval(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_null_severity_does_not_block_approval(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
-    fixture = (
-        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
-    )
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None))
 
-    payload = build_payload(pr, classified, approve_on_clean=True)
+    payload = build_payload(
+        pr,
+        classified,
+        approve_on_clean=True,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     assert payload["event"] == "APPROVE"
     assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
 
@@ -1997,44 +1984,47 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
     assert calls == [("post", None), ("minimize", "IC_matching")]
 
 
-def test_build_payload_places_diagram_blocks_under_the_header(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """``diagram_blocks`` lands directly under ``**Code Review Summary**``."""
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
     classified = pr_review._ClassifiedIssues(
         body_only=[
             ParsedIssue(
-                path="b.py", line=None, title="File note", body="desc",
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
                 fingerprint="b" * 64,
             )
         ]
     )
     blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
 
-    payload = pr_review.build_payload(pr, classified, diagram_blocks=blocks)
+    payload = pr_review.build_payload(
+        pr,
+        classified,
+        diagram_blocks=blocks,
+        renderers=BUILTIN_RENDERERS,
+        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    )
     body = payload["body"]
     header = "**Code Review Summary**"
     assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
     # Absent (the default) is byte-identical to the pre-#1113 body.
-    assert pr_review.build_payload(pr, classified)["body"] == body.replace(
-        f"{header}\n\n{blocks}", header
-    )
+    assert pr_review.build_payload(
+        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    )["body"] == body.replace(f"{header}\n\n{blocks}", header)
 
 
-def test_custom_summary_renderer_receives_and_may_drop_diagrams(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     """Spec test 16: ``ctx.diagrams`` reaches a fork renderer, which owns it.
 
     The host cannot inject the blocks around a custom renderer's output (they
     belong inside the summary body), so a renderer that ignores ``ctx.diagrams``
     drops them -- which is exactly what docs/extensions.md warns about.
     """
-    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
 
-    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
     seen: list[str | None] = []
 
     def keeps(ctx: Any) -> str:
@@ -2047,17 +2037,82 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(
 
     classified = pr_review._ClassifiedIssues()
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
-    prev = get_registry()
-    try:
-        for renderer, expect_present in ((keeps, True), (drops, False)):
-            reg = Registry()
-            register_builtins(reg)
-            reg.override_renderer("summary", renderer)
-            set_registry(reg)
-            body = pr_review.build_payload(
-                pr, classified, diagram_blocks=blocks
-            )["body"]
-            assert (blocks in body) is expect_present
-    finally:
-        set_registry(prev)
+    for renderer, expect_present in ((keeps, True), (drops, False)):
+        reg = Registry()
+        register_builtins(reg)
+        reg.override_renderer("summary", renderer)
+        body = pr_review.build_payload(
+            pr,
+            classified,
+            diagram_blocks=blocks,
+            renderers=resolve_review_renderers(reg),
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )["body"]
+        assert (blocks in body) is expect_present
     assert seen == [blocks, blocks]
+
+
+def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
+    """Pin the host envelope, approval, rollup, markers and diagram placement."""
+    classified = pr_review._ClassifiedIssues(
+        body_only=[
+            ParsedIssue(
+                path="a.py",
+                line=None,
+                title="Fixture note",
+                body="Fixture rationale",
+                severity="low",
+                confidence="HIGH",
+                fingerprint="a" * 64,
+            )
+        ]
+    )
+    payload = build_payload(
+        pr,
+        classified,
+        run_info="Fixture run info",
+        approve_on_clean=True,
+        diagram_blocks="<details>Fixture diagram</details>",
+        renderers=BUILTIN_RENDERERS,
+    )
+    payload["body"] = payload["body"].replace(DAYDREAM_FOOTER, "<DAYDREAM_FOOTER>")
+    assert payload == json.loads((SNAP / "explicit_payload.json").read_text())
+
+
+def test_payload_uses_only_explicit_renderers_and_run_info(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.extensions import Registry, SummaryContext
+    from daydream.extensions.builtins import register_builtins
+
+    seen: list[SummaryContext] = []
+
+    def summary(ctx: SummaryContext) -> str:
+        seen.append(ctx)
+        return default_render_summary(ctx)
+
+    registry = Registry()
+    register_builtins(registry)
+    registry.override_renderer("summary", summary)
+    renderers = resolve_review_renderers(registry)
+    classified = pr_review._ClassifiedIssues(body_only=[ParsedIssue(
+        path="a.py", line=None, title="Explicit finding", body="Explanation",
+        severity="low", confidence="HIGH",
+    )])
+    run_info = pr_comment_renderer.render_run_info_block([_FIXTURE])
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("payload assembly accessed ambient state or the filesystem")
+
+    registry.override_renderer("summary", forbidden)
+    monkeypatch.setattr(pr_review, "get_registry", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr("tempfile.TemporaryDirectory", forbidden)
+    monkeypatch.setattr("daydream.trajectory.get_current_recorder", forbidden)
+    first = build_payload(pr, classified, run_info=run_info, renderers=renderers)
+    second = build_payload(pr, classified, run_info=run_info, renderers=renderers)
+    assert first == second
+    assert seen[0] == seen[1]
+    assert seen[0].findings[0].finding.title == "Explicit finding"
+    assert run_info in seen[0].review_info

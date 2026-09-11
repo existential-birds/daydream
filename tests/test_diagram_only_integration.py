@@ -932,6 +932,10 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
 
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["kind"] == "review"
+    assert "- **Model:**" in artifact["run_info"]
+    assert "- **Model:** unknown" in artifact["run_info"]  # Stub responses omit model metadata.
+    assert "| Diagram |" in artifact["run_info"]
+    assert "run details unavailable" not in artifact["run_info"]
     assert artifact["findings"], "the review half of the artifact is still populated"
     assert artifact["diagrams"]["results"]["sequence"]["status"] == "rendered"
     expected = _artifact(target)["results"]["sequence"]["mermaid"]
@@ -953,6 +957,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     reviews = fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews")
     assert len(reviews) == 1
     body = reviews[0].payload["body"]
+    assert artifact["run_info"] in body
     assert SEQUENCE_HEADING in body
     assert expected in body
     # A diagram in a review artifact posts as part of the review, not as a

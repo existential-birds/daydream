@@ -19,7 +19,7 @@ from typing import Any, Literal, cast
 import anyio
 import pytest
 
-from daydream import git_ops, runner
+from daydream import git_ops, pr_review, runner
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import (
     Manifest,
@@ -337,13 +337,23 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     monkeypatch.setattr(
         "daydream.pr_review.find_pr_by_number",
         lambda *_args, **_kwargs: PRInfo(
-            number=7, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
-            owner="owner", repo="repo", url="https://example.invalid/owner/repo/pull/7",
+            number=7,
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            base_ref="main",
+            head_ref="feature",
+            owner="owner",
+            repo="repo",
+            url="https://example.invalid/owner/repo/pull/7",
         ),
     )
 
     result = runner._write_findings_for_parsed(
-        repo, RunConfig(pr_number=7, findings_out=str(private_path)), []
+        repo,
+        RunConfig(pr_number=7, findings_out=str(private_path)),
+        [],
+        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
+        run_info="Fixture run info",
     )
 
     output = capsys.readouterr().out
@@ -367,8 +377,14 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(
     monkeypatch.setattr(
         "daydream.pr_review.find_pr_by_number",
         lambda *_args, **_kwargs: PRInfo(
-            number=7, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
-            owner="owner", repo="repo", url="https://example.invalid/owner/repo/pull/7",
+            number=7,
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            base_ref="main",
+            head_ref="feature",
+            owner="owner",
+            repo="repo",
+            url="https://example.invalid/owner/repo/pull/7",
         ),
     )
 
@@ -385,9 +401,17 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(
 
     monkeypatch.setattr(git_ops, "gh_pr_diff", read_diff)
     destination = tmp_path / "findings.json"
-    assert runner._write_findings_for_parsed(
-        repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth,
-    ) == 0
+    assert (
+        runner._write_findings_for_parsed(
+            repo,
+            RunConfig(pr_number=7, findings_out=str(destination)),
+            [],
+            auth=auth,
+            renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
+            run_info="Fixture run info",
+        )
+        == 0
+    )
     assert seen == [auth]
     assert "artifact-owner" not in destination.read_text()
 

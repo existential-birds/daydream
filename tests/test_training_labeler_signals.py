@@ -55,7 +55,12 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
         repo="widgets",
         url="https://github.com/acme/widgets/pull/1",
     )
-    payload = build_payload(pr, pr_review._ClassifiedIssues())
+    payload = build_payload(
+        pr,
+        pr_review._ClassifiedIssues(),
+        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
+        run_info="Fixture run info",
+    )
     body = payload["body"]
     assert "- **Reviewed commit:**" in body  # precondition: new line present
     assert labeler_signals._DAYDREAM_FOOTER_PREFIX in body

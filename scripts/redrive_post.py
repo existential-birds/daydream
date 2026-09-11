@@ -19,7 +19,9 @@ import sys
 from pathlib import Path
 
 from daydream.deep.artifacts import merged_items_path
-from daydream.pr_review import PostStatus, post_review_to_pr_from_report
+from daydream.extensions import get_registry
+from daydream.pr_comment_renderer import render_run_info
+from daydream.pr_review import PostStatus, post_review_to_pr_from_report, resolve_review_renderers
 from daydream.ui import create_console
 
 
@@ -50,6 +52,8 @@ async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None
             console=create_console(),
             post=auto_yes,
             pr_number=pr_number,
+            run_info=render_run_info(()),
+            renderers=resolve_review_renderers(get_registry()),
         )
     except (OSError, json.JSONDecodeError) as exc:
         print(f"Could not read merged-items.json at {items_path}: {exc}", file=sys.stderr)

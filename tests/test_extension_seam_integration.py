@@ -149,6 +149,9 @@ def register(r):
 
 def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
     """Build the smallest context needed by the post-review step."""
+    registry = Registry()
+    registry.override_renderer("finding", pr_review.default_render_finding)
+    registry.override_renderer("summary", pr_review.default_render_summary)
     return FlowContext(
         config=RunConfig(),
         work=WorkContext(
@@ -161,7 +164,7 @@ def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
             is_ephemeral=False,
             run_id="test-run",
         ),
-        registry=Registry(),
+        registry=registry,
         data={"dd": dd, "items_file": items_file},
         run_context=RunContext(InteractionPolicy()),
     )
@@ -242,18 +245,23 @@ async def test_post_review_uses_published_items_path(
     ctx = _post_context(dd=private_dir, items_file=stable_items)
     posted_paths: list[Path] = []
     async def _record_post(
-        repo: Path,
-        path: Path,
+        target_dir: Path,
+        merged_items_path: Path,
         *,
         console: Any,
+        run_info: str,
+        renderers: pr_review.ReviewRenderers,
         post: bool,
         approve_on_clean: bool = False,
+        pr_number: int | None = None,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
         auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         assert run_context is ctx.run_context
-        await _record_path(posted_paths, path)
+        assert isinstance(run_info, str)
+        assert isinstance(renderers, pr_review.ReviewRenderers)
+        await _record_path(posted_paths, merged_items_path)
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
 
@@ -272,7 +280,20 @@ async def test_report_only_review_mode_never_enters_pr_posting(
     )
     ctx.data["mode"] = "review"
 
-    async def _post_forbidden(*_args: object, **_kwargs: object) -> None:
+    async def _post_forbidden(
+        target_dir: Path,
+        merged_items_path: Path,
+        *,
+        console: Any,
+        run_info: str,
+        renderers: pr_review.ReviewRenderers,
+        post: bool = False,
+        approve_on_clean: bool = False,
+        pr_number: int | None = None,
+        diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+    ) -> None:
         pytest.fail("report-only review mode must not resolve or post to a PR")
 
     monkeypatch.setattr(
@@ -611,11 +632,14 @@ async def test_fork_disables_arbiter_in_deep(
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
     async def _no_post(
         target_dir: Path,
-        report_path: Path,
+        merged_items_path: Path,
         *,
         console: Any,
+        run_info: str,
+        renderers: pr_review.ReviewRenderers,
         post: bool = False,
         approve_on_clean: bool = False,
+        pr_number: int | None = None,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
         auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
@@ -961,11 +985,14 @@ async def test_custom_phase_full_stack(
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
     async def _no_post(
         target_dir: Path,
-        report_path: Path,
+        merged_items_path: Path,
         *,
         console: Any,
+        run_info: str,
+        renderers: pr_review.ReviewRenderers,
         post: bool = False,
         approve_on_clean: bool = False,
+        pr_number: int | None = None,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
         auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
@@ -1000,11 +1027,14 @@ async def test_flow_deep_routes_to_deep_helper(
 
     async def _no_post(
         target_dir: Path,
-        report_path: Path,
+        merged_items_path: Path,
         *,
         console: Any,
+        run_info: str,
+        renderers: pr_review.ReviewRenderers,
         post: bool = False,
         approve_on_clean: bool = False,
+        pr_number: int | None = None,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
         auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
@@ -1082,7 +1112,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(
     try:
         body = pr_review._format_inline_body(
             ParsedIssue(path="a.py", line=1, title="T", body="B", fingerprint="a" * 64)
-        )
+        , renderers=pr_review.resolve_review_renderers(get_registry()))
     finally:
         set_registry(prev)
     assert "EXT::inline::T" in body and pr_review.DAYDREAM_FOOTER in body
