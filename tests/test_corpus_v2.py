@@ -734,7 +734,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 10: additive v2 loader surface (stacks.py)
+# Frozen-corpus loader surface (stacks.py)
 # ---------------------------------------------------------------------------
 
 from daydream.training.stacks import load_dataset_v2  # noqa: E402

@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 
 from daydream.training.corpus_projection.splits import assign_split
-from daydream.training.stacks_v2 import V2Projection, load_v2_projection
+from daydream.training.stacks import V2Projection, load_v2_projection
 
 SALT = "issue-1081-salt"
 HOLDOUT_RATE = 0.2

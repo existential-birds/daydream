@@ -16,7 +16,7 @@ Contract points:
   Stage 3's directory is created, and the manifest is not written — a refused
   run leaves no partial-success artifact.
 - **Dry path (CI)**: ``dry_run=True`` executes everything that needs no GPU —
-  projection load (fail-closed via :mod:`daydream.training.stacks_v2`), Stage-0
+  projection load (fail-closed via :mod:`daydream.training.stacks`), Stage-0
   gate evaluation on cached model state, validation, manifest — and marks the wall-
   clock GPU stages ``skipped_dry``. The Stage-3 adapter *handoff* (pure file
   assembly from Stage-0 state, no GPU) is still produced on the dry path so
@@ -52,7 +52,7 @@ from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests,
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
-from daydream.training.stacks_v2 import V2Projection, load_v2_projection, recompute_split_from_record_id
+from daydream.training.stacks import V2Projection, load_v2_projection, recompute_split_from_record_id
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
@@ -71,7 +71,7 @@ class PipelineConfig:
     Attributes:
         projection: Path to a frozen projection directory (the
             ``build_frozen_corpus`` output). The pipeline loads the projection
-            via :func:`daydream.training.stacks_v2.load_v2_projection` and
+            via :func:`daydream.training.stacks.load_v2_projection` and
             Stage 0 consumes the projector's frozen split. This is the only
             pipeline input — the legacy v1 ``corpus`` JSONL input was removed
             (#1093).
@@ -206,13 +206,6 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     finding; the completion field chain is
     ``completion`` → ``finding_text`` → ``text`` → ``review_output``.
 
-    Current-policy SFT prefers native-profile traces (M23): accepted rows are
-    partitioned by the ``legacy_policy`` tag (set on records whose
-    ``labeler_policy_version`` is absent or null);
-    native rows (``legacy_policy`` falsy) are selected first, and legacy rows
-    are only used to fill the dataset when the native-profile pool is empty.
-    The tag is a selection preference, never a drop — a legacy-only corpus
-    still trains.
 
     Returns:
         ``(rows, tier_counts)`` where ``tier_counts`` has ``gold`` and
@@ -220,8 +213,7 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
         never mixed into the gold-positive data).
     """
     silver = 0
-    native: list[dict[str, Any]] = []
-    legacy: list[dict[str, Any]] = []
+    gold: list[dict[str, Any]] = []
     for rec in records:
         label = rec.get("label") or rec.get("outcome_label")
         completion = (
@@ -237,11 +229,9 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
                 "prompt": rec.get("prompt") or _sft_prompt(rec),
                 "completion": completion,
             }
-            (legacy if rec.get("legacy_policy") else native).append(row)
+            gold.append(row)
         elif rec.get("tier") == "silver":
             silver += 1
-    # M23: prefer native-profile rows; legacy rows only when the native pool is empty.
-    gold = native or legacy
     return gold, {"gold": len(gold), "silver": silver}
 
 

@@ -23,7 +23,7 @@ from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.gate import _split_digest
 from daydream.training.rft import RftConfig, run_rft
-from daydream.training.stacks_v2 import load_v2_projection
+from daydream.training.stacks import load_v2_projection
 
 SALT = "issue-1081-coordinator-salt"
 HOLDOUT_RATE = 0.2
