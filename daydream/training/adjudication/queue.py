@@ -10,9 +10,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from daydream.training.adjudication.precedence import reopen_on_digest_change
-from daydream.training.corpus_v2.identity import record_id
-from daydream.training.corpus_v2.projector import project_findings
-from daydream.training.corpus_v2.provenance import extract_provenance
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import project_findings
+from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.dispositions import (
     NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
 )

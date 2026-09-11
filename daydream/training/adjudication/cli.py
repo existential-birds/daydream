@@ -1270,7 +1270,7 @@ def _projector_findings_map(
     anchor the pinned index cannot resolve are honestly reported ambiguous
     (per-finding validation is informational for anchor-less sessions).
     """
-    from daydream.training.corpus_v2.projector import project_findings
+    from daydream.training.corpus_projection.projector import project_findings
     from daydream.training.labeler_versions import reply_evidence_digest
 
     findings_map: dict[str, list[dict[str, Any]]] = {}

@@ -1,4 +1,4 @@
-"""Profile + stack provenance extraction for corpus v2 records (Req 8).
+"""Profile + stack provenance extraction for projection records (Req 8).
 
 Reads the four native review-profile fields (issue #885, R12) verbatim from a
 manifest row / trajectory record and assembles the provenance block: the

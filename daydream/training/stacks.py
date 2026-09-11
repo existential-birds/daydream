@@ -9,8 +9,8 @@ touches an excluded or unopted-copyleft repo fails closed.
 The lists themselves are owned exclusively by :mod:`daydream.training.exclusion`;
 this module re-implements no parsing.
 
-Corpus v2 adds :func:`load_dataset_v2`, an additive sibling that loads the
-frozen per-split manifests of a ``run_build_corpus_v2`` projection directory
+This module also provides :func:`load_dataset_v2`, an additive sibling that loads the
+frozen per-split manifests of a ``build_frozen_corpus`` projection directory
 and refuses any record not stamped ``schema_version == "2"``. Every v2
 record must also carry its repo identity and immutable license decision
 under ``lineage`` (structurally required — an absent field is itself the
@@ -124,7 +124,7 @@ def load_dataset_v2(
     allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """Load a projected corpus v2 directory (the frozen train/validation/
-    holdout JSONL manifests from ``run_build_corpus_v2``), enforcing repo
+    holdout JSONL manifests from ``build_frozen_corpus``), enforcing repo
     identity, the license-decision stamp, and C5/C8 fail-closed.
 
     ``holdout.jsonl``. A ``_SUCCESS`` completeness marker (written last by

@@ -29,7 +29,7 @@ from daydream.archive.hydrate import (
     PublicDestinationError,
     RepoInfo,
 )
-from daydream.archive.hydrate_rules import derive_curation_id_v2
+from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.training.adjudication.final_bundle import (
     FINAL_IDENTITY_FILES,
     _bundle_input_names,
@@ -700,7 +700,7 @@ def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
         or allow_copyleft != sorted(set(allow_copyleft))
     ):
         raise ValueError("policy-binding.json: invalid policy fields")
-    derived = derive_curation_id_v2(
+    derived = derive_curation_id(
         source,
         binding["policy_digest"],
         policy_version,

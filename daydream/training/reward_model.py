@@ -2,7 +2,7 @@
 
 Trains a small two-class classifier on **gold accepted/rejected** evidence and
 scores a finished comment to a ``[0, 1]`` outcome term for the Stage-0 rubric
-(:mod:`daydream.training.rubric_v2`). This is the *learned* outcome term —
+(:mod:`daydream.training.rubric`). This is the *learned* outcome term —
 a sibling of the intrinsic composite in :mod:`daydream.training.reward`, never
 a rewrite of it.
 

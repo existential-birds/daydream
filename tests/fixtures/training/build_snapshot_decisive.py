@@ -18,7 +18,7 @@ from daydream.archive.hydrate_rules import (
     ADMISSION_POLICY_VERSION,
     HYDRATION_INDEX_SCHEMA_VERSION,
     SANITIZER_VERSION,
-    derive_curation_id,
+    derive_pre_identity_curation_id,
 )
 from tests.fixtures.training.build_archive import FIXTURE_SESSIONS
 from tests.fixtures.training.build_hub_snapshot import (
@@ -71,7 +71,7 @@ def build_snapshot_decisive(*, hostile: bool = False) -> FakeHub:
     files["curated/cur-old/batches/old/manifest.json"] = b'{"derived": true}\n'
     files["annotations/latest/sessions.jsonl"] = b'{"derived": true}\n'
     files["bronze/manifest.json"] = b'{"bronze": true}\n'
-    curation_id = derive_curation_id(
+    curation_id = derive_pre_identity_curation_id(
         SNAPSHOT_REVISION,
         SANITIZER_VERSION,
         HYDRATION_INDEX_SCHEMA_VERSION,

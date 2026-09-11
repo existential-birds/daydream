@@ -27,7 +27,7 @@ Contract points:
   after Stage 0 has computed it.
 - **Atomicity**: the manifest is written temp-then-rename, mirroring the
   corpus exporter's atomic-write discipline in
-  :func:`daydream.training.corpus_v2.run_build_corpus_v2`.
+  :func:`daydream.training.corpus_projection.build_frozen_corpus`.
 - **Adapter handoff**: the final stage's output is a LoRA adapter checkpoint
   in the ``save_adapter_separately`` shape (``adapter_config.json`` +
   ``adapter_state.json``), and the manifest's ``adapter_path`` points at it.
@@ -70,7 +70,7 @@ class PipelineConfig:
 
     Attributes:
         projection: Path to a frozen projection directory (the
-            ``run_build_corpus_v2`` output). The pipeline loads the projection
+            ``build_frozen_corpus`` output). The pipeline loads the projection
             via :func:`daydream.training.stacks_v2.load_v2_projection` and
             Stage 0 consumes the projector's frozen split. This is the only
             pipeline input — the legacy v1 ``corpus`` JSONL input was removed

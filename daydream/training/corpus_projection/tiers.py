@@ -1,4 +1,4 @@
-"""Tier + eligibility classification for corpus v2 records.
+"""Tier + eligibility classification for projection records.
 
 The gold gate is human-evidence-only and structural (C5): no intrinsic
 reward or LLM self-score input exists in this module's signature, so a

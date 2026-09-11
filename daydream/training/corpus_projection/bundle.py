@@ -1,4 +1,4 @@
-"""Fail-closed loader for hydrated curation bundles (corpus v2).
+"""Fail-closed loader for hydrated curation bundles (projection).
 
 Mirrors ``daydream.archive.hydrate.verify_publication``'s SHA256SUMS
 parse-and-verify loop, but reads read-only from a local checkout directory.

@@ -368,22 +368,22 @@ class TestHydrateRules:
     def test_curation_id_deterministic(self) -> None:
         kwargs = dict(source_commit="a" * 40, sanitizer_version="1.0.0",
                       index_schema_version="1", admission_policy_version="1")
-        first = hydrate_rules.derive_curation_id(**kwargs)
-        assert first == hydrate_rules.derive_curation_id(**kwargs)
-        assert first == hydrate_rules.derive_curation_id(**kwargs)  # stable across calls
+        first = hydrate_rules.derive_pre_identity_curation_id(**kwargs)
+        assert first == hydrate_rules.derive_pre_identity_curation_id(**kwargs)
+        assert first == hydrate_rules.derive_pre_identity_curation_id(**kwargs)  # stable across calls
         assert hydrate_rules.CURATION_ID_RE.fullmatch(first)
 
     def test_curation_id_inputs_sensitive(self) -> None:
         base = dict(source_commit="a" * 40, sanitizer_version="1.0.0",
                     index_schema_version="1", admission_policy_version="1")
-        ids = {hydrate_rules.derive_curation_id(**{**base, k: v})
+        ids = {hydrate_rules.derive_pre_identity_curation_id(**{**base, k: v})
                for k, v in [("source_commit", "b" * 40), ("sanitizer_version", "1.0.1"),
                             ("admission_policy_version", "2")]}
         assert len(ids) == 3  # every input changes the id
-        assert hydrate_rules.derive_curation_id(**base) not in ids
+        assert hydrate_rules.derive_pre_identity_curation_id(**base) not in ids
 
-    def test_derive_curation_id_v2_binds_policy_inputs(self) -> None:
-        from daydream.archive.hydrate_rules import derive_curation_id_v2
+    def test_derive_curation_id_binds_policy_inputs(self) -> None:
+        from daydream.archive.hydrate_rules import derive_curation_id
         base: dict[str, object] = {
             "source_commit": "a" * 40,
             "policy_digest": "d" * 64,
@@ -393,7 +393,7 @@ class TestHydrateRules:
             "decisions_digest": "f" * 64,
             "distribution_digest": "0" * 64,
         }
-        cid = derive_curation_id_v2(**base)  # type: ignore[arg-type]
+        cid = derive_curation_id(**base)  # type: ignore[arg-type]
         assert cid.startswith("cur-") and len(cid) == 20 and cid[4:].isalnum()
         # Any change to any bound input changes the id (identity-breaking by design).
         for key, value in [
@@ -404,10 +404,11 @@ class TestHydrateRules:
             ("decisions_digest", "f" * 63 + "0"),
             ("distribution_digest", "0" * 63 + "1"),
         ]:
-            assert derive_curation_id_v2(**{**base, key: value}) != cid  # type: ignore[arg-type]
-        # v1 ids are untouched: existing prefixes keep the old derivation.
-        from daydream.archive.hydrate_rules import derive_curation_id
-        assert derive_curation_id("a" * 40, "1", "1", "1") == derive_curation_id("a" * 40, "1", "1", "1")
+            assert derive_curation_id(**{**base, key: value}) != cid  # type: ignore[arg-type]
+        # Historical ids are untouched: existing prefixes keep the old derivation.
+        from daydream.archive.hydrate_rules import derive_pre_identity_curation_id
+        lhs = rhs = ("a" * 40, "1", "1", "1")
+        assert derive_pre_identity_curation_id(*lhs) == derive_pre_identity_curation_id(*rhs)
 
     def test_fixture_exclusion_reason_codes(self, tmp_path: Path) -> None:
         (tmp_path / "manifest.json").write_text('{"session_id": "s", "source_path": "/tmp/pytest-of-user/x"}')
@@ -679,7 +680,7 @@ class TestPublish:
         hub = make_fake_hub(tmp_path)
         hub.private = False
         stage = self._staged(tmp_path)
-        cid = hydrate_rules.derive_curation_id(
+        cid = hydrate_rules.derive_pre_identity_curation_id(
             source_commit="a" * 40, sanitizer_version="1", index_schema_version="1",
             admission_policy_version="1")
         with pytest.raises(hydrate.PublicDestinationError, match="private"):
@@ -689,7 +690,7 @@ class TestPublish:
     def test_batches_and_ledger_under_additive_prefix(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
         stage = self._staged(tmp_path)
-        cid = hydrate_rules.derive_curation_id(
+        cid = hydrate_rules.derive_pre_identity_curation_id(
             source_commit="a" * 40, sanitizer_version="1", index_schema_version="1",
             admission_policy_version="1")
         hydrate.publish_batches(hub, stage, curation_id=cid)
@@ -759,7 +760,7 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     published manifest rows — the gate proves the two evidence supply paths
     agree under one contract."""
     from daydream.archive import license_enrich
-    from daydream.training.corpus_v2.license import (
+    from daydream.training.corpus_projection.license import (
         load_license_policy,
         resolve_repo_decision,
     )
@@ -1642,8 +1643,8 @@ def test_curation_id_changes_with_policy_binding(tmp_path: Path) -> None:
     cid_b = _identity_for(stage, policy_path=str(policy_b_path))  # different policy_version
     assert cid_a != cid_b
     assert _identity_for(stage, policy_path=policy_a, allow_copyleft=frozenset()) == cid_a
-    # The v2 id is never the v1 derivation (which ignores the policy inputs).
-    v1 = hydrate_rules.derive_curation_id(
+    # The v2 id is never the historical derivation (which ignores the policy inputs).
+    v1 = hydrate_rules.derive_pre_identity_curation_id(
         "a" * 40, hydrate_rules.SANITIZER_VERSION,
         hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION, hydrate_rules.ADMISSION_POLICY_VERSION)
     assert cid_a != v1

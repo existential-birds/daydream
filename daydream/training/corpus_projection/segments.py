@@ -1,4 +1,4 @@
-"""Deterministic per-agent segmentation of ATIF trajectories (corpus v2).
+"""Deterministic per-agent segmentation of ATIF trajectories (projection).
 
 Pinned rule (spike 0B): sibling registration order in
 ``TrajectoryRecorder.fork()`` is append-ordered, so enumeration of the

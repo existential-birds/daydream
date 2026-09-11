@@ -49,7 +49,7 @@ def test_pipeline_config_rejects_legacy_corpus_kwarg() -> None:
 
 
 def test_pipeline_config_projection_only() -> None:
-    """#1093: `projection` is the one and only pipeline input (corpus_v2 renamed)."""
+    """#1093: `projection` is the one and only pipeline input (package renamed in this task)."""
     from daydream.training.coordinator import PipelineConfig
 
     cfg = PipelineConfig(out_dir=Path("/tmp/x"), projection=Path("/tmp/proj"))

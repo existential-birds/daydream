@@ -20,7 +20,7 @@ from typing import Any, cast
 import pytest
 
 from daydream.training.coordinator import PipelineConfig, run_pipeline
-from daydream.training.corpus_v2.splits import assign_split
+from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.gate import _split_digest
 from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks_v2 import load_v2_projection
@@ -320,7 +320,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """AC6: the 50-record real-projection fixture feeds the full pipeline.
 
     The fixture materializes a corpus-v2 projection with the real
-    ``run_build_corpus_v2`` over a curated bundle + annotation snapshot
+    ``build_frozen_corpus`` over a curated bundle + annotation snapshot
     (finding text, git shas, and diff bodies present — the producer-shaped
     manifest puts base_sha under ``code_context``; the projector embeds each
     raw diff body directly), sized so both gold classes are present plus
@@ -329,9 +329,9 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     Stage-2 rows are replayable through ``run_rft`` with no fixture
     post-processing.
     """
-    from tests.fixtures.training.build_corpus_v2_50 import build_corpus_v2_50
+    from tests.fixtures.training.build_corpus_v2_50 import build_projection_50
 
-    proj_dir = build_corpus_v2_50(tmp_path)
+    proj_dir = build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)
     assert len(projection.records) == 50
     gold_labels = {

@@ -378,16 +378,16 @@ def _run_summarize(args: argparse.Namespace) -> int:
     return summarize(args.path)
 
 
-def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream corpus build-v2 [...]``.
+def _build_build_corpus_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream corpus build [...]``.
 
     Dispatches to the
-    deterministic per-finding corpus v2 projector over a curated bundle.
+    deterministic per-finding corpus projection projector over a curated bundle.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream corpus build-v2",
+        prog="daydream corpus build",
         description="Project curated-bundle per-finding resolutions into deterministic, "
-        "frozen-split corpus-v2 training records.",
+        "frozen-split projection training records.",
     )
 
     parser.add_argument(
@@ -495,10 +495,10 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _handle_build_corpus_v2_command(argv: list[str]) -> int:
-    """Handle ``daydream corpus build-v2 --bundle-root <dir> [...]``.
+def _handle_build_corpus_command(argv: list[str]) -> int:
+    """Handle ``daydream corpus build --bundle-root <dir> [...]``.
 
-    Drives :func:`daydream.training.corpus_v2.run_build_corpus_v2` synchronously
+    Drives :func:`daydream.training.corpus_projection.build_frozen_corpus` synchronously
     (no agent work, no network — a pure projection over the curated bundle plus
     the annotation bundle). Mirrors the other corpus handlers'
     structure: returns an exit code; ``main()`` translates it into a process
@@ -508,10 +508,10 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     import tempfile
     from dataclasses import replace
 
-    from daydream.training.corpus_v2 import BuildCorpusV2Config, run_build_corpus_v2
+    from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
     from daydream.ui import create_console, print_error, print_success
 
-    parser = _build_build_corpus_v2_parser()
+    parser = _build_build_corpus_parser()
     args = parser.parse_args(argv)
 
     for flag, value in (
@@ -535,7 +535,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         print_error(
             create_console(),
             "Missing --annotation-bundle-root",
-            "A corpus v2 build requires a pinned annotation bundle "
+            "A corpus build requires a pinned annotation bundle "
             "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
         )
         return 1
@@ -552,14 +552,14 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         print_error(
             create_console(),
             "Missing --license-policy",
-            "A corpus v2 build requires a pinned license policy file; per-repo "
+            "A corpus build requires a pinned license policy file; per-repo "
             "license decisions are resolved from it (fail-closed).",
         )
         return 1
 
     # Validate the policy file before any build work (M10): a malformed or
     # unknown-version policy must refuse without creating the output directory.
-    from daydream.training.corpus_v2.license import load_license_policy
+    from daydream.training.corpus_projection.license import load_license_policy
 
     try:
         load_license_policy(args.license_policy)
@@ -573,10 +573,10 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     # covered by the fail-closed completeness gate.
     out_dir = args.out.parent
     try:
-        # BuildCorpusV2Config is the single validation boundary for --as-of
+        # BuildFrozenCorpusConfig is the single validation boundary for --as-of
         # (UTC-only, canonical +00:00 spelling out) — normalize_as_of runs in
         # __post_init__, so an unparseable pin refuses here, not as a traceback.
-        config = BuildCorpusV2Config(
+        config = BuildFrozenCorpusConfig(
             out_dir=out_dir,
             bundle_dir=args.bundle_root,
             annotation_bundle_dir=args.annotation_bundle_dir,
@@ -593,15 +593,15 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     try:
         if args.dry_run:
             with tempfile.TemporaryDirectory() as td:
-                summary = run_build_corpus_v2(replace(config, out_dir=Path(td)))
+                summary = build_frozen_corpus(replace(config, out_dir=Path(td)))
         else:
-            summary = run_build_corpus_v2(config)
+            summary = build_frozen_corpus(config)
     except (OSError, ValueError, TypeError) as exc:
-        print_error(create_console(), "Corpus v2 build refused", str(exc))
+        print_error(create_console(), "Corpus build refused", str(exc))
         return 1
     print_success(
         create_console(),
-        f"Corpus v2 build complete: {summary['emitted']} records "
+        f"Corpus build complete: {summary['emitted']} records "
         f"({summary['adjudication']} to adjudication) in {out_dir}",
     )
     return 0
@@ -1677,7 +1677,7 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
     # Issue #1094: a non-dry hydrate-hub publication requires a pinned license
     # policy; refuse before any Hub access or staging work. A dry-run may omit
-    # it (planning affordance). Mirrors build-v2's policy-required pattern.
+    # it (planning affordance). Mirrors build's policy-required pattern.
     if args.license_policy is None and not args.dry_run:
         print_error(
             console,
@@ -1707,9 +1707,9 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     # Pre-validate the license policy up front so a malformed or missing
     # --license-policy is named by this handler (and redaction-processed) instead
     # of escaping as an unredacted generic "Fatal Error" from main(). Mirrors the
-    # build-v2 handler's fail-closed validation.
+    # build handler's fail-closed validation.
     if args.license_policy is not None:
-        from daydream.training.corpus_v2.license import load_license_policy
+        from daydream.training.corpus_projection.license import load_license_policy
 
         try:
             load_license_policy(args.license_policy)
@@ -2183,7 +2183,7 @@ def _handle_adjudicate_command(argv: list[str]) -> int:
 
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "harvest": _handle_harvest_command,
-    "build-v2": _handle_build_corpus_v2_command,
+    "build": _handle_build_corpus_command,
     "label": _handle_label_command,
     "hydrate-hub": _handle_hydrate_hub_command,
     "calibrate-reward": _handle_calibrate_reward_command,
@@ -2192,11 +2192,11 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build-v2,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
+    "usage: daydream corpus {harvest,build,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
-    "  build-v2  project curated-bundle resolutions into corpus-v2 records (pinned --license-policy required)\n"
+    "  build  project curated-bundle resolutions into projection records (pinned --license-policy required)\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
     "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"

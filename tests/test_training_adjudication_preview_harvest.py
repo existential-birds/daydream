@@ -96,7 +96,7 @@ def test_preview_detects_evidence_drift(tmp_path: Path) -> None:
     result = run_preview(drifted, ledger)  # same ledger path: compares against prior preview
     assert result["drifted_record_ids"]  # drift surfaced, not merged silently
     # Drift names exactly the mutated finding (fp-a in session s2).
-    from daydream.training.corpus_v2.identity import record_id as rid
+    from daydream.training.corpus_projection.identity import record_id as rid
     assert result["drifted_record_ids"] == [rid("s2", "s2-traj", "s2-seg", "fp-a")]
     fresh_digests = {
         str(item["record_id"]): str(item["evidence_digest"])
@@ -188,7 +188,7 @@ def test_preview_and_harvest_identity_digest_stability_gate(tmp_path: Path) -> N
         assert item["record_id"] in by_id
         assert by_id[item["record_id"]]["evidence_digest"] == item["evidence_digest"]
     # record_id recomputation from the exported entries round-trips.
-    from daydream.training.corpus_v2.identity import record_id as rid
+    from daydream.training.corpus_projection.identity import record_id as rid
     for e in exported:
         assert e["record_id"] == rid(e["session_id"], e["trajectory_id"], e["segment_id"], e["fingerprint"])
 

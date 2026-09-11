@@ -571,7 +571,7 @@ def classify_run_level(
             is a run-level (session-scoped) label; a row carrying one is
             already per-finding evidence.
         projector_findings: ``{session_id: [finding, ...]}`` mirroring the
-            ``corpus_v2.projector.project_findings`` enumeration — the single
+            ``corpus_projection.projector.project_findings`` enumeration — the single
             authority for the non-decisive set. Each finding dict must carry
             ``record_id`` and ``evidence_sha``.
 

@@ -14,9 +14,9 @@ from tests.test_corpus_v2 import (
 
 
 def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
-    from daydream.training.corpus_v2.projector import BuildCorpusV2Config
+    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
 
-    return BuildCorpusV2Config(
+    return BuildFrozenCorpusConfig(
         out_dir=out_dir,
         bundle_dir=bundle_dir,
         annotation_bundle_dir=snapshot.parent,
@@ -39,9 +39,9 @@ def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any], Path]:
         bundle_dir, dispositions=["accepted", "ambiguous"]
     )
     out_dir = tmp_path / "out"
-    from daydream.training.corpus_v2.projector import run_build_corpus_v2
+    from daydream.training.corpus_projection.projector import build_frozen_corpus
 
-    out = run_build_corpus_v2(_cfg(out_dir, bundle_dir, snap, **kw))
+    out = build_frozen_corpus(_cfg(out_dir, bundle_dir, snap, **kw))
     return out_dir, out, snap
 
 

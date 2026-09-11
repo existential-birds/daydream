@@ -1,6 +1,6 @@
 """50-record corpus-v2 integration fixture (mirrors the v1 ``records-50``).
 
-Builds a real corpus-v2 projection directory with :func:`run_build_corpus_v2`
+Builds a real corpus-v2 projection directory with :func:`build_frozen_corpus`
 over a curated bundle + annotation snapshot — the same staging helpers
 ``tests.test_corpus_v2`` uses — sized so that:
 
@@ -21,7 +21,7 @@ pipeline run's ``run_identity.corpus_digest`` — is stable across runs.
 The projector embeds the raw diff body on every record (schema v2.json
 ``diff``) directly from the bundle's ``batches/<sid>/diff.patch``, so the
 fixture needs no post-processing: the real projector -> Stage-2 journey
-(``coordinator._rft_rows`` over ``run_build_corpus_v2`` output) carries the
+(``coordinator._rft_rows`` over ``build_frozen_corpus`` output) carries the
 full RFT identity (repo_slug/base_sha/head_sha/diff) on its own.
 """
 
@@ -32,15 +32,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daydream.training.corpus_v2.identity import record_id
-from daydream.training.corpus_v2.projector import run_build_corpus_v2
-from daydream.training.corpus_v2.splits import assign_split
 from tests.test_corpus_v2 import (
     _policy_file,
     _write_annotations_snapshot,
     _write_bundle,
     _write_sumsums,
 )
+
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import build_frozen_corpus
+from daydream.training.corpus_projection.splits import assign_split
 
 SALT = "issue-1081-fixture-salt"
 HOLDOUT_RATE = 0.2
@@ -192,7 +193,7 @@ def _add_batch(
         manifest["batches"].append(batch_row)
 
 
-def build_corpus_v2_50(tmp_path: Path) -> Path:
+def build_projection_50(tmp_path: Path) -> Path:
     """Materialize the 50-record corpus-v2 projection under ``tmp_path``.
 
     Returns:
@@ -204,7 +205,7 @@ def build_corpus_v2_50(tmp_path: Path) -> Path:
             task-only records) — a broken fixture is a test-authoring bug,
             never a silently accepted projection.
     """
-    from daydream.training.corpus_v2.projector import BuildCorpusV2Config
+    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
 
     work = tmp_path / "corpus-v2-fixture"
     bundle_dir = _write_bundle(work)
@@ -219,8 +220,8 @@ def build_corpus_v2_50(tmp_path: Path) -> Path:
         _write_annotations_snapshot(bundle_dir, session_id=sid, dispositions=dispositions[sid])
 
     proj_dir = work / "proj"
-    run_build_corpus_v2(
-        BuildCorpusV2Config(
+    build_frozen_corpus(
+        BuildFrozenCorpusConfig(
             out_dir=proj_dir,
             bundle_dir=bundle_dir,
             annotation_bundle_dir=bundle_dir.parent / f"{bundle_dir.name}-annotations",

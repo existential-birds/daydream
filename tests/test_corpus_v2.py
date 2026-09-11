@@ -6,16 +6,16 @@ from typing import Any
 import pytest
 
 from daydream.archive.sanitize import _derivative_digest
-from daydream.training.corpus_v2.bundle import (
+from daydream.training.corpus_projection.bundle import (
     BundleBatch,
     BundleError,
     CuratedBundle,
     load_curated_bundle,
 )
-from daydream.training.corpus_v2.identity import record_id
-from daydream.training.corpus_v2.provenance import extract_provenance
-from daydream.training.corpus_v2.segments import segment, segment_agents
-from daydream.training.corpus_v2.tiers import GoldGateError, classify_tier
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.segments import segment, segment_agents
+from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 
 _MANIFEST = {
     "schema_version": "1",
@@ -99,11 +99,11 @@ def _write_bundle(
 
 
 def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
-    from daydream.training.corpus_v2.projector import BuildCorpusV2Config
+    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
 
     if kw.get("license_policy_path") is None:
         kw["license_policy_path"] = _policy_file(bundle_dir.parent)
-    return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir,
+    return BuildFrozenCorpusConfig(out_dir=out_dir, bundle_dir=bundle_dir,
                                annotation_bundle_dir=snapshot.parent, **kw)
 
 
@@ -136,7 +136,7 @@ def _write_annotations_snapshot(
     (bundle_dir / "batches" / session_id / "trajectory.json").write_text(
         json.dumps(trajectory) + "\n"
     )
-    from daydream.training.corpus_v2.identity import record_id as _record_id
+    from daydream.training.corpus_projection.identity import record_id as _record_id
 
     ann_dir = bundle_dir.parent / f"{bundle_dir.name}-annotations"
     ann_dir.mkdir(parents=True, exist_ok=True)
@@ -263,7 +263,7 @@ def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_
     assert {r["fingerprint"] for r in rows} == {"a1" * 32, "b2" * 32}
     assert len({r["record_id"] for r in rows}) == 2
     out = tmp_path / "proj"
-    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_cfg(out, bundle_dir, snap))
     records = [
         json.loads(line)
         for line in (out / "corpus.jsonl").read_text().splitlines() if line.strip()
@@ -538,7 +538,7 @@ def test_stack_falls_back_to_none_when_unresolvable() -> None:
 # Task 7: per-finding projection + adjudication routing
 # ---------------------------------------------------------------------------
 
-from daydream.training.corpus_v2.projector import project_findings  # noqa: E402
+from daydream.training.corpus_projection.projector import project_findings  # noqa: E402
 
 
 def _res(fp: str, disposition: str) -> dict[str, object]:
@@ -589,13 +589,13 @@ def test_run_level_contested_aggregate_never_erases_split() -> None:
 # Task 9: summary + full lineage + adjudication report
 # ---------------------------------------------------------------------------
 
-from daydream.training.corpus_v2.projector import BuildCorpusV2Config, run_build_corpus_v2  # noqa: E402
+from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus  # noqa: E402
 
 
 def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected", "ambiguous"])
-    summary = run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    summary = build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
     assert set(summary) >= {"records_by_type", "records_by_tier", "records_by_split",
                             "caps", "exclusions_by_reason"}
     assert summary["records_by_type"]["outcome-finding"] >= 2
@@ -632,7 +632,7 @@ def _config_for(
     license_policy: Any = _UNSET,
     **kw: Any,
 ) -> Any:
-    """BuildCorpusV2Config over the fixture's bundle + annotation bundle.
+    """BuildFrozenCorpusConfig over the fixture's bundle + annotation bundle.
 
     The policy defaults to ``_policy_file(tmp_path)``; passing ``None``
     explicitly produces the misconfigured (no-policy) config.
@@ -640,7 +640,7 @@ def _config_for(
     if license_policy is _UNSET:
         license_policy = _policy_file(tmp_path)
     snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
-    return BuildCorpusV2Config(
+    return BuildFrozenCorpusConfig(
         out_dir=tmp_path / "out",
         bundle_dir=bundle_dir,
         annotation_bundle_dir=snap.parent,
@@ -653,7 +653,7 @@ def test_projected_records_carry_per_repo_license_decision(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
-    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     records = [json.loads(line) for line in
                (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line]
     assert records
@@ -683,7 +683,7 @@ def test_schema_validation_accepts_evolved_v2_records(
     import jsonschema  # noqa: PLC0415
 
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
-    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     schema = json.loads((tmp_path / "out" / "schema.json").read_text())
     for rec in (json.loads(line) for line in
                 (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line):
@@ -693,7 +693,7 @@ def test_schema_validation_accepts_evolved_v2_records(
 def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
     records = [json.loads(line) for line in
                (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
     assert records
@@ -725,7 +725,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     (ann_dir / "SHA256SUMS").write_text("".join(
         f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
     ))
-    summary = run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    summary = build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
     assert summary["records_by_tier"] == {"silver": 1}
     records = [json.loads(line) for line in
                (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
@@ -743,7 +743,7 @@ from daydream.training.stacks import load_dataset_v2  # noqa: E402
 def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    summary = run_build_corpus_v2(_cfg(tmp_path / "proj", bundle_dir, snap))
+    summary = build_frozen_corpus(_cfg(tmp_path / "proj", bundle_dir, snap))
     assert summary["emitted"] >= 1
     records = load_dataset_v2(tmp_path / "proj")
     assert records
@@ -793,7 +793,7 @@ def test_emitted_records_validate_against_shipped_v2_schema(tmp_path: Path) -> N
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "proj"
-    summary = run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
     assert summary["emitted"] >= 1
     validator = Draft202012Validator(json.loads(TRAINING_SCHEMA_V2_PATH.read_text()))
     records = [
@@ -822,7 +822,7 @@ def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
         bundle_dir, dispositions=["accepted", "rejected"], n_siblings=2
     )
     out = tmp_path / "proj"
-    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_cfg(out, bundle_dir, snap))
     records = [
         json.loads(line)
         for line in (out / "corpus.jsonl").read_text().splitlines()
@@ -843,7 +843,7 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
     out = tmp_path / "proj"
-    summary = run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
     assert summary["records_by_tier"] == {"gold": 1}
     assert summary["exclusions_by_reason"] == {"non-decisive-adjudication": 1}
     records = [
@@ -861,7 +861,7 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
     assert (out / "_SUCCESS").is_file()
 
 
-# Task 11: CLI wiring — ``daydream corpus build-v2``
+# Task 11: CLI wiring — ``daydream corpus build``
 # ---------------------------------------------------------------------------
 
 
@@ -885,7 +885,7 @@ def _run_cli(argv: list[str]) -> int:
 def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
-    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
+    rc = _run_cli(["corpus", "build", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(snap.parent),
                    "--license-policy", str(_policy_file(bundle_dir.parent)),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
@@ -895,7 +895,7 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
 
 
 def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None:
-    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(tmp_path / "nope"),
+    rc = _run_cli(["corpus", "build", "--bundle-root", str(tmp_path / "nope"),
                    "--annotation-bundle-root", str(tmp_path / "nope" / "ann"),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc != 0
@@ -903,7 +903,7 @@ def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Task 7: two-bundle build-v2 contract (annotation bundle self-verification +
+# Task 7: two-bundle build contract (annotation bundle self-verification +
 # cross-bundle linkage replaces the snapshot SHA256SUMS pin)
 # ---------------------------------------------------------------------------
 
@@ -917,10 +917,10 @@ def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
         tmp_path / "ann", snapshot_rows,
         curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
         batch_fileset_digest=_derivative_digest(bundle_dir))
-    config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
+    config = BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
                                  annotation_bundle_dir=ann,
                                  license_policy_path=_policy_file(tmp_path))
-    summary = run_build_corpus_v2(config)
+    summary = build_frozen_corpus(config)
     assert summary["emitted"] > 0
     # curation bundle untouched (K3: no mutation of the finalized bundle)
     sums_before = (bundle_dir / "SHA256SUMS").read_bytes()
@@ -953,11 +953,11 @@ def test_build_v2_refuses_broken_annotation_bundles(
         (ann / "annotations.jsonl").write_text("tampered\n", encoding="utf-8")
     if mutate in ("wrong_curation", "wrong_commit", "wrong_fileset"):
         (ann / "lineage.json").write_text(json.dumps(lineage, sort_keys=True) + "\n", encoding="utf-8")
-    config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
+    config = BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
                                  annotation_bundle_dir=ann,
                                  license_policy_path=_policy_file(tmp_path))
     with pytest.raises(ValueError):
-        run_build_corpus_v2(config)
+        build_frozen_corpus(config)
 
 
 def test_build_v2_still_works_without_annotation_bundle_dir_raises(
@@ -966,7 +966,7 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
 ) -> None:
     bundle_dir, _rows, kwargs = existing_bundle_fixture
     with pytest.raises(ValueError, match="annotation_bundle_dir"):
-        BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
+        BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1016,7 +1016,7 @@ def test_projection_rejects_c5_repo_and_refuses_success(
     # projector must too (boundary 2), refusing before any file write.
     _inject_admitted_repo_slug(bundle_dir, "getsentry/sentry")
     with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO):
-        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+        build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     assert not (tmp_path / "out" / "_SUCCESS").exists()
     assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
 
@@ -1032,7 +1032,7 @@ def test_unopted_copyleft_repo_refuses_projection(
     _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
     policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
     with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED):
-        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+        build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=policy))
     assert not (tmp_path / "out" / "_SUCCESS").exists()
     assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
 
@@ -1048,7 +1048,7 @@ def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
     _admit_second_batch(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
     policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
     with pytest.raises(ValueError, match=r"\('sess-b', 'c8_copyleft_unopted'\)") as excinfo:
-        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+        build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=policy))
     # The clean batch is named nowhere in the refusal — only offenders are.
     assert "'sess-a'" not in str(excinfo.value)
 
@@ -1062,7 +1062,7 @@ def test_build_lineage_pins_license_policy_and_decisions(
 
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     out = tmp_path / "out"
-    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     lineage = json.loads((out / "lineage.json").read_text())
     assert lineage["license_policy"]["policy_version"] == "1"
     assert lineage["license_policy"]["path_digest"] == _hashlib.sha256(
@@ -1101,7 +1101,7 @@ def test_multi_session_repo_license_decisions_all_recorded(
         batch["license_evidence"] = {"spdx_id": "MIT", "source": "manifest"}
     (bundle_dir / "curation-manifest.json").write_text(json.dumps(manifest))
     ann_snapshot = _write_annotations_snapshot(bundle_dir, session_id="sess-a")
-    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, ann_snapshot))
+    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, ann_snapshot))
     lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
     assert set(lineage["license_decisions"]) == {"sess-a", "sess-b"}
     assert all(
@@ -1132,7 +1132,7 @@ def test_license_report_artifact_is_deterministic(
 ) -> None:
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     config = _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
-    run_build_corpus_v2(config)
+    build_frozen_corpus(config)
     report_path = tmp_path / "out" / "license-report.json"
     assert report_path.is_file()
     report = json.loads(report_path.read_text())
@@ -1148,7 +1148,7 @@ def test_license_report_artifact_is_deterministic(
     # Byte-identical replay of the report alone (pure function of the
     # bundle + policy + exclusion.txt bytes):
     first = report_path.read_bytes()
-    run_build_corpus_v2(_config_for(bundle_dir, tmp_path / "again",
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path / "again",
                                     license_policy=_policy_file(tmp_path)))
     assert (tmp_path / "again" / "out" / "license-report.json").read_bytes() == first
 
@@ -1159,7 +1159,7 @@ def test_license_report_written_before_success_marker(
     # The completeness gate covers the report: it exists on every clean build
     # that publishes _SUCCESS, and the summary exposes the distribution.
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
-    summary = run_build_corpus_v2(
+    summary = build_frozen_corpus(
         _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
     )
     assert (tmp_path / "out" / "_SUCCESS").is_file()
@@ -1176,12 +1176,12 @@ def _run_build_v2_cli(
     bundle_dir: Path, tmp_path: Path, policy: Path, capsys: pytest.CaptureFixture[str],
     *, out_name: str = "pub",
 ) -> tuple[int, str]:
-    """Drive ``daydream corpus build-v2`` (the production entrypoint) over the
+    """Drive ``daydream corpus build`` (the production entrypoint) over the
     fixture's bundle + annotation bundle, returning (exit code, combined
     terminal output). The projection publishes into ``tmp_path/<out_name>/``."""
     out = tmp_path / out_name / "corpus-v2.jsonl"
     ann = bundle_dir.parent / (bundle_dir.name + "-annotations")
-    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
+    rc = _run_cli(["corpus", "build", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(ann),
                    "--license-policy", str(policy),
                    "--out", str(out)])
@@ -1236,7 +1236,7 @@ def test_end_to_end_mixed_repo_publication_gated(
     existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Real-path: entering from the CLI (``daydream corpus build-v2``, the
+    """Real-path: entering from the CLI (``daydream corpus build``, the
     production entrypoint), a hydrate-shaped bundle whose admitted batch
     carries a C5-excluded repo slug must exit 1, publish no ``_SUCCESS``,
     and name the stable reason code; the mirror case — an unopted copyleft
@@ -1312,7 +1312,7 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     (batch_dir / "diff.patch").write_text(diff_text)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     out = tmp_path / "proj"
-    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_cfg(out, bundle_dir, snap))
     records = [
         json.loads(line)
         for line in (out / "corpus.jsonl").read_text().splitlines() if line.strip()
@@ -1345,7 +1345,7 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
 
 
 # #1093: the legacy v1 records builder and its CLI verb are removed; the
-# canonical projection surface is corpus_v2 (renamed in a later task).
+# canonical projection surface is the corpus_projection package (renamed in this task).
 def test_legacy_records_builder_gone() -> None:
     """#1093: `run_build_corpus` (v1 records JSONL emission) is removed."""
     import daydream.training.corpus as corpus_mod
@@ -1356,10 +1356,9 @@ def test_legacy_records_builder_gone() -> None:
 def test_corpus_build_verb_gone() -> None:
     """#1093: the legacy `daydream corpus build` verb no longer dispatches.
 
-    `build-v2` still dispatches here; the Task 4 rename retires that spelling
-    and makes `build` the canonical subverb.
+    After the Task 4 rename, `build` is the canonical subverb (build-v2 retired).
     """
     from daydream.cli import _CORPUS_SUBVERBS
 
-    assert "build" not in _CORPUS_SUBVERBS
-    assert "build-v2" in _CORPUS_SUBVERBS
+    assert "build" in _CORPUS_SUBVERBS
+    assert "build-v2" not in _CORPUS_SUBVERBS

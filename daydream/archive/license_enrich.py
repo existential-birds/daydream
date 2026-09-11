@@ -41,7 +41,7 @@ from daydream.archive.hydrate import (
     _manifest_repo_slug,
     _read_manifest_dict,
 )
-from daydream.training.corpus_v2.license import normalize_repo_slug
+from daydream.training.corpus_projection.license import normalize_repo_slug
 from daydream.trajectory import redact_text
 
 _ENRICH_DIR = "_enrich"

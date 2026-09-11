@@ -1,4 +1,4 @@
-"""Record identity for corpus v2 (Req 2, D2).
+"""Record identity for projection records (Req 2, D2).
 
 Each per-finding training record is identified by a sha256 digest over the
 canonical four-component join (US-separated, UTF-8) of the session id,

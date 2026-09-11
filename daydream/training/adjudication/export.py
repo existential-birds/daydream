@@ -4,7 +4,7 @@ One serializer, two entry points: the canonical harvest
 (:func:`daydream.training.adjudication.harvest.run_harvest`) and the
 ``corpus adjudicate export`` CLI verb both write through
 :func:`write_export_rows`, so the on-disk shape — the
-``corpus_v2.projector.project_findings`` adjudication entry shape plus
+``corpus_projection.projector.project_findings`` adjudication entry shape plus
 ``record_id``/``evidence_digest`` — is produced by exactly one code path.
 
 ``validate_export_rows`` is the dry-run gate: every row's required keys are
@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from daydream.training.corpus_v2.identity import record_id as compute_record_id
+from daydream.training.corpus_projection.identity import record_id as compute_record_id
 
 __all__ = ["EXPORT_KEYS", "validate_export_rows", "write_export_rows"]
 

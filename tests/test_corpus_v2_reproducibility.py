@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.training.corpus_v2.projector import run_build_corpus_v2
-from daydream.training.corpus_v2.splits import assign_split
+from daydream.training.corpus_projection.projector import build_frozen_corpus
+from daydream.training.corpus_projection.splits import assign_split
 from tests.test_corpus_v2 import _cfg, _write_annotations_snapshot, _write_bundle
 
 
@@ -43,8 +43,8 @@ def test_assign_split_is_deterministic_and_salted() -> None:
 def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
-    run_build_corpus_v2(_cfg(tmp_path / "a", bundle_dir, snap))
-    run_build_corpus_v2(_cfg(tmp_path / "b", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "a", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "b", bundle_dir, snap))
     assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
     assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
@@ -75,7 +75,7 @@ def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) ->
     bundle_dir = _write_bundle(tmp_path)
     _enrich_bundle(bundle_dir)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
     records = [json.loads(line) for line in
                (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
     accepted = next(r for r in records if r["outcome_label"] == "accepted")
@@ -150,8 +150,8 @@ def test_enriched_reprojection_is_byte_identical(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     _enrich_bundle(bundle_dir)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    run_build_corpus_v2(_cfg(tmp_path / "a", bundle_dir, snap))
-    run_build_corpus_v2(_cfg(tmp_path / "b", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "a", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "b", bundle_dir, snap))
     assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
     assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
@@ -162,18 +162,18 @@ def test_splits_are_disjoint_and_frozen(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
     out_a = tmp_path / "o"
-    run_build_corpus_v2(_cfg(out_a, bundle_dir, snap))
+    build_frozen_corpus(_cfg(out_a, bundle_dir, snap))
     train, val, holdout = _read_split_memberships(out_a)
     assert not (set(train) & set(val))
     assert not (set(train) & set(holdout))
     assert not (set(val) & set(holdout))
     assert train + val + holdout  # the fixture projected records
     # frozen: same membership again on re-run into a fresh directory
-    run_build_corpus_v2(_cfg(tmp_path / "b", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "b", bundle_dir, snap))
     train2, _, _ = _read_split_memberships(tmp_path / "b")
     assert train2 == train
     # frozen: same membership under re-run in place (overwrite is stable)
-    run_build_corpus_v2(_cfg(out_a, bundle_dir, snap))
+    build_frozen_corpus(_cfg(out_a, bundle_dir, snap))
     train3, _, _ = _read_split_memberships(out_a)
     assert train3 == train
 
@@ -182,7 +182,7 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "o"
-    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_cfg(out, bundle_dir, snap))
     for line in (out / "corpus.jsonl").read_text().splitlines():
         record = json.loads(line)
         assert record["lineage"]["split"] in {"train", "validation", "holdout"}
@@ -225,7 +225,7 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
         f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
     ))
     for out in (tmp_path / "a", tmp_path / "b"):
-        run_build_corpus_v2(
+        build_frozen_corpus(
             _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,
                  max_profile_share=0.7)
         )
@@ -246,7 +246,7 @@ def test_late_outcome_evidence_is_refused(tmp_path: Path) -> None:
     snap = _write_annotations_snapshot(bundle_dir, valid_at="2030-01-01T00:00:00+00:00")
     cfg = _cfg(tmp_path / "late", bundle_dir, snap, as_of="2026-06-01T00:00:00+00:00")
     with pytest.raises(ValueError, match="valid_at"):
-        run_build_corpus_v2(cfg)
+        build_frozen_corpus(cfg)
     # refusal, not drop: the full fail-closed file set was never written
     # (every artifact the projector emits, plus the _SUCCESS completeness
     # marker — a regression that wrote any of them before raising fails)

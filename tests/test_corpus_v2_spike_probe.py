@@ -21,9 +21,9 @@ manifest with ``git.head_sha`` and ``code_context.{base_sha,head_sha}``;
 import json
 from pathlib import Path
 
-from daydream.training.corpus_v2.projector import (
+from daydream.training.corpus_projection.projector import (
+    build_frozen_corpus,
     read_batch_artifacts,
-    run_build_corpus_v2,
 )
 from tests.test_corpus_v2 import (
     _cfg,
@@ -65,7 +65,7 @@ def test_spike_probe_curated_batch_layout(tmp_path: Path) -> None:
 
     # The projection pipeline accepts a bundle whose batches carry the three
     # artifacts (no shape validation rejects them).
-    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
 
     # THE RELATION TO PROVE: a helper read from the batch path resolves a
     # resolution's finding text and diff exactly.

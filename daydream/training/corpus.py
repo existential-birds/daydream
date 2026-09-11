@@ -24,7 +24,7 @@ string.
 
 All symbols are private (underscore-prefixed) shared infrastructure for the
 corpus projection packages — the canonical emitter is
-:mod:`daydream.training.corpus_v2`, which imports the builders, the leak
+:mod:`daydream.training.corpus_projection`, which imports the builders, the leak
 guard, the trajectory-set hash, and the skill→stack decoder from here.
 """
 

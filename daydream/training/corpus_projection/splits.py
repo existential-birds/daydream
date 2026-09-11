@@ -1,4 +1,4 @@
-"""Content-derived, frozen, disjoint split assignment (corpus v2, D5).
+"""Content-derived, frozen, disjoint split assignment (projection, D5).
 
 A record's split is a deterministic function of its content-derived record id
 and the pinned salt — no RNG, no state, no call-order dependence. The unit

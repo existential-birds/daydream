@@ -20,7 +20,7 @@ def _mk_record(rid: str, stack: str | None, repo: str, profile: str | None) -> d
 
 class TestApplyShareCaps:
     def test_over_share_group_is_capped_to_limit(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         records = [_mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(10)]
         records.append(_mk_record("r900", "rust", "owner/repo-b", "deep"))
@@ -38,7 +38,7 @@ class TestApplyShareCaps:
         assert exclusions == {"stack:python": 9}
 
     def test_final_shares_respect_limits_after_sequential_passes(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         # Profiles must vary (a single profile value is trivially 100% of any
         # positive population and could never satisfy a <1.0 cap); the contract
@@ -70,7 +70,7 @@ class TestApplyShareCaps:
                 assert count / total <= limit + 1e-9, f"{key}={value} share {count}/{total}"
 
     def test_sequential_passes_reconverge_correlated_dimensions(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         # F1-shaped correlated fixture: python is concentrated in repo-a while
         # rust is split repo-a x2 + repo-b x3, and python sits exactly at the
@@ -118,7 +118,7 @@ class TestApplyShareCaps:
         assert exclusions == {"repo:owner/repo-a": 3, "stack:python": 1}
 
     def test_order_invariance_identical_kept_population(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         records = [
             _mk_record(
@@ -140,7 +140,7 @@ class TestApplyShareCaps:
         assert a_excl == b_excl
 
     def test_none_dimension_value_is_its_own_bucket_and_cappable(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         records = [_mk_record(f"r{i:03d}", None, "owner/repo-a", None) for i in range(8)]
         records.append(_mk_record("r800", "rust", "owner/repo-b", "deep"))
@@ -155,7 +155,7 @@ class TestApplyShareCaps:
         assert "stack:(none)" in exclusions
 
     def test_degenerate_cap_that_empties_population_fails_closed(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         records = [_mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(4)]
         with pytest.raises(ValueError, match="max_stack_share"):
@@ -165,7 +165,7 @@ class TestApplyShareCaps:
             )
 
     def test_sole_remaining_value_above_cap_fails_closed(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         # Mono-value boundary consistency (issues #5/#7): a cap that floors to
         # zero on the entry population raises fail-closed, and the identical
@@ -184,7 +184,7 @@ class TestApplyShareCaps:
                 )
 
     def test_empty_population_with_configured_caps_stays_empty(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         # Issue #6: a zero-record build (no decisive findings, or tier caps
         # that trimmed everything) previously completed with an empty corpus;
@@ -196,7 +196,7 @@ class TestApplyShareCaps:
         assert exclusions == {}
 
     def test_fixed_point_fails_closed_when_caps_conflict(self) -> None:
-        from daydream.training.corpus_v2.projector import _apply_share_caps
+        from daydream.training.corpus_projection.projector import _apply_share_caps
 
         # Finding-1 counterexample: the repo pass re-trims by lowest record_id
         # and would push stack A to 100% under single sequential passes. The
@@ -228,7 +228,7 @@ class TestBuildWiring:
         return _cfg(out, bundle, snap, **share)
 
     def _build(self, tmp_path: Path, **share: Any) -> tuple[Path, dict[str, Any]]:
-        from daydream.training.corpus_v2.projector import run_build_corpus_v2
+        from daydream.training.corpus_projection.projector import build_frozen_corpus
         from tests.test_corpus_v2 import (
             _admit_second_batch,
             _write_annotations_snapshot,
@@ -252,7 +252,7 @@ class TestBuildWiring:
             bundle, session_id="sess-b", dispositions=["accepted", "accepted"], stack="rust",
         )
         out = tmp_path / "out"
-        summary = run_build_corpus_v2(
+        summary = build_frozen_corpus(
             self._share_cfg(out, bundle, snap, **share)
         )
         return out, summary
@@ -292,7 +292,7 @@ class TestBuildWiring:
         # under ``exclusions_by_reason`` as ``share-cap:*``).
         import hashlib
 
-        from daydream.training.corpus_v2.projector import run_build_corpus_v2
+        from daydream.training.corpus_projection.projector import build_frozen_corpus
         from tests.test_corpus_v2 import (
             _admit_second_batch,
             _write_annotations_snapshot,
@@ -325,7 +325,7 @@ class TestBuildWiring:
         ))
 
         out = tmp_path / "out"
-        summary = run_build_corpus_v2(self._share_cfg(
+        summary = build_frozen_corpus(self._share_cfg(
             out, bundle, snap,
             max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
         ))
@@ -378,14 +378,14 @@ class TestBuildWiring:
         assert "share_caps" not in summary
 
     def test_zero_population_cap_fails_closed(self, tmp_path: Path) -> None:
-        from daydream.training.corpus_v2.projector import run_build_corpus_v2
+        from daydream.training.corpus_projection.projector import build_frozen_corpus
         from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
 
         bundle = _write_bundle(tmp_path)
         snap = _write_annotations_snapshot(bundle, session_id="sess-a",
                                            dispositions=["accepted", "accepted", "accepted"])
         with pytest.raises(ValueError, match="max_profile_share"):
-            run_build_corpus_v2(
+            build_frozen_corpus(
                 self._share_cfg(tmp_path / "out2", bundle, snap, max_profile_share=0.1)
             )
         # fail-closed: nothing written
@@ -393,7 +393,7 @@ class TestBuildWiring:
 
 
 # ---------------------------------------------------------------------------
-# Task 5: CLI wiring — build-v2 accepts share-cap flags (M2, M9)
+# Task 5: CLI wiring — build accepts share-cap flags (M2, M9)
 # ---------------------------------------------------------------------------
 
 
@@ -443,9 +443,9 @@ class TestCliShareFlags:
         ]
 
     def test_share_flags_accepted_by_parser(self) -> None:
-        from daydream.cli import _build_build_corpus_v2_parser
+        from daydream.cli import _build_build_corpus_parser
 
-        args = _build_build_corpus_v2_parser().parse_args(
+        args = _build_build_corpus_parser().parse_args(
             ["--bundle-root", "/b", "--annotation-bundle-root", "/a",
              "--license-policy", "/l", "--out", "/o/corpus.jsonl",
              "--max-stack-share", "0.5", "--max-repo-share", "0.6",
@@ -464,9 +464,9 @@ class TestCliShareFlags:
     def test_share_out_of_range_refuses_before_build(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, value: str
     ) -> None:
-        from daydream.cli import _handle_build_corpus_v2_command
+        from daydream.cli import _handle_build_corpus_command
 
-        rc = _handle_build_corpus_v2_command(self._base_argv(tmp_path) + [flag, value])
+        rc = _handle_build_corpus_command(self._base_argv(tmp_path) + [flag, value])
         assert rc == 1
         assert f"Invalid {flag}" in capsys.readouterr().out
         # refused before any build work: no output written
@@ -475,15 +475,15 @@ class TestCliShareFlags:
     def test_dry_run_writes_nothing_but_reports_capped_population(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from daydream.cli import _handle_build_corpus_v2_command
-        from daydream.training.corpus_v2 import BuildCorpusV2Config, run_build_corpus_v2
+        from daydream.cli import _handle_build_corpus_command
+        from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
         from tests.test_corpus_v2 import _policy_file
 
         argv = self._base_argv(tmp_path) + [
             "--dry-run", "--max-stack-share", "0.5", "--max-repo-share", "0.6",
             "--max-profile-share", "0.7",
         ]
-        rc = _handle_build_corpus_v2_command(argv)
+        rc = _handle_build_corpus_command(argv)
         assert rc == 0
         # dry run writes nothing into the real output directory
         assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
@@ -493,7 +493,7 @@ class TestCliShareFlags:
         # run the same projection directly and compare the emitted counts.
         bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
         snap = bundle_dir.parent / (bundle_dir.name + "-annotations")
-        direct = run_build_corpus_v2(BuildCorpusV2Config(
+        direct = build_frozen_corpus(BuildFrozenCorpusConfig(
             out_dir=tmp_path / "direct",
             bundle_dir=bundle_dir,
             annotation_bundle_dir=snap,
@@ -505,17 +505,17 @@ class TestCliShareFlags:
     def test_dry_run_parity_for_capped_build(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from daydream.cli import _handle_build_corpus_v2_command
+        from daydream.cli import _handle_build_corpus_command
         from tests.test_corpus_v2 import _policy_file
 
         argv = self._base_argv(tmp_path) + ["--dry-run", "--max-stack-share", "0.5"]
-        rc = _handle_build_corpus_v2_command(argv)
+        rc = _handle_build_corpus_command(argv)
         assert rc == 0
         capsys.readouterr()
         # the real build with the same caps succeeds over the same inputs
         bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
         snap = bundle_dir.parent / (bundle_dir.name + "-annotations")
-        rc2 = _handle_build_corpus_v2_command([
+        rc2 = _handle_build_corpus_command([
             "--bundle-root", str(bundle_dir),
             "--annotation-bundle-root", str(snap),
             "--license-policy", str(_policy_file(tmp_path)),

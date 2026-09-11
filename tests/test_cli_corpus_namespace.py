@@ -96,11 +96,11 @@ def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> 
     # CI terminals wrap help output at 80 cols, so assert per token, not the
     # full usage line.
     assert "calibrate-reward" in captured.out
-    assert "build-v2" in captured.out
+    assert "build" in captured.out
     assert "hydrate-hub" in captured.out
     assert "harvest" in captured.out
     assert "build" in captured.out
-    assert "build-v2" in captured.out
+    assert "build" in captured.out
     assert "label" in captured.out
     assert "calibrate-reward" in captured.out
 
@@ -160,7 +160,7 @@ def test_adjudicate_publication_commands_run_through_main(
 
 
 # ---------------------------------------------------------------------------
-# Task 8 (#1080): build-v2 operator inputs — pinned license policy, exact-slug
+# Task 8 (#1080): build operator inputs — pinned license policy, exact-slug
 # copyleft opt-ins, and refusal of URL-shaped identities. Real-path: the
 # handler runs the real projector over a real fixture bundle pair; only the
 # policy file is authored by the test.
@@ -170,7 +170,7 @@ def test_adjudicate_publication_commands_run_through_main(
 def _run_build_v2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]
 ) -> tuple[int, str]:
-    """Drive ``daydream corpus build-v2`` through ``cli.main`` over the
+    """Drive ``daydream corpus build`` through ``cli.main`` over the
     standard fixture bundle pair (from tests.test_corpus_v2) and return
     (exit code, captured stdout+stderr)."""
     from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
@@ -179,7 +179,7 @@ def _run_build_v2(
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
     out_dir = tmp_path / "corpus-out"
     rc = _run_main([
-        "corpus", "build-v2",
+        "corpus", "build",
         "--bundle-root", str(bundle_dir),
         "--annotation-bundle-root", str(snap.parent),
         "--out", str(out_dir / "corpus-v2.jsonl"),
@@ -228,7 +228,7 @@ def test_build_v2_refuses_raw_authenticated_url_as_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A raw remote URL is never a repo identity: any URL-shaped --repo-slug
-    # value is refused before it can reach BuildCorpusV2Config.
+    # value is refused before it can reach BuildFrozenCorpusConfig.
     rc, out = _run_build_v2(tmp_path, capsys, [
         "--repo-slug", "https://user:token@github.com/owner/repo",
     ])

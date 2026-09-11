@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from daydream.archive import hydrate_rules
-from daydream.training.corpus_v2.license import (
+from daydream.training.corpus_projection.license import (
     LicensePolicy,
     load_license_policy,
     resolve_repo_decision,

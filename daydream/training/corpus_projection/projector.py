@@ -1,4 +1,4 @@
-"""Per-finding projection for corpus v2 (Req 6, Req 18, D8).
+"""Per-finding projection for projection records (Req 6, Req 18, D8).
 
 Each ``PerFindingResolution`` becomes its own record with a per-record
 ``outcome_label`` — a mixed session (some findings accepted, some rejected)
@@ -9,7 +9,7 @@ report (report output, not a pipeline stage) unless the build opts in via
 ``process-trace``/``task-only`` training records; the projector stays pure and
 deterministic.
 
-``run_build_corpus_v2()`` is the top-level pure projection (no git, no
+``build_frozen_corpus()`` is the top-level pure projection (no git, no
 network): load bundle → segment → project findings → assign frozen
 content-derived splits → refuse posterior evidence → write split manifests
 atomically with a lineage pin.
@@ -29,25 +29,25 @@ from typing import Any, Literal, Mapping, NoReturn, cast, overload
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
-from daydream.training.corpus_v2.bundle import (
+from daydream.training.corpus_projection.bundle import (
     CuratedBundle,
     _verify_sha256sums,
     load_curated_bundle,
 )
-from daydream.training.corpus_v2.identity import record_id
-from daydream.training.corpus_v2.license import load_license_policy, resolve_repo_decision
-from daydream.training.corpus_v2.provenance import extract_provenance
-from daydream.training.corpus_v2.segments import segment
-from daydream.training.corpus_v2.splits import assign_split
-from daydream.training.corpus_v2.tiers import classify_tier
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
+from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.segments import segment
+from daydream.training.corpus_projection.splits import assign_split
+from daydream.training.corpus_projection.tiers import classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 
 __all__ = [
     "BatchArtifacts",
-    "BuildCorpusV2Config",
+    "BuildFrozenCorpusConfig",
     "project_findings",
     "read_batch_artifacts",
-    "run_build_corpus_v2",
+    "build_frozen_corpus",
 ]
 
 Record = dict[str, object]
@@ -63,7 +63,7 @@ _SPLIT_FILENAMES: dict[str, str] = {
 class BatchArtifacts:
     """Per-batch review artifacts read from a curated bundle's batch directory
     (``batches/<session_id>/``). Producer-realistic shapes (confirmed by the
-    task-0 spike probe, tests/test_corpus_v2_spike_probe.py):
+    task-0 spike probe, tests/test_corpus_projection_spike_probe.py):
 
     - ``findings.json`` — ``{"findings": [{"fingerprint": <64-hex>, "body":
       <str>, ...}]}`` (the same artifact ``daydream/archive/__init__.py``
@@ -144,8 +144,8 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 @dataclass(frozen=True)
-class BuildCorpusV2Config:
-    """Configuration for the corpus v2 projection (pure — no git, no network)."""
+class BuildFrozenCorpusConfig:
+    """Configuration for the frozen projection (pure — no git, no network)."""
 
     out_dir: Path
     bundle_dir: Path
@@ -188,13 +188,13 @@ class BuildCorpusV2Config:
     def __post_init__(self) -> None:
         if self.annotation_bundle_dir is None:
             raise ValueError(
-                "annotation_bundle_dir is required: a corpus v2 build without a "
+                "annotation_bundle_dir is required: a projection build without a "
                 "pinned annotation bundle is a configuration error"
             )
         object.__setattr__(self, "annotation_bundle_dir", Path(self.annotation_bundle_dir))
         if self.license_policy_path is None:
             raise ValueError(
-                "license_policy_path is required: a corpus v2 build without a "
+                "license_policy_path is required: a projection build without a "
                 "pinned license policy is a configuration error"
             )
         object.__setattr__(self, "license_policy_path", Path(self.license_policy_path))
@@ -823,8 +823,8 @@ def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]
     return _count_by(records, lambda r: str(r["tier"])) if caps else {}
 
 
-def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
-    """Top-level corpus v2 projection (mirrors ``corpus.py:985``'s pipeline
+def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
+    """Top-level frozen projection (mirrors ``corpus.py:985``'s pipeline
     contract). Pure — no git, no network; ``base_sha``/hub commit come from
     the curation manifest only.
 

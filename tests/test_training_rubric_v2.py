@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.training.rubric_v2 import (
+from daydream.training.rubric import (
     REWARD_VERSION_RUBRIC,
     RubricV2Breakdown,
     RubricV2Weights,

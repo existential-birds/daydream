@@ -11,7 +11,7 @@ fail-closed gates) and adds the boundary the downstream pipeline needs:
   the sorted ``(relpath, sha256(file_bytes))`` pairs — a pure function of
   the directory bytes, so the same projection always yields the same digest;
 - a **split-drift gate**: the split is recomputed from every record's id via
-  :func:`daydream.training.corpus_v2.splits.assign_split` under the lineage's
+  :func:`daydream.training.corpus_projection.splits.assign_split` under the lineage's
   pinned salt/rates, and any disagreement with the record's recorded
   ``lineage.split`` refuses the whole load (``ValueError`` naming the
   offending record id) — never a silent accept.
@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from daydream.training.corpus_v2.splits import Split, assign_split
+from daydream.training.corpus_projection.splits import Split, assign_split
 from daydream.training.stacks import load_dataset_v2
 
 __all__ = ["V2Projection", "load_v2_projection", "recompute_split_from_record_id"]
@@ -175,7 +175,7 @@ def load_v2_projection(
 
     Args:
         path: The projection output directory written by
-            ``run_build_corpus_v2``.
+            ``build_frozen_corpus``.
         allow_copyleft: Passed through to the underlying v2 loader.
 
     Returns:

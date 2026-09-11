@@ -286,7 +286,7 @@ def test_production_policy_file_loads_and_rejects_copyleft() -> None:
     """The checked-in production SPDX policy validates (M10 discipline) and
     fail-closes: missing evidence -> reject, GPL without opt-in -> reject,
     MIT -> admit, exact opt-in -> admit the named repo only."""
-    from daydream.training.corpus_v2.license import load_license_policy, resolve_repo_decision
+    from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 
     policy_path = pathlib.Path("daydream/training/schema/license-policy-production.json")
     policy, digest = load_license_policy(policy_path)

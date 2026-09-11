@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate_rules import derive_curation_id_v2
+from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import _evidence_after_as_of
@@ -41,8 +41,8 @@ from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
-from daydream.training.corpus_v2.bundle import load_curated_bundle
-from daydream.training.corpus_v2.tiers import classify_tier
+from daydream.training.corpus_projection.bundle import load_curated_bundle
+from daydream.training.corpus_projection.tiers import classify_tier
 from daydream.training.dispositions import (
     DECISIVE_DISPOSITIONS,
     NON_DECISIVE_DISPOSITIONS,
@@ -277,7 +277,7 @@ def _validated_policy_binding(
     canonical = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
     if raw != canonical:
         raise ValueError(f"policy binding at {path} is not canonically encoded")
-    derived = derive_curation_id_v2(
+    derived = derive_curation_id(
         source_hub_commit,
         binding["policy_digest"],
         policy_version,
