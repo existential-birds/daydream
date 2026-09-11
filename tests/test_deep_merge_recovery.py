@@ -110,8 +110,7 @@ def test_load_failures_defaults_and_filters() -> None:
     import tempfile
     from pathlib import Path
 
-    from daydream.deep.artifacts import per_stack_failures_path
-    from daydream.deep.orchestrator import _load_failures
+    from daydream.deep.artifacts import _load_failures, per_stack_failures_path
 
     with tempfile.TemporaryDirectory() as td:
         dd = Path(td) / ".daydream" / "deep"
@@ -563,7 +562,7 @@ def test_merge_salvage_keeps_both_sides_of_a_pre_uid_dedup_pair(
     un-applied pair is named on the console instead of silently swallowed.
     """
     from daydream.deep.artifacts import dedup_candidates_path
-    from daydream.deep.orchestrator import _drop_cross_stack_duplicates
+    from daydream.deep.merge_steps import _drop_cross_stack_duplicates
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True)

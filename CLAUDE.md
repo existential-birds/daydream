@@ -88,7 +88,10 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `runner.py` | Flow preambles (workspace, diff, recorder), backend resolution, registry, dispatch |
 | `flows/` | `FlowContext` + `run_flow()` engine: ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups |
 | `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
-| `deep/orchestrator.py` | Deep-flow steps: exploration, intent, wonder, per-stack, arbiter, merge, verify, fix |
+| `deep/orchestrator.py` | Public deep/diagram entry points, flow assembly, mode gates, diff/stack preamble, and success-only cleanup dispatch |
+| `deep/{review,merge,diagram,fix}_steps.py` | Stage implementations: review fan-out; adjudication and publication; grounded diagrams; authorized fix transactions, test, commit, and CI |
+| `deep/state.py` | Checked `DeepState` view over the same extension-visible `FlowContext.data` mapping; validates when consumed and writes through |
+| `deep/diff.py` | Shared changed-file parsing and full-diff reads, also consumed by scope enforcement and Improve |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
 | `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |

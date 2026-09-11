@@ -114,6 +114,9 @@ def review_run(
     """
     for module in (
         "daydream.deep.orchestrator",
+        "daydream.deep.review_steps",
+        "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps",
         "daydream.phases",
         "daydream.runner",
         "daydream.pr_review",
@@ -1166,7 +1169,14 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     from daydream.config_file import DaydreamFileConfig
     from daydream.runner import run
 
-    for module in ("daydream.deep.orchestrator", "daydream.phases", "daydream.runner"):
+    for module in (
+        "daydream.deep.orchestrator",
+        "daydream.deep.review_steps",
+        "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps",
+        "daydream.phases",
+        "daydream.runner",
+    ):
         silence_console(module)
     silence(monkeypatch)
 
@@ -1180,7 +1190,7 @@ async def test_diagram_phase_resolves_its_own_configured_model(
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
     exit_code = await run(
         make_config(
@@ -1270,7 +1280,7 @@ def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Pa
     without reading any artifact the prompt references."""
     from types import SimpleNamespace
 
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
 
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
@@ -1286,7 +1296,7 @@ def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
     diff.patch and exploration directory are named, not inlined."""
     from types import SimpleNamespace
 
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
 
     backend = SimpleNamespace(read_only_disposable_clone=False, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
@@ -1302,7 +1312,7 @@ def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -
     faked — while the diff is still inlined."""
     from types import SimpleNamespace
 
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
 
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary=None, deps_text=None)
@@ -1317,7 +1327,7 @@ def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_pa
     dependencies.md must not be rendered as a marker-only string: that would
     assert 'Deterministic import edges' while carrying only the truncation
     notice. It is omitted entirely."""
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
     from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     exploration_dir = tmp_path / "exploration"
@@ -1337,7 +1347,7 @@ def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) 
     artifacts that do not travel to the disposable clone (the
     affected_files.md/conventions.md/dependencies.md rows and the embedded
     blockquote the writer emits), while the prose is kept."""
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
     from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 
     exploration_dir = tmp_path / "exploration"
@@ -1370,7 +1380,7 @@ def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) 
 def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> None:
     """Issue #336: the summary slice is byte-exact (mirroring the diff-block
     truncation), so a multibyte summary cannot exceed INLINE_DIFF_BUDGET_BYTES."""
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
     from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     exploration_dir = tmp_path / "exploration"
@@ -1395,7 +1405,7 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     with exploration_dir=None on the clone run, never the dangling host path."""
     from types import SimpleNamespace
 
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
     from daydream.extensions.registry import Registry
 
     def _legacy_sequence_builder(
@@ -1427,7 +1437,7 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
     """Issue #1123 acceptance: the full author turn on a disposable-clone backend
     completes with no read of .daydream/exploration or diff.patch — the prompt
     names neither path, so the clone cannot be asked to read them."""
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
     from daydream.deep.diagram_grounding import RepoSymbols
 
     class _Wall:
@@ -1461,7 +1471,7 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
 ) -> None:
     """Same wall for the flowchart branch: no clone-branch special-casing may
     leak a host-only artifact path into the flowchart author prompt."""
-    from daydream.deep import orchestrator as deep
+    from daydream.deep import diagram_steps as deep
     from daydream.deep.diagram_grounding import RepoSymbols
 
     class _Wall:

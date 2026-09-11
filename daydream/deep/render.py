@@ -18,6 +18,15 @@ from __future__ import annotations
 
 from typing import Any
 
+# User-visible pipeline stages (exploration is a pre-stage banner, not counted).
+_PIPELINE_STAGE_NAMES: list[str] = [
+    "TTT intent",
+    "TTT alternative-review",
+    "per-stack reviews",
+    "cross-stack merge",
+    "optional fix gate",
+]
+
 # Heading of the grounded-diagram section (issue #1113). The section is written
 # by ``render_report`` on the merge write and re-applied textually by the
 # diagram step, which runs after two other writers have already produced

@@ -43,7 +43,7 @@ def test_normalize_assigns_unique_ids_across_lenses() -> None:
 
 
 def test_verdict_join_matches_after_collision_resolution() -> None:
-    from daydream.deep.orchestrator import _attach_verdicts
+    from daydream.deep.fix_steps import _attach_verdicts
 
     items = normalize_items([
         {"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",

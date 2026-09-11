@@ -122,7 +122,7 @@ def _install_model_capturing_stubs(
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     return shared_calls
 
 
@@ -685,7 +685,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
     _silence(monkeypatch)
     mute_side_effects()
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=120)
-    monkeypatch.setattr("daydream.deep.orchestrator.console", rec)
+    monkeypatch.setattr("daydream.deep.review_steps.console", rec)
     _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
 
     exit_code = await run(
@@ -1092,7 +1092,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     ]
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.fix_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
     commit_calls: list[int] = []
@@ -1100,7 +1100,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
         commit_calls.append(1)
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _spy_commit)
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
@@ -1223,7 +1223,7 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
 
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.fix_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
 
@@ -1984,7 +1984,7 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.fix_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
     exit_code = await _run_quality_gate_fixture(
@@ -2036,7 +2036,7 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
 
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.fix_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
     exit_code = await run(
@@ -2083,7 +2083,7 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
 
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.fix_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
 
@@ -2142,7 +2142,7 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     stub = _SecondaryEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
     exit_code = await run(
         make_config(target, assume="yes", output_mode="loop", non_interactive=False)
@@ -2235,10 +2235,10 @@ async def test_fix_quality_gate_flags_missing_baseline_secondary_file(
     )
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.fix_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
 
@@ -2502,7 +2502,7 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     mute_side_effects(heal=True, commit=False)
     stub = _CommittingStubBackend(multi_stack_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
     monkeypatch.setattr(
@@ -2555,7 +2555,7 @@ async def test_parallel_fix_commit_runs_once_after_all(
             all(fix_marker in (multi_stack_target / path).read_text() for path in files)
         )
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _spy_commit)
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
@@ -2603,7 +2603,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
     issues: list[tuple[Any, ...]] = []
 
@@ -2674,7 +2674,7 @@ async def test_fix_reverts_but_files_no_issue_by_default(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     issues: list[tuple[str, str]] = []
 
     def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
@@ -2717,7 +2717,7 @@ async def test_fix_reverts_and_files_when_opted_in(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     issues: list[tuple[str, str]] = []
 
     def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
@@ -2757,7 +2757,7 @@ async def test_reverted_edit_dedups_across_runs(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     created: list[tuple[str, str]] = []
 
     def _record_and_list_create(repo: Any, *, title: str, body: str, **kw: Any) -> str:
@@ -2832,7 +2832,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr(
         "daydream.git_ops.restore_group_from_snapshot",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
@@ -3038,7 +3038,7 @@ async def test_confirmed_intent_reaches_fix_prompt(
         "daydream.runner.create_backend",
         lambda name, model=None, **kwargs: stub,
     )
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
 
     rc = await run(
@@ -3333,7 +3333,7 @@ async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", fail_view)
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.review_steps.print_warning",
         lambda _console, message: warnings.append(message),
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -3516,7 +3516,7 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
         asked.append(message)
         return "n"  # decline the fix gate
 
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.run_context._prompt_user", _record_prompt)
 
@@ -3548,7 +3548,7 @@ async def test_yes_auto_applies_fix(
         prompt_calls.append((message, default))
         return default
 
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     # Forced yes resolves both gates before the sole raw prompt seam.
     monkeypatch.setattr("daydream.run_context._prompt_user", _record_prompt)
@@ -3801,7 +3801,7 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
             }
         )
 
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
     monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -3858,7 +3858,7 @@ async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
             }
         )
 
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
     monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -3947,7 +3947,8 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
     def _capture(console: Any, current: Any, total: Any, name: Any) -> None:
         progress_calls.append((current, total, name))
 
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", _capture)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", _capture)
+    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", _capture)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -4013,7 +4014,7 @@ def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
 
 def test_diff_changed_files_rename_single_entry() -> None:
     """Rename diff contributes only the destination path, not both sides."""
-    from daydream.deep.orchestrator import _diff_changed_files
+    from daydream.deep.diff import _diff_changed_files
 
     rename_diff = (
         "diff --git a/foo.py b/foo.ts\n"
@@ -4031,7 +4032,7 @@ def test_diff_changed_files_rename_single_entry() -> None:
 
 def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     """Non-rename diff shapes emit exactly one path each."""
-    from daydream.deep.orchestrator import _diff_changed_files
+    from daydream.deep.diff import _diff_changed_files
 
     mixed = (
         "diff --git a/keep.py b/keep.py\n"
@@ -4273,10 +4274,10 @@ async def test_orchestrator_threads_structural_records_to_merge(
 
     monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.build_dedup_candidates", _capture_dedup
+        "daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup
     )
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.build_record_dedup_candidates",
+        "daydream.deep.merge_steps.build_record_dedup_candidates",
         _capture_record_dedup,
     )
 
@@ -4356,10 +4357,10 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
 
     monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.build_dedup_candidates", _capture_dedup
+        "daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup
     )
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.build_record_dedup_candidates",
+        "daydream.deep.merge_steps.build_record_dedup_candidates",
         _capture_record_dedup,
     )
 
@@ -4715,7 +4716,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     # Accept the fix gate so fix/test/commit run; pin interactivity so the "y"
     # stub is honoured instead of the unattended decline default.
     _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
@@ -6083,7 +6084,7 @@ def test_approve_on_clean_resolves_from_file_config() -> None:
     the repo config, ``_approve_on_clean`` returns True; with no opt-in anywhere
     it stays False (default off)."""
     from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.orchestrator import _approve_on_clean
+    from daydream.deep.merge_steps import _approve_on_clean
     from daydream.runner import RunConfig
 
     file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(approve_on_clean=True))
@@ -6096,7 +6097,7 @@ def test_approve_on_clean_resolves_from_file_config() -> None:
 def test_scope_issue_filing_resolves_precedence() -> None:
     """#1056 precedence: CLI tier over file config over built-in default False."""
     from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.orchestrator import _scope_issue_filing
+    from daydream.deep.fix_steps import _scope_issue_filing
     from daydream.runner import RunConfig
 
     cli = RunConfig(target="/t", scope_issue_filing=True)
@@ -6400,7 +6401,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     _silence(monkeypatch)
     # Lower the group serial-item ceiling at the binding the orchestrator resolves
     # (it imported the constant by name, so patching daydream.config alone is inert).
-    monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 3)
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 3)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)] + [
         _merge_item(7, "App.tsx", "high")
@@ -6476,7 +6477,7 @@ async def test_run_leaves_small_file_group_unbudgeted(
     from daydream.runner import run
 
     _silence(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 20)
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 20)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)] + [
         _merge_item(7, "App.tsx", "high")
@@ -6538,7 +6539,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     # Group wall ceiling below the batched turn's scaled per-invocation budget, so
     # the wall the batched turn already burned guarantees the fallback's first
     # check trips (deterministic: 1.0 < 0.3 * 6).
-    monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_WALL_S", 1.0)
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 1.0)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)] + [
         _merge_item(7, "App.tsx", "high")
@@ -6806,7 +6807,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         "daydream.runner.create_backend",
         lambda name, model=None, **kwargs: stub,
     )
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
     mute_side_effects(heal=False)
     _add_bare_remote(multi_stack_target)
@@ -7661,7 +7662,7 @@ async def test_ac_merge_resume_on_tiny_diff(
     async def _fail_merge(*_a: Any, **_k: Any) -> None:
         raise AssertionError("phase_cross_stack_merge must not run in single_stack_mode")
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_cross_stack_merge", _fail_merge)
+    monkeypatch.setattr("daydream.deep.merge_steps.phase_cross_stack_merge", _fail_merge)
     # Stub the post-merge side effects so the run terminates cleanly.
     mute_side_effects()
 
@@ -8214,7 +8215,7 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     stub = _CommittingStubBackend(tiny_diff_target)
     _add_bare_remote(tiny_diff_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
 
     mute_side_effects(heal=False, commit=False)
@@ -9468,10 +9469,7 @@ def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
 
 def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> None:
     """The sweep numeric caps resolve from the profile pipeline (already host-clamped)."""
-    from daydream.deep.orchestrator import (
-        _uncovered_sweep_max_files,
-        _uncovered_sweep_min_hunk_lines,
-    )
+    from daydream.deep.review_steps import _uncovered_sweep_max_files, _uncovered_sweep_min_hunk_lines
     from daydream.extensions import Registry
     from daydream.flows.engine import FlowContext
     from daydream.runner import RunConfig
@@ -10139,7 +10137,7 @@ async def test_duplicate_record_uid_stops_the_run_before_merge(
     """
     errors: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_error",
+        "daydream.deep.review_steps.print_error",
         lambda console, title, message, *a, **k: errors.append((title, message)),
     )
     _silence(monkeypatch)
@@ -10240,7 +10238,7 @@ async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
     # arbitration actually wrote back, not the stub's fixed payload.
     stub.merge_echo_records = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     deep = _prime_merge_resume(
         multi_stack_target,
         python=[_high_record(description="py issue")],
@@ -10293,7 +10291,7 @@ async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
     """
     warnings: list[str] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_warning",
+        "daydream.deep.merge_steps.print_warning",
         lambda console, msg, *a, **k: warnings.append(msg),
     )
     _silence(monkeypatch)
@@ -11056,7 +11054,7 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
 ) -> None:
     """Unrelated/protected bytes invalidate evidence without entering the patch."""
     from daydream import git_ops
-    from daydream.deep.orchestrator import FixCycleState, capture_retained_tree
+    from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
     from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.workspace import WorkContext
 
@@ -11107,7 +11105,7 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
 def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
     """Commit selection is HEAD-relative even though evidence stays run-relative."""
     from daydream import git_ops
-    from daydream.deep.orchestrator import FixCycleState, capture_retained_tree
+    from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
     from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.workspace import WorkContext
 
@@ -11203,7 +11201,7 @@ def _direct_fix_context(
 
 def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str]) -> Any:
     from daydream import git_ops
-    from daydream.deep.orchestrator import FixCycleState
+    from daydream.deep.fix_steps import FixCycleState
     from daydream.fix_footprint import AuthorizedFixFootprint
 
     footprint = AuthorizedFixFootprint.build(ctx.work.repo, reviewed, items)
@@ -11225,7 +11223,7 @@ def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str])
 
 def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
     from daydream import git_ops
-    from daydream.deep.orchestrator import _persist_push_verdict
+    from daydream.deep.fix_steps import _persist_push_verdict
     from daydream.phases import PushReceipt
 
     repo = tmp_path / "push-verdict"
@@ -11274,7 +11272,8 @@ def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> N
 @pytest.mark.anyio
 async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Path) -> None:
     from daydream import git_ops
-    from daydream.deep.orchestrator import _remote_ci_enabled, _step_remote_ci
+    from daydream.deep.fix_steps import _step_remote_ci
+    from daydream.deep.orchestrator import _remote_ci_enabled
     from daydream.extensions.api import Stop
     from daydream.phases import PushReceipt
 
@@ -11364,7 +11363,7 @@ def test_remote_target_accepts_matching_same_repo_and_fork_identity(
     head_repository: str,
     pushed_repository: str,
 ) -> None:
-    from daydream.deep.orchestrator import _resolve_remote_ci_target
+    from daydream.deep.fix_steps import _resolve_remote_ci_target
     from daydream.phases import PushReceipt
 
     ctx, sha = _remote_identity_context(
@@ -11405,7 +11404,7 @@ def test_remote_target_rejects_untrusted_identity_combinations(
     base_ref: str,
     configured_pr: int,
 ) -> None:
-    from daydream.deep.orchestrator import _resolve_remote_ci_target
+    from daydream.deep.fix_steps import _resolve_remote_ci_target
     from daydream.git_ops import GitError
     from daydream.phases import PushReceipt
 
@@ -11428,7 +11427,7 @@ async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale
 ) -> None:
     """A start-at-fix preflight cannot inherit green evidence when policy parsing fails."""
     from daydream import git_ops
-    from daydream.deep.orchestrator import _step_fix_gate
+    from daydream.deep.fix_steps import _step_fix_gate
     from daydream.extensions import Stop
     from daydream.run_context import InteractionPolicy, RunContext
 
@@ -11460,7 +11459,7 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from daydream import git_ops
-    from daydream.deep.orchestrator import _step_fix_gate
+    from daydream.deep.fix_steps import _step_fix_gate
     from daydream.extensions import Stop
     from daydream.run_context import InteractionPolicy, RunContext
 
@@ -11490,7 +11489,7 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
 
 
 def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
-    from daydream.deep.orchestrator import _round_dispatch_items
+    from daydream.deep.fix_steps import _round_dispatch_items
 
     repo = tmp_path / "cross-item-retarget"
     _init_repo(repo)
@@ -11528,7 +11527,7 @@ def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None
 def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_retarget(
     tmp_path: Path,
 ) -> None:
-    from daydream.deep.orchestrator import _round_dispatch_items
+    from daydream.deep.fix_steps import _round_dispatch_items
 
     repo = tmp_path / "accepted-then-rejected-retarget"
     _init_repo(repo)
@@ -11571,7 +11570,7 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.deep.orchestrator import RetainedTreeSnapshot, verify_retained_tree
+    from daydream.deep.fix_steps import RetainedTreeSnapshot, verify_retained_tree
     from tests.harness.backend import ScriptedBackend
 
     repo = tmp_path / "resolved-target-provenance"
@@ -11623,7 +11622,7 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
 
 
 def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
-    from daydream.deep.orchestrator import capture_retained_tree
+    from daydream.deep.fix_steps import capture_retained_tree
 
     repo = tmp_path / "finalization"
     _init_repo(repo)
@@ -11641,10 +11640,7 @@ def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
 async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep.orchestrator import (
-        EvidenceKey,
-        finalize_retained_tree_after_test,
-    )
+    from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
     from daydream.extensions import Stop
     from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
@@ -11660,8 +11656,8 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     )
     calls = {"verify": 0, "test": 0}
 
-    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", lambda *_a, **_k: False)
-    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
 
     async def _actionable(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
         calls["verify"] += 1
@@ -11671,8 +11667,8 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
         calls["test"] += 1
         raise AssertionError("actionable verifier must stop before a no-heal test")
 
-    monkeypatch.setattr("daydream.deep.orchestrator.verify_retained_tree", _actionable)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_once", _no_test)
+    monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", _actionable)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _no_test)
 
     result = await finalize_retained_tree_after_test(
         ctx,
@@ -11703,7 +11699,7 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
 ) -> None:
     """A healer's red/exception exit is confined like a successful path."""
     from daydream import git_ops
-    from daydream.deep.orchestrator import _step_test
+    from daydream.deep.fix_steps import _step_test
     from daydream.extensions import Stop
     from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
@@ -11738,7 +11734,7 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
         return TestAndHealResult(False, 1, False, False, (attempt,))
 
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.phase_test_and_heal", _red_after_mutation
+        "daydream.deep.fix_steps.phase_test_and_heal", _red_after_mutation
     )
     result = await _step_test(ctx)
 
@@ -11757,10 +11753,7 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
 async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
 ) -> None:
-    from daydream.deep.orchestrator import (
-        EvidenceKey,
-        finalize_retained_tree_after_test,
-    )
+    from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
     from daydream.extensions import Stop
     from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
@@ -11798,9 +11791,9 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
             "test output",
         )
 
-    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", _guard)
-    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_once", _one_test)
+    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", _guard)
+    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _one_test)
     monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
 
     result = await finalize_retained_tree_after_test(
@@ -11828,7 +11821,7 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
 async def test_stabilization_audit_write_failure_stops_before_retest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep.orchestrator import finalize_retained_tree_after_test
+    from daydream.deep.fix_steps import finalize_retained_tree_after_test
     from daydream.extensions import Stop
     from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
@@ -11841,14 +11834,14 @@ async def test_stabilization_audit_write_failure_stops_before_retest(
         input_tree_key=snapshot.tree_key,
         output_tree_key=snapshot.tree_key,
     )
-    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", lambda *_a, **_k: False)
-    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
     monkeypatch.setattr(
-        "daydream.deep.orchestrator._write_footprint_audit",
+        "daydream.deep.fix_steps._write_footprint_audit",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("audit disk full")),
     )
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.phase_test_once",
+        "daydream.deep.fix_steps.phase_test_once",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not retest")),
     )
 
@@ -11866,11 +11859,11 @@ async def test_stabilization_audit_write_failure_stops_before_retest(
 def test_fix_outcome_summary_renders_uid_keyed_outcomes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep.orchestrator import _render_fix_outcome_summary
+    from daydream.deep.fix_steps import _render_fix_outcome_summary
 
     rendered: list[tuple[int, int, str | None]] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_fix_complete",
+        "daydream.deep.fix_steps.print_fix_complete",
         lambda _console, number, total, *, outcome=None: rendered.append(
             (number, total, outcome)
         ),
@@ -11893,10 +11886,7 @@ async def test_changed_tree_red_retest_requires_new_override(
     expect_stop: bool,
 ) -> None:
     """A prior-tree red override cannot authorize a newly executed red result."""
-    from daydream.deep.orchestrator import (
-        EvidenceKey,
-        finalize_retained_tree_after_test,
-    )
+    from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
     from daydream.extensions import Stop
     from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
@@ -11925,11 +11915,11 @@ async def test_changed_tree_red_retest_requires_new_override(
             "1 failed",
         )
 
-    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", lambda *_a, **_k: False)
-    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_once", _red_retest)
+    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _red_retest)
     monkeypatch.setattr(
-        "daydream.deep.orchestrator._authorize_final_red_override",
+        "daydream.deep.fix_steps._authorize_final_red_override",
         lambda _ctx: new_override,
     )
     monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
@@ -11948,7 +11938,7 @@ async def test_changed_tree_red_retest_requires_new_override(
 
 
 def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) -> None:
-    from daydream.deep.orchestrator import _authorize_final_red_override
+    from daydream.deep.fix_steps import _authorize_final_red_override
     from daydream.run_context import InteractionPolicy, RunContext
 
     prompts: list[dict[str, Any]] = []
@@ -12120,7 +12110,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
         }
     }
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *_a, **_k: "2")
     _silence(monkeypatch, prompts=False)
 

@@ -373,9 +373,9 @@ async def test_shallow_staged_fix_preflight_preserves_review_evidence_and_git_st
 
     assert exit_code == 1
     output = capfd.readouterr().out
-    from daydream.deep import orchestrator as deep_orchestrator
+    from daydream.deep import fix_steps
 
-    console_file = getattr(deep_orchestrator, "console").file
+    console_file = getattr(fix_steps, "console").file
     if isinstance(console_file, StringIO):
         output += console_file.getvalue()
     assert "Cannot start the fix cycle with staged changes" in output, (
@@ -749,7 +749,7 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     )
     rendered = StringIO()
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.console",
+        "daydream.deep.fix_steps.console",
         Console(file=rendered, width=160),
     )
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
@@ -1150,6 +1150,10 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     monkeypatch.delenv("CI", raising=False)
     silence_console("daydream.runner")
     silence_console("daydream.deep.orchestrator")
+    silence_console("daydream.deep.review_steps")
+    silence_console("daydream.deep.merge_steps")
+    silence_console("daydream.deep.diagram_steps")
+    silence_console("daydream.deep.fix_steps")
     silence_console("daydream.phases")
     install_backend(
         _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False)
@@ -1867,7 +1871,7 @@ async def test_run_populates_exploration_context(
         return {s.stack_name: None for s in stacks}, {}
 
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.phase_per_stack_reviews", fake_per_stack_reviews
+        "daydream.deep.review_steps.phase_per_stack_reviews", fake_per_stack_reviews
     )
 
     config = make_config(multi_stack_target, shallow=True)

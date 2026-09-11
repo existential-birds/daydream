@@ -55,7 +55,7 @@ async def test_fork_prompt_override_reaches_backend(
         )
     )
     install_backend(backend)
-    mute_side_effects("daydream.deep.orchestrator")
+    mute_side_effects("daydream.deep.fix_steps")
 
     rc = await runner.run(make_config(feature_branch_repo, shallow=True, stack="python"))
 
@@ -90,7 +90,7 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
         )
     )
     install_backend(backend)
-    mute_side_effects("daydream.deep.orchestrator")
+    mute_side_effects("daydream.deep.fix_steps")
 
     rc = await runner.run(make_config(feature_branch_repo, shallow=True))
 
