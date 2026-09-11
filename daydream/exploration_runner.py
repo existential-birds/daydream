@@ -33,6 +33,7 @@ from daydream.prompts.exploration_subagents import (
     build_repo_survey_prompt,
     build_test_mapper_prompt,
 )
+from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
     DispatchHandle,
@@ -51,7 +52,6 @@ if TYPE_CHECKING:
 
 
 Tier: TypeAlias = Literal["skip", "single", "parallel"]
-
 
 # This regex parses git's own diff header output (not source code), so a
 # regex is the right tool here per D-04 (no tree-sitter for non-source text).
@@ -190,12 +190,15 @@ def _parse_envelope(envelope: dict[str, Any]) -> ExplorationContext:
     )
 
 
+@bind_resolved_run_context
 async def pre_scan(
     backend: Backend,
     repo_root: Path,
     diff_text: str,
     diff_ref: str = "HEAD",
     strategies: dict[str, str] | None = None,
+    *,
+    run_context: RunContext | None = None,
 ) -> ExplorationContext:
     """Run the pre-scan exploration pipeline for a diff.
 
@@ -219,6 +222,7 @@ async def pre_scan(
             When ``None`` (the default), the packaged default-profile contents
             are used, so non-profile callers stay operable.
     """
+    run_context = resolve_run_context(run_context)
     if strategies is None:
         defaults = _rp.build_default_profile().strategies
         strategies = {
@@ -286,6 +290,7 @@ async def pre_scan(
                     read_only=True,
                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                    run_context=run_context,
                 )
                 if isinstance(structured, dict):
                     results[name] = structured
@@ -405,12 +410,14 @@ def _sample_paths(paths: list[str], limit: int) -> list[str]:
     return [paths[int(i * stride)] for i in range(limit)]
 
 
+@bind_resolved_run_context
 async def repo_scan(
     backend: Backend,
     repo_root: Path,
     *,
     max_files: int = 500,
     strategies: dict[str, str] | None = None,
+    run_context: RunContext | None = None,
 ) -> ExplorationContext:
     """Discover repository conventions from a bounded tracked-file sample.
 
@@ -423,6 +430,7 @@ async def repo_scan(
             ``exploration.repository_survey`` strategy content. When ``None``
             (the default), the packaged default-profile content is used.
     """
+    run_context = resolve_run_context(run_context)
     if strategies is None:
         strategies = {
             "exploration.repository_survey": _rp.build_default_profile().strategies[
@@ -464,6 +472,7 @@ async def repo_scan(
                     read_only=True,
                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                    run_context=run_context,
                 )
                 if isinstance(structured, dict):
                     survey.update(structured)

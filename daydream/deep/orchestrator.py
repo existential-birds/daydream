@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import anyio
 from rich.markup import escape as escape_markup
 
-from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt, run_agent
+from daydream.agent import console, run_agent
 from daydream.artifact_visibility import artifact_dir_for, review_output_path_for
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
@@ -170,6 +170,7 @@ from daydream.phases import (
 )
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.review_profile import Pipeline
+from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.supervision import (
     RuleBasedSupervisor,
     apply_findings_verdicts,
@@ -1127,6 +1128,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
                         "exploration.test_mapping": ctx.strategy("exploration.test_mapping"),
                         "exploration.repository_survey": ctx.strategy("exploration.repository_survey"),
                     },
+                    run_context=ctx.run_context,
                 )
             # Osprey resolves an omitted model from its own config and reports
             # the authoritative value in session_start, during safe_explore.
@@ -1240,6 +1242,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             pr_description=pr_description,
             diff_text=_ttt_diff_text(ctx),
             strategy=ctx.strategy("intent"),
+            run_context=ctx.run_context,
         )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
@@ -1266,6 +1269,7 @@ async def _wonder(ctx: FlowContext) -> None:
                 exploration_dir=ctx.data["exploration_dir"],
                 diff_text=_ttt_diff_text(ctx),
                 strategy=ctx.strategy("alternatives"),
+                run_context=ctx.run_context,
             )
 
     alts_p = _alternatives_path(ctx.data["dd"])
@@ -1341,6 +1345,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 # the sweep credits reviewed files on every run (decoupled from
                 # sharding; #740 updates the evidence gate and bounds).
                 write_coverage_receipts=True,
+                run_context=ctx.run_context,
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -1806,6 +1811,7 @@ async def _run_uncovered_sweep(
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                                     sanctioned_inputs=sanctioned_inputs,
+                                    run_context=ctx.run_context,
                                 )
                             if budget_reason:
                                 sweep_failures[file] = (
@@ -2128,6 +2134,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     exploration_dir=ctx.data["exploration_dir"],
                     intent_authoritative=ctx.data.get("intent_authoritative", False),
                     strategy=ctx.strategy("arbitration"),
+                    run_context=ctx.run_context,
                 )
                 # Identity gate: only resume when merge runs on the very same
                 # backend instance. A per-phase override that resolves a
@@ -2189,6 +2196,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         alternatives_path=ctx.data["alts_path"],
                         exploration_dir=ctx.data["exploration_dir"],
                         strategy=ctx.strategy("suppression"),
+                        run_context=ctx.run_context,
                     )
                 adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
                     adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
@@ -2420,6 +2428,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
                 continuation=ctx.data.get("arbiter_continuation"),
                 strategy=ctx.strategy("merge"),
+                run_context=ctx.run_context,
             )
         except CrossStackMergeError as exc:
             phase.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
@@ -2699,6 +2708,7 @@ async def _step_supervise(ctx: FlowContext) -> None:
                 alternatives_path=ctx.data["alts_path"],
                 exploration_dir=ctx.data["exploration_dir"],
                 strategy=ctx.strategy("supervision"),
+                run_context=ctx.run_context,
             )
     kept, held, events = apply_findings_verdicts(items, verdicts)
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
@@ -2744,6 +2754,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         post=_mode_of(ctx) == "comment",
         approve_on_clean=_approve_on_clean(ctx.config),
         diagram_blocks=(ctx.data.get("diagrams") or {}).get("blocks"),
+        run_context=ctx.run_context,
         **pr_kwargs,
     )
     if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
@@ -3074,6 +3085,7 @@ async def _run_diagram_kind(
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             sanctioned_inputs=sanctioned_inputs,
+            run_context=ctx.run_context,
         )
     read_paths |= _diagram_read_paths(getattr(fork, "path", None))
     if budget_reason:
@@ -3116,6 +3128,7 @@ async def _run_diagram_kind(
                 wall_budget_s=DEFAULT_WALL_BUDGET_S,
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                 sanctioned_inputs=sanctioned_inputs,
+                run_context=ctx.run_context,
             )
         read_paths |= _diagram_read_paths(getattr(repair_fork, "path", None))
         if not repair_budget and isinstance(repaired_output, dict):
@@ -3413,12 +3426,11 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
     # an unattended run with no assumption declines (safe_default=False) so a
     # piped/CI run never mutates without intent; otherwise prompt.
-    decision = resolve_or_prompt(
-        assume=get_assume(),
-        interactive=not get_non_interactive(),
+    decision = resolve_run_context(ctx.run_context).confirm(
         safe_default=False,
         question="Apply fixes now? [y/N]",
         default="n",
+        console=console,
     )
     if not decision:
         print_success(console, f"Report written to {ctx.data['merged_report']}. Exiting.")
@@ -3539,6 +3551,7 @@ async def _step_verify(ctx: FlowContext) -> None:
             merged_items_path=ctx.data["items_file"],
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
+            run_context=ctx.run_context,
         )
     print_verification_summary(console, verdicts_file)
 
@@ -4432,6 +4445,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 test_map_path=test_map_path,
                 footprint=state.footprint,
                 round_snapshot=round_snapshot,
+                run_context=ctx.run_context,
             )
         except Exception as exc:
             confinement_error = _enforce_terminal_confinement(
@@ -4586,6 +4600,7 @@ async def verify_retained_tree(
             items,
             snapshot.verifier_patch,
             round_number=pass_number,
+            run_context=ctx.run_context,
         )
     by_id = {
         item.get("id"): item
@@ -4770,16 +4785,17 @@ def _persist_test_verdict(
     )
 
 
-def _authorize_final_red_override() -> bool:
+def _authorize_final_red_override(ctx: FlowContext) -> bool:
     """Require a fresh interactive decision for a changed-tree red retest."""
-    if get_assume() is not None or get_non_interactive():
+    run_context = resolve_run_context(ctx.run_context)
+    policy = run_context.policy
+    if policy.assume is not None or not policy.interactive:
         return False
-    return resolve_or_prompt(
-        assume=None,
-        interactive=True,
+    return run_context.confirm(
         safe_default=False,
         question="Final no-heal validation is still red. Ignore and continue? [y/N]",
         default="n",
+        console=console,
     )
 
 
@@ -4853,6 +4869,7 @@ async def finalize_retained_tree_after_test(
                     config=ctx.config,
                     session_id=state.session_id,
                     capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
+                    run_context=ctx.run_context,
                 )
             except Exception as exc:
                 return _stabilization_stop(
@@ -4863,7 +4880,7 @@ async def finalize_retained_tree_after_test(
                 )
             attempts.append(evidence)
             state.test_evidence = evidence
-            ignored = False if evidence.passed else _authorize_final_red_override()
+            ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
             _persist_test_verdict(
                 ctx,
@@ -4934,6 +4951,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 session_id=state.session_id,
                 capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
                 footprint=state.footprint,
+                run_context=ctx.run_context,
             )
             if not isinstance(result, TestAndHealResult):
                 raise TypeError("phase_test_and_heal returned an invalid evidence result")
@@ -5034,6 +5052,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,
+            run_context=ctx.run_context,
         )
     except PushAttemptError as exc:
         try:
@@ -5322,12 +5341,11 @@ async def _perform_cleanup(ctx: FlowContext) -> None:
     elif config.cleanup is False:
         enabled = False
     else:
-        enabled = resolve_or_prompt(
-            assume=get_assume(),
-            interactive=not get_non_interactive(),
+        enabled = resolve_run_context(ctx.run_context).confirm(
             safe_default=False,
             question="Cleanup review output after completion? [y/N]",
             default="n",
+            console=console,
         )
 
     if not enabled:
@@ -5524,7 +5542,14 @@ DIAGRAM_STEPS: tuple[FlowStep, ...] = (
 )
 
 
-async def run_deep(config: RunConfig, work: WorkContext, *, run_artifacts: _RunArtifacts | None = None) -> int:
+@bind_resolved_run_context
+async def run_deep(
+    config: RunConfig,
+    work: WorkContext,
+    *,
+    run_artifacts: _RunArtifacts | None = None,
+    run_context: RunContext | None = None,
+) -> int:
     """Execute the deep-review pipeline (D-07) across every PR-process mode.
 
     The single ``deep`` flow (#330) handles ``review`` and ``comment`` through
@@ -5548,7 +5573,14 @@ async def run_deep(config: RunConfig, work: WorkContext, *, run_artifacts: _RunA
     Returns:
         Exit code (0 on success, 1 on failure).
     """
-    return await _run_review_spine(config, work, _resolve_mode(config), run_artifacts=run_artifacts)
+    run_context = resolve_run_context(run_context)
+    return await _run_review_spine(
+        config,
+        work,
+        _resolve_mode(config),
+        run_artifacts=run_artifacts,
+        run_context=run_context,
+    )
 
 
 def _collapse_stacks_for_shallow(
@@ -5607,10 +5639,17 @@ def _collapse_stacks_for_shallow(
     return [*structural, combined], True
 
 
+@bind_resolved_run_context
 async def _run_review_spine(
-    config: RunConfig, work: WorkContext, mode: str, *, run_artifacts: _RunArtifacts | None
+    config: RunConfig,
+    work: WorkContext,
+    mode: str,
+    *,
+    run_artifacts: _RunArtifacts | None,
+    run_context: RunContext | None = None,
 ) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
+    run_context = resolve_run_context(run_context)
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
     from daydream.backends import Backend
@@ -5858,6 +5897,7 @@ async def _run_review_spine(
             review_profile=config.review_profile,
             private_workspace_owner=None if run_artifacts is None else run_artifacts.owner,
             artifacts=None if run_artifacts is None else run_artifacts.session,
+            run_context=run_context,
             data={
                 "mode": mode,
                 "diff": bounded_diff,

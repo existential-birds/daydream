@@ -610,24 +610,6 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_agent_state() -> Iterator[Any]:
-    """Reset the ``AgentState`` singleton before AND after every test.
-
-    The interaction axes (``non_interactive``, ``assume``) and ``quiet_mode``
-    live on a module-level ``AgentState`` singleton in ``daydream.agent``. A test
-    that drives ``run()`` calls ``set_non_interactive``/``set_assume``, leaving
-    the singleton dirty for the next test — which silently changes the resolved
-    answer at every ``resolve_gate`` call site. Reset on both edges so each test
-    starts from defaults regardless of order.
-    """
-    from daydream.agent import reset_state
-
-    reset_state()
-    yield
-    reset_state()
-
-
-@pytest.fixture(autouse=True)
 def _reset_gh_token_env() -> Iterator[Any]:
     """Reset the ``gh`` token-env singleton before AND after every test.
 
@@ -697,7 +679,6 @@ def _hermetic_skill_availability(
 def _reset_trajectory_recorder() -> Iterator[Any]:
     """Clear the trajectory ContextVar before AND after every test.
 
-    Mirrors ``daydream.agent.reset_state()`` for ``AgentState`` (CORE-10 / D-17).
     Prevents cross-test bleed when a test forgets to wrap recorder usage in
     ``async with TrajectoryRecorder(...)``.
 

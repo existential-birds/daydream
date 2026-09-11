@@ -41,7 +41,6 @@ import jsonschema
 
 import daydream
 from daydream import git_ops
-from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import DIAGRAM_KINDS
 from daydream.extensions import (
     CommentFinding,
@@ -53,6 +52,7 @@ from daydream.extensions import (
 from daydream.git_ops import GitError, PathAbsentError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.repository_paths import valid_repository_file_path
+from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import normalize_severity
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_error, print_info, print_success, print_warning
@@ -64,7 +64,6 @@ if TYPE_CHECKING:
 
 
 _logger = logging.getLogger(__name__)
-
 
 # --- Data shapes ------------------------------------------------------------
 
@@ -198,6 +197,7 @@ class _ClassifiedIssues:
 # --- Public entry points ----------------------------------------------------
 
 
+@bind_resolved_run_context
 async def post_review_to_pr_from_report(
     target_dir: Path,
     merged_items_path: Path,
@@ -207,6 +207,7 @@ async def post_review_to_pr_from_report(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    run_context: RunContext | None = None,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -234,6 +235,7 @@ async def post_review_to_pr_from_report(
         whether a non-posting run is a failure (comment mode) or a
         warn-and-continue (default deep flow).
     """
+    run_context = resolve_run_context(run_context)
     if not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
     try:
@@ -259,6 +261,7 @@ async def post_review_to_pr_from_report(
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
         diagram_blocks=diagram_blocks,
+        run_context=run_context,
     )
 
 
@@ -1611,6 +1614,7 @@ def _resolve_pr(
     return pr
 
 
+@bind_resolved_run_context
 async def _post(
     target_dir: Path,
     issues: list[ParsedIssue],
@@ -1620,7 +1624,9 @@ async def _post(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    run_context: RunContext | None = None,
 ) -> PostStatus:
+    run_context = resolve_run_context(run_context)
     try:
         pr = _resolve_pr(target_dir, console, pr_number)
     except GitError as exc:
@@ -1651,9 +1657,7 @@ async def _post(
     event_note = " — will post event: APPROVE" if clean else ""
     print_info(console, f"PR #{pr.number}: {summary}{event_note}")
 
-    if not post and not resolve_or_prompt(
-        assume=get_assume(),
-        interactive=not get_non_interactive(),
+    if not post and not run_context.confirm(
         safe_default=False,
         question=(
             "Post an APPROVE review for this clean PR? [y/N]"
@@ -1661,6 +1665,7 @@ async def _post(
             else "Post these as a PR review? [y/N]"
         ),
         default="n",
+        console=console,
     ):
         print_info(console, "Skipped posting to PR.")
         return PostStatus.NOTHING_TO_POST

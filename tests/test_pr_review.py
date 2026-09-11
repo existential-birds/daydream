@@ -29,6 +29,7 @@ from daydream.pr_review import (
     parsed_issues_from_items,
     snap_to_hunk,
 )
+from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.git_helpers import git as _git
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
@@ -1091,6 +1092,10 @@ class _FakeConsole:
         pass
 
 
+def _assumed_context(answer: str) -> RunContext:
+    return RunContext(InteractionPolicy(assume=answer))
+
+
 @pytest.mark.asyncio
 async def test_post_skips_when_no_pr(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1152,8 +1157,6 @@ async def test_post_succeeds_and_prints_url(
             body_only=[],
         ),
     )
-    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: True)
-
     captured: dict[str, Any] = {}
 
     def fake_submit(
@@ -1175,6 +1178,7 @@ async def test_post_succeeds_and_prints_url(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
+        run_context=_assumed_context("yes"),
     )
     # The payload that would be POSTed was assembled and forwarded.
     assert captured["payload"]["commit_id"] == pr.head_sha
@@ -1208,7 +1212,6 @@ async def test_post_payload_approves_when_clean_and_enabled(
             ],
         ),
     )
-    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: True)
     captured: dict[str, Any] = {}
 
     def fake_submit(
@@ -1226,6 +1229,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
         [ParsedIssue(path="a.py", line=1, title="t", body="b", severity="low")],
         console=_FakeConsole(),  # type: ignore[arg-type]
         approve_on_clean=True,
+        run_context=_assumed_context("yes"),
     )
     assert captured["payload"]["event"] == "APPROVE"
     assert "no high/medium findings" in captured["payload"]["body"]
@@ -1250,7 +1254,6 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
             body_only=[],
         ),
     )
-    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: True)
     err = "gh api /repos/acme/widgets/pulls/42/reviews failed: HTTP 422 (payload preserved at /tmp/x.json)"
     monkeypatch.setattr(
         pr_review, "_submit_review", lambda *_a, **_k: (None, err)
@@ -1267,6 +1270,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
+        run_context=_assumed_context("yes"),
     )
     assert warnings
     assert "no comments were posted" in warnings[0].lower()
@@ -1288,7 +1292,6 @@ async def test_post_skipped_when_user_declines(
             body_only=[],
         ),
     )
-    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: False)
     submit_called = False
 
     def fake_submit(*_a: Any, **_k: Any) -> tuple[str | None, str | None]:
@@ -1303,6 +1306,7 @@ async def test_post_skipped_when_user_declines(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
+        run_context=_assumed_context("no"),
     )
     assert not submit_called
     assert status == pr_review.PostStatus.NOTHING_TO_POST

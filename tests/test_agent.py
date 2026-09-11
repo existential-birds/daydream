@@ -1,20 +1,19 @@
-"""Tests for daydream.agent module-level state accessors."""
+"""Tests for agent execution and supporting helpers."""
 
 import os
+import sys
 from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
 from rich.console import Console
 
 from daydream.agent import (
-    get_non_interactive,
     is_environmental_failure,
-    reset_state,
     run_agent,
-    set_non_interactive,
 )
 from daydream.backends import DiagnosticEvent, ResultEvent
 from daydream.extensions import ToolDecision, get_registry, set_registry
@@ -27,6 +26,12 @@ from daydream.prompt_budget import (
     SanctionedInputTransport,
     SanctionedInputUnavailable,
     prepare_sanctioned_inputs,
+)
+from daydream.run_context import (
+    InteractionPolicy,
+    RunContext,
+    active_backends,
+    current_run_context,
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -58,6 +63,116 @@ async def _run_with_inputs(backend: Any, root: Path, prepared: Any) -> Any:
     return await run_agent(
         backend, root, "inspect", phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared
     )
+
+
+@pytest.mark.anyio
+async def test_run_agent_binds_context_and_keeps_backend_registered_across_retry(
+    tmp_path: Path,
+) -> None:
+    context = RunContext(InteractionPolicy(quiet=True))
+    observations: list[tuple[RunContext | None, tuple[object, ...], tuple[object, ...]]] = []
+
+    class RetryableFailure(RuntimeError):
+        retryable = True
+
+    class RetryBackend:
+        model = "test-model"
+        retry_attempts = 1
+        retry_base_delay_s = 0
+        retry_max_delay_s = 0
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.calls += 1
+            observations.append(
+                (current_run_context(), context.active_backends(), active_backends())
+            )
+            if self.calls == 1:
+                raise RetryableFailure("retry")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self) -> None:
+            pass
+
+    backend = RetryBackend()
+    assert current_run_context() is None
+
+    result = await run_agent(
+        backend,
+        tmp_path,
+        "inspect",
+        phase=DaydreamPhase.REVIEW,
+        run_context=context,
+    )
+
+    assert result == ("", None, None)
+    assert observations == [
+        (context, (backend,), (backend,)),
+        (context, (backend,), (backend,)),
+    ]
+    assert context.active_backends() == ()
+    assert active_backends() == ()
+    assert current_run_context() is None
+
+
+@pytest.mark.anyio
+async def test_run_agent_unregisters_backend_after_exception(tmp_path: Path) -> None:
+    context = RunContext(InteractionPolicy(quiet=True))
+    backend = ScriptedBackend(
+        events=[RuntimeError("boom")],
+        retry_attempts=0,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_agent(
+            backend,
+            tmp_path,
+            "inspect",
+            phase=DaydreamPhase.REVIEW,
+            run_context=context,
+        )
+
+    assert context.active_backends() == ()
+    assert active_backends() == ()
+
+
+async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) -> None:
+    """A signal between registration and execution must not retain a backend."""
+    from daydream.agent import _run_agent
+
+    class InjectedInterrupt(BaseException):
+        pass
+
+    context = RunContext(InteractionPolicy())
+    backend = ScriptedBackend()
+    previous_trace = sys.gettrace()
+
+    def interrupt(frame: FrameType, event: str, _arg: Any) -> Any:
+        if (
+            event == "line"
+            and frame.f_code is _run_agent.__code__
+            and context.active_backends()
+        ):
+            raise InjectedInterrupt("after registration")
+        return interrupt
+
+    try:
+        sys.settrace(interrupt)
+        with pytest.raises(InjectedInterrupt) as caught:
+            await run_agent(
+                backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW,
+                run_context=context,
+            )
+    finally:
+        sys.settrace(previous_trace)
+
+    # Keep the traceback alive: cleanup must not depend on collecting frames.
+    assert caught.value.__traceback__ is not None
+    assert context.active_backends() == ()
+    assert active_backends() == ()
+    assert current_run_context() is None
 
 
 def _sized_inputs(tmp_path: Path, count: int, size: int) -> dict[str, Path]:
@@ -373,20 +488,6 @@ async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes
     assert backend.call_count == 0
 
 
-def test_set_and_get_non_interactive() -> None:
-    try:
-        set_non_interactive(True)
-        assert get_non_interactive() is True
-    finally:
-        reset_state()
-
-
-def test_reset_state_clears_non_interactive() -> None:
-    set_non_interactive(True)
-    reset_state()
-    assert get_non_interactive() is False
-
-
 def test_is_environmental_failure_both_directions() -> None:
     environmental = [
         "The dev Postgres container is not running",
@@ -499,7 +600,6 @@ async def test_diagnostic_event_is_recorder_only_and_has_no_agent_side_effects(
             )
     finally:
         set_registry(previous_registry)
-        reset_state()
 
     assert result == ("", None, None)
     assert callback_events == []

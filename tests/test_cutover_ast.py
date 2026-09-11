@@ -4,8 +4,8 @@ Walks the AST of every .py file under daydream/ and tests/ and rejects:
 
 1. Name nodes referencing forbidden symbols (catches direct calls and
    references)
-2. Attribute nodes accessing .debug_log (catches AgentState.debug_log
-   and similar attribute lookups even on aliased objects)
+2. Attribute nodes accessing .debug_log (catches attribute lookups even
+   on aliased objects)
 3. ImportFrom nodes importing forbidden names (catches the canonical
    Pitfall 13 lazy import in codex.py:_raw_log that grep alone misses)
 4. String-literal Constant nodes containing forbidden log prefixes
@@ -34,7 +34,7 @@ FORBIDDEN_NAMES: set[str] = {
     "get_debug_log",
 }
 FORBIDDEN_ATTRS: set[str] = {
-    "debug_log",  # AgentState.debug_log
+    "debug_log",
 }
 
 # String-literal forbidden prefixes — re-introducing any would resurrect the legacy log format.

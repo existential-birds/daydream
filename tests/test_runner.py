@@ -37,6 +37,7 @@ from daydream.backends import (
 from daydream.exploration import ExplorationContext
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
+from daydream.run_context import RunContext, current_run_context
 from daydream.runner import RunConfig
 from daydream.trajectory import (
     DaydreamRunFlow,
@@ -944,7 +945,11 @@ async def test_run_dispatches_to_expected_flow(
     called: list[tuple[str, WorkContext, RunConfig]] = []
 
     def _record(name: str) -> Any:
-        async def stub(work: Any, config: Any, _run_artifacts: Any = None) -> int:
+        async def stub(
+            work: Any, config: Any, _run_artifacts: Any = None, *,
+            run_context: RunContext,
+        ) -> int:
+            assert run_context is current_run_context()
             called.append((name, work, config))
             return 0
 
@@ -976,7 +981,11 @@ async def test_run_rejects_head_mismatch_before_dispatch(
     called: list[str] = []
 
     def _record(name: str) -> Any:
-        async def stub(work: Any, config: Any, _run_artifacts: Any = None) -> int:
+        async def stub(
+            work: Any, config: Any, _run_artifacts: Any = None, *,
+            run_context: RunContext,
+        ) -> int:
+            assert run_context is current_run_context()
             called.append(name)
             return 0
 
@@ -1003,7 +1012,11 @@ async def test_run_allows_matching_approved_head(
     called: list[str] = []
 
     def _record(name: str) -> Any:
-        async def stub(work: Any, config: Any, _run_artifacts: Any = None) -> int:
+        async def stub(
+            work: Any, config: Any, _run_artifacts: Any = None, *,
+            run_context: RunContext,
+        ) -> int:
+            assert run_context is current_run_context()
             called.append(name)
             return 0
 
@@ -1036,7 +1049,11 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     called: list[str] = []
 
     def _record(name: str) -> Any:
-        async def stub(work: Any, config: Any, _run_artifacts: Any = None) -> int:
+        async def stub(
+            work: Any, config: Any, _run_artifacts: Any = None, *,
+            run_context: RunContext,
+        ) -> int:
+            assert run_context is current_run_context()
             called.append(name)
             return 0
 
@@ -1068,7 +1085,11 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
     head_shas: list[str] = []
 
     def _record(name: str) -> Any:
-        async def stub(work: Any, config: Any, _run_artifacts: Any = None) -> int:
+        async def stub(
+            work: Any, config: Any, _run_artifacts: Any = None, *,
+            run_context: RunContext,
+        ) -> int:
+            assert run_context is current_run_context()
             called.append(name)
             head_shas.append(work.head_sha)
             return 0
@@ -1198,7 +1219,9 @@ async def test_review_run_does_not_mint_app_identity(
         _work: WorkContext,
         config: RunConfig,
         _run_artifacts: Any = None,
+        *, run_context: RunContext,
     ) -> int:
+        assert run_context is current_run_context()
         assert config.identity == "operator"
         return 0
 
@@ -1304,7 +1327,9 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
         work: WorkContext,
         config: RunConfig,
         _run_artifacts: Any = None,
+        *, run_context: RunContext,
     ) -> int:
+        assert run_context is current_run_context()
         seen["output_mode"] = config.output_mode
         seen["branch"] = config.branch
         return 0
@@ -1779,7 +1804,7 @@ def test_runconfig_defaults_non_interactive_false() -> None:
     ],
     ids=["deep_loop", "shallow", "comment", "improve"],
 )
-async def test_run_threads_non_interactive_into_agent_state(
+async def test_run_threads_non_interactive_into_runtime(
     dispatch_target: Any,
     config_kwargs: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -1788,27 +1813,25 @@ async def test_run_threads_non_interactive_into_agent_state(
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
-    """``config.non_interactive=True`` flips the agent singleton flag before any
-    promptable phase, on every dispatch branch ``run()`` can take. Each case
-    patches one dispatch fn so ``run()`` reaches the run-start setup (where
-    ``set_non_interactive`` fires) without executing real phases.
-    """
-    from daydream.agent import get_non_interactive, reset_state
+    """Every dispatch receives the runner's bound unattended policy explicitly."""
+    previous = current_run_context()
+    received: list[RunContext] = []
 
-    reset_state()
-    try:
+    async def stub(
+        work: Any, config: Any, _run_artifacts: Any = None, *,
+        run_context: RunContext,
+    ) -> int:
+        assert current_run_context() is run_context
+        received.append(run_context)
+        return 0
 
-        async def stub(work: Any, config: Any, _run_artifacts: Any = None) -> int:
-            return 0
+    monkeypatch.setattr(dispatch_target, stub)
+    config = make_config(tmp_path, non_interactive=True, **config_kwargs)
 
-        monkeypatch.setattr(dispatch_target, stub)
-        config = make_config(tmp_path, non_interactive=True, **config_kwargs)
-
-        exit_code = await runner.run(config)
-        assert exit_code == 0
-        assert get_non_interactive() is True
-    finally:
-        reset_state()
+    assert await runner.run(config) == 0
+    assert len(received) == 1
+    assert received[0].policy.interactive is False
+    assert current_run_context() is previous
 
 
 # --- Deep fix-cycle commit gate semantics ----------------------------------
@@ -1981,8 +2004,6 @@ async def _drive_fix_cycle_failing(
     Returns:
         ``(exit_code, test_backend, commit_calls)``.
     """
-    from daydream.agent import reset_state
-
     _seed_fix_resume(target, [_fix_item()])
 
     # Silence the flow's terminal noise; the test phase is observed through the
@@ -2039,11 +2060,7 @@ async def _drive_fix_cycle_failing(
 
         monkeypatch.setattr("builtins.input", _forbidden_input)
 
-    reset_state()
-    try:
-        exit_code = await runner.run(config)
-    finally:
-        reset_state()
+    exit_code = await runner.run(config)
 
     return exit_code, test_backend, commit_calls
 

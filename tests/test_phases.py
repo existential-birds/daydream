@@ -1117,7 +1117,7 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(
 
     # fail -> choice "2" (fix and retry) -> pass
     choices = iter(["2"])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"))
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"))
 
     feedback_items = [
         {"id": 1, "description": "Bug in handler", "file": "src/handler.py", "line": 10},
@@ -1152,7 +1152,7 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
 
     silence_console("daydream.phases")
     backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "2")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
     monkeypatch.setattr(
         "daydream.phases._reject_test_healing_generated_file_edits",
         lambda *args, **kwargs: None,
@@ -1194,7 +1194,7 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
     ])
 
     choices = iter(["2"])  # fail -> fix-and-retry -> pass
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"))
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"))
 
     feedback_items = [{"id": 1, "description": "Bug", "file": "src/handler.py", "line": 10}]
 
@@ -2592,7 +2592,7 @@ async def test_phase_understand_intent_confirmed_first_try(
         _RESULT,
     ])
 
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git a/login.py ...")
@@ -2624,7 +2624,7 @@ async def test_phase_understand_intent_rejects_budget_truncated_summary(
 
     monkeypatch.setattr("daydream.phases.run_agent", _truncated_run_agent)
     monkeypatch.setattr(
-        "daydream.phases.prompt_user",
+        "daydream.run_context._prompt_user",
         lambda *args, **kwargs: pytest.fail("a truncated response must not reach confirmation"),
     )
 
@@ -2659,7 +2659,7 @@ async def test_phase_understand_intent_correction_then_confirm(
 
     # First: correction, second: confirm.
     responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
 
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git ...")
@@ -2704,7 +2704,7 @@ async def test_phase_understand_intent_codex_read_only_inlines_diff_and_explorat
         return "This PR adds a login page.", None, None
 
     monkeypatch.setattr("daydream.phases.run_agent", _capture_run_agent)
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     diff_file = tmp_path / ".daydream" / "deep" / "diff.patch"
     diff_file.parent.mkdir(parents=True)
@@ -2764,7 +2764,7 @@ async def test_phase_understand_intent_codex_correction_loop_inlines_diff_under_
 
     monkeypatch.setattr("daydream.phases.run_agent", _capture_run_agent)
     responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
 
     diff_file = tmp_path / ".daydream" / "deep" / "diff.patch"
     diff_file.parent.mkdir(parents=True)
@@ -2808,7 +2808,7 @@ async def test_phase_understand_intent_non_codex_keeps_budget_gated_diff_pointer
         TextEvent(text="This PR adds a login page."),
         _RESULT,
     ])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     diff_file = tmp_path / ".daydream" / "deep" / "diff.patch"
     diff_file.parent.mkdir(parents=True)
@@ -2848,7 +2848,7 @@ async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_di
 
     correction = "No, it's a login page with OAuth, not signup"
     responses = iter([correction, "y"])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
 
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git ...")
@@ -2889,13 +2889,12 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(
     the prompt when interactive, so the user is consulted. Observable: the
     correction prompt is reached (prompt_user is called), not bypassed.
     """
-    from daydream.agent import reset_state, set_assume
     from daydream.phases import phase_understand_intent
+    from daydream.run_context import InteractionPolicy, RunContext
 
     silence_console("daydream.phases")
 
-    reset_state()
-    set_assume("no")
+    run_context = RunContext(InteractionPolicy(assume="no"))
     try:
         backend = ScriptedBackend(events=[TextEvent(text="This PR adds a signup page."), _RESULT])
 
@@ -2905,7 +2904,7 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(
             prompt_calls.append(message)
             return "y"
 
-        monkeypatch.setattr("daydream.phases.prompt_user", _record)
+        monkeypatch.setattr("daydream.run_context._prompt_user", _record)
 
         diff_file = tmp_path / "diff.patch"
         diff_file.write_text("diff --git ...")
@@ -2915,13 +2914,14 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(
             diff_path=diff_file,
             log="abc1234 add signup",
             branch="feat/signup",
+            run_context=run_context,
         )
 
         # The forced "no" did not bypass the gate: the correction prompt was reached.
         assert prompt_calls, "forced 'no' short-circuited without offering a correction"
         assert "signup" in result.lower()
     finally:
-        reset_state()
+        pass
 
 
 def _make_intent_backend(summary: str) -> ScriptedBackend:
@@ -2951,7 +2951,7 @@ async def test_phase_understand_intent_renders_summary_panel_before_gate(
     monkeypatch.setattr("daydream.phases.console", recording)
 
     summary = "This change adds a login page with email and password authentication."
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git ...")
@@ -2985,7 +2985,7 @@ async def test_phase_understand_intent_renders_placeholder_for_empty_summary(
     recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.phases.console", recording)
 
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git ...")
@@ -3298,9 +3298,7 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     from daydream.phases import phase_commit_push
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-    # _do_commit uses resolve_or_prompt which calls prompt_user from agent's namespace.
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3357,7 +3355,7 @@ async def test_declined_commit_still_runs_host_validation_before_success(
     from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.resolve_or_prompt", lambda **k: False)
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
 
     calls: list[dict[str, Any]] = []
 
@@ -3392,7 +3390,7 @@ async def test_declined_commit_surfaces_failed_validation(
     from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.resolve_or_prompt", lambda **k: False)
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
 
     async def fake_run(*a: Any, **k: Any) -> TestExecutionResult:
         return TestExecutionResult(exit_status=1, timed_out=False, merged_output="1 failed")
@@ -3419,7 +3417,7 @@ async def test_declined_commit_without_configured_command_skips_validation(
     from daydream.phases import phase_commit_push
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.resolve_or_prompt", lambda **k: False)
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
 
     async def fake_run(*a: Any, **k: Any) -> None:
         raise AssertionError("run_test_command must not be called without a command")
@@ -3457,8 +3455,7 @@ async def test_approved_investigator_command_runs_once_host_side(
         }),
     ])
 
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls: list[dict[str, Any]] = []
 
     async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
@@ -3510,8 +3507,7 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
         _PASS_TURN,
     ])
 
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls: list[list[str]] = []
 
     async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
@@ -3592,7 +3588,7 @@ async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
 
     choices = iter(["1"])  # user picks option 1 once
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -3632,11 +3628,8 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
         }),
     ])
 
-    # First prompt_user call: "Choice" -> "1" (goes through phases.prompt_user).
-    # Second: "Use suggested command?" -> "y" goes through resolve_or_prompt
-    # which calls agent.prompt_user, not phases.prompt_user.
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    # The shared gateway returns "1" for the menu and "y" for approval.
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     cmds: list[list[str]] = []
 
     async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
@@ -3683,8 +3676,7 @@ async def test_phase_test_and_heal_prompts_require_foreground_run_and_summary_li
             "reason": "Makefile defines `check` as the CI test target",
         }),
     ])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     monkeypatch.setattr(
         "daydream.phases.run_test_command",
         _fake_passed_run,
@@ -3723,10 +3715,8 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
         _PASS_TURN,
     ])
 
-    # "Choice" -> "1" via phases.prompt_user; "Use suggested command?" -> "n"
-    # via agent.prompt_user (resolve_or_prompt routes through agent's namespace).
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
+    # Select the investigator, then decline its replacement command.
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "n")
 
     success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -3763,7 +3753,7 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
 
     choices = iter(["1"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -3818,7 +3808,7 @@ async def test_summarizer_invoked_read_only_normal_calls_mutating(
     _install_recorder(monkeypatch, tmp_path)
     monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
     backend = _HealBackend(script=[_FAIL_TURN, _handoff_turn("# H")])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
 
     await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -3879,7 +3869,7 @@ async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
 
     choices = iter(["4"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -3917,10 +3907,8 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
         _handoff_turn("BODY"),
     ])
 
-    # "Choice" -> "4" via phases.prompt_user (direct call).
-    # Clipboard confirm -> "y" via agent.prompt_user (resolve_or_prompt path).
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "4")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    # Abort at the menu, then approve copying the handoff.
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "4" if "Choice" in a[1] else "y")
 
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -3955,7 +3943,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
         user_prompts.append(message)
         return next(answers, "n")
 
-    monkeypatch.setattr("daydream.phases.prompt_user", fake_prompt)
+    monkeypatch.setattr("daydream.run_context._prompt_user", fake_prompt)
 
     copy_called = False
 
@@ -4000,7 +3988,7 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
 
     choices = iter(["4"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -4038,7 +4026,7 @@ async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
 
     choices = iter(["4"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -4074,7 +4062,7 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
 
     choices = iter(["4"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -4100,7 +4088,7 @@ async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
     _install_recorder(monkeypatch, tmp_path)
     monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
     backend = _HealBackend(script=[_FAIL_TURN, _handoff_turn("# H\nbody")])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
 
     await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -4132,7 +4120,7 @@ async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
     _install_recorder(monkeypatch, tmp_path)
     monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
     backend = _HealBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
 
     await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -4359,7 +4347,7 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
 
     choices = iter(["4"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -4396,11 +4384,10 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
     Observable contract (CLAUDE.md S3.1): the handoff file lands on disk, the
     menu prompt is never consulted, and the fix agent is never launched.
     """
-    from daydream.agent import reset_state, set_non_interactive
     from daydream.phases import phase_test_and_heal
+    from daydream.run_context import InteractionPolicy, RunContext
 
-    reset_state()
-    set_non_interactive(True)
+    run_context = RunContext(InteractionPolicy(interactive=False))
     try:
         silence_console("daydream.phases")
         _install_recorder(monkeypatch, tmp_path)
@@ -4412,8 +4399,7 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
         prompt_sentinel = Mock(
             side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
         )
-        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
-        monkeypatch.setattr("daydream.agent.prompt_user", prompt_sentinel)
+        monkeypatch.setattr("daydream.run_context._prompt_user", prompt_sentinel)
 
         # First call: failing test run (menu would otherwise appear). Second
         # call: the read-only failure-summarizer producing the handoff body —
@@ -4424,7 +4410,9 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
             _handoff_turn("# Handoff\n\nnon-interactive failure context"),
         ])
 
-        passed, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+        passed, retries, _ = await phase_test_and_heal(
+            backend, make_work(tmp_path), run_context=run_context,
+        )
 
         # Took the abort/terminate path (choice "4" semantics, no mutation).
         assert passed is False
@@ -4452,7 +4440,7 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
         # did not). Same contract as the interactive option-4 path.
         assert backend.read_only_calls == [False, True]
     finally:
-        reset_state()
+        pass
 
 
 @pytest.mark.asyncio
@@ -4468,11 +4456,10 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
     branch: no menu, no fix agent, but the written handoff still separates
     Verified facts from Hypotheses and never invents a cause.
     """
-    from daydream.agent import reset_state, set_non_interactive
     from daydream.phases import phase_test_and_heal
+    from daydream.run_context import InteractionPolicy, RunContext
 
-    reset_state()
-    set_non_interactive(True)
+    run_context = RunContext(InteractionPolicy(interactive=False))
     try:
         silence_console("daydream.phases")
         _install_recorder(monkeypatch, tmp_path)
@@ -4483,12 +4470,13 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
         prompt_sentinel = Mock(
             side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
         )
-        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
-        monkeypatch.setattr("daydream.agent.prompt_user", prompt_sentinel)
+        monkeypatch.setattr("daydream.run_context._prompt_user", prompt_sentinel)
 
         backend = _HealBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
 
-        passed, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+        passed, retries, _ = await phase_test_and_heal(
+            backend, make_work(tmp_path), run_context=run_context,
+        )
         assert passed is False
         assert retries == 0
 
@@ -4502,7 +4490,7 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
         assert backend.read_only_calls == [False, True]
         prompt_sentinel.assert_not_called()
     finally:
-        reset_state()
+        pass
 
 
 # phase_test_and_heal — --yes bounded auto fix-and-retry (Task assume="yes")
@@ -4528,11 +4516,10 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
     implements the bounded-loop invariant: ``decision is True and retries_used > 0``
     → abort, preventing an unbounded mutating fix loop under ``--yes``.
     """
-    from daydream.agent import reset_state, set_assume
     from daydream.phases import phase_test_and_heal
+    from daydream.run_context import InteractionPolicy, RunContext
 
-    reset_state()
-    set_assume("yes")
+    run_context = RunContext(InteractionPolicy(assume="yes"))
     try:
         silence_console("daydream.phases")
         _install_recorder(monkeypatch, tmp_path)
@@ -4543,8 +4530,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
         prompt_sentinel = Mock(
             side_effect=AssertionError("prompt_user must not be called under --yes"),
         )
-        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
-        monkeypatch.setattr("daydream.agent.prompt_user", prompt_sentinel)
+        monkeypatch.setattr("daydream.run_context._prompt_user", prompt_sentinel)
 
         # Script: fail → fix (no-op) → fail → handoff (summarizer).
         backend = _HealBackend(script=[
@@ -4553,7 +4539,9 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
             _FAIL_TURN,
             _handoff_turn("# Handoff\nauto-mode failure"),
         ])
-        success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+        success, retries, _ = await phase_test_and_heal(
+            backend, make_work(tmp_path), run_context=run_context,
+        )
 
         # Loop terminated after exactly one auto fix attempt.
         assert success is False
@@ -4569,7 +4557,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
         assert backend.read_only_calls == [False, False, False, True], backend.read_only_calls
         prompt_sentinel.assert_not_called()
     finally:
-        reset_state()
+        pass
 
 
 # _sanitize_suggested_command — fence-break hardening + whitespace collapse
@@ -4672,9 +4660,8 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
         }),
     ])
 
-    # "Choice" -> "1" via phases.prompt_user; confirm "y" via agent.prompt_user.
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    # Select the investigator, then approve its replacement command.
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     cmds: list[list[str]] = []
 
     async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
@@ -4728,12 +4715,8 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
             return "1"  # menu Choice
         return "n"
 
-    # Menu choice ("Choice") goes through phases.prompt_user (direct call).
-    monkeypatch.setattr("daydream.phases.prompt_user", _prompt)
-    # Confirm gate ("Use suggested command?") goes through agent.prompt_user
-    # (via resolve_or_prompt). Route it through the same _prompt so
-    # prompt_called_at tracks both calls and the ordering assertion holds.
-    monkeypatch.setattr("daydream.agent.prompt_user", _prompt)
+    # Both the menu and confirmation use the single runtime prompt gateway.
+    monkeypatch.setattr("daydream.run_context._prompt_user", _prompt)
 
     backend = _HealBackend(script=[
         _FAIL_TURN,
@@ -4959,7 +4942,7 @@ async def test_option4_calls_write_partial_before_summarizer(
 
     choices = iter(["4"])
     monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
@@ -5089,7 +5072,7 @@ async def test_phase_prints_model_line_after_hero(
 
     silence_console("daydream.phases", keep=("print_phase_hero", "print_dim"))
     heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     kwargs = setup(tmp_path)
     backend = ScriptedBackend(events=events, model=model)
@@ -5262,7 +5245,7 @@ async def test_phase_understand_intent_inline_exploration_budget_degrades(
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -5329,7 +5312,7 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -5415,7 +5398,7 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
     owner = resolve_private_workspace_owner(repo, locations=locations)
 
     responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
 
     async with open_artifact_session(work, session_id="intent-inline-correction", owner=owner):
         exploration = artifact_dir_for(repo) / "exploration"
@@ -5920,7 +5903,7 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
     feedback = [{"id": 1, "item_uid": "item:1", "file": "a.py"}]
     footprint = AuthorizedFixFootprint.build(tmp_path, {"readme.md"}, feedback)
     backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
-    monkeypatch.setattr(phases, "prompt_user", lambda *args, **kwargs: "2")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "2")
     keys = iter(["in-1", "out-1", "in-2", "out-2"])
 
     result = await phases.phase_test_and_heal(

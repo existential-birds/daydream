@@ -598,6 +598,7 @@ async def explain_note(ctx: FlowContext) -> None:
         phase=DaydreamPhase.REVIEW,
         read_only=True,
         sanctioned_inputs=inputs,
+        run_context=ctx.run_context,
     )
 
 def register(registry: Registry) -> None:
@@ -614,6 +615,29 @@ published under the checkout's untracked `.daydream/` at finalization).
 `review_output_path_for(ctx.work.repo)` routes the review-output file the same
 way: private while the session is active, published as `.review-output.md` at
 finalization.
+
+### Interaction and output policy
+
+Runner-created flows receive `ctx.run_context`, which owns a frozen policy
+(`assume`, `interactive`, `quiet`, and `log_mode`) and active backend registrations.
+Pass it to `run_agent` and built-in phase calls. Use its `confirm()` and `choice()`
+methods for input so unattended runs take the call site's safe default.
+
+For example, `ctx.run_context.confirm("Apply this change?", safe_default=False)`
+honors a forced answer, declines unattended changes, and otherwise prompts.
+`choice()` accepts explicit `assume_yes` and `assume_no` mappings for menus;
+free-form input without those mappings follows the run's interactivity policy.
+
+The runner binds this context for the run, so the shared console and API v6
+extensions that omit the new argument still use the emitting run's policy.
+Built-in phases also bind an explicitly supplied `run_context` for the entire
+invocation, including output before and after agent execution.
+Standalone callers can use `with bind_run_context(RunContext(InteractionPolicy(...)))`
+from `daydream.run_context` to scope several calls together. Without an explicit
+or bound context, standalone calls use a fresh interactive, non-quiet, non-log
+default with no assumed answer. Binding restores the previous context on exit,
+including exceptions. This additive field does not change API version 6,
+`ctx.artifacts`, or the shared `ctx.data` mapping.
 
 ### Stable `ctx.data` keys
 

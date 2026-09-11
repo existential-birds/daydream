@@ -969,8 +969,7 @@ async def test_shallow_run_captures_recommended_patch(
     the distinct artifact carrying daydream's own edit (the deep test asserts
     the same distinctness where both artifacts exist).
     """
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
-    monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "n")
     # Host-native commit/push (issue #726): the shallow --yes run commits and
     # pushes to 'origin' for real, so give the repo a bare remote.
     remote = bare_remote(archive_dir.parent / "origin.git")

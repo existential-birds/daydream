@@ -17,6 +17,42 @@ from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
 
 
+def test_signal_handler_flushes_before_backend_registry_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream import cli
+
+    events: list[str] = []
+
+    class FakePanel:
+        def __init__(self, _console: object) -> None:
+            pass
+
+        def start(self, _message: str) -> None:
+            events.append("panel-start")
+
+        def add_step(self, _message: str) -> None:
+            events.append("backend-step")
+
+    monkeypatch.setattr(
+        cli,
+        "flush_active_signal_recorders",
+        lambda: events.append("flush"),
+    )
+    def snapshot() -> tuple[object, ...]:
+        events.append("snapshot")
+        return (object(),)
+
+    monkeypatch.setattr(cli, "active_backends", snapshot)
+    monkeypatch.setattr(cli, "ShutdownPanel", FakePanel)
+    monkeypatch.setattr(cli, "set_shutdown_panel", lambda _panel: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli._signal_handler(signal.SIGTERM, None)
+
+    assert events == ["flush", "panel-start", "snapshot", "backend-step"]
+
+
 def test_approved_head_sha_flag_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """--approved-head-sha pins config.approved_head_sha (no normalization)."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--approved-head-sha", "a" * 40, "/tmp/repo"])
