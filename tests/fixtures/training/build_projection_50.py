@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -231,4 +232,46 @@ def build_projection_50(tmp_path: Path) -> Path:
             emit_process_traces=True,
         )
     )
+    # Reproduce the committed projection-dir shape: SHA256SUMS over the
+    # payload files (mirroring the bundle's own manifest) and the bundle's
+    # curation-manifest.json, both before nothing depends on ordering — the
+    # loader's digest is computed over whatever the directory holds.
+    sums_lines = []
+    for path in sorted(proj_dir.rglob("*")):
+        if not path.is_file() or path.name in {"SHA256SUMS", "_SUCCESS"}:
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        sums_lines.append(f"{digest}  {path.relative_to(proj_dir).as_posix()}\n")
+    (proj_dir / "SHA256SUMS").write_text("".join(sums_lines))
+    shutil.copyfile(bundle_dir / "curation-manifest.json", proj_dir / "curation-manifest.json")
     return proj_dir
+
+
+def main() -> None:
+    """Commit the fixture: build into a scratch dir, copy the projection
+    directory to ``--out`` (content-only — the loader's directory digest is
+    computed over file bytes, never mtimes)."""
+    import argparse
+    import shutil
+    import tempfile
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="Destination projection directory (e.g. tests/fixtures/training/projection-50)",
+    )
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory() as tmp:
+        proj_dir = build_projection_50(Path(tmp))
+        if args.out.exists():
+            shutil.rmtree(args.out)
+        shutil.copytree(proj_dir, args.out)
+    print(f"committed projection fixture written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
+
+

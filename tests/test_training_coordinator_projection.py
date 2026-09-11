@@ -397,7 +397,8 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
 
 def test_projection_is_the_only_input(tmp_path: Path) -> None:
     """#1093: the legacy `corpus` kwarg is gone and `projection` is required."""
+    legacy_ctor = cast(Any, PipelineConfig)
     with pytest.raises(TypeError):
-        PipelineConfig(corpus=tmp_path / "corpus.jsonl", out_dir=tmp_path / "out")  # type: ignore[call-arg]
+        legacy_ctor(corpus=tmp_path / "corpus.jsonl", out_dir=tmp_path / "out")
     with pytest.raises(ValueError, match="projection"):
         PipelineConfig(out_dir=tmp_path / "out")
