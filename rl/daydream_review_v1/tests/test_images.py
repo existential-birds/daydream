@@ -196,7 +196,8 @@ def test_main_uses_immutable_base_for_repository_builds(
     received: list[str] = []
 
     def _record(
-        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool
+        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
+        mirror: Path,
     ) -> str:
         received.append(base_image)
         return f"{entry.image}:{head_sha[:12]}"
@@ -217,6 +218,43 @@ def test_main_uses_immutable_base_for_repository_builds(
 
     # The mutable alias is never selected for a snapshot build.
     assert build_images.BASE_LATEST not in received
+
+
+def test_main_acquires_upstream_mirror_once_per_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two same-slug PR snapshots in one main() invocation acquire the upstream
+    mirror exactly once; each build still gets its own isolated context (its
+    own copy) and its own tag."""
+    clones: list[str] = []
+
+    def _fake_stream(cmd: list[str], *, cwd: Path | None = None) -> None:
+        if cmd[:2] == ["git", "clone"] and "--mirror" in cmd:
+            clones.append(cmd[2])
+
+    contexts: list[str] = []
+    real_temporary_directory = tempfile.TemporaryDirectory
+
+    def _tracking_tmp(prefix: str) -> Any:
+        handle = real_temporary_directory(prefix)
+        contexts.append(str(handle.name))
+        return handle
+
+    tags: list[str] = []
+
+    def _record(
+        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
+        mirror: Path,
+    ) -> str:
+        tags.append(f"{entry.image}:{head_sha[:12]}")
+        return tags[-1]
+
+    monkeypatch.setattr(build_images, "_build_base", lambda: (0, "daydream-rl/base:v1.2.3"))
+    monkeypatch.setattr(build_images, "_stream", _fake_stream)
+    monkeypatch.setattr(build_images, "build_repo_image", _record)
+
+    status = build_images.main(["--only", FIXTURE_SLUG])
+    assert status == 0
+    upstream = [url for url in clones if url != str(build_images.FIXTURE_CLONE_URL)]
+    assert len(upstream) == 1, f"expected one upstream mirror acquisition, got {clones}"
 
 
 def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
