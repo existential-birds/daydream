@@ -42,12 +42,12 @@ from daydream.pr_review import FINDING_MARKER_RE
 
 def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
     """Run ``gh auth status --hostname github.com`` (exit code is the contract)."""
-    return git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"])
+    return git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"], auth=git_ops.INHERIT_GITHUB_AUTH)
 
 
 def _run_gh_api_user(root: Path) -> dict[str, Any]:
     """Return the authenticated GitHub user record from ``gh api user``."""
-    proc = git_ops._run_gh(root, ["api", "user"])
+    proc = git_ops._run_gh(root, ["api", "user"], auth=git_ops.INHERIT_GITHUB_AUTH)
     if proc.returncode != 0:
         raise git_ops.GitError(f"gh api user failed: {proc.stderr.strip()}")
     data = json.loads(proc.stdout)
@@ -84,6 +84,7 @@ def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
     proc = git_ops._run_gh(
         root,
         ["repo", "view", repo_slug, "--json", "id,nameWithOwner,url,visibility,defaultBranchRef"],
+        auth=git_ops.INHERIT_GITHUB_AUTH,
     )
     if proc.returncode != 0:
         raise PreflightError("no_access", f"cannot read repository {repo_slug}: {proc.stderr.strip()}")
@@ -397,7 +398,7 @@ def _fetch_with_retry(root: Path, owner_repo: str, number: int) -> dict[str, Any
     """
     endpoint = f"repos/{owner_repo}/pulls/{number}"
     proc, rate_limit = _call_with_rate_limit_retry(
-        lambda: git_ops._run_gh(root, ["api", endpoint, "--jq", "@json"])
+        lambda: git_ops._run_gh(root, ["api", endpoint, "--jq", "@json"], auth=git_ops.INHERIT_GITHUB_AUTH)
     )
     if proc.returncode != 0:
         if rate_limit is not None:
@@ -416,7 +417,9 @@ def _rest(root: Path, endpoint: str) -> list[Any]:
     the complete canned list in one NDJSON stream).
     """
     proc, rate_limit = _call_with_rate_limit_retry(
-        lambda: git_ops._run_gh(root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"])
+        lambda: git_ops._run_gh(
+            root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"], auth=git_ops.INHERIT_GITHUB_AUTH,
+        )
     )
     if proc.returncode != 0:
         if rate_limit is not None:
@@ -683,7 +686,7 @@ def _graphql_with_rate_limit_retry(
                 "graphql",
                 method="POST",
                 idempotent=True,
-                input_data={"query": query, "variables": variables},
+                input_data={"query": query, "variables": variables}, auth=git_ops.INHERIT_GITHUB_AUTH,
             )
             return cast(dict[str, Any], resp)  # gh_api returns raw JSON; the GraphQL body is a dict
         except git_ops.RateLimitError as exc:

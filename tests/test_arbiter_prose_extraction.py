@@ -26,10 +26,10 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.agent import set_log_mode
 from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
 
 SELECTED_RECORDS: list[dict[str, Any]] = [
@@ -240,7 +240,6 @@ async def test_arbiter_captures_structured_output_in_log_mode(
     phase received the prose-fallback string. Drives the real production path
     (phase_arbiter_review -> run_agent -> backend events) with log_mode on.
     """
-    set_log_mode(True)  # reset by the autouse _reset_agent_state fixture
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
         cast(Backend, _SplitTextBackend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)),
@@ -249,6 +248,7 @@ async def test_arbiter_captures_structured_output_in_log_mode(
         diff_path=diff_path,
         intent_path=intent_path,
         alternatives_path=alternatives_path,
+        run_context=RunContext(InteractionPolicy(log_mode=True)),
     )
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True

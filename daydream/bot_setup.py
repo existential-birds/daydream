@@ -36,7 +36,7 @@ from daydream.github_app import (
     APP_PRIVATE_KEY_ENV,
     AppCredentials,
     GitHubAppError,
-    app_jwt_auth,
+    build_app_jwt_auth,
     exchange_manifest_code,
     get_app_metadata,
     resolve_credentials,
@@ -143,7 +143,7 @@ class _ManifestListener:
         """
         if not code:
             raise GitHubAppError("App registration was cancelled")
-        return exchange_manifest_code(self.repo_dir, code)
+        return exchange_manifest_code(self.repo_dir, code, auth=git_ops.INHERIT_GITHUB_AUTH)
 
     def serve(self) -> tuple[AppCredentials, str]:
         """Bind a localhost port, open the browser, and block on the callback.
@@ -305,7 +305,7 @@ def deposit_secrets(
     }
 
     try:
-        existing = set(git_ops.gh_secret_list(repo_dir, **scope_kwargs))
+        existing = set(git_ops.gh_secret_list(repo_dir, **scope_kwargs, auth=git_ops.INHERIT_GITHUB_AUTH))
     except GitError as exc:
         raise GitHubAppError(f"Could not list existing secrets: {exc}") from exc
 
@@ -315,12 +315,14 @@ def deposit_secrets(
 
     for name in config.SETUP_SECRET_NAMES:
         try:
-            git_ops.gh_secret_set(repo_dir, name, secret_values[name], **scope_kwargs)
+            git_ops.gh_secret_set(repo_dir, name, secret_values[name], **scope_kwargs, auth=git_ops.INHERIT_GITHUB_AUTH)
         except GitError as exc:
             raise GitHubAppError(f"Failed to set secret {name}: {exc}") from exc
 
     try:
-        git_ops.gh_variable_set(repo_dir, config.BOT_HANDLE_VAR, bot_handle, **scope_kwargs)
+        git_ops.gh_variable_set(
+            repo_dir, config.BOT_HANDLE_VAR, bot_handle, **scope_kwargs, auth=git_ops.INHERIT_GITHUB_AUTH,
+        )
     except GitError as exc:
         raise GitHubAppError(f"Failed to set variable {config.BOT_HANDLE_VAR}: {exc}") from exc
 
@@ -401,10 +403,12 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
         git_ops.create_branch(repo_dir, branch)
     git_ops.commit_paths(repo_dir, copied, _PR_TITLE)
     git_ops.push_branch(repo_dir, branch)
-    existing_prs = git_ops.gh_pr_list_for_branch(repo_dir, branch)
+    existing_prs = git_ops.gh_pr_list_for_branch(repo_dir, branch, auth=git_ops.INHERIT_GITHUB_AUTH)
     if existing_prs:
         return str(existing_prs[0]["url"])
-    return git_ops.gh_pr_create(repo_dir, head=branch, base=base, title=_PR_TITLE, body=_PR_BODY)
+    return git_ops.gh_pr_create(
+        repo_dir, head=branch, base=base, title=_PR_TITLE, body=_PR_BODY, auth=git_ops.INHERIT_GITHUB_AUTH,
+    )
 
 
 @dataclass(frozen=True)
@@ -465,8 +469,10 @@ def _installed_owner_logins(repo_dir: Path, creds: AppCredentials) -> set[str | 
     Callers are responsible for catching :class:`GitError` and converting it
     to their own error type or return value as appropriate.
     """
-    with app_jwt_auth(creds.app_id, creds.private_key) as bearer:
-        installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer, idempotent=True)
+    jwt_auth, bearer = build_app_jwt_auth(creds.app_id, creds.private_key)
+    installations = git_ops.gh_api(
+        repo_dir, "/app/installations", headers=bearer, idempotent=True, auth=jwt_auth,
+    )
     return {
         (inst.get("account") or {}).get("login")
         for inst in (installations if isinstance(installations, list) else [])
@@ -516,8 +522,8 @@ def _check_secrets_and_var(repo_dir: Path, scope: Scope) -> Check:
     """Check (2): all required secrets + the bot-handle variable are present."""
     scope_kwargs = scope._secret_kwargs()
     try:
-        secrets = set(git_ops.gh_secret_list(repo_dir, **scope_kwargs))
-        variables = set(git_ops.gh_variable_list(repo_dir, **scope_kwargs))
+        secrets = set(git_ops.gh_secret_list(repo_dir, **scope_kwargs, auth=git_ops.INHERIT_GITHUB_AUTH))
+        variables = set(git_ops.gh_variable_list(repo_dir, **scope_kwargs, auth=git_ops.INHERIT_GITHUB_AUTH))
     except GitError as exc:
         return Check(
             name="secrets",
@@ -970,7 +976,7 @@ def run_setup(
         )
         return 1
 
-    already = set(git_ops.gh_secret_list(target_dir, **scope._secret_kwargs()))
+    already = set(git_ops.gh_secret_list(target_dir, **scope._secret_kwargs(), auth=git_ops.INHERIT_GITHUB_AUTH))
     creds_present = all(name in already for name in config.SETUP_SECRET_NAMES)
 
     if creds_present and not force:

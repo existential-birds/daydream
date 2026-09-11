@@ -29,6 +29,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.test_agent_recorder_integration import MockBackend
 
@@ -87,7 +88,6 @@ async def test_plain_text_still_renders(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 
 async def test_log_mode_emission_redacts_sentinels_on_agent_path(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -105,9 +105,9 @@ async def test_log_mode_emission_redacts_sentinels_on_agent_path(
             ResultEvent(structured_output=payload, continuation=None),
         ]
     )
-    monkeypatch.setattr("daydream.agent._state.log_mode", True)
     result, _, _ = await run_agent(
-        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"},
+        run_context=RunContext(InteractionPolicy(log_mode=True)),
     )
     assert result == payload          # returned object is raw/unchanged
     out = capsys.readouterr().out
@@ -116,7 +116,6 @@ async def test_log_mode_emission_redacts_sentinels_on_agent_path(
 
 
 async def test_log_mode_captures_structured_output(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -128,10 +127,10 @@ async def test_log_mode_captures_structured_output(
         "token": sentinel,
         "nested": {"path": f"/Users/{sentinel}"},
     }
-    monkeypatch.setattr("daydream.agent._state.log_mode", True)
     backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
     result, _, _ = await run_agent(
-        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"},
+        run_context=RunContext(InteractionPolicy(log_mode=True)),
     )
     assert result == payload        # captured AND returned raw (never redacted)
     out = capsys.readouterr().out
@@ -141,7 +140,6 @@ async def test_log_mode_captures_structured_output(
 
 
 async def test_log_mode_structured_result_wins_over_prose_stray_json(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Under --log, prose containing stray JSON must not be scraped over the real result.
@@ -157,7 +155,6 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(
     With the fix the captured structured result wins, so the payload survives as a
     dict and the fallback never runs.
     """
-    monkeypatch.setattr("daydream.agent._state.log_mode", True)
     merge_prose = "All source artifacts are empty: `stack-python-records.json` is `[]`. Nothing to merge."
     payload: dict[str, Any] = {"items": []}
     backend = MockBackend(
@@ -167,7 +164,8 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(
         ]
     )
     result, _, _ = await run_agent(
-        backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema={"type": "object"}
+        backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema={"type": "object"},
+        run_context=RunContext(InteractionPolicy(log_mode=True)),
     )
     assert result == payload  # the captured dict, NOT the stray [] scraped from prose
     assert isinstance(result, dict)  # the exact type the merge phase gate requires

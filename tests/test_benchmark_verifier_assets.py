@@ -6,15 +6,166 @@ absent-axis handling) plus the compiled metric's subprocess behavior, so
 later canonicalization work must preserve behavior rather than source text.
 """
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
+import sys
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+
+import pytest
 
 from daydream.benchmark.harbor import verifier_core
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def copied_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    from daydream.benchmark.harbor.build import _copy_assets
+
+    _copy_assets(tmp_path)
+    path = tmp_path / "tests" / "verifier_core.py"
+    spec = importlib.util.spec_from_file_location("copied_validation_verifier", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _finding_content() -> dict[str, Any]:
+    return {
+        "title": "Cache key omits tenant",
+        "body": "Two tenants can receive the same cached response.",
+        "severity": "high",
+        "path": "src/cache.py",
+        "start_line": 3,
+        "end_line": 5,
+    }
+
+
+@pytest.mark.parametrize("locationless", [False, True])
+def test_public_content_parser_preserves_valid_values(
+    copied_verifier: ModuleType, locationless: bool,
+) -> None:
+    raw = _finding_content()
+    raw.update(title=" t " + "x" * 497, body="é" * 4096, severity=None)
+    if locationless:
+        raw.update(path=None, start_line=None, end_line=None)
+    original = dict(raw)
+    for module in (verifier_core, copied_verifier):
+        parsed = module.parse_finding_content(raw)
+        assert parsed == original and parsed is not raw
+        assert raw == original
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"title": " "}, {"title": "x" * 501}, {"title": "a\x00b"},
+        {"body": ""}, {"body": "é" * 4096 + "x"}, {"body": "a\x00b"},
+        {"severity": "critical"}, {"path": ""}, {"path": "/src/cache.py"},
+        {"path": "src/../cache.py"}, {"path": "src/ca\x00che.py"},
+        {"start_line": True}, {"end_line": False}, {"start_line": 0},
+        {"end_line": -1}, {"start_line": "3"}, {"end_line": 2},
+        {"path": None}, {"start_line": None}, {"end_line": None},
+        {"path": None, "start_line": None},
+        {"path": None, "end_line": None},
+        {"start_line": None, "end_line": None},
+    ],
+)
+def test_public_content_parser_rejection_matches_copied_verifier(
+    copied_verifier: ModuleType, changes: dict[str, Any],
+) -> None:
+    raw = _finding_content() | changes
+    messages = []
+    for module in (verifier_core, copied_verifier):
+        with pytest.raises(module.VerifierError) as rejected:
+            module.parse_finding_content(raw)
+        messages.append(str(rejected.value))
+    assert messages[0] == messages[1]
+
+
+@pytest.mark.parametrize("shape", ["non-object", "missing-severity", "unknown-key"])
+def test_public_content_parser_requires_exact_keys(
+    copied_verifier: ModuleType, shape: str,
+) -> None:
+    raw: Any = _finding_content()
+    if shape == "non-object":
+        raw = []
+    elif shape == "missing-severity":
+        del raw["severity"]
+    else:
+        raw["finding_id"] = "a" * 64
+    for module in (verifier_core, copied_verifier):
+        with pytest.raises(module.VerifierError):
+            module.parse_finding_content(raw)
+
+
+def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType) -> None:
+    from daydream.benchmark.harbor import build, candidate
+
+    key = "case-validation-parity"
+    merged = {"file": "src/cache.py", "line": 3, "description": "Tenant omitted",
+              "rationale": "Responses cross tenants", "severity": "high"}
+    candidate_artifact = candidate.build_candidate_artifact(
+        key, candidate.build_candidate_findings([merged, merged], case_id=key)
+    )
+    findings: list[dict[str, Any]] = [
+        {"finding_id": "a" * 64, "title": "Cache key omits tenant", "body": "Wrong tenant",
+         "severity": "high", "location": {"path": "src/cache.py", "start_line": 3, "end_line": 5}},
+        {"finding_id": "b" * 64, "title": "Missing access check", "body": "No authorization",
+         "severity": None, "location": None},
+    ]
+    gold = build.build_gold_list(findings, key=key)
+    oracle = build.build_oracle_artifact(key, findings)
+    for artifact in (candidate_artifact, oracle, candidate.build_candidate_artifact(key, [])):
+        expected = [asdict(f) for f in verifier_core.validate_candidate_artifact(artifact)]
+        assert [asdict(f) for f in copied_verifier.validate_candidate_artifact(artifact)] == expected
+        assert [f["candidate_id"] for f in artifact["findings"]] == [f["candidate_id"] for f in expected]
+    assert candidate_artifact["findings"][0]["candidate_id"] != candidate_artifact["findings"][1]["candidate_id"]
+    for entries in (gold, []):
+        expected = [asdict(f) for f in verifier_core.validate_gold_set(entries, case_id=key)]
+        assert [asdict(f) for f in copied_verifier.validate_gold_set(entries, case_id=key)] == expected
+
+    # Mutate host-built artifacts at the input boundary: both deployed and host
+    # validators must reject them with their own public exception category.
+    located_gold = next(i for i, finding in enumerate(gold) if finding["path"] is not None)
+    for changes in ({"body": "é" * 4096 + "x"}, {"path": None}, {"severity": "critical"}):
+        bad_candidate = deepcopy(candidate_artifact)
+        bad_candidate["findings"][0].update(changes)
+        bad_gold = deepcopy(gold)
+        bad_gold[located_gold].update(changes)
+        for module in (verifier_core, copied_verifier):
+            with pytest.raises(module.VerifierError):
+                module.validate_candidate_artifact(bad_candidate)
+            with pytest.raises(module.VerifierError):
+                module.validate_gold_set(bad_gold, case_id=key)
+
+    for module in (verifier_core, copied_verifier):
+        wrong_id = deepcopy(candidate_artifact)
+        wrong_id["findings"][0]["candidate_id"] = "0" * 64
+        with pytest.raises(module.VerifierError, match="derived id"):
+            module.validate_candidate_artifact(wrong_id)
+        wrong_gold_id = deepcopy(gold)
+        wrong_gold_id[0]["finding_id"] = "0" * 64
+        with pytest.raises(module.VerifierError, match="canonical digest"):
+            module.validate_gold_set(wrong_gold_id, case_id=key)
+        too_many = deepcopy(candidate_artifact)
+        too_many["findings"] = candidate_artifact["findings"] * 51
+        with pytest.raises(module.VerifierError, match="100 findings"):
+            module.validate_candidate_artifact(too_many)
+        with pytest.raises(module.VerifierError, match="50 findings"):
+            module.validate_gold_set(gold * 26, case_id=key)
+        too_large = deepcopy(candidate_artifact)
+        too_large["findings"][0]["body"] = "x" * module.MAX_ARTIFACT_BYTES
+        with pytest.raises(module.VerifierError, match="1 MiB"):
+            module.validate_candidate_artifact(too_large)
 
 
 _MISSING = object()  # sentinel: bare "verifier_core" absent from sys.modules
@@ -277,4 +428,3 @@ def test_deployed_canonical_copy_exposes_score_review_surface(tmp_path: Path) ->
         "derive_candidate_id",
     ):
         assert name in ns and ns[name] is not None, name
-

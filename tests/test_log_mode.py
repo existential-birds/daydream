@@ -289,22 +289,22 @@ def test_log_mode_console_redacts_string_payloads() -> None:
     """phases.py imports agent's module-level console; in --log mode that
     console redacts string payloads, so phase/UI output (e.g. the failure
     handoff body) cannot bypass the log-mode redaction boundary."""
-    from daydream.agent import _LogRedactingConsole, set_log_mode
+    from daydream.agent import _LogRedactingConsole
+    from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 
     sentinel = REDACTION_SENTINEL
     buffer = io.StringIO()
     rec = _LogRedactingConsole(file=buffer, force_terminal=True, width=100)
 
-    set_log_mode(False)
-    try:
+    with bind_run_context(RunContext(InteractionPolicy())):
         # Normal mode: raw pass-through (Rich UI is unredacted by design).
         rec.print(f"handoff token={sentinel}")
         assert sentinel in buffer.getvalue()
 
-        # --log mode: the same emission path is redacted at the console boundary.
-        buffer.truncate(0)
-        buffer.seek(0)
-        set_log_mode(True)
+    # --log mode: the same emission path is redacted at the console boundary.
+    buffer.truncate(0)
+    buffer.seek(0)
+    with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
         rec.print(f"handoff token={sentinel}")
         out = buffer.getvalue()
         # Rich's highlighter splits the marker's brackets into styled spans, so
@@ -312,8 +312,6 @@ def test_log_mode_console_redacts_string_payloads() -> None:
         # exact bracketed string.
         assert "REDACTED_API_KEY" in out
         assert sentinel not in out
-    finally:
-        set_log_mode(False)
 
 
 class _CredentialSummarizerBackend(ScriptedBackend):
@@ -349,8 +347,8 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
     raw token to stdout. The console-level _LogRedactingConsole boundary is the
     mechanism (RD-1); this proves it on the real handoff path."""
     from daydream.agent import console as phases_console
-    from daydream.agent import set_log_mode
     from daydream.phases import _emit_failure_handoff
+    from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 
     # False-pass trap: the module console phases.py binds MUST be the redacting
     # console, otherwise a passing test would mean nothing.
@@ -365,8 +363,7 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
     # handoff_prompt (real run_agent path, backend mocked only).
     backend = _CredentialSummarizerBackend(f"token {sentinel}")
 
-    set_log_mode(True)
-    try:
+    with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
         await _emit_failure_handoff(
             backend, work, "failing test output", offer_clipboard=False,
         )
@@ -374,8 +371,6 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
         out = captured.out + captured.err
         assert sentinel not in out   # raw token never reaches stdout
         assert "REDACTED" in out     # redaction marker present
-    finally:
-        set_log_mode(False)
 
 
 def test_log_mode_trajectory_still_written(

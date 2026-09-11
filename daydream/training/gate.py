@@ -27,12 +27,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from daydream.json_utils import atomic_write_json
 from daydream.training.reward_model import _read_admitted_rows, score_comment
 
 _LABELS = {"accepted": 1.0, "rejected": 0.0}
@@ -167,7 +167,7 @@ def write_split_sidecar(
     Shared by every producer of the M18 resume-guard / stage-manifest split
     contract (:func:`freeze_split` and the corpus-v2 frozen-boundary path in
     :mod:`daydream.training.coordinator`), so the sidecar shape cannot drift
-    between them. Writes are atomic (tmp + ``os.replace``).
+    between them. Writes use the shared crash-safe JSON writer.
 
     Args:
         labels_path: Path of the labels file the sidecar sits beside.
@@ -188,9 +188,7 @@ def write_split_sidecar(
         "held_out_ids": sorted(held_out_ids),
         "train_ids": sorted(train_ids),
     }
-    tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
-    tmp.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
-    os.replace(tmp, sidecar_path)
+    atomic_write_json(sidecar_path, sidecar, sort_keys=True)
     return sidecar_path.name
 
 

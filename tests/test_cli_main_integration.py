@@ -42,7 +42,7 @@ from typing import Any, Literal
 
 import pytest
 
-from daydream import cli
+from daydream import cli, git_ops
 from daydream.phases import UnconfinedFindingError
 from tests.harness.git_helpers import bare_remote, commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
@@ -70,10 +70,24 @@ def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     - signal-handler install is a no-op concern here; leave it real — it is a
       cheap, side-effect-free part of the production entrypoint we want covered.
     """
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_repo_view", lambda repo: ("acme", Path(repo).name)
-    )
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
+    def repo_view(
+        repo: Path,
+        *,
+        auth: git_ops.GitHubAuth,
+    ) -> tuple[str, str]:
+        assert auth is git_ops.INHERIT_GITHUB_AUTH
+        return "acme", Path(repo).name
+
+    def pr_view(
+        _repo: Path,
+        _branch: int | None,
+        *,
+        auth: git_ops.GitHubAuth,
+    ) -> None:
+        assert auth is git_ops.INHERIT_GITHUB_AUTH
+
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", repo_view)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", pr_view)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
 
 
@@ -247,24 +261,23 @@ def test_non_tty_auto_enables_non_interactive(
     This drives the production entrypoint (``cli.main`` -> ``runner.run``) with a
     bare target and a non-TTY stdin. The interactivity axis must resolve from the
     environment (non-TTY) rather than requiring an explicit ``--non-interactive``
-    flag, so the captured ``set_non_interactive`` value is ``True``.
+    flag. The raw input boundary must never be called, and the review completes.
     """
     _silence(monkeypatch)
     _silence_cli_and_runner(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # piped stdin
     monkeypatch.delenv("CI", raising=False)
-    captured: dict[str, bool] = {}
-    monkeypatch.setattr(
-        "daydream.runner.set_non_interactive",
-        lambda v: captured.__setitem__("v", v),
-    )
+    def forbidden_input(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("non-TTY run must not prompt")
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", forbidden_input)
     monkeypatch.setattr(sys, "argv", ["daydream", str(multi_stack_target)])
 
     with pytest.raises(SystemExit):
         cli.main()
 
-    assert captured["v"] is True  # auto-enabled with no flag
+    assert (multi_stack_target / ".review-output.md").exists()
 
 
 def test_cli_main_prune_reanchor_removes_and_exits_0(

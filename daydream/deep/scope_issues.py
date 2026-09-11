@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from daydream.agent import console
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.git_ops import GitPathState
+from daydream.git_ops import INHERIT_GITHUB_AUTH, GitHubAuth, GitPathState
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
@@ -40,6 +40,7 @@ def enforce_authorized_fix_footprint(
     phase: str,
     round_number: int | None,
     file_scope_issues: bool = False,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> ScopeEnforcementResult:
     """Restore every run-external edit while preserving authorized siblings.
 
@@ -185,7 +186,7 @@ def enforce_authorized_fix_footprint(
     )
     for path, patch in filing_evidence:
         try:
-            _file_reverted_edit_issue(repo, path, patch)
+            _file_reverted_edit_issue(repo, path, patch, auth=auth)
         except Exception:  # noqa: BLE001 -- all issue filing is best-effort
             print_warning(
                 console,
@@ -194,7 +195,15 @@ def enforce_authorized_fix_footprint(
     return ScopeEnforcementResult(retained_paths=frozenset(retained), mutated=bool(to_restore))
 
 
-def _file_scope_issue(repo: Path, *, title: str, body: str, noun: str, ident: str) -> None:
+def _file_scope_issue(
+    repo: Path,
+    *,
+    title: str,
+    body: str,
+    noun: str,
+    ident: str,
+    auth: GitHubAuth,
+) -> None:
     """Best-effort: file one scope-related GitHub issue; never raise.
 
     The residual-edit filer records work the footprint guard restored instead
@@ -204,13 +213,13 @@ def _file_scope_issue(repo: Path, *, title: str, body: str, noun: str, ident: st
     from daydream import git_ops
 
     try:
-        url = git_ops.gh_issue_create(repo, title=title, body=body)
+        url = git_ops.gh_issue_create(repo, title=title, body=body, auth=auth)
         print_warning(console, f"Filed out-of-scope {noun} as issue: {url}")
     except Exception as exc:  # noqa: BLE001 -- best-effort issue filing
         print_warning(console, f"Could not file out-of-scope {noun} '{ident}' as issue: {exc}")
 
 
-def _scope_already_filed(repo: Path, marker: str) -> bool:
+def _scope_already_filed(repo: Path, marker: str, *, auth: GitHubAuth) -> bool:
     """Best-effort: has an open issue already filed this scope marker?
 
     GitHub is the store: scan open issues for the reverted edit's fingerprint
@@ -224,7 +233,7 @@ def _scope_already_filed(repo: Path, marker: str) -> bool:
     """
     from daydream import git_ops
 
-    issues = git_ops.gh_issue_list(repo, search="out-of-scope")
+    issues = git_ops.gh_issue_list(repo, search="out-of-scope", auth=auth)
     return any(marker in (issue.get("body") or "") for issue in issues)
 
 
@@ -262,7 +271,9 @@ def _scope_edit_marker(fingerprint: str) -> str:
     return f"<!-- daydream-scope-edit: {fingerprint} -->"
 
 
-def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
+def _file_reverted_edit_issue(
+    repo: Path, path: str, patch: str, *, auth: GitHubAuth
+) -> None:
     """Best-effort: file one reverted out-of-scope edit as a tracked GitHub issue.
 
     Issue #336 — the post-fix residual check reverts edits the fix pass made
@@ -276,7 +287,7 @@ def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
     # Compute the fingerprint marker once and thread it into both the dedup
     # lookup and the issue body, rather than recomputing it for each.
     marker = _scope_edit_marker(_scope_edit_fingerprint(path, patch))
-    if _scope_already_filed(repo, marker):
+    if _scope_already_filed(repo, marker, auth=auth):
         return
     title = f"[daydream] out-of-scope edit reverted: {path}"
     body = (
@@ -286,7 +297,7 @@ def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
         "Filed by daydream fix loop: out of scope for PR.\n"
         f"{marker}"
     )
-    _file_scope_issue(repo, title=title, body=body, noun="edit", ident=path)
+    _file_scope_issue(repo, title=title, body=body, noun="edit", ident=path, auth=auth)
 
 
 def _resolve_changed_files(ctx: FlowContext) -> set[str] | None:

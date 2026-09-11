@@ -406,11 +406,13 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
     stub.calls.clear()
     stub.merge_emit_str = None
-    # Force the fix gate to accept so the resume reaches the fix phase and
-    # consumes the salvaged partial items; without this the gate declines in
-    # non-interactive mode and the run stops (0) before any fix prompt exists.
+    # Accept the interactive fix gate so the resume consumes the salvaged
+    # partial items; decline the later commit and posting gates.
+    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.resolve_or_prompt", lambda *_a, **_k: True
+        "daydream.run_context._prompt_user",
+        lambda _console, message, _default: "y" if "Apply fixes" in message else "n",
     )
     assert await _run_deep(multi_stack_target, start_at="fix") == 0
     # Reopen #361: the resume loader surfaces the prior merge failure.

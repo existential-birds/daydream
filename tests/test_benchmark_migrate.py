@@ -529,15 +529,18 @@ def test_migrate_heals_interrupted_journal_under_lock(tmp_path: Path) -> None:
     other locked writer) so a crashed curator journal is healed before it reads;
     and its transaction op_id must be flat so no residue is left that bricks a
     later recover_startup with WorkspaceCorrupt."""
+    from tests.harness.transaction_faults import TransactionFaultDriver
+
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(path)
     mutated = dict(raw)
     mutated["curation"] = dict(raw["curation"])
     mutated["curation"]["state"] = "excluded"    # an interrupted mutation left in flight
-    with storage.Transaction(ws, op_id=f"migrate-{case_id}", kind="migrate") as tx:
+    faults = TransactionFaultDriver(ws, op_id=f"migrate-{case_id}", kind="migrate")
+    with faults.transaction as tx:
         tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
-        tx.inject_crash("target-1")              # target applied under 'committing', then halt
+        faults.halt_at("target-1")               # target applied under 'committing', then halt
     assert storage.load_yaml_strict(path)["curation"]["state"] == "excluded"
 
     migrate.migrate_workspace(ws)               # recover_startup under lock rolls the crash back

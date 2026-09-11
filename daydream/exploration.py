@@ -364,10 +364,10 @@ CACHE_KEY_FILENAME = "cache-key"
 
 # Bump when the artifact generator changes (e.g. a new boundary rendering) so
 # upgrades force regeneration instead of serving pre-upgrade artifacts on a key match.
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 
-def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str) -> str:
+def exploration_cache_key(head_sha: str, diff: str, tier: str) -> str:
     """Content key identifying one exploration pre-scan result.
 
     Exact-match only: a stale hit misgrounds every downstream review prompt, so
@@ -378,12 +378,12 @@ def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str)
 
     An exact key match is reused even with uncommitted worktree edits: the key
     intentionally excludes uncommitted edits because reuse is exact-match-only
-    on format version + head SHA + diff + tier + depth. The generating code is
+    on format version + head SHA + diff + tier. The generating code is
     versioned into the key too, so an upgrade that changes artifact rendering
     (``_CACHE_VERSION``) never serves stale pre-upgrade artifacts on an exact
     match.
     """
-    payload = f"{_CACHE_VERSION}\n{head_sha}\n{diff}\n{tier}\n{depth}"
+    payload = f"{_CACHE_VERSION}\n{head_sha}\n{diff}\n{tier}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

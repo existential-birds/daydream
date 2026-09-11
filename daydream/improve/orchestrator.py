@@ -13,7 +13,7 @@ import anyio
 
 import daydream.agent as agent
 from daydream import git_ops
-from daydream.agent import console, get_non_interactive, run_agent
+from daydream.agent import console, run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     AUDIT_CATEGORIES,
@@ -88,6 +88,7 @@ from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import canonicalize_working_directory
+from daydream.run_context import resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -454,7 +455,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         async with phase_scope(
             DaydreamPhase.EXPLORATION, stage="repo-survey"
         ):
-            exploration = await repo_scan(backend, target)
+            exploration = await repo_scan(backend, target, run_context=ctx.run_context)
         recon, _, _ = await run_agent(
             backend,
             target,
@@ -466,6 +467,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             read_only=True,
             persist_session=False,
             validate_structured_output=False,
+            run_context=ctx.run_context,
         )
 
     total_candidates = 0
@@ -1022,6 +1024,7 @@ async def _run_audit_assignments(
                                 ),
                                 read_only=True,
                                 persist_session=False,
+                                run_context=ctx.run_context,
                             )
                             raw_findings = (
                                 output.get("findings", [])
@@ -1406,6 +1409,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                                         ),
                                         read_only=True,
                                         persist_session=False,
+                                        run_context=ctx.run_context,
                                     )
                                 except Exception:  # noqa: BLE001 - no verdict fails closed
                                     output = {}
@@ -1584,12 +1588,14 @@ def _selection_prompt(
 async def _step_select(ctx: FlowContext) -> Stop | None:
     """Persist the user's plan selection or the silent unattended default."""
     default_findings: list[dict[str, Any]] = ctx.data["defects"]
-    publish_all = get_non_interactive() and _automatic_issue_publishing(ctx)
+    run_context = resolve_run_context(ctx.run_context)
+    interactive = run_context.policy.interactive
+    publish_all = not interactive and _automatic_issue_publishing(ctx)
     default_numbers = list(range(1, len(default_findings) + 1)) if publish_all else _default_selection(default_findings)
     mode = (
         "automatic-publishing"
         if publish_all
-        else ("non-interactive-default" if get_non_interactive() else "interactive")
+        else ("non-interactive-default" if not interactive else "interactive")
     )
     selected_numbers = default_numbers
 
@@ -1609,19 +1615,25 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
         print_success(console, "No vetted defect findings -- done.")
         return None
 
-    if not get_non_interactive():
+    if interactive:
         default_text = f"1-{len(default_numbers)}" if len(default_numbers) > 1 else "1"
         prompt = _selection_prompt(default_findings)
-        raw = agent.prompt_user(console, prompt, default=default_text)
+        raw = run_context.choice(
+            prompt,
+            default=default_text,
+            safe_default=default_text,
+            console=console,
+        )
         parsed = _parse_selection(
             raw,
             total=len(default_findings),
         )
         if parsed is None:
-            raw = agent.prompt_user(
-                console,
+            raw = run_context.choice(
                 "Invalid selection; try once more",
                 default=default_text,
+                safe_default=default_text,
+                console=console,
             )
             parsed = _parse_selection(
                 raw,
@@ -1869,6 +1881,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                             read_only=True,
                             persist_session=False,
                             validate_structured_output=False,
+                            run_context=ctx.run_context,
                         )
                     return output, aborted_reason
 
@@ -2253,6 +2266,7 @@ async def _step_publish_issues(ctx: FlowContext) -> None:
         publisher = IssuePublisher.connect(
             ctx.work.repo,
             repo_slug=ctx.config.pr_repo,
+            auth=ctx.github_execution.auth,
         )
     except ImprovePublishError as exc:
         safe_error = redact_text(str(exc))

@@ -24,13 +24,16 @@ from daydream.extensions.api import (
 from daydream.extensions.api import (
     LoopGroup as LoopGroup,
 )
+from daydream.github_app import GitHubExecutionInput
 from daydream.observability.spans import step_scope
+from daydream.run_context import bind_run_context, resolve_run_context
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactSession, PrivateWorkspaceOwner
     from daydream.backends import Backend
     from daydream.extensions.registry import FlowEntry, Registry
     from daydream.review_profile import Pipeline, ResolvedProfile
+    from daydream.run_context import RunContext
     from daydream.runner import RunConfig
     from daydream.workspace import AuditWorkspace, WorkContext
 
@@ -48,6 +51,13 @@ class FlowContext:
             + source kind + digest), set by the runner composition root (R1).
             ``None`` before resolution; ``strategy()``/``pipeline()`` fall back
             to the packaged default so steps stay operable either way.
+        run_context: Runner-owned interaction policy and backend lifecycle.
+            Direct extension callers may omit it to use the bound runtime or
+            the standalone default when the flow begins.
+        github_execution: Explicit GitHub authentication owned by this run.
+            Omitted by standalone extensions, it inherits the parent environment.
+            This runtime capability is excluded from repr and must not enter data
+            or artifact serializers.
     """
 
     config: RunConfig
@@ -58,6 +68,10 @@ class FlowContext:
     audit_workspace: AuditWorkspace | None = None
     private_workspace_owner: PrivateWorkspaceOwner | None = None
     artifacts: ArtifactSession | None = None
+    run_context: RunContext | None = field(default=None, kw_only=True)
+    github_execution: GitHubExecutionInput = field(
+        default_factory=GitHubExecutionInput, repr=False, compare=False, kw_only=True,
+    )
     _backend_cache: dict[
         tuple[str, str | None, str | None, Path | None], Backend
     ] = field(
@@ -170,13 +184,16 @@ async def run_flow(registry: Registry, flow_name: str, ctx: FlowContext) -> int:
     falling off the end returns 0. A ``BreakLoop`` outside a loop group is
     ignored.
     """
-    entries = registry.flow(flow_name)
-    steps = _resolve_steps(registry, flow_name, entries)
-    for entry in entries:
-        if isinstance(entry, str):
-            signal = await _run_step(steps[entry], ctx)
-        else:
-            signal = await _run_group(entry, steps, ctx)
-        if isinstance(signal, Stop):
-            return signal.exit_code
-    return 0
+    runtime = resolve_run_context(ctx.run_context)
+    ctx.run_context = runtime
+    with bind_run_context(runtime):
+        entries = registry.flow(flow_name)
+        steps = _resolve_steps(registry, flow_name, entries)
+        for entry in entries:
+            if isinstance(entry, str):
+                signal = await _run_step(steps[entry], ctx)
+            else:
+                signal = await _run_group(entry, steps, ctx)
+            if isinstance(signal, Stop):
+                return signal.exit_code
+        return 0

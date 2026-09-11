@@ -41,7 +41,6 @@ import jsonschema
 
 import daydream
 from daydream import git_ops
-from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import DIAGRAM_KINDS
 from daydream.extensions import (
     CommentFinding,
@@ -50,9 +49,10 @@ from daydream.extensions import (
     SummaryFinding,
     get_registry,
 )
-from daydream.git_ops import GitError, PathAbsentError
+from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.repository_paths import valid_repository_file_path
+from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import normalize_severity
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_error, print_info, print_success, print_warning
@@ -64,7 +64,6 @@ if TYPE_CHECKING:
 
 
 _logger = logging.getLogger(__name__)
-
 
 # --- Data shapes ------------------------------------------------------------
 
@@ -198,6 +197,7 @@ class _ClassifiedIssues:
 # --- Public entry points ----------------------------------------------------
 
 
+@bind_resolved_run_context
 async def post_review_to_pr_from_report(
     target_dir: Path,
     merged_items_path: Path,
@@ -207,6 +207,8 @@ async def post_review_to_pr_from_report(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    run_context: RunContext | None = None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -234,6 +236,7 @@ async def post_review_to_pr_from_report(
         whether a non-posting run is a failure (comment mode) or a
         warn-and-continue (default deep flow).
     """
+    run_context = resolve_run_context(run_context)
     if not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
     try:
@@ -259,6 +262,8 @@ async def post_review_to_pr_from_report(
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
         diagram_blocks=diagram_blocks,
+        run_context=run_context,
+        auth=auth,
     )
 
 
@@ -521,7 +526,9 @@ def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
     raise GitError("invalid PR row: incomplete head repository metadata")
 
 
-def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
+def _pr_info_from_row(
+    target_dir: Path, row: dict[str, Any], *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+) -> PRInfo:
     """Build :class:`PRInfo` from a ``gh`` PR row, resolving the owner/repo slug.
 
     ``owner``/``repo`` (the posting target) come from ``gh repo view`` — the
@@ -552,7 +559,7 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
     git_ops.validate_branch_name(target_dir, head_ref)
     git_ops.validate_branch_name(target_dir, base_ref)
 
-    owner, repo = git_ops.gh_repo_view_required(target_dir)
+    owner, repo = git_ops.gh_repo_view_required(target_dir, auth=auth)
     base_slug = f"{owner}/{repo}"
     matching_remotes: list[str] = []
     for remote, raw_url in git_ops.remote_urls(target_dir).items():
@@ -578,7 +585,9 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
     )
 
 
-def find_open_pr(target_dir: Path) -> PRInfo | None:
+def find_open_pr(
+    target_dir: Path, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+) -> PRInfo | None:
     """Locate the open PR for the current branch.
 
     Returns:
@@ -591,13 +600,15 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
     branch = _current_branch(target_dir)
     if not branch:
         return None
-    rows = git_ops.gh_pr_list_for_branch(target_dir, branch)
+    rows = git_ops.gh_pr_list_for_branch(target_dir, branch, auth=auth)
     if not rows:
         return None
-    return _pr_info_from_row(target_dir, rows[0])
+    return _pr_info_from_row(target_dir, rows[0], auth=auth)
 
 
-def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
+def find_pr_by_number(
+    target_dir: Path, pr_number: int, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+) -> PRInfo | None:
     """Resolve :class:`PRInfo` for an explicit PR number via ``gh pr view``.
 
     Used when the caller pins the target PR (``--pr-number``) instead of
@@ -610,10 +621,10 @@ def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
         GitError: If repository identity, PR data, or local Git objects cannot
             be resolved safely.
     """
-    data = git_ops.gh_pr_view(target_dir, pr_number)
+    data = git_ops.gh_pr_view(target_dir, pr_number, auth=auth)
     if data is None:
         return None
-    return _pr_info_from_row(target_dir, data)
+    return _pr_info_from_row(target_dir, data, auth=auth)
 
 
 # --- Line resolution + hunk classification --------------------------------
@@ -774,6 +785,7 @@ def file_hunks(
     path: str,
     *,
     pr_number: int | None = None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> list[tuple[int, int]]:
     """Return (start, end) inclusive line ranges on the head side for `path`.
 
@@ -799,15 +811,21 @@ def file_hunks(
         git_failed = True
 
     if git_failed and pr_number is not None:
-        diff_text = _gh_pr_diff_for_path(target_dir, pr_number, path)
+        diff_text = _gh_pr_diff_for_path(target_dir, pr_number, path, auth=auth)
 
     return _parse_hunks(diff_text)
 
 
-def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
+def _gh_pr_diff_for_path(
+    target_dir: Path,
+    pr_number: int,
+    path: str,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> str:
     """Fetch the PR's full diff via `gh pr diff` and return just the block for `path`."""
     try:
-        full_diff = git_ops.gh_pr_diff(target_dir, pr_number)
+        full_diff = git_ops.gh_pr_diff(target_dir, pr_number, auth=auth)
     except GitError:
         return ""
     # Pick the `diff --git a/<path> b/<path>` block.
@@ -829,7 +847,9 @@ def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
 _DIFF_GIT_HEADER = re.compile(r"(?m)^diff --git a/.+ b/(.+)$")
 
 
-def pr_changed_files(target_dir: Path, pr: PRInfo) -> set[str]:
+def pr_changed_files(
+    target_dir: Path, pr: PRInfo, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+) -> set[str]:
     """Return the head-side paths touched by ``pr``.
 
     Primary path is ``git diff <base>..<head>``; when the local clone cannot
@@ -845,7 +865,7 @@ def pr_changed_files(target_dir: Path, pr: PRInfo) -> set[str]:
     if changed:
         return changed
     try:
-        full_diff = git_ops.gh_pr_diff(target_dir, pr.number)
+        full_diff = git_ops.gh_pr_diff(target_dir, pr.number, auth=auth)
     except GitError:
         return set()
     return set(_DIFF_GIT_HEADER.findall(full_diff))
@@ -902,7 +922,11 @@ def snap_to_hunk(
 
 
 def classify(
-    target_dir: Path, pr: PRInfo, issues: list[ParsedIssue]
+    target_dir: Path,
+    pr: PRInfo,
+    issues: list[ParsedIssue],
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> _ClassifiedIssues:
     """Split issues into inline, file-level, and body-only placements.
 
@@ -921,7 +945,7 @@ def classify(
     """
     out = _ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
-    changed_files = pr_changed_files(target_dir, pr)
+    changed_files = pr_changed_files(target_dir, pr, auth=auth)
 
     def _unplaced(issue: ParsedIssue) -> None:
         if issue.path in changed_files:
@@ -954,6 +978,7 @@ def classify(
                 pr.head_sha,
                 issue.path,
                 pr_number=pr.number,
+                auth=auth,
             )
         hunks = hunks_cache[issue.path]
         line = resolve_line(target_dir, pr.head_sha, issue, hunks)
@@ -1580,6 +1605,8 @@ def _resolve_pr(
     target_dir: Path,
     console: Console,
     pr_number: int | None,
+    *,
+    auth: GitHubAuth,
 ) -> PRInfo | None:
     """Resolve the target PR for posting.
 
@@ -1593,7 +1620,7 @@ def _resolve_pr(
         cannot be resolved.
     """
     if pr_number is not None:
-        pr = find_pr_by_number(target_dir, pr_number)
+        pr = find_pr_by_number(target_dir, pr_number, auth=auth)
         if pr is None:
             print_warning(
                 console,
@@ -1601,7 +1628,7 @@ def _resolve_pr(
             )
             return None
         return pr
-    pr = find_open_pr(target_dir)
+    pr = find_open_pr(target_dir, auth=auth)
     if pr is None:
         print_warning(
             console,
@@ -1611,6 +1638,7 @@ def _resolve_pr(
     return pr
 
 
+@bind_resolved_run_context
 async def _post(
     target_dir: Path,
     issues: list[ParsedIssue],
@@ -1620,16 +1648,19 @@ async def _post(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    run_context: RunContext | None = None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
+    run_context = resolve_run_context(run_context)
     try:
-        pr = _resolve_pr(target_dir, console, pr_number)
+        pr = _resolve_pr(target_dir, console, pr_number, auth=auth)
     except GitError as exc:
         print_error(console, "PR Lookup Failed", str(exc))
         return PostStatus.FAILED
     if pr is None:
         return PostStatus.NO_PR
 
-    classified = classify(target_dir, pr, issues)
+    classified = classify(target_dir, pr, issues, auth=auth)
     if (
         classified.is_empty()
         and not approve_on_clean
@@ -1651,9 +1682,7 @@ async def _post(
     event_note = " — will post event: APPROVE" if clean else ""
     print_info(console, f"PR #{pr.number}: {summary}{event_note}")
 
-    if not post and not resolve_or_prompt(
-        assume=get_assume(),
-        interactive=not get_non_interactive(),
+    if not post and not run_context.confirm(
         safe_default=False,
         question=(
             "Post an APPROVE review for this clean PR? [y/N]"
@@ -1661,13 +1690,16 @@ async def _post(
             else "Post these as a PR review? [y/N]"
         ),
         default="n",
+        console=console,
     ):
         print_info(console, "Skipped posting to PR.")
         return PostStatus.NOTHING_TO_POST
 
     # File-level comments post first: a failure here has to fall back into the
     # review body, which is built below.
-    posted, failed = _submit_file_level_comments(target_dir, pr, classified.file_level)
+    posted, failed = _submit_file_level_comments(
+        target_dir, pr, classified.file_level, auth=auth
+    )
     if failed:
         classified.file_level = posted
         classified.body_only.extend(failed)
@@ -1679,7 +1711,7 @@ async def _post(
     payload = build_payload(
         pr, classified, approve_on_clean=approve_on_clean, diagram_blocks=diagram_blocks
     )
-    review_url, error_msg = _submit_review(target_dir, pr, payload)
+    review_url, error_msg = _submit_review(target_dir, pr, payload, auth=auth)
     if review_url is None:
         # ``error_msg`` carries the GitError text from git_ops, which includes
         # the preserved tempfile path on failure (see git_ops.gh_api).
@@ -1699,7 +1731,11 @@ async def _post(
 
 
 def _submit_file_level_comments(
-    target_dir: Path, pr: PRInfo, issues: list[ParsedIssue]
+    target_dir: Path,
+    pr: PRInfo,
+    issues: list[ParsedIssue],
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[list[ParsedIssue], list[ParsedIssue]]:
     """POST each issue as a file-level review comment; return the ones that failed.
 
@@ -1727,7 +1763,9 @@ def _submit_file_level_comments(
             "body": _format_file_level_body(issue),
         }
         try:
-            git_ops.gh_api(target_dir, endpoint, method="POST", input_data=payload)
+            git_ops.gh_api(
+                target_dir, endpoint, method="POST", input_data=payload, auth=auth
+            )
         except GitError:
             failed.append(issue)
         else:
@@ -1736,7 +1774,11 @@ def _submit_file_level_comments(
 
 
 def _submit_review(
-    target_dir: Path, pr: PRInfo, payload: dict[str, Any]
+    target_dir: Path,
+    pr: PRInfo,
+    payload: dict[str, Any],
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[str | None, str | None]:
     """POST the review payload via ``gh api``.
 
@@ -1747,7 +1789,9 @@ def _submit_review(
     """
     endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
     try:
-        data = git_ops.gh_api(target_dir, endpoint, method="POST", input_data=payload)
+        data = git_ops.gh_api(
+            target_dir, endpoint, method="POST", input_data=payload, auth=auth
+        )
     except GitError as exc:
         return None, str(exc)
     if not isinstance(data, dict):
@@ -1763,6 +1807,7 @@ def post_diagram_comment_to_pr(
     body: str,
     kinds: list[str],
     bot_login: str | None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[str | None, str | None]:
     """Post a standalone grounded-diagram issue comment on a PR (issue #1113).
 
@@ -1806,7 +1851,7 @@ def post_diagram_comment_to_pr(
     else:
         try:
             prior = fetch_prior_diagram_comments(
-                target_dir, repo_slug, pr.number, bot_login=bot_login
+                target_dir, repo_slug, pr.number, bot_login=bot_login, auth=auth
             )
         except GitError as exc:
             print_warning(console, f"Could not inventory prior diagram comments: {exc}")
@@ -1817,7 +1862,11 @@ def post_diagram_comment_to_pr(
     endpoint = f"/repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments"
     try:
         data = git_ops.gh_api(
-            target_dir, endpoint, method="POST", input_data={"body": "\n\n".join(chunks)}
+            target_dir,
+            endpoint,
+            method="POST",
+            input_data={"body": "\n\n".join(chunks)},
+            auth=auth,
         )
     except GitError as exc:
         return None, str(exc)
@@ -1831,7 +1880,7 @@ def post_diagram_comment_to_pr(
     for comment in prior:
         if not set(comment.kinds) & current_kinds:
             continue
-        if not minimize_comment(target_dir, comment.node_id):
+        if not minimize_comment(target_dir, comment.node_id, auth=auth):
             print_warning(
                 console,
                 f"Failed to minimize prior diagram comment {comment.node_id}",
@@ -2134,10 +2183,18 @@ class _HeadEvidence:
     rendered diagram would lose its diagram there.
     """
 
-    def __init__(self, target_dir: Path, head_sha: str, repo_slug: str | None) -> None:
+    def __init__(
+        self,
+        target_dir: Path,
+        head_sha: str,
+        repo_slug: str | None,
+        *,
+        auth: GitHubAuth,
+    ) -> None:
         self._target_dir = target_dir
         self._head_sha = head_sha
         self._repo_slug = repo_slug
+        self._auth = auth
         self._local: bool | None = None
         self._bytes: dict[str, bytes] = {}
         self._lines: dict[str, list[str]] = {}
@@ -2173,7 +2230,7 @@ class _HeadEvidence:
             raise GitError(f"{self._target_dir} does not contain commit {self._head_sha}")
         else:
             data = git_ops.gh_file_at_ref(
-                self._target_dir, self._repo_slug, self._head_sha, path
+                self._target_dir, self._repo_slug, self._head_sha, path, auth=self._auth
             )
         self._bytes[path] = data
         return data
@@ -2305,6 +2362,7 @@ def validate_diagram_payload(
     target_dir: Path | None = None,
     head_sha: str | None = None,
     repo_slug: str | None = None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> str | None:
     """Validate each rendered spec and its grounding attestation before posting.
 
@@ -2349,7 +2407,7 @@ def validate_diagram_payload(
     if not isinstance(results, dict):
         return "diagrams payload has no 'results' object"
     head = (
-        _HeadEvidence(target_dir, head_sha, repo_slug)
+        _HeadEvidence(target_dir, head_sha, repo_slug, auth=auth)
         if target_dir is not None and head_sha is not None
         else None
     )
@@ -2385,6 +2443,7 @@ def _post_diagram_artifact(
     *,
     console: Console,
     bot_login: str | None,
+    auth: GitHubAuth,
 ) -> int:
     """Post a ``kind == "diagram"`` artifact as a standalone PR comment.
 
@@ -2408,6 +2467,7 @@ def _post_diagram_artifact(
         target_dir=target_dir,
         head_sha=pr.head_sha,
         repo_slug=f"{pr.owner}/{pr.repo}",
+        auth=auth,
     )
     if problem is not None:
         print_error(console, "Diagram Artifact Rejected", problem)
@@ -2415,7 +2475,7 @@ def _post_diagram_artifact(
     body = render_diagram_comment_body(payload)
     kinds = diagram_comment_kinds(payload)
     url, error = post_diagram_comment_to_pr(
-        target_dir, pr, body=body, kinds=kinds, bot_login=bot_login
+        target_dir, pr, body=body, kinds=kinds, bot_login=bot_login, auth=auth
     )
     if url is None:
         suffix = f" ({error})" if error else ""
@@ -2435,6 +2495,7 @@ def post_findings_from_artifact(
     console: Console,
     bot_login: str | None = None,
     approve_on_clean: bool = False,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> int:
     """Post a Phase A findings artifact to the PR (the Phase B privileged poster).
 
@@ -2521,7 +2582,12 @@ def post_findings_from_artifact(
     # the bot's real open findings. Branch before ``fetch_prior_findings``.
     if artifact.kind == "diagram":
         return _post_diagram_artifact(
-            artifact, pr, target_dir, console=console, bot_login=effective_login
+            artifact,
+            pr,
+            target_dir,
+            console=console,
+            bot_login=effective_login,
+            auth=auth,
         )
 
     diagram_blocks: str | None = None
@@ -2531,6 +2597,7 @@ def post_findings_from_artifact(
             target_dir=target_dir,
             head_sha=pr.head_sha,
             repo_slug=repo,
+            auth=auth,
         )
         # Issue #1176: a diagram problem must not discard findings that passed
         # their own schema, fingerprint and event-fact validation. Dropping the
@@ -2542,14 +2609,16 @@ def post_findings_from_artifact(
             diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
 
     try:
-        prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
+        prior = fetch_prior_findings(
+            target_dir, repo, pr_number, bot_login=effective_login, auth=auth
+        )
     except GitError as exc:
         print_error(console, "Prior-Finding Inventory Failed", str(exc))
         return 1
 
     plan = partition([f.fingerprint for f in artifact.findings], prior)
     if plan.stale:
-        resolved, failed = resolve_threads(target_dir, plan.stale)
+        resolved, failed = resolve_threads(target_dir, plan.stale, auth=auth)
         print_info(console, f"Stale findings minimized: {resolved} succeeded, {failed} failed.")
 
     new_fingerprints = set(plan.new)
@@ -2590,7 +2659,9 @@ def post_findings_from_artifact(
         )
         return 0
 
-    posted_files, failed_files = _submit_file_level_comments(target_dir, pr, classified.file_level)
+    posted_files, failed_files = _submit_file_level_comments(
+        target_dir, pr, classified.file_level, auth=auth
+    )
     if failed_files:
         classified.file_level = posted_files
         classified.body_only.extend(failed_files)
@@ -2606,7 +2677,7 @@ def post_findings_from_artifact(
         approve_on_clean=can_approve,
         diagram_blocks=diagram_blocks,
     )
-    review_url, error_msg = _submit_review(target_dir, pr, payload)
+    review_url, error_msg = _submit_review(target_dir, pr, payload, auth=auth)
     if review_url is None:
         suffix = f" ({error_msg})" if error_msg else ""
         already = (

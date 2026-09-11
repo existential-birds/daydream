@@ -793,8 +793,8 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
     ``manifest`` keeps the complete after-state, and ``transactions/`` is left
     empty after recovery.
     """
-    from daydream.benchmark import storage
     from daydream.benchmark.storage import recover_startup
+    from tests.harness.transaction_faults import TransactionFaultDriver
 
     for boundary in ("journal", "data", "manifest"):
         case_dir = tmp_path / "cases"
@@ -804,11 +804,12 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
         (case_dir / "pr-000001-aaaaaaaaaaaa.yaml").write_text("case-before")
         (snap_dir / "pr-000001-aaaaaaaaaaaa.bundle").write_bytes(b"bundle-before")
         (tmp_path / "benchmark.yaml").write_text("ledger-before")
-        with storage.Transaction(tmp_path, op_id=f"freeze-{boundary}", kind="freeze") as tx:
+        faults = TransactionFaultDriver(tmp_path, op_id=f"freeze-{boundary}", kind="freeze")
+        with faults.transaction as tx:
             tx.stage("snapshots/pr-000001-aaaaaaaaaaaa.bundle", b"bundle-after")
             tx.stage("cases/pr-000001-aaaaaaaaaaaa.yaml", b"case-after")
             tx.stage("benchmark.yaml", b"ledger-after")
-            tx.inject_crash(boundary)
+            faults.halt_at(boundary)
         recover_startup(tmp_path)
         if boundary in ("journal", "data"):
             assert (snap_dir / "pr-000001-aaaaaaaaaaaa.bundle").read_bytes() == b"bundle-before"

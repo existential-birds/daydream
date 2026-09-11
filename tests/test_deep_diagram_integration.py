@@ -85,10 +85,12 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
         repo="widgets",
         url="https://example/pr/123",
     )
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _target: fake_pr)
+    monkeypatch.setattr(
+        "daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr
+    )
 
     def _capture(
-        _target: Path, _pr: pr_review.PRInfo, payload: dict[str, Any]
+        _target: Path, _pr: pr_review.PRInfo, payload: dict[str, Any], **_kwargs: Any
     ) -> tuple[str, None]:
         captured.payloads.append(payload)
         return "https://example/pr/123#review-1", None

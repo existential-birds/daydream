@@ -506,11 +506,11 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
 
     monkeypatch.setattr(
         "daydream.pr_review.find_open_pr",
-        lambda target_dir: fake_pr,
+        lambda target_dir, **_kwargs: fake_pr,
     )
 
     def _capture(
-        target_dir: Path, pr: pr_review.PRInfo, payload: dict[str, Any]
+        target_dir: Path, pr: pr_review.PRInfo, payload: dict[str, Any], **_kwargs: Any
     ) -> tuple[str, None]:
         captured.payloads.append(payload)
         return "https://example/pr/123#review-1", None
@@ -557,51 +557,14 @@ def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase prompts: y for intent confirmation + PR post; n for fix gate.
-
-    In pytest stdin is not a TTY, so ``runner._resolve_interactive`` returns
-    False and ``set_non_interactive(True)`` is called. Every gate that uses
-    ``resolve_or_prompt(safe_default=False)`` then auto-declines without
-    prompting -- including the PR-post gate. We must force interactive mode
-    the same way ``_force_interactive`` does (in test_deep_orchestrator.py).
-
-    Both the orchestrator fix gate ("Apply fixes now?") and the PR-post gate
-    ("Post these as a PR review?") route through resolve_or_prompt in agent.py,
-    which calls prompt_user from its own (agent) namespace. We dispatch on the
-    question text so the fix gate gets "n" (skip fixes) and PR-post gets "y".
-    """
-    # Force interactive mode so resolve_gate defers to prompt_user.
+    """Accept intent and PR posting through the shared gateway; decline fixes."""
     monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
 
-    monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: "y", raising=False,
-    )
-    monkeypatch.setattr(
-        "daydream.deep.orchestrator.prompt_user",
-        lambda *a, **kw: "n",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "daydream.pr_review.prompt_user",
-        lambda *a, **kw: "y",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "daydream.runner.prompt_user", lambda *a, **kw: "n", raising=False,
-    )
+    def answer(_console: Any, message: str, default: str = "") -> str:
+        return "n" if "apply fix" in message.lower() else "y"
 
-    def _agent_prompt(console: Any, message: str, default: str = "") -> str:  # noqa: ARG001
-        # Decline the fix gate (proceed to PR post without fixes); approve PR post.
-        if "apply fixes" in message.lower() or "apply fix" in message.lower():
-            return "n"
-        if "post these" in message.lower() or "pr review" in message.lower():
-            return "y"
-        return "y"  # all other gates (intent confirmation, etc.)
-
-    monkeypatch.setattr(
-        "daydream.agent.prompt_user", _agent_prompt, raising=False,
-    )
+    monkeypatch.setattr("daydream.run_context._prompt_user", answer)
 
 
 # Markdown extraction helpers.

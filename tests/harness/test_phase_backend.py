@@ -19,8 +19,7 @@ ISSUE = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
 @pytest.fixture
 def mock_ui_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Decline interactive gates so the run runs unattended."""
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
-    monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "n")
 
 
 @pytest.mark.asyncio

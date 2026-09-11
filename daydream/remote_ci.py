@@ -19,8 +19,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import anyio
 
 from daydream.git_ops import (
+    INHERIT_GITHUB_AUTH,
     DeadlineExpired,
     GitError,
+    GitHubAuth,
     GitHubPageLimits,
     GitHubRequestBudget,
     gh_actions_workflows,
@@ -883,6 +885,11 @@ class GitHubRemoteCIFetcher:
     """Fetch normalized CI evidence through the sole async GitHub boundary."""
 
     limits: RemoteCILimits = field(default_factory=RemoteCILimits)
+    auth: GitHubAuth = field(
+        default=INHERIT_GITHUB_AUTH,
+        repr=False,
+        compare=False,
+    )
 
     async def fetch(
         self, target: RemoteCITarget, *, budget: GitHubRequestBudget
@@ -899,6 +906,7 @@ class GitHubRemoteCIFetcher:
                     name,
                     target.pr_number,
                     budget=budget,
+                    auth=self.auth,
                 ),
                 target,
             )
@@ -909,6 +917,7 @@ class GitHubRemoteCIFetcher:
                 target.base_ref,
                 limits=pages,
                 budget=budget,
+                auth=self.auth,
             )
             classic = await gh_classic_required_checks(
                 target.target_dir,
@@ -916,6 +925,7 @@ class GitHubRemoteCIFetcher:
                 name,
                 target.base_ref,
                 budget=budget,
+                auth=self.auth,
             )
             policy = parse_required_policy(active_rules, classic)
             workflows = parse_active_workflows(
@@ -925,6 +935,7 @@ class GitHubRemoteCIFetcher:
                     name,
                     limits=pages,
                     budget=budget,
+                    auth=self.auth,
                 )
             )
             head = await self._observations(
@@ -970,6 +981,7 @@ class GitHubRemoteCIFetcher:
             sha,
             limits=pages,
             budget=budget,
+            auth=self.auth,
         )
         statuses = await gh_commit_statuses(
             target.target_dir,
@@ -978,6 +990,7 @@ class GitHubRemoteCIFetcher:
             sha,
             limits=pages,
             budget=budget,
+            auth=self.auth,
         )
         return parse_observations(
             checks, statuses, expected_sha=sha, limit=self.limits.diagnostic_chars

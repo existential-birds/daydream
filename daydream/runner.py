@@ -37,13 +37,7 @@ import anyio
 from rich.markup import escape as escape_markup
 
 from daydream import git_ops, github_app
-from daydream.agent import (
-    console,
-    set_assume,
-    set_log_mode,
-    set_non_interactive,
-    set_quiet_mode,
-)
+from daydream.agent import console
 from daydream.artifact_visibility import (
     ArtifactDisposition,
     ArtifactSession,
@@ -88,6 +82,7 @@ from daydream.phases import (
     _git_log,
 )
 from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
+from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
@@ -103,7 +98,6 @@ from daydream.ui import (
     print_info,
     print_phase_hero,
     print_success,
-    prompt_user,
 )
 from daydream.workspace import (
     AuditWorkspace,
@@ -323,7 +317,6 @@ class RunConfig:
     fix_model: str | None = None
     test_model: str | None = None
     exploration_context: ExplorationContext | None = None
-    exploration_depth: int = 1
     exploration_model: str | None = None
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None
@@ -1017,8 +1010,6 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
     if config is None:
         config = RunConfig()
 
-    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
-
     # Codex backends need shell output visible (the commands ARE the signal), so
     # disable quiet when any phase resolves to codex. Done before backend construction.
     quiet = config.quiet
@@ -1029,12 +1020,24 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
         )
         if codex_in_use:
             quiet = False
-    set_quiet_mode(quiet)
-    # Interactivity (--non-interactive flag, else non-TTY stdin, else CI) and the
-    # orthogonal ``assume`` axis (--yes) both feed ``resolve_gate`` at each gate.
-    set_non_interactive(not _resolve_interactive(config))
-    set_assume(config.assume)
-    set_log_mode(config.log_mode)
+    run_context = RunContext(InteractionPolicy(
+        assume=config.assume,
+        interactive=_resolve_interactive(config),
+        quiet=quiet,
+        log_mode=config.log_mode,
+    ))
+    with bind_run_context(run_context):
+        return await _run_with_context(
+            config, private_roots=private_roots, run_context=run_context,
+        )
+
+
+async def _run_with_context(
+    config: RunConfig, *, private_roots: PrivateRootLocations | None,
+    run_context: RunContext,
+) -> int:
+    """Execute with the runner's immutable policy bound before any output."""
+    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
     # Build the per-run registry (builtins + optional daydream_ext) and set it
     # on the ContextVar so every downstream phase resolves through it.
@@ -1067,7 +1070,9 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
     if config.target is not None:
         target_dir = Path(config.target).resolve()
     else:
-        target_input = prompt_user(console, "Enter target directory", ".")
+        target_input = run_context.choice(
+            "Enter target directory", default=".", safe_default=".",
+        )
         target_dir = Path(target_input).resolve()
 
     if not target_dir.is_dir():
@@ -1092,7 +1097,7 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
             # succeeds. Posting flows may acquire an installation token here;
             # read-only flows preserve the ambient identity.
             try:
-                config.identity = github_app.resolve_run_identity(
+                session = github_app.resolve_run_identity(
                     target_dir, config.pr_repo, is_posting=_run_posts_to_github(config),
                 )
             except github_app.GitHubAppError as exc:
@@ -1100,10 +1105,14 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
                 observed.finish(1)
                 return 1
 
+            config.identity = session.identity.login
+            run_context.github_identity = session.identity
+
             # Report-only flows skip the test phase and its .env copy.
             skip_tests = config.output_mode != "loop" or config.flow_name in ("review", "improve")
             result = await _run_workspace(
                 config, target_dir, skip_tests=skip_tests, private_owner=private_owner,
+                run_context=run_context, github_execution=session.execution,
             )
             observed.finish(result)
             return result
@@ -1168,7 +1177,9 @@ def _finalize_run_artifacts(
 
 
 async def _run_workspace(
-    config: RunConfig, target_dir: Path, *, skip_tests: bool, private_owner: PrivateWorkspaceOwner
+    config: RunConfig, target_dir: Path, *, skip_tests: bool,
+    private_owner: PrivateWorkspaceOwner, run_context: RunContext,
+    github_execution: github_app.GitHubExecutionInput,
 ) -> int:
     """Keep workspace errors inside the run span so returned failures are recorded."""
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
@@ -1183,7 +1194,7 @@ async def _run_workspace(
             extra_copy=config.extra_copy,
             skip_tests=skip_tests,
             allow_unborn=config.flow_name == "improve",
-            private_owner=private_owner,
+            private_owner=private_owner, auth=github_execution.auth,
         ) as work:
             session_id = str(uuid.uuid4())
             async with open_artifact_session(work, session_id=session_id, owner=private_owner) as artifacts:
@@ -1204,7 +1215,10 @@ async def _run_workspace(
                 primary: BaseException | None = None
                 result = 1
                 try:
-                    result = await _dispatch(work, dispatch_config, run_artifacts)
+                    result = await _dispatch(
+                        work, dispatch_config, run_artifacts, run_context=run_context,
+                        github_execution=github_execution,
+                    )
                 except BaseException as exc:
                     primary = exc
 
@@ -1294,7 +1308,11 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
 _DEEP_FLOW_ALIASES = ("review", "shallow", "deep")
 
 
-async def _dispatch_selected_flow(work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts) -> int:
+async def _dispatch_selected_flow(
+    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
+    run_context: RunContext,
+    github_execution: github_app.GitHubExecutionInput,
+) -> int:
     """Route an explicit ``--flow <name>`` selection.
 
     ``review`` / ``shallow`` / ``deep`` route to the single deep flow (as
@@ -1313,14 +1331,20 @@ async def _dispatch_selected_flow(work: WorkContext, config: RunConfig, run_arti
     if name in _DEEP_FLOW_ALIASES:
         if name in ("shallow", "deep"):
             _require_reviewable_branch(work, config)
-        return await _run_loop_deep(work, config, run_artifacts)
+        return await _run_loop_deep(
+            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        )
     if name == "improve":
-        return await _run_improve(work, config, run_artifacts)
+        return await _run_improve(
+            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        )
 
     # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
     # by run()'s Extension Error panel (exit 1). Do not swallow it here.
     get_registry().flow(name)
-    return await _run_custom_flow(work, config, run_artifacts)
+    return await _run_custom_flow(
+        work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+    )
 
 
 def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
@@ -1336,7 +1360,11 @@ def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
     return 1
 
 
-async def _dispatch(work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts) -> int:
+async def _dispatch(
+    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
+    run_context: RunContext,
+    github_execution: github_app.GitHubExecutionInput,
+) -> int:
     """Verify the approved head, then route to the resolved flow.
 
     Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
@@ -1357,29 +1385,36 @@ async def _dispatch(work: WorkContext, config: RunConfig, run_artifacts: _RunArt
     if work.is_unborn:
         if config.flow_name != "improve" or config.approved_head_sha is not None:
             raise GitError("unborn checkout cannot satisfy a commit-anchored review")
-        return await _run_improve(work, config, run_artifacts)
+        return await _run_improve(
+            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        )
     head_status = _verify_approved_head(work, config)
     if head_status != 0:
         return head_status
 
     if config.flow_name is not None:
-        return await _dispatch_selected_flow(work, config, run_artifacts)
+        return await _dispatch_selected_flow(
+            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        )
 
     # ``diagram`` joins comment/review in skipping ``_require_reviewable_branch``:
     # it neither fixes nor commits, so a base-branch invocation is a legitimate
     # (if empty) request rather than a ``WrongBranchError``.
     if config.output_mode in ("comment", "review", "diagram"):
-        return await _run_loop_deep(work, config, run_artifacts)
+        return await _run_loop_deep(
+            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        )
 
     # output_mode == "loop" (default deep) and --shallow both fix against a
     # base branch, so both must refuse to review the base branch against
     # itself (the guard was shared by loop + shallow pre-collapse, #330).
     _require_reviewable_branch(work, config)
-    return await _run_loop_deep(work, config, run_artifacts)
+    return await _run_loop_deep(work, config, run_artifacts, run_context=run_context, github_execution=github_execution)
 
 
 def _emit_diagram_findings(
-    target_dir: Path, config: RunConfig, payload: dict[str, Any],
+    target_dir: Path, config: RunConfig, payload: dict[str, Any], *,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Write the Phase A findings artifact for a diagram-only run (issue #1113).
 
@@ -1398,7 +1433,7 @@ def _emit_diagram_findings(
         ``0`` on success, ``1`` when no PR is resolvable or the artifact is
         over the size cap.
     """
-    return _write_findings_for_parsed(target_dir, config, [], kind="diagram", diagrams=payload)
+    return _write_findings_for_parsed(target_dir, config, [], kind="diagram", diagrams=payload, auth=auth)
 
 
 def _emit_findings_from_items(
@@ -1407,6 +1442,7 @@ def _emit_findings_from_items(
     items: list[dict[str, Any]],
     *,
     diagrams: dict[str, Any] | None = None,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Write the Phase A findings artifact from canonical merged items.
 
@@ -1428,7 +1464,7 @@ def _emit_findings_from_items(
     from daydream import pr_review
 
     parsed = pr_review.parsed_issues_from_items(items)
-    return _write_findings_for_parsed(target_dir, config, parsed, diagrams=diagrams)
+    return _write_findings_for_parsed(target_dir, config, parsed, diagrams=diagrams, auth=auth)
 
 
 def _write_findings_for_parsed(
@@ -1438,6 +1474,7 @@ def _write_findings_for_parsed(
     *,
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Resolve the target PR and write the strict-schema findings artifact.
 
@@ -1467,9 +1504,9 @@ def _write_findings_for_parsed(
     assert config.findings_out is not None  # caller gates on findings_out
     try:
         if config.pr_number is not None:
-            pr = pr_review.find_pr_by_number(target_dir, config.pr_number)
+            pr = pr_review.find_pr_by_number(target_dir, config.pr_number, auth=auth)
         else:
-            pr = pr_review.find_open_pr(target_dir)
+            pr = pr_review.find_open_pr(target_dir, auth=auth)
     except GitError as exc:
         print_error(console, "Findings Artifact", f"cannot resolve target PR: {exc}")
         return 1
@@ -1489,6 +1526,7 @@ def _write_findings_for_parsed(
         run_info=pr_review._render_review_info_block(),
         kind=kind,
         diagrams=diagrams,
+        auth=auth,
     )
     out_path = Path(config.findings_out)
     try:
@@ -1517,7 +1555,11 @@ def _gather_diff_seed(work: WorkContext, config: RunConfig) -> tuple[str | None,
 # Helper: generic custom flow (--flow <name>)
 
 
-async def _run_improve(work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts) -> int:
+async def _run_improve(
+    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
+    run_context: RunContext,
+    github_execution: github_app.GitHubExecutionInput,
+) -> int:
     """Preamble for the registered repository-wide improve flow."""
     from daydream.improve.artifacts import improve_dir
 
@@ -1571,6 +1613,7 @@ async def _run_improve(work: WorkContext, config: RunConfig, run_artifacts: _Run
                 audit_workspace=audit,
                 private_workspace_owner=run_artifacts.owner,
                 artifacts=run_artifacts.session,
+                run_context=run_context, github_execution=github_execution,
             )
             ctx.data["audit_repo"] = audit.repo
             ctx.data["improve_dir"] = directory
@@ -1612,7 +1655,11 @@ async def _run_improve(work: WorkContext, config: RunConfig, run_artifacts: _Run
             return await run_flow(ctx.registry, "improve", ctx)
 
 
-async def _run_custom_flow(work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts) -> int:
+async def _run_custom_flow(
+    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
+    run_context: RunContext,
+    github_execution: github_app.GitHubExecutionInput,
+) -> int:
     """Generic preamble for a fork-registered flow selected via ``--flow``.
 
     Mirrors :func:`_run_review_or_comment`'s diff seed so custom flows composed
@@ -1650,6 +1697,7 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig, run_artifacts: 
             review_profile=config.review_profile,
             private_workspace_owner=run_artifacts.owner,
             artifacts=run_artifacts.session,
+            run_context=run_context, github_execution=github_execution,
         )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
@@ -1672,9 +1720,15 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig, run_artifacts: 
 # Helper: deep (single-flow dispatch)
 
 
-async def _run_loop_deep(work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts) -> int:
+async def _run_loop_deep(
+    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
+    run_context: RunContext,
+    github_execution: github_app.GitHubExecutionInput,
+) -> int:
     """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
     from daydream.deep.orchestrator import run_deep
 
     _resolve_review_profile(config)
-    return await run_deep(config, work, run_artifacts=run_artifacts)
+    return await run_deep(
+        config, work, run_artifacts=run_artifacts, run_context=run_context, github_execution=github_execution,
+    )

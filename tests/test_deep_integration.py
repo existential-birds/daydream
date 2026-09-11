@@ -216,35 +216,16 @@ def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _wire_mocks(monkeypatch: pytest.MonkeyPatch, backend: _DeepMockBackend) -> None:
-    """Install the mock backend + silence prompts and UI.
-
-    ``phase_understand_intent`` loops on ``prompt_user`` until the user confirms
-    with ``y`` -- so ``daydream.phases.prompt_user`` must return ``y``.
-    The orchestrator's fix gate must return ``n`` so we skip the fix pass.
-    """
+    """Install the backend, accept intent, and decline other interactive gates."""
     monkeypatch.setattr(
         "daydream.runner.create_backend",
         lambda name, model=None, **kwargs: backend,
     )
-    # Orchestrator fix gate: decline to apply fixes.
-    monkeypatch.setattr(
-        "daydream.deep.orchestrator.prompt_user",
-        lambda *a, **kw: "n",
-        raising=False,
-    )
-    # Intent confirmation loop: accept the first answer.
-    monkeypatch.setattr(
-        "daydream.phases.prompt_user",
-        lambda *a, **kw: "y",
-        raising=False,
-    )
-    # Runner-level prompts (target dir, cleanup): never reached when `target`
-    # and `cleanup` are explicit on RunConfig, but be defensive.
-    monkeypatch.setattr(
-        "daydream.runner.prompt_user",
-        lambda *a, **kw: "n",
-        raising=False,
-    )
+
+    def answer(_console: Any, message: str, default: str = "") -> str:
+        return "y" if "understanding correct" in message.lower() else "n"
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", answer)
     _silence_ui(monkeypatch)
 
 

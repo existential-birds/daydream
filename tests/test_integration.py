@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -23,6 +24,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.run_context import RunContext
 from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
@@ -63,14 +65,15 @@ async def render_agent(
 
     The tool-panel / quiet-mode tests all repeated the same harness: a scripted
     event-yielding backend, a ``StringIO``-backed ``Console`` bound over
-    ``daydream.agent.console``, and ``set_quiet_mode``. The console is pinned
+    ``daydream.agent.console``, and an explicit interaction policy. The console is pinned
     (``force_terminal=True``, ``width=120``, ``NEON_THEME``) so wrapping and
     styling are identical regardless of the host terminal.
 
     Returns the output with ANSI codes INTACT -- the border/styling assertions
     read them. Callers comparing plain text pass the result to ``strip_ansi``.
     """
-    from daydream.agent import run_agent, set_quiet_mode
+    from daydream.agent import run_agent
+    from daydream.run_context import InteractionPolicy, RunContext
 
     output = StringIO()
     extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
@@ -78,13 +81,13 @@ async def render_agent(
         "daydream.agent.console",
         Console(file=output, force_terminal=True, width=120, theme=NEON_THEME, **extra),
     )
-    set_quiet_mode(quiet)
 
     await run_agent(
         ScriptedBackend(events=events, model="mock-model"),
         Path("/tmp"),
         prompt,
         phase=DaydreamPhase.REVIEW,
+        run_context=RunContext(InteractionPolicy(quiet=quiet)),
     )
     return output.getvalue()
 
@@ -98,14 +101,14 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
         ResultEvent(structured_output=None, continuation=None),
     ]
 
-    from daydream.agent import run_agent, set_quiet_mode
+    from daydream.agent import run_agent
+    from daydream.run_context import InteractionPolicy, RunContext
 
     output = StringIO()
     monkeypatch.setattr(
         "daydream.agent.console",
         Console(file=output, force_terminal=True, width=120, theme=NEON_THEME),
     )
-    set_quiet_mode(False)
 
     async def run_() -> None:
         await run_agent(
@@ -113,6 +116,7 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
             Path("/tmp"),
             "Test prompt",
             phase=DaydreamPhase.REVIEW,
+            run_context=RunContext(InteractionPolicy(quiet=False)),
         )
 
     await run_()
@@ -142,8 +146,7 @@ def mock_backend(install_backend: Callable[[object], object]) -> Any:
 @pytest.fixture
 def mock_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch UI functions that require user input."""
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *args, **kwargs: "n")
-    monkeypatch.setattr("daydream.runner.prompt_user", lambda *args, **kwargs: "n")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "n")
 
 
 @pytest.fixture
@@ -1506,6 +1509,8 @@ async def test_run_comment_full_flow(
         approve_on_clean: Any=False,
         pr_number: int | None = None,
         diagram_blocks: Any=None,
+        run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         posted.extend(json.loads(merged_items_path.read_text())["items"])
         posted_posts.append(post)
@@ -1672,12 +1677,10 @@ async def test_run_comment_does_not_prompt_for_skill(
     silence_console("daydream.phases")
     silence_console("daydream.runner")
 
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")  # confirm intent
-
     # Trap: skill selection must never prompt in --comment mode.
     def runner_prompt_trap(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("Should not prompt for skill selection in --comment mode")
-    monkeypatch.setattr("daydream.runner.prompt_user", runner_prompt_trap)
+    monkeypatch.setattr("daydream.run_context._prompt_user", runner_prompt_trap)
 
     config = make_config(tmp_path, output_mode="comment")
     exit_code = await run(config)
@@ -1702,7 +1705,7 @@ async def test_run_comment_missing_pr_exits_nonzero(
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: None)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: None)
 
     config = make_config(tmp_path, output_mode="comment")
 
@@ -1740,10 +1743,10 @@ async def test_run_comment_submission_failure_exits_nonzero(
         repo="widgets",
         url="https://example/pr/7",
     )
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
     monkeypatch.setattr(
         "daydream.pr_review._submit_review",
-        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+        lambda _td, _pr, _payload, **_kwargs: (None, "gh api failed: HTTP 500"),
     )
 
     config = make_config(tmp_path, output_mode="comment")
@@ -1784,10 +1787,10 @@ async def test_run_loop_submission_failure_warns_and_continues(
         repo="widgets",
         url="https://example/pr/7",
     )
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
     monkeypatch.setattr(
         "daydream.pr_review._submit_review",
-        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+        lambda _td, _pr, _payload, **_kwargs: (None, "gh api failed: HTTP 500"),
     )
 
     # Approve the PR-post gate but decline the apply-fixes gate so the run ends
@@ -1797,8 +1800,7 @@ async def test_run_loop_submission_failure_warns_and_continues(
             return "n"
         return "y"
 
-    monkeypatch.setattr("daydream.agent.prompt_user", _gate_prompt)
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.run_context._prompt_user", _gate_prompt)
 
     config = make_config(tmp_path, output_mode="loop")
 

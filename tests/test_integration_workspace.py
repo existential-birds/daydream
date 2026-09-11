@@ -32,6 +32,8 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.github_app import GitHubExecutionInput
+from daydream.run_context import current_run_context
 from daydream.runner import RunConfig
 from tests.harness.git_helpers import git as _git
 
@@ -172,13 +174,20 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     # live gh CLI in the test environment.
     monkeypatch.setattr(
         "daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch: [],
+        lambda _repo, _branch, **_kwargs: [],
     )
 
     captured: dict[str, Any] = {}
     worktree_path_at_dispatch: dict[str, Path] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
+    async def fake_run_loop_deep(
+        work: Any,
+        config: Any,
+        run_artifacts: Any = None,
+        *,
+        run_context: Any, github_execution: GitHubExecutionInput,
+    ) -> int:
+        assert run_context is current_run_context()
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
@@ -238,7 +247,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     monkeypatch.setattr(
         "daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch: [],
+        lambda _repo, _branch, **_kwargs: [],
     )
     warnings_emitted: list[str] = []
     # ``_resolve_ref`` does ``from daydream.ui import ... print_warning``
@@ -250,7 +259,14 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
+    async def fake_run_loop_deep(
+        work: Any,
+        config: Any,
+        run_artifacts: Any = None,
+        *,
+        run_context: Any, github_execution: GitHubExecutionInput,
+    ) -> int:
+        assert run_context is current_run_context()
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
@@ -298,15 +314,22 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     _make_feature_branch_on_origin(tmp_path, repo_with_origin, bare_origin, branch="feat/Z")
     monkeypatch.setattr(
         "daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch: [],
+        lambda _repo, _branch, **_kwargs: [],
     )
     monkeypatch.setattr(
         "daydream.runner.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch: [],
+        lambda _repo, _branch, **_kwargs: [],
     )
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
+    async def fake_run_loop_deep(
+        work: Any,
+        config: Any,
+        run_artifacts: Any = None,
+        *,
+        run_context: Any, github_execution: GitHubExecutionInput,
+    ) -> int:
+        assert run_context is current_run_context()
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
         captured["output_mode"] = config.output_mode
@@ -353,7 +376,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
 
     monkeypatch.setattr(
         "daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch: [
+        lambda _repo, _branch, **_kwargs: [
             {
                 "number": 42,
                 "baseRefName": "develop",
@@ -367,7 +390,14 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
+    async def fake_run_loop_deep(
+        work: Any,
+        config: Any,
+        run_artifacts: Any = None,
+        *,
+        run_context: Any, github_execution: GitHubExecutionInput,
+    ) -> int:
+        assert run_context is current_run_context()
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         return 0
@@ -414,7 +444,14 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError guard into the deep flow.
     routed: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work: Any, config: Any, run_artifacts: Any = None) -> int:
+    async def fake_run_loop_deep(
+        work: Any,
+        config: Any,
+        run_artifacts: Any = None,
+        *,
+        run_context: Any, github_execution: GitHubExecutionInput,
+    ) -> int:
+        assert run_context is current_run_context()
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
         return 0
@@ -434,4 +471,3 @@ async def test_review_mode_on_base_branch_does_not_error(
     # _run_loop_deep was reached.
     assert routed["base_branch"] == "main"
     assert routed["head_branch"] == "main"
-

@@ -11,7 +11,6 @@ import random
 import re
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -45,6 +44,14 @@ from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.prompt_budget import PreparedSanctionedInputs
+from daydream.run_context import (
+    InteractionPolicy,
+    RunContext,
+    bind_run_context,
+    current_run_context,
+    resolve_run_context,
+)
+from daydream.run_context import resolve_gate as resolve_gate
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
 from daydream.ui import (
     NEON_THEME,
@@ -56,9 +63,6 @@ from daydream.ui import (
     print_error,
     print_thinking,
     print_warning,
-)
-from daydream.ui import (
-    prompt_user as prompt_user,
 )
 from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG
 
@@ -154,26 +158,6 @@ class _EventStreamScope:
             pass
 
 
-@dataclass
-class AgentState:
-    """Consolidated state for agent module.
-
-    Attributes:
-        assume: A forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
-            ``"no"`` (a future ``--no``), or ``None`` (no assumption). Orthogonal to
-            ``non_interactive``: ``non_interactive`` controls *whether* we may block on
-            stdin; ``assume`` supplies a *pre-decided answer* regardless of TTY.
-        log_mode: When True, bypass Rich UI and emit redacted agent events as plain text
-            to stdout (for CI log capture). Default False.
-    """
-
-    quiet_mode: bool = False
-    non_interactive: bool = False
-    assume: str | None = None
-    log_mode: bool = False
-    current_backends: list[Backend] = field(default_factory=list)
-
-
 class _LogRedactingConsole(Console):
     """Console that redacts string payloads while ``--log`` mode is active.
 
@@ -183,7 +167,8 @@ class _LogRedactingConsole(Console):
     """
 
     def print(self, *objects: Any, **kwargs: Any) -> None:
-        if _state.log_mode:
+        context = current_run_context()
+        if context is not None and context.policy.log_mode:
             objects = tuple(
                 redact_text(obj) if isinstance(obj, str) else obj
                 for obj in objects
@@ -191,91 +176,7 @@ class _LogRedactingConsole(Console):
         super().print(*objects, **kwargs)
 
 
-# Module-level singletons: access/mutate via the getter/setter functions below,
-# never _state directly. reset_state() restores defaults between test runs.
-
-_state = AgentState()
 console = _LogRedactingConsole(theme=NEON_THEME)
-
-
-def reset_state() -> None:
-    """Reset the global agent state to defaults (restores between test runs)."""
-    global _state
-    _state = AgentState()
-
-
-def set_quiet_mode(quiet: bool) -> None:
-    """Set quiet mode for agent output."""
-    _state.quiet_mode = quiet
-
-
-def get_quiet_mode() -> bool:
-    """Get current quiet mode setting."""
-    return _state.quiet_mode
-
-
-def set_non_interactive(value: bool) -> None:
-    """Set non-interactive mode for prompts."""
-    _state.non_interactive = value
-
-
-def get_non_interactive() -> bool:
-    """Get current non-interactive mode setting."""
-    return _state.non_interactive
-
-
-def set_assume(value: str | None) -> None:
-    """Set the forced yes/no answer for interactive gates.
-
-    Args:
-        value: ``"yes"`` to auto-approve gates (``--yes``), ``"no"`` to auto-decline,
-            or ``None`` for no assumption (gates fall back to prompting or their
-            unattended safe default).
-    """
-    _state.assume = value
-
-
-def get_assume() -> str | None:
-    """Get the forced yes/no answer for interactive gates.
-
-    Returns:
-        ``"yes"``, ``"no"``, or ``None`` when no assumption is set.
-    """
-    return _state.assume
-
-
-def set_log_mode(log_mode: bool) -> None:
-    """Set log mode for agent output."""
-    _state.log_mode = log_mode
-
-
-def get_log_mode() -> bool:
-    """Get current log mode setting."""
-    return _state.log_mode
-
-
-def resolve_gate(*, assume: str | None, interactive: bool, safe_default: bool) -> bool | None:
-    """Resolve a yes/no interaction gate across the two orthogonal axes.
-
-    Collapses *assume* (a forced answer) and *interactivity* (may we block on
-    stdin?) into a single decision. Pure — performs no I/O.
-
-    Args:
-        assume: A forced answer: ``"yes"`` → True, ``"no"`` → False, ``None`` →
-            no assumption (defer to interactivity).
-        interactive: True when prompts may read stdin.
-        safe_default: The answer to use when unattended and no assumption is set
-            (e.g. ``False`` to decline a fix-apply, ``True`` to auto-commit).
-
-    Returns:
-        ``True``/``False`` to use the resolved answer directly, or ``None`` when
-        the caller should fall back to an interactive prompt.
-    """
-    if assume is not None:
-        return assume == "yes"
-    if not interactive:
-        return safe_default
-    return None
 
 
 def resolve_or_prompt(
@@ -306,16 +207,21 @@ def resolve_or_prompt(
     Returns:
         ``True`` if the gate is approved, ``False`` if declined.
     """
-    decision = resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default)
-    if decision is None:
-        response = prompt_user(console, question, default)
-        decision = response.strip().lower() in ("y", "yes")
-    return decision
-
-
-def get_current_backends() -> list[Backend]:
-    """Get all currently running backends."""
-    return list(_state.current_backends)
+    current = resolve_run_context()
+    context = RunContext(
+        InteractionPolicy(
+            assume=assume,
+            interactive=interactive,
+            quiet=current.policy.quiet,
+            log_mode=current.policy.log_mode,
+        )
+    )
+    return context.confirm(
+        question,
+        safe_default=safe_default,
+        default=default,
+        console=console,
+    )
 
 
 def detect_test_success(output: str) -> bool:
@@ -533,6 +439,7 @@ async def run_agent(
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
+    run_context: RunContext | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
@@ -541,8 +448,11 @@ async def run_agent(
     """
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
+    context = resolve_run_context(run_context)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
-    with agent_scope(phase.value, backend=backend_name, model=backend.model) as observed:
+    with bind_run_context(context), agent_scope(
+        phase.value, backend=backend_name, model=backend.model
+    ) as observed:
         observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
         result = await _run_agent(
             backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
@@ -550,6 +460,7 @@ async def run_agent(
             persist_session=persist_session, wall_budget_s=wall_budget_s, tool_call_budget=tool_call_budget,
             validate_structured_output=validate_structured_output,
             sanctioned_inputs=sanctioned_inputs,
+            run_context=context,
         )
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
@@ -573,6 +484,7 @@ async def _run_agent(
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
+    run_context: RunContext,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -643,409 +555,411 @@ async def _run_agent(
     aborted_reason: str | None = None
     use_callback = progress_callback is not None
     tool_supervisor = get_registry().tool_supervisor_if_registered()
+    policy = run_context.policy
 
-    _state.current_backends.append(backend)
-    try:
-        # Open Invocation scope when a recorder is active; nullcontext keeps the
-        # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
-        # here — only inv.observe()/inv.observe_user_step() against the recorder.
-        recorder = get_current_recorder()
+    with run_context.backend_registration(backend):
         try:
-            _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
-        except ValueError:
-            _default_attempts = 20
-        if _default_attempts < 0:
-            _default_attempts = 20
-
-        def _retry_delay_from_env(name: str, default: float) -> float:
+            # Open Invocation scope when a recorder is active; nullcontext keeps the
+            # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
+            # here — only inv.observe()/inv.observe_user_step() against the recorder.
+            recorder = get_current_recorder()
             try:
-                value = float(os.environ.get(name, str(default)))
+                _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
             except ValueError:
-                return default
-            return value if math.isfinite(value) and value >= 0 else default
+                _default_attempts = 20
+            if _default_attempts < 0:
+                _default_attempts = 20
 
-        _default_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0)
-        _default_max_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0)
-        max_attempts = getattr(backend, "retry_attempts", _default_attempts)
-        base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
-        max_delay = getattr(backend, "retry_max_delay_s", _default_max_delay)
-        if max_attempts < 0:
-            raise ValueError("retry attempts must be >= 0")
-        if not math.isfinite(base_delay):
-            raise ValueError("retry base delay must be finite")
-        if base_delay < 0:
-            raise ValueError("retry base delay must be >= 0")
-        if not math.isfinite(max_delay):
-            raise ValueError("retry max delay must be finite")
-        if max_delay < 0:
-            raise ValueError("retry max delay must be >= 0")
+            def _retry_delay_from_env(name: str, default: float) -> float:
+                try:
+                    value = float(os.environ.get(name, str(default)))
+                except ValueError:
+                    return default
+                return value if math.isfinite(value) and value >= 0 else default
 
-        for attempt in range(max_attempts + 1):
-            # Reset accumulated state so a failed attempt's partial output
-            # does not leak into the next attempt's return value.
-            output_parts = []
-            structured_result = None
-            result_continuation = None
-            tool_calls = 0
-            budget_reason: str | None = None
-            # Track tool names by id for log mode output
-            tool_names: dict[str, str] = {}
-            callback_text_parts: list[str] = []
+            _default_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0)
+            _default_max_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0)
+            max_attempts = getattr(backend, "retry_attempts", _default_attempts)
+            base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
+            max_delay = getattr(backend, "retry_max_delay_s", _default_max_delay)
+            if max_attempts < 0:
+                raise ValueError("retry attempts must be >= 0")
+            if not math.isfinite(base_delay):
+                raise ValueError("retry base delay must be finite")
+            if base_delay < 0:
+                raise ValueError("retry base delay must be >= 0")
+            if not math.isfinite(max_delay):
+                raise ValueError("retry max delay must be finite")
+            if max_delay < 0:
+                raise ValueError("retry max delay must be >= 0")
 
-            async def _flush_callback_text() -> None:
-                """Render one line for a consecutive run of streamed text deltas."""
-                if progress_callback is None or not callback_text_parts:
-                    return
-                text = "".join(callback_text_parts)
-                callback_text_parts.clear()
-                last_line = text.strip().split("\n")[-1]
-                if last_line:
-                    result = progress_callback(format_callback_text(last_line))
-                    if inspect.isawaitable(result):
-                        await result
+            for attempt in range(max_attempts + 1):
+                # Reset accumulated state so a failed attempt's partial output
+                # does not leak into the next attempt's return value.
+                output_parts = []
+                structured_result = None
+                result_continuation = None
+                tool_calls = 0
+                budget_reason: str | None = None
+                # Track tool names by id for log mode output
+                tool_names: dict[str, str] = {}
+                callback_text_parts: list[str] = []
 
-            # Created per attempt so a failed retry's UI panels and task-label
-            # mappings cannot be flushed or reused by a later successful attempt.
-            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
-            agent_renderer = AgentTextRenderer(console)
+                async def _flush_callback_text() -> None:
+                    """Render one line for a consecutive run of streamed text deltas."""
+                    if progress_callback is None or not callback_text_parts:
+                        return
+                    text = "".join(callback_text_parts)
+                    callback_text_parts.clear()
+                    last_line = text.strip().split("\n")[-1]
+                    if last_line:
+                        result = progress_callback(format_callback_text(last_line))
+                        if inspect.isawaitable(result):
+                            await result
 
-            try:
-                if artifact_session_active():
-                    assert_model_cwd_clean(cwd)
-                if sanctioned_inputs is not None:
-                    sanctioned_inputs.revalidate(backend, cwd, read_only)
-                execute_kwargs: dict[str, Any] = {
-                    "agents": agents,
-                    "max_turns": max_turns,
-                    "read_only": read_only,
-                }
-                if not persist_session:
-                    execute_kwargs["persist_session"] = False
-                event_iter = backend.execute(
-                    cwd, prompt, output_schema, continuation,
-                    **execute_kwargs,
-                )
-                invocation_cm: Any = (
-                    recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
-                )
-                event_stream_scope = _EventStreamScope(event_iter)
+                # Created per attempt so a failed retry's UI panels and task-label
+                # mappings cannot be flushed or reused by a later successful attempt.
+                tool_registry = LiveToolPanelRegistry(console, policy.quiet)
+                agent_renderer = AgentTextRenderer(console)
 
-                async with (
-                    attempt_scope(attempt + 1) as observed,
-                    invocation_cm as inv,
-                    event_stream_scope,
-                ):
-                    if inv is not None:
-                        inv.observe_user_step(prompt=prompt)
-
-                    # Per-invocation abort controls live here so both backends are
-                    # covered without a backend-signature change. The wall budget
-                    # cancels the async-for via move_on_after; the tool-call ceiling
-                    # and supervisor veto break in-loop.
-                    wall_scope: Any = (
-                        anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
+                try:
+                    if artifact_session_active():
+                        assert_model_cwd_clean(cwd)
+                    if sanctioned_inputs is not None:
+                        sanctioned_inputs.revalidate(backend, cwd, read_only)
+                    execute_kwargs: dict[str, Any] = {
+                        "agents": agents,
+                        "max_turns": max_turns,
+                        "read_only": read_only,
+                    }
+                    if not persist_session:
+                        execute_kwargs["persist_session"] = False
+                    event_iter = backend.execute(
+                        cwd, prompt, output_schema, continuation,
+                        **execute_kwargs,
                     )
+                    invocation_cm: Any = (
+                        recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
+                    )
+                    event_stream_scope = _EventStreamScope(event_iter)
 
-                    with wall_scope:
-                        async for event in event_iter:
-                            # The sole telemetry observer runs before UI callbacks,
-                            # supervision and budgets can interrupt event handling.
-                            observed.observe(event)
-                            if use_callback and not isinstance(
-                                event, (TextEvent, DiagnosticEvent)
-                            ):
-                                await _flush_callback_text()
+                    async with (
+                        attempt_scope(attempt + 1) as observed,
+                        invocation_cm as inv,
+                        event_stream_scope,
+                    ):
+                        if inv is not None:
+                            inv.observe_user_step(prompt=prompt)
 
-                            if isinstance(event, DiagnosticEvent):
-                                # Recorder-only parser/transport evidence. It
-                                # must not affect UI, callbacks, supervision,
-                                # tool bookkeeping, or invocation budgets.
-                                if inv is not None:
-                                    inv.observe(event)
+                        # Per-invocation abort controls live here so both backends are
+                        # covered without a backend-signature change. The wall budget
+                        # cancels the async-for via move_on_after; the tool-call ceiling
+                        # and supervisor veto break in-loop.
+                        wall_scope: Any = (
+                            anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
+                        )
 
-                            elif isinstance(event, TextEvent):
-                                output_parts.append(event.text)
+                        with wall_scope:
+                            async for event in event_iter:
+                                # The sole telemetry observer runs before UI callbacks,
+                                # supervision and budgets can interrupt event handling.
+                                observed.observe(event)
+                                if use_callback and not isinstance(
+                                    event, (TextEvent, DiagnosticEvent)
+                                ):
+                                    await _flush_callback_text()
 
-                                if _state.log_mode:
-                                    _print_log(event.text)
-                                elif use_callback and progress_callback is not None:
-                                    callback_text_parts.append(event.text)
-                                elif output_schema is None:
-                                    # Structured-output text is the JSON payload, redundant with
-                                    # the returned structured result — don't echo it to the terminal.
-                                    agent_renderer.append(event.text)
+                                if isinstance(event, DiagnosticEvent):
+                                    # Recorder-only parser/transport evidence. It
+                                    # must not affect UI, callbacks, supervision,
+                                    # tool bookkeeping, or invocation budgets.
+                                    if inv is not None:
+                                        inv.observe(event)
 
-                                if inv is not None:
-                                    inv.observe(event)
+                                elif isinstance(event, TextEvent):
+                                    output_parts.append(event.text)
 
-                            elif isinstance(event, ThinkingEvent):
-                                if _state.log_mode:
-                                    _print_log(f"[thinking] {event.text}")
-                                elif not use_callback:
-                                    if agent_renderer.has_content:
-                                        agent_renderer.finish()
-                                    print_thinking(console, event.text)
+                                    if policy.log_mode:
+                                        _print_log(event.text)
+                                    elif use_callback and progress_callback is not None:
+                                        callback_text_parts.append(event.text)
+                                    elif output_schema is None:
+                                        # Structured-output text is the JSON payload, redundant with
+                                        # the returned structured result — don't echo it to the terminal.
+                                        agent_renderer.append(event.text)
 
-                                if inv is not None:
-                                    inv.observe(event)
+                                    if inv is not None:
+                                        inv.observe(event)
 
-                            elif isinstance(event, ToolStartEvent):
-                                if _state.log_mode:
-                                    tool_names[event.id] = event.name
-                                    _print_log(f"[tool:{event.name}] {_summarize_input(event.input, event.name)}")
-                                elif progress_callback is not None:
-                                    # Record the originating call so a backgrounded launch's result
-                                    # can later resolve a Task-family label for the progress line.
-                                    tool_registry.note_call(event.id, event.name, event.input)
-                                    label = tool_registry.resolve_call_label(event.name, event.input)
-                                    result = progress_callback(format_callback_progress(event.name, event.input, label))
-                                    if inspect.isawaitable(result):
-                                        await result
-                                else:
-                                    if agent_renderer.has_content:
-                                        agent_renderer.finish()
-                                    tool_registry.create(event.id, event.name, event.input)
+                                elif isinstance(event, ThinkingEvent):
+                                    if policy.log_mode:
+                                        _print_log(f"[thinking] {event.text}")
+                                    elif not use_callback:
+                                        if agent_renderer.has_content:
+                                            agent_renderer.finish()
+                                        print_thinking(console, event.text)
 
-                                if inv is not None:
-                                    inv.observe(event)
+                                    if inv is not None:
+                                        inv.observe(event)
 
-                                if tool_supervisor is not None:
-                                    try:
-                                        # Extension tool supervisors matched
-                                        # start-anchored deny patterns against the
-                                        # pre-#1124 wrapper-decoded, cd-stripped
-                                        # command value. The stored
-                                        # ToolStartEvent keeps the replayable
-                                        # cd-prefixed payload; hand the supervisor
-                                        # the display variant so e.g. '^make'
-                                        # keeps matching Codex shell commands.
-                                        supervisor_input = event.input
-                                        if event.name == "shell" and isinstance(event.input, dict):
-                                            command = event.input.get("command")
-                                            if isinstance(command, str):
-                                                from daydream.backends.codex import display_shell_command
+                                elif isinstance(event, ToolStartEvent):
+                                    if policy.log_mode:
+                                        tool_names[event.id] = event.name
+                                        _print_log(f"[tool:{event.name}] {_summarize_input(event.input, event.name)}")
+                                    elif progress_callback is not None:
+                                        # Record the originating call so a backgrounded launch's result
+                                        # can later resolve a Task-family label for the progress line.
+                                        tool_registry.note_call(event.id, event.name, event.input)
+                                        label = tool_registry.resolve_call_label(event.name, event.input)
+                                        result = progress_callback(
+                                            format_callback_progress(event.name, event.input, label)
+                                        )
+                                        if inspect.isawaitable(result):
+                                            await result
+                                    else:
+                                        if agent_renderer.has_content:
+                                            agent_renderer.finish()
+                                        tool_registry.create(event.id, event.name, event.input)
 
-                                                supervisor_input = dict(event.input)
-                                                supervisor_input["command"] = display_shell_command(command)
-                                        decision = tool_supervisor(event.name, supervisor_input, phase=phase)
-                                    except Exception as exc:  # noqa: BLE001 - policy failures must propagate
-                                        raise _ToolSupervisorFailure(exc) from exc
-                                    if decision.veto:
-                                        if recorder is not None:
-                                            recorder.emit_tool_veto(
-                                                event.name, decision.reason, phase=phase
-                                            )
-                                        budget_reason = f"tool_vetoed:{event.name}"
+                                    if inv is not None:
+                                        inv.observe(event)
+
+                                    if tool_supervisor is not None:
+                                        try:
+                                            # Extension tool supervisors matched
+                                            # start-anchored deny patterns against the
+                                            # pre-#1124 wrapper-decoded, cd-stripped
+                                            # command value. The stored
+                                            # ToolStartEvent keeps the replayable
+                                            # cd-prefixed payload; hand the supervisor
+                                            # the display variant so e.g. '^make'
+                                            # keeps matching Codex shell commands.
+                                            supervisor_input = event.input
+                                            if event.name == "shell" and isinstance(event.input, dict):
+                                                command = event.input.get("command")
+                                                if isinstance(command, str):
+                                                    from daydream.backends.codex import display_shell_command
+
+                                                    supervisor_input = dict(event.input)
+                                                    supervisor_input["command"] = display_shell_command(command)
+                                            decision = tool_supervisor(event.name, supervisor_input, phase=phase)
+                                        except Exception as exc:  # noqa: BLE001 - policy failures must propagate
+                                            raise _ToolSupervisorFailure(exc) from exc
+                                        if decision.veto:
+                                            if recorder is not None:
+                                                recorder.emit_tool_veto(
+                                                    event.name, decision.reason, phase=phase
+                                                )
+                                            budget_reason = f"tool_vetoed:{event.name}"
+                                            break
+
+                                    tool_calls += 1
+                                    if tool_call_budget is not None and tool_calls > tool_call_budget:
+                                        budget_reason = "tool_call_budget_exceeded"
                                         break
 
-                                tool_calls += 1
-                                if tool_call_budget is not None and tool_calls > tool_call_budget:
-                                    budget_reason = "tool_call_budget_exceeded"
-                                    break
+                                elif isinstance(event, ToolResultEvent):
+                                    if policy.log_mode:
+                                        tool_name = tool_names.get(event.id, "unknown")
+                                        prefix = (
+                                            f"[tool:{tool_name} ERROR]" if event.is_error
+                                            else f"[tool:{tool_name} result]"
+                                        )
+                                        _print_log(f"{prefix} {_summarize_output(event.output)}")
+                                    else:
+                                        # Populate the task_id→label map in both modes, so a later
+                                        # TaskOutput/TaskStop resolves its originating label.
+                                        tool_registry.observe_result(event.id, event.output)
+                                        if not use_callback:
+                                            panel = tool_registry.get(event.id)
+                                            if panel:
+                                                panel.set_result(event.output, event.is_error)
+                                                panel.finish()
+                                                tool_registry.remove(event.id)
 
-                            elif isinstance(event, ToolResultEvent):
-                                if _state.log_mode:
-                                    tool_name = tool_names.get(event.id, "unknown")
-                                    prefix = (
-                                        f"[tool:{tool_name} ERROR]" if event.is_error
-                                        else f"[tool:{tool_name} result]"
-                                    )
-                                    _print_log(f"{prefix} {_summarize_output(event.output)}")
-                                else:
-                                    # Populate the task_id→label map in both modes, so a later
-                                    # TaskOutput/TaskStop resolves its originating label.
-                                    tool_registry.observe_result(event.id, event.output)
-                                    if not use_callback:
-                                        panel = tool_registry.get(event.id)
-                                        if panel:
-                                            panel.set_result(event.output, event.is_error)
-                                            panel.finish()
-                                            tool_registry.remove(event.id)
+                                    if inv is not None:
+                                        inv.observe(event)
 
-                                if inv is not None:
-                                    inv.observe(event)
-
-                            elif isinstance(event, MetricsEvent):
-                                if _state.log_mode:
-                                    _print_log(
-                                        f"[metrics] prompt={event.prompt_tokens} completion={event.completion_tokens}",
-                                    )
-                                # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
-                                # CostEvent branch so isinstance order is correct.
-                                if inv is not None:
-                                    inv.observe(event)
-
-                            elif isinstance(event, (GenerationStartEvent, GenerationEndEvent)):
-                                # P18 T1/T2 seam: the pending-generation ledger is
-                                # recorder-only evidence (no UI, no logging). The
-                                # telemetry observer already saw the event at the
-                                # top of the loop; forward it so the invocation
-                                # ledger seals drafts and resolves the single
-                                # billing owner before the attempt scope exits.
-                                if inv is not None:
-                                    inv.observe(event)
-
-                            elif isinstance(event, CostEvent):
-                                if _state.log_mode:
-                                    cost_str = f"${event.cost_usd:.4f}" if event.cost_usd is not None else "unknown"
-                                    _print_log(f"[cost] {cost_str}")
-                                elif event.cost_usd and not use_callback:
-                                    if agent_renderer.has_content:
-                                        agent_renderer.finish()
-                                    console.print()
-                                    print_cost(console, event.cost_usd)
-
-                                if inv is not None:
-                                    inv.observe(event)
-
-                            elif isinstance(event, TurnEndEvent):
-                                # Per-turn close (issue #747): forward the
-                                # turn boundary so each turn's already-emitted
-                                # MetricsEvent lands on its own Step instead of
-                                # collapsing into one. Pure recorder
-                                # forwarding — no UI, no logging. The recorder's
-                                # no-open-step no-op guard prevents empty-step
-                                # invention.
-                                if inv is not None:
-                                    inv.observe(event)
-
-                            elif isinstance(event, ResultEvent):
-                                # Capture the structured result unconditionally: the log-mode
-                                # print is an additive side effect, never a substitute for
-                                # capture (otherwise --log silently drops every structured
-                                # result — exploration conventions, review findings, etc.).
-                                structured_result = event.structured_output
-                                if event.structured_output is not None:
-                                    if _state.log_mode:
-                                        redacted = _redact_log_value(event.structured_output)
+                                elif isinstance(event, MetricsEvent):
+                                    if policy.log_mode:
                                         _print_log(
-                                            f"[result] {json.dumps(redacted)[:500]}",
+                                            f"[metrics] prompt={event.prompt_tokens} "
+                                            f"completion={event.completion_tokens}",
                                         )
-                                    elif not use_callback:
-                                        issues = (
-                                            structured_result.get("issues", [])
-                                            if isinstance(structured_result, dict)
-                                            else []
-                                        )
-                                        if issues:
-                                            formatted = []
-                                            for i in issues:
-                                                if "file" in i and "line" in i:
-                                                    desc = i.get("description", "")
-                                                    issue_id = i.get("id", "?")
-                                                    formatted.append(
-                                                        f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
-                                                    )
-                                                else:
-                                                    label = i.get("title", i.get("description", ""))
-                                                    formatted.append(f"[{i.get('id', '?')}] {label}")
-                                            agent_renderer.append("\n".join(formatted))
-                                result_continuation = event.continuation
+                                    # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
+                                    # CostEvent branch so isinstance order is correct.
+                                    if inv is not None:
+                                        inv.observe(event)
 
-                                if inv is not None:
-                                    inv.observe(event)
+                                elif isinstance(event, (GenerationStartEvent, GenerationEndEvent)):
+                                    # P18 T1/T2 seam: the pending-generation ledger is
+                                    # recorder-only evidence (no UI, no logging). The
+                                    # telemetry observer already saw the event at the
+                                    # top of the loop; forward it so the invocation
+                                    # ledger seals drafts and resolves the single
+                                    # billing owner before the attempt scope exits.
+                                    if inv is not None:
+                                        inv.observe(event)
 
-                        if use_callback:
-                            await _flush_callback_text()
+                                elif isinstance(event, CostEvent):
+                                    if policy.log_mode:
+                                        cost_str = f"${event.cost_usd:.4f}" if event.cost_usd is not None else "unknown"
+                                        _print_log(f"[cost] {cost_str}")
+                                    elif event.cost_usd and not use_callback:
+                                        if agent_renderer.has_content:
+                                            agent_renderer.finish()
+                                        console.print()
+                                        print_cost(console, event.cost_usd)
 
-                    # Abort handling: the wall scope cancelled the loop, a quantitative
-                    # tool ceiling fired, or a supervisor veto broke out. Mark the
-                    # ATIF turn aborted and let the invocation's event-stream scope
-                    # close its resources before returning partial output.
-                    wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
-                    if budget_reason is None and wall_cancelled:
-                        budget_reason = "wall_budget_exceeded"
-                    aborted_reason = budget_reason
-                    if budget_reason is not None:
-                        observed.abort(budget_reason)
-                        await event_stream_scope.aclose()
-                        if inv is not None:
-                            inv.mark_aborted(budget_reason)
-                            inv.observe(TurnEndEvent())
-                        if _state.log_mode:
-                            _print_log(f"[aborted] {budget_reason}")
+                                    if inv is not None:
+                                        inv.observe(event)
+
+                                elif isinstance(event, TurnEndEvent):
+                                    # Per-turn close (issue #747): forward the
+                                    # turn boundary so each turn's already-emitted
+                                    # MetricsEvent lands on its own Step instead of
+                                    # collapsing into one. Pure recorder
+                                    # forwarding — no UI, no logging. The recorder's
+                                    # no-open-step no-op guard prevents empty-step
+                                    # invention.
+                                    if inv is not None:
+                                        inv.observe(event)
+
+                                elif isinstance(event, ResultEvent):
+                                    # Capture the structured result unconditionally: the log-mode
+                                    # print is an additive side effect, never a substitute for
+                                    # capture (otherwise --log silently drops every structured
+                                    # result — exploration conventions, review findings, etc.).
+                                    structured_result = event.structured_output
+                                    if event.structured_output is not None:
+                                        if policy.log_mode:
+                                            redacted = _redact_log_value(event.structured_output)
+                                            _print_log(
+                                                f"[result] {json.dumps(redacted)[:500]}",
+                                            )
+                                        elif not use_callback:
+                                            issues = (
+                                                structured_result.get("issues", [])
+                                                if isinstance(structured_result, dict)
+                                                else []
+                                            )
+                                            if issues:
+                                                formatted = []
+                                                for i in issues:
+                                                    if "file" in i and "line" in i:
+                                                        desc = i.get("description", "")
+                                                        issue_id = i.get("id", "?")
+                                                        formatted.append(
+                                                            f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
+                                                        )
+                                                    else:
+                                                        label = i.get("title", i.get("description", ""))
+                                                        formatted.append(f"[{i.get('id', '?')}] {label}")
+                                                agent_renderer.append("\n".join(formatted))
+                                    result_continuation = event.continuation
+
+                                    if inv is not None:
+                                        inv.observe(event)
+
+                            if use_callback:
+                                await _flush_callback_text()
+
+                        # Abort handling: the wall scope cancelled the loop, a quantitative
+                        # tool ceiling fired, or a supervisor veto broke out. Mark the
+                        # ATIF turn aborted and let the invocation's event-stream scope
+                        # close its resources before returning partial output.
+                        wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
+                        if budget_reason is None and wall_cancelled:
+                            budget_reason = "wall_budget_exceeded"
+                        aborted_reason = budget_reason
+                        if budget_reason is not None:
+                            observed.abort(budget_reason)
+                            await event_stream_scope.aclose()
+                            if inv is not None:
+                                inv.mark_aborted(budget_reason)
+                                inv.observe(TurnEndEvent())
+                            if policy.log_mode:
+                                _print_log(f"[aborted] {budget_reason}")
+                            elif use_callback and progress_callback is not None:
+                                result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
+                                if inspect.isawaitable(result):
+                                    await result
+                            elif not use_callback:
+                                print_warning(console, f"Turn aborted: {budget_reason}")
+
+                        if not use_callback and not policy.log_mode:
+                            if agent_renderer.has_content:
+                                agent_renderer.finish()
+                            tool_registry.finish_all()
+                            console.print()
+
+                    break  # success — exit the retry loop
+
+                except _ToolSupervisorFailure:
+                    raise
+                except Exception as exc:
+                    if use_callback:
+                        await _flush_callback_text()
+                    exception_max_retries = min(
+                        max_attempts, getattr(exc, "max_retries", max_attempts)
+                    )
+                    if attempt < exception_max_retries and getattr(exc, "retryable", False):
+                        delay = min(
+                            base_delay * (2 ** attempt) + random.uniform(0, 1),
+                            max_delay,
+                        )
+                        retry_msg = (
+                            f"Backend error ({type(exc).__name__}), retrying "
+                            f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
+                        )
+                        if policy.log_mode:
+                            _print_log(f"[retry] {retry_msg}")
                         elif use_callback and progress_callback is not None:
-                            result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
+                            result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
                             if inspect.isawaitable(result):
                                 await result
                         elif not use_callback:
-                            print_warning(console, f"Turn aborted: {budget_reason}")
+                            print_warning(console, retry_msg)
+                        # The event-stream scope has already closed only this failed
+                        # invocation. Backend-wide cancel() is reserved for shutdown.
+                        tool_registry.discard_all()
+                        await anyio.sleep(delay)
+                        continue
+                    raise
 
-                    if not use_callback and not _state.log_mode:
-                        if agent_renderer.has_content:
-                            agent_renderer.finish()
-                        tool_registry.finish_all()
-                        console.print()
-
-                break  # success — exit the retry loop
-
-            except _ToolSupervisorFailure:
-                raise
-            except Exception as exc:
-                if use_callback:
-                    await _flush_callback_text()
-                exception_max_retries = min(
-                    max_attempts, getattr(exc, "max_retries", max_attempts)
-                )
-                if attempt < exception_max_retries and getattr(exc, "retryable", False):
-                    delay = min(
-                        base_delay * (2 ** attempt) + random.uniform(0, 1),
-                        max_delay,
-                    )
-                    retry_msg = (
-                        f"Backend error ({type(exc).__name__}), retrying "
-                        f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
-                    )
-                    if _state.log_mode:
-                        _print_log(f"[retry] {retry_msg}")
-                    elif use_callback and progress_callback is not None:
-                        result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
-                        if inspect.isawaitable(result):
-                            await result
-                    elif not use_callback:
-                        print_warning(console, retry_msg)
-                    # The event-stream scope has already closed only this failed
-                    # invocation. Backend-wide cancel() is reserved for shutdown.
-                    tool_registry.discard_all()
-                    await anyio.sleep(delay)
-                    continue
-                raise
-
-    except _ToolSupervisorFailure as exc:
-        original = exc.original
-        print_error(
-            console, "Extension Failure", redact_text(f"{type(original).__name__}: {original}")
-        )
-        # The exception itself still propagates to outer handlers that re-print
-        # str(exc) without redaction (e.g. the CLI's "Fatal Error" panel on
-        # `daydream <target>`, improve-run retry checks). Rewriting .args in
-        # place is not enough: a supervisor can raise OSError (whose str() is
-        # built from errno/strerror) or a type overriding __str__/__repr__, for
-        # which the raw credential would survive. Rebuild a scrubbed exception
-        # here, failing closed instead of silently passing the raw value onward.
-        raise _scrubbed_supervisor_error(original) from original
-    except Exception as exc:
-        category = getattr(exc, "category", None)
-        msg = str(exc).strip()
-        diagnostic = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
-        if isinstance(category, str):
-            diagnostic += f" [{category}]"
-        # Error messages can embed secrets (a leaked env var, an API key in a
-        # provider error); redact at this host boundary like every other surfaced text.
-        print_error(console, "Backend Execution Error", redact_text(diagnostic))
-        raise
-    except BaseException:
-        # Shutdown path: SIGINT (KeyboardInterrupt) / task cancellation
-        # (CancelledError) are BaseException, so the generic `except Exception`
-        # above never sees them. Deterministically reap the tracked subprocesses
-        # via backend.cancel() before unwinding.
-        try:
-            await backend.cancel()
-        except Exception:  # cancel() must not mask the original signal
-            _logger.exception("backend.cancel() failed during shutdown")
-        raise
-    finally:
-        _state.current_backends.remove(backend)
+        except _ToolSupervisorFailure as exc:
+            original = exc.original
+            print_error(
+                console, "Extension Failure", redact_text(f"{type(original).__name__}: {original}")
+            )
+            # The exception itself still propagates to outer handlers that re-print
+            # str(exc) without redaction (e.g. the CLI's "Fatal Error" panel on
+            # `daydream <target>`, improve-run retry checks). Rewriting .args in
+            # place is not enough: a supervisor can raise OSError (whose str() is
+            # built from errno/strerror) or a type overriding __str__/__repr__, for
+            # which the raw credential would survive. Rebuild a scrubbed exception
+            # here, failing closed instead of silently passing the raw value onward.
+            raise _scrubbed_supervisor_error(original) from original
+        except Exception as exc:
+            category = getattr(exc, "category", None)
+            msg = str(exc).strip()
+            diagnostic = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+            if isinstance(category, str):
+                diagnostic += f" [{category}]"
+            # Error messages can embed secrets (a leaked env var, an API key in a
+            # provider error); redact at this host boundary like every other surfaced text.
+            print_error(console, "Backend Execution Error", redact_text(diagnostic))
+            raise
+        except BaseException:
+            # Shutdown path: SIGINT (KeyboardInterrupt) / task cancellation
+            # (CancelledError) are BaseException, so the generic `except Exception`
+            # above never sees them. Deterministically reap the tracked subprocesses
+            # via backend.cancel() before unwinding.
+            try:
+                await backend.cancel()
+            except Exception:  # cancel() must not mask the original signal
+                _logger.exception("backend.cancel() failed during shutdown")
+            raise
 
     def _usable(value: Any) -> bool:
         """Whether ``value`` passes the structured-output gate.

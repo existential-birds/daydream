@@ -1187,15 +1187,12 @@ def definitions_in_file(repo_root: Path, path: str) -> list[dict[str, object]]:
 def detect_affected_files(
     diff_text: str,
     repo_root: Path,
-    depth: int = 1,
 ) -> list[FileInfo]:
     """Return changed files plus their 1-hop import dependencies.
 
     Args:
         diff_text: Raw output of ``git diff`` (unified format).
         repo_root: Repository root used for resolving import paths on disk.
-        depth: Reserved for future multi-hop tracing. Only ``depth=1`` is
-            supported. Passing any other value raises ``NotImplementedError``.
 
     Returns:
         A list of ``FileInfo`` entries containing the modified files (always)
@@ -1203,7 +1200,6 @@ def detect_affected_files(
         (``role="imported_by"``). Deduplicated by ``(path, role)``.
 
     Raises:
-        NotImplementedError: If ``depth != 1``.
         TreeSitterBadVersionError: If the installed tree-sitter version is in
             the known-bad set (issue #1087): the index consumer refuses to
             construct a parser that could SIGSEGV the process.
@@ -1213,9 +1209,6 @@ def detect_affected_files(
     # construction, so no native parsing happens on a bad install. No-op on
     # good installs; errors propagate to the caller unwrapped.
     assert_tree_sitter_safe()
-
-    if depth != 1:
-        raise NotImplementedError("depth > 1 reserved for future use")
 
     results: list[FileInfo] = []
     seen: set[tuple[str, str]] = set()

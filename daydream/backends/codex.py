@@ -95,9 +95,7 @@ _GIT_REDIRECT_STRIP_VARS = (
 # runs inside the macOS Seatbelt sandbox cannot shell out to ``xcrun`` itself,
 # so the parent resolves the real git binary's directory once per process and
 # prepends it to the child PATH (see ``_isolated_child_env``). Cached
-# at-most-once per process — negative results included — mirroring the
-# ``set_gh_token_env``/``reset_gh_token_env`` singleton style in
-# :mod:`daydream.git_ops`.
+# at-most-once per process, including negative resolution results.
 _REAL_GIT_DIR: str | None = None
 _REAL_GIT_RESOLVED = False
 # ``execute()`` builds the child env through ``asyncio.to_thread``, so a fan-out

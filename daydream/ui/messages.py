@@ -194,8 +194,8 @@ def print_intent_summary(console: Console, text: str) -> None:
     console.print(panel)
 
 
-def prompt_user(console: Console, message: str, default: str = "") -> str:
-    """Display a styled input prompt and get user input.
+def _read_user_input(console: Console, message: str, default: str) -> str:
+    """Display a styled input prompt and read stdin without policy lookup.
 
     Args:
         default: Default value if user enters nothing.
@@ -204,12 +204,6 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
         User's input string, or default if empty.
 
     """
-    # Lazy import to avoid the ui -> agent import cycle (agent.py imports ui).
-    from daydream.agent import get_non_interactive
-
-    if get_non_interactive():
-        return default
-
     prompt_text = Text()
     prompt_text.append("▶ ", style=STYLE_CYAN)
     prompt_text.append(message, style=STYLE_CYAN)
@@ -227,3 +221,15 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
         )
         return default
     return user_input if user_input else default
+
+
+def prompt_user(console: Console, message: str, default: str = "") -> str:
+    """Resolve a free-form prompt through the current run's interaction gateway."""
+    from daydream.run_context import resolve_run_context
+
+    return resolve_run_context().choice(
+        message,
+        default=default,
+        safe_default=default,
+        console=console,
+    )

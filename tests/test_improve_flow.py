@@ -2434,7 +2434,7 @@ async def test_capable_improve_stub_retains_commands_and_avoids_provider_overloa
 ) -> None:
     _force_interactive(monkeypatch)
     monkeypatch.setattr(
-        "daydream.agent.prompt_user",
+        "daydream.run_context._prompt_user",
         lambda *args, **kwargs: "1-5",
     )
     backend = ProductionPathBackend(improve_monorepo_target)
@@ -2478,7 +2478,7 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
 ) -> None:
     _force_interactive(monkeypatch)
     monkeypatch.setattr(
-        "daydream.agent.prompt_user",
+        "daydream.run_context._prompt_user",
         lambda *args, **kwargs: "1-5",
     )
     backend = ProductionPathBackend(
@@ -3123,7 +3123,7 @@ async def test_interactive_selection_honors_user_choice(
     make_config: MakeConfig,
 ) -> None:
     _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "2")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
     install_improve_stub(
         monkeypatch,
         improve_monorepo_target,
