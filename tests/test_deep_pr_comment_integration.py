@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
@@ -506,23 +507,27 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
 
 
-# gh / PR plumbing patches: find_open_pr returns a fake PRInfo and _submit_review
+# gh / PR plumbing patches: find_open_pr returns a fake PRInfo and fake gh
 # captures the payload (the only allowed non-SDK mock per the brief — it stands
 # in for the gh-CLI subprocess that would post to GitHub).
 
 
 @dataclass
 class _CapturedPost:
-    payloads: list[dict[str, Any]] = field(default_factory=list)
+    gh: FakeGh
+
+    @property
+    def payloads(self) -> list[dict[str, Any]]:
+        return [call.payload for call in self.gh.calls("POST", "repos/test-owner/test-repo/pulls/123/reviews")]
 
 
 @pytest.fixture
-def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
-    """Wire find_open_pr + _submit_review so build_payload runs and we see
+def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
+    """Wire PR discovery and fake gh so the complete submission runs and we see
     the rendered markdown without ever touching GitHub."""
     from daydream import pr_review
 
-    captured = _CapturedPost()
+    captured = _CapturedPost(fake_gh)
 
     fake_pr = pr_review.PRInfo(
         number=123,
@@ -540,16 +545,10 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
         lambda target_dir, **_kwargs: fake_pr,
     )
 
-    def _capture(
-        target_dir: Path, pr: pr_review.PRInfo, payload: dict[str, Any], **_kwargs: Any
-    ) -> tuple[str, None]:
-        captured.payloads.append(payload)
-        return "https://example/pr/123#review-1", None
-
-    monkeypatch.setattr(
-        "daydream.pr_review._submit_review", _capture,
+    fake_gh.set_response(
+        "POST", "repos/test-owner/test-repo/pulls/123/reviews",
+        {"html_url": "https://example/pr/123#review-1"},
     )
-
     return captured
 
 
@@ -638,8 +637,8 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
         symbols imported into that module (isinstance-pinning).
       - ``pr_review.find_open_pr`` returns a synthetic ``PRInfo`` (avoids
         ``gh pr list`` subprocess).
-      - ``pr_review._submit_review`` captures the payload (avoids ``gh api``
-        subprocess that would actually POST the comment).
+      - the fake ``gh`` process captures the payload; the real API adapter
+        and its temporary request-file handling run unchanged.
 
     Everything else — RunConfig dispatch, _run_loop_deep, run_deep, the
     real ``TrajectoryRecorder``, ``ClaudeBackend.execute``, ``run_agent``,

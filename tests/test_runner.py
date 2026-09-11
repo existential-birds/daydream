@@ -1192,7 +1192,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     temp git worktree with GitHub App credentials set. Only the external
     network/API seams are mocked: the App installation-token mint, the Claude
     SDK transport (``patch_sdk``), and the final ``gh`` PR-posting transport
-    (``find_open_pr`` + ``_submit_review``). The real deep orchestrator,
+    (``find_open_pr`` + ``git_ops.gh_api``). The real deep orchestrator,
     ``ClaudeBackend.execute``, every phase, ``_post``, ``classify``, and
     ``build_payload`` run unmodified.
 
@@ -1239,17 +1239,19 @@ async def test_deep_run_mints_app_identity_before_posting_path(
         events.append("find-open-pr")
         return fake_pr
 
-    def fake_submit_review(
-        _target_dir: object, _pr: object, payload: dict[str, Any], *, auth: git_ops.GitHubAuth,
-    ) -> tuple[str, None]:
-        received_auth.append(auth)
-        events.append("post")
-        payloads.append(payload)
-        return "https://example/pr/123#review-1", None
+    def fake_gh_api(
+        _target_dir: object, endpoint: str, *, auth: git_ops.GitHubAuth, **kwargs: Any,
+    ) -> Any:
+        if kwargs.get("method") == "POST" and endpoint.endswith("/reviews"):
+            received_auth.append(auth)
+            events.append("post")
+            payloads.append(kwargs["input_data"])
+            return {"html_url": "https://example/pr/123#review-1"}
+        return []
 
     monkeypatch.setattr("daydream.github_app._mint_installation_token", fake_mint)
     monkeypatch.setattr("daydream.pr_review.find_open_pr", fake_find_open_pr)
-    monkeypatch.setattr("daydream.pr_review._submit_review", fake_submit_review)
+    monkeypatch.setattr("daydream.git_ops.gh_api", fake_gh_api)
 
     config = RunConfig(
         target=str(deep_target),
@@ -1269,7 +1271,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     assert len(received_auth) == 2 and received_auth[0] is received_auth[1]
     environment = received_auth[0].environment_for_request()
     assert environment is not None and environment["GH_TOKEN"] == "installation-token"
-    assert payloads, "deep flow never reached _submit_review"
+    assert payloads, "deep flow never posted its review"
 
 
 @pytest.mark.asyncio

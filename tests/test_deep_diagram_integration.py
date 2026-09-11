@@ -16,13 +16,14 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from tests.harness import diagram_repos as dr
+from tests.harness.fake_gh import FakeGh
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
@@ -55,17 +56,18 @@ FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
 
 @dataclass
 class _CapturedPost:
-    """Every review payload the run tried to submit."""
+    gh: FakeGh
 
-    payloads: list[dict[str, Any]] = field(default_factory=list)
+    @property
+    def payloads(self) -> list[dict[str, Any]]:
+        return [call.payload for call in self.gh.calls("POST", "repos/acme/widgets/pulls/123/reviews")]
 
     def body(self) -> str:
         assert self.payloads, "no review payload was submitted"
         return str(self.payloads[-1]["body"])
 
-
 @pytest.fixture
-def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
+def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
     """Let the real ``build_payload`` run and capture the review it would POST.
 
     Patches only the PR lookup and the ``gh`` review submission, so the summary
@@ -74,7 +76,7 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
     """
     from daydream import pr_review
 
-    captured = _CapturedPost()
+    captured = _CapturedPost(fake_gh)
     fake_pr = pr_review.PRInfo(
         number=123,
         head_sha="a" * 40,
@@ -89,13 +91,10 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
         "daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr
     )
 
-    def _capture(
-        _target: Path, _pr: pr_review.PRInfo, payload: dict[str, Any], **_kwargs: Any
-    ) -> tuple[str, None]:
-        captured.payloads.append(payload)
-        return "https://example/pr/123#review-1", None
-
-    monkeypatch.setattr("daydream.pr_review._submit_review", _capture)
+    fake_gh.set_response(
+        "POST", "repos/acme/widgets/pulls/123/reviews",
+        {"html_url": "https://example/pr/123#review-1"},
+    )
     return captured
 
 

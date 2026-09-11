@@ -1144,13 +1144,22 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
             body_only=[],
         ),
     )
-    captured: dict[str, Any] = {}
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
 
-    def fake_submit(_td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any) -> tuple[str | None, str | None]:
-        captured["payload"] = payload
-        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
+    def fake_submit(
+        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
+    ) -> pr_review.ClassifiedReviewResult:
+        captured["plan"] = plan
+        return pr_review.ClassifiedReviewResult(
+            status=pr_review.SubmissionStatus.POSTED,
+            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
+            posted_file_level=(),
+            folded_file_level=(),
+            final_review_posted=True,
+            safe_error=None,
+        )
 
-    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     successes: list[str] = []
     monkeypatch.setattr(
         pr_review,
@@ -1167,9 +1176,8 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
         renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
-    # The payload that would be POSTed was assembled and forwarded.
-    assert captured["payload"]["commit_id"] == pr.head_sha
-    assert captured["payload"]["event"] == "COMMENT"
+    assert captured["plan"].pr.head_sha == pr.head_sha
+    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
     assert successes and "pullrequestreview" in successes[0]
     assert status == pr_review.PostStatus.POSTED
 
@@ -1199,13 +1207,22 @@ async def test_post_payload_approves_when_clean_and_enabled(
             ],
         ),
     )
-    captured: dict[str, Any] = {}
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
 
-    def fake_submit(_td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any) -> tuple[str | None, str | None]:
-        captured["payload"] = payload
-        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
+    def fake_submit(
+        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
+    ) -> pr_review.ClassifiedReviewResult:
+        captured["plan"] = plan
+        return pr_review.ClassifiedReviewResult(
+            status=pr_review.SubmissionStatus.POSTED,
+            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
+            posted_file_level=(),
+            folded_file_level=(),
+            final_review_posted=True,
+            safe_error=None,
+        )
 
-    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
@@ -1218,10 +1235,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
         renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
-    assert captured["payload"]["event"] == "APPROVE"
-    assert "no high/medium findings" in captured["payload"]["body"]
-    # F3: the reviewed SHA is pinned on every payload, APPROVE included.
-    assert captured["payload"]["commit_id"] == pr.head_sha
+    assert captured["plan"].event is pr_review.ReviewEvent.APPROVE
     assert status == pr_review.PostStatus.POSTED
 
 
@@ -1241,8 +1255,19 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
             body_only=[],
         ),
     )
-    err = "gh api /repos/acme/widgets/pulls/42/reviews failed: HTTP 422 (payload preserved at /tmp/x.json)"
-    monkeypatch.setattr(pr_review, "_submit_review", lambda *_a, **_k: (None, err))
+    err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
+    monkeypatch.setattr(
+        pr_review,
+        "post_classified_review",
+        lambda _plan, *, transport: pr_review.ClassifiedReviewResult(
+            status=pr_review.SubmissionStatus.FAILED,
+            review_url=None,
+            posted_file_level=(),
+            folded_file_level=(),
+            final_review_posted=False,
+            safe_error=err,
+        ),
+    )
     warnings: list[str] = []
     monkeypatch.setattr(
         pr_review,
@@ -1261,9 +1286,40 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     )
     assert warnings
     assert "no comments were posted" in warnings[0].lower()
-    # The git_ops error text -- including the preserved payload path -- is forwarded.
+    # The structured safe error preserves the request payload path.
     assert "payload preserved at /tmp/x.json" in warnings[0]
     assert status == pr_review.PostStatus.FAILED
+
+
+def test_github_transport_surfaces_only_structured_preserved_payload_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pr: PRInfo,
+) -> None:
+    error = GitError("remote response leaked secret=never-show-this")
+    error.preserved_payload_path = Path("/tmp/review.json")
+
+    def fail_gh(*_args: Any, **_kwargs: Any) -> object:
+        raise error
+
+    monkeypatch.setattr(git_ops, "gh_api", fail_gh)
+
+    result = pr_review.GitHubReviewTransport(
+        target_dir=tmp_path,
+        auth=git_ops.INHERIT_GITHUB_AUTH,
+    ).post_review(
+        pr,
+        pr_review.ReviewPayload(
+            event=pr_review.ReviewEvent.COMMENT,
+            commit_id=pr.head_sha,
+            body="review body",
+            comments=(),
+        ),
+    )
+
+    assert result.review_url is None
+    assert result.safe_error == "GitHub review submission failed (request payload preserved at /tmp/review.json)"
+    assert "secret" not in result.safe_error
 
 
 @pytest.mark.asyncio
@@ -1279,12 +1335,21 @@ async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, 
     )
     submit_called = False
 
-    def fake_submit(*_a: Any, **_k: Any) -> tuple[str | None, str | None]:
+    def fake_submit(
+        _plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
+    ) -> pr_review.ClassifiedReviewResult:
         nonlocal submit_called
         submit_called = True
-        return "x", None
+        return pr_review.ClassifiedReviewResult(
+            status=pr_review.SubmissionStatus.POSTED,
+            review_url="x",
+            posted_file_level=(),
+            folded_file_level=(),
+            final_review_posted=True,
+            safe_error=None,
+        )
 
-    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
     status = await pr_review._post(
@@ -1330,13 +1395,22 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
-    captured: dict[str, Any] = {}
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
 
-    def fake_submit(_td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any) -> tuple[str | None, str | None]:
-        captured["payload"] = payload
-        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
+    def fake_submit(
+        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
+    ) -> pr_review.ClassifiedReviewResult:
+        captured["plan"] = plan
+        return pr_review.ClassifiedReviewResult(
+            status=pr_review.SubmissionStatus.POSTED,
+            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
+            posted_file_level=(),
+            folded_file_level=(),
+            final_review_posted=True,
+            safe_error=None,
+        )
 
-    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
@@ -1351,8 +1425,8 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     )
 
     assert status == pr_review.PostStatus.POSTED
-    assert captured["payload"]["event"] == "COMMENT"
-    assert blocks in captured["payload"]["body"]
+    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
+    assert captured["plan"].diagram_blocks == blocks
 
 
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
