@@ -90,7 +90,7 @@ def test_observability_fields_doc_exists_and_pins_contract() -> None:
     # contract (P18-plan.md Task 6 Step 3).
     assert "contract_version" in doc
     assert "94f432d" in doc
-    for pin in ("1.44.0", "0.62.3", "0.5.1", "0.28.1", "4.14.2", "0.85.1"):
+    for pin in ("1.44.0", "0.62.3", "0.5.1", "0.28.1", "4.15.1", "0.84.3"):
         assert pin in doc, f"missing dependency pin {pin} in observability-fields.md"
     assert "94f432d7126f5884d30a2cdde6f4e89908ebb6fd" in doc  # semconv commit pin
 

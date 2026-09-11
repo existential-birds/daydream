@@ -272,7 +272,7 @@ Full contract: `docs/extensions.md`.
 
 ## Constraints and conventions
 
-- **SDK** `claude-agent-sdk==0.2.147`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
+- **SDK** `claude-agent-sdk==0.2.152`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
   unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
 - **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
