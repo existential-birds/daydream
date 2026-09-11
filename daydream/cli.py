@@ -151,7 +151,7 @@ def _auto_detect_pr_number(repo: Path) -> int | None:
             launched.
     """
     try:
-        data = git_ops.gh_pr_view(repo, None)
+        data = git_ops.gh_pr_view(repo, None, auth=git_ops.INHERIT_GITHUB_AUTH)
     except git_ops.GitError:
         return None
     if not data:
@@ -171,7 +171,7 @@ def _detect_repo_slug(repo: Path) -> str | None:
             against a checkout of another (the benchmark-harness pattern).
     """
     try:
-        slug = git_ops.gh_repo_view(repo)
+        slug = git_ops.gh_repo_view(repo, auth=git_ops.INHERIT_GITHUB_AUTH)
     except git_ops.GitError:
         return None
     if slug is None:
@@ -2680,7 +2680,7 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         repo=args.repo,
         console=console,
         bot_login=args.bot_login,
-        approve_on_clean=approve,
+        approve_on_clean=approve, auth=git_ops.INHERIT_GITHUB_AUTH,
     )
 
 

@@ -1313,6 +1313,48 @@ async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_r
 
 
 @pytest.mark.asyncio
+async def test_expired_remote_ci_budget_skips_auth_resolution_and_gh_spawn(
+    fake_gh: FakeGh, git_repo: Path
+) -> None:
+    """The async request budget expires before an auth refresh can begin."""
+
+    class NeverResolveAuth:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def environment_for_request(self) -> None:
+            self.calls += 1
+            raise AssertionError("an expired remote-CI request must not resolve auth")
+
+    ticks = iter((0.0, 0.0, 1.0, 1.0))
+
+    def monotonic() -> float:
+        return next(ticks)
+
+    auth = NeverResolveAuth()
+    emitted: list[RemoteCIVerdict] = []
+    verdict = await wait_for_remote_ci(
+        _target(git_repo),
+        fetcher=GitHubRemoteCIFetcher(auth=auth),
+        limits=RemoteCILimits(
+            poll_seconds=0.1,
+            discovery_seconds=1.0,
+            completion_seconds=2.0,
+            request_seconds=1.0,
+        ),
+        monotonic=monotonic,
+        sleep=lambda _delay: asyncio.sleep(0),
+        on_snapshot=emitted.append,
+    )
+
+    assert auth.calls == 0
+    assert fake_gh.process_calls() == []
+    assert verdict.status == "unavailable"
+    assert verdict.reason == "remote CI deadline expired during the first poll"
+    assert emitted == [verdict]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "required_entry",
     [

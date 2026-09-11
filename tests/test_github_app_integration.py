@@ -2,7 +2,7 @@
 
 Enters from runner.run() with a real temp git repo, real filesystem, real event
 loop. Mocks only the Backend (no real AI) and the github_app network helpers
-(no real GitHub). Asserts observable banner output and singleton state.
+(no real GitHub). Asserts observable banner output and run-owned auth behavior.
 """
 from __future__ import annotations
 
@@ -112,11 +112,11 @@ async def test_fallback_identity_without_app_creds(
     out = capsys.readouterr().out
     assert "personal-user" in out
     assert not mock_mint.called             # no App creds → no minting
-    assert git_ops.get_gh_token_env() is None  # singleton never set in fallback
+    assert config.identity == "personal-user"
     assert exit_code == 0
 
 
-async def test_fallback_clears_stale_token_from_previous_run(
+async def test_fallback_run_cannot_replace_an_existing_session_auth(
     feature_branch_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -124,8 +124,9 @@ async def test_fallback_clears_stale_token_from_previous_run(
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
-    # Simulate a prior run() in the same process that injected an App token.
-    git_ops.set_gh_token_env({"GH_TOKEN": "stale"})
+    existing_auth = git_ops.StaticGitHubAuth(
+        {"GH_TOKEN": "ghs_existing_session_1234567890"}
+    )
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
                        output_mode="review", shallow=True, stack="python", quiet=False)
@@ -136,7 +137,10 @@ async def test_fallback_clears_stale_token_from_previous_run(
 
     out = capsys.readouterr().out
     assert "personal-user" in out
-    assert git_ops.get_gh_token_env() is None  # stale token cleared, not reused
+    assert existing_auth.environment_for_request()["GH_TOKEN"] == (
+        "ghs_existing_session_1234567890"
+    )
+    assert config.identity == "personal-user"
     assert exit_code == 0
 
 
@@ -162,7 +166,6 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
     assert exit_code == 1
     assert "Cannot determine owner/repo" in out
     assert not mock_mint.called
-    assert git_ops.get_gh_token_env() is None
 
 
 async def test_minting_failure_aborts_run(
@@ -185,4 +188,3 @@ async def test_minting_failure_aborts_run(
     out = capsys.readouterr().out
     assert exit_code == 1
     assert "App token resolution failed" in out
-    assert git_ops.get_gh_token_env() is None  # failed minting never injects a token

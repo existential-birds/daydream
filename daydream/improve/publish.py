@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from daydream import git_ops
+from daydream.git_ops import INHERIT_GITHUB_AUTH, GitHubAuth
 
 PublicationDisposition = Literal["created", "existing", "reconciled"]
 _PACKAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -88,14 +89,16 @@ def issue_body(
     return f"{'\n'.join(markers)}\n\n{plan_markdown}"
 
 
-def _repo_slug(repo: Path, explicit: str | None) -> str:
+def _repo_slug(
+    repo: Path, explicit: str | None, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+) -> str:
     if explicit is not None:
         parsed = git_ops.split_owner_repo(explicit)
         if parsed is None or "/" in parsed[1]:
             raise ImprovePublishError(f"Invalid GitHub repository slug {explicit!r}; expected owner/repo")
         return explicit
     try:
-        inferred = git_ops.gh_repo_view(repo)
+        inferred = git_ops.gh_repo_view(repo, auth=auth)
     except git_ops.GitError as exc:
         raise ImprovePublishError("Cannot infer the GitHub repository from this checkout") from exc
     if inferred is None:
@@ -115,10 +118,12 @@ class IssuePublisher:
         repo: Path,
         repo_slug: str,
         issues: list[dict[str, object]],
+        auth: GitHubAuth,
     ) -> None:
         self._repo = repo
         self.repo_slug = repo_slug
         self._issues = issues
+        self._auth = auth
 
     @classmethod
     def connect(
@@ -126,20 +131,22 @@ class IssuePublisher:
         repo: Path,
         *,
         repo_slug: str | None = None,
+        auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     ) -> IssuePublisher:
         """Resolve the repository and load open and closed issues strictly."""
-        resolved = _repo_slug(repo, repo_slug)
+        resolved = _repo_slug(repo, repo_slug, auth=auth)
         try:
             issues = git_ops.gh_issue_list_strict(
                 repo,
                 state="all",
                 repo_slug=resolved,
+                auth=auth,
             )
         except git_ops.GitError as exc:
             raise ImprovePublishError(
                 "Cannot safely reconcile existing Improve issues; no issues were created"
             ) from exc
-        return cls(repo, resolved, list(issues))
+        return cls(repo, resolved, list(issues), auth)
 
     def _matches(self, marker: str) -> list[dict[str, object]]:
         return [issue for issue in self._issues if marker in str(issue.get("body") or "")]
@@ -225,6 +232,7 @@ class IssuePublisher:
                 self._repo,
                 state="all",
                 repo_slug=self.repo_slug,
+                auth=self._auth,
             )
         except git_ops.GitError as lookup_error:
             raise ImprovePublishError(
@@ -289,6 +297,7 @@ class IssuePublisher:
                 title=title,
                 body=body,
                 repo_slug=self.repo_slug,
+                auth=self._auth,
             )
         except git_ops.GitError as create_error:
             self._refresh_after_failed_create(create_error)

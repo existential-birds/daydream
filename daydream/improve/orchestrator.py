@@ -2266,6 +2266,7 @@ async def _step_publish_issues(ctx: FlowContext) -> None:
         publisher = IssuePublisher.connect(
             ctx.work.repo,
             repo_slug=ctx.config.pr_repo,
+            auth=ctx.github_execution.auth,
         )
     except ImprovePublishError as exc:
         safe_error = redact_text(str(exc))

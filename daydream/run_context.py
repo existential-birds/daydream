@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from daydream.backends import Backend
+    from daydream.github_app import GitHubIdentity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -47,11 +48,16 @@ _T = TypeVar("_T")
 class RunContext:
     """Own the immutable policy and active backend counts for one run."""
 
-    __slots__ = ("_policy", "_run_token")
+    __slots__ = ("_policy", "_run_token", "github_identity")
 
-    def __init__(self, policy: InteractionPolicy) -> None:
+    def __init__(
+        self, policy: InteractionPolicy, *, github_identity: GitHubIdentity | None = None,
+    ) -> None:
+        from daydream.github_app import GitHubIdentity
+
         self._policy = policy
         self._run_token = object()
+        self.github_identity = github_identity if github_identity is not None else GitHubIdentity("unknown")
 
     @property
     def policy(self) -> InteractionPolicy:

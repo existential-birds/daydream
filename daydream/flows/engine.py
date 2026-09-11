@@ -24,6 +24,7 @@ from daydream.extensions.api import (
 from daydream.extensions.api import (
     LoopGroup as LoopGroup,
 )
+from daydream.github_app import GitHubExecutionInput
 from daydream.observability.spans import step_scope
 from daydream.run_context import bind_run_context, resolve_run_context
 
@@ -53,6 +54,10 @@ class FlowContext:
         run_context: Runner-owned interaction policy and backend lifecycle.
             Direct extension callers may omit it to use the bound runtime or
             the standalone default when the flow begins.
+        github_execution: Explicit GitHub authentication owned by this run.
+            Omitted by standalone extensions, it inherits the parent environment.
+            This runtime capability is excluded from repr and must not enter data
+            or artifact serializers.
     """
 
     config: RunConfig
@@ -64,6 +69,9 @@ class FlowContext:
     private_workspace_owner: PrivateWorkspaceOwner | None = None
     artifacts: ArtifactSession | None = None
     run_context: RunContext | None = field(default=None, kw_only=True)
+    github_execution: GitHubExecutionInput = field(
+        default_factory=GitHubExecutionInput, repr=False, compare=False, kw_only=True,
+    )
     _backend_cache: dict[
         tuple[str, str | None, str | None, Path | None], Backend
     ] = field(

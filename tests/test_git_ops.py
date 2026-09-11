@@ -2956,6 +2956,7 @@ def test_gh_api_jq_parsing(
 def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Explicit headers reach gh as -H args, in both the plain and --input branches."""
     captured: list[list[str]] = []
+    captured_auth: list[Any] = []
 
     class _Proc:
         returncode = 0
@@ -2964,14 +2965,22 @@ def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     def fake_run_gh(repo: Path, args: list[str], **kwargs: Any) -> _Proc:
         captured.append(args)
+        captured_auth.append(kwargs["auth"])
         return _Proc()
 
     monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
     headers = {"Authorization": "Bearer jwt-abc"}
-    git_ops.gh_api(tmp_path, "/app/installations", headers=headers)
+    auth = git_ops.StaticGitHubAuth({"PATH": "/tools", "GH_TOKEN": "jwt-abc"})
+    git_ops.gh_api(
+        tmp_path,
+        "/app/installations",
+        auth=auth,
+        headers=headers,
+    )
     git_ops.gh_api(
         tmp_path,
         "/app/installations/1/access_tokens",
+        auth=auth,
         method="POST",
         input_data={"repositories": ["r"]},
         headers=headers,
@@ -2980,6 +2989,7 @@ def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert captured[0][:3] == ["api", "-H", "Authorization: Bearer jwt-abc"]
     assert captured[1][:3] == ["api", "-H", "Authorization: Bearer jwt-abc"]
     assert "--input" in captured[1]
+    assert captured_auth == [auth, auth]
 
 
 def test_gh_api_error_message_redacts_authorization_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3224,6 +3234,36 @@ def test_gh_file_at_ref_reads_a_nested_path_outside_any_checkout(
     assert content == b"VALUE = 1\n"
     endpoints = [call.endpoint for call in fake_gh.calls("GET")]
     assert endpoints == [f"repos/o/r/contents/src/deep/a%20b.py?ref={_FILE_AT_REF_SHA}"]
+
+
+def test_gh_file_at_ref_forwards_auth_to_contents_and_blob_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth = git_ops.StaticGitHubAuth(
+        {"PATH": "/tools", "GH_TOKEN": "ghs_file_reader_token_1234567890"}
+    )
+    seen_auth: list[Any] = []
+
+    def api(_repo: Path, endpoint: str, **kwargs: Any) -> dict[str, Any]:
+        seen_auth.append(kwargs["auth"])
+        if "/contents/" in endpoint:
+            return {"type": "file", "sha": "c" * 40, "encoding": "none"}
+        return {
+            "encoding": "base64",
+            "content": base64.b64encode(b"large file\n").decode(),
+        }
+
+    monkeypatch.setattr(git_ops, "gh_api", api)
+
+    assert git_ops.gh_file_at_ref(
+        tmp_path,
+        "o/r",
+        _FILE_AT_REF_SHA,
+        "large.bin",
+        auth=auth,
+    ) == b"large file\n"
+    assert seen_auth == [auth, auth]
 
 
 @pytest.mark.parametrize(

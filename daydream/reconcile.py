@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from daydream import git_ops
 from daydream.bot_identity import bot_login_matches
-from daydream.git_ops import GitError
+from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
 from daydream.pr_review import parse_diagram_markers, parse_finding_markers
 from daydream.ui import print_warning
 
@@ -117,7 +117,14 @@ mutation($subjectId: ID!) {
 """
 
 
-def _graphql(repo: Path, query: str, variables: dict[str, Any], *, idempotent: bool = False) -> dict[str, Any]:
+def _graphql(
+    repo: Path,
+    query: str,
+    variables: dict[str, Any],
+    *,
+    idempotent: bool = False,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> dict[str, Any]:
     """Run a GraphQL operation via ``gh api graphql`` and return the response.
 
     Args:
@@ -134,6 +141,7 @@ def _graphql(repo: Path, query: str, variables: dict[str, Any], *, idempotent: b
         method="POST",
         input_data={"query": query, "variables": variables},
         idempotent=idempotent,
+        auth=auth,
     )
     if not isinstance(response, dict) or response.get("errors"):
         raise GitError(f"GraphQL query failed: {response!r}")
@@ -155,7 +163,12 @@ def _authored_by_bot(login: str | None, viewer_did_author: bool, bot_login: str 
 
 
 def fetch_prior_findings(
-    target_dir: Path, repo_slug: str, pr_number: int, *, bot_login: str | None = None
+    target_dir: Path,
+    repo_slug: str,
+    pr_number: int,
+    *,
+    bot_login: str | None = None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> dict[str, PriorFinding]:
     """Inventory the bot's prior findings on a PR, keyed by fingerprint.
 
@@ -190,7 +203,9 @@ def fetch_prior_findings(
     cursor: str | None = None
     while True:
         variables = {"owner": owner, "name": name, "number": pr_number, "cursor": cursor}
-        response = _graphql(target_dir, _REVIEW_THREADS_QUERY, variables, idempotent=True)
+        response = _graphql(
+            target_dir, _REVIEW_THREADS_QUERY, variables, idempotent=True, auth=auth
+        )
         threads = response["data"]["repository"]["pullRequest"]["reviewThreads"]
         for thread in threads["nodes"]:
             for comment in thread["comments"]["nodes"]:
@@ -215,7 +230,11 @@ def fetch_prior_findings(
         cursor = page_info["endCursor"]
 
     reviews = git_ops.gh_api(
-        target_dir, f"repos/{owner}/{name}/pulls/{pr_number}/reviews", paginate=True, idempotent=True
+        target_dir,
+        f"repos/{owner}/{name}/pulls/{pr_number}/reviews",
+        paginate=True,
+        idempotent=True,
+        auth=auth,
     )
     for review in reviews:
         if not _authored_by_bot(
@@ -257,7 +276,9 @@ def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> Reconci
     )
 
 
-def minimize_comment(target_dir: Path, node_id: str) -> bool:
+def minimize_comment(
+    target_dir: Path, node_id: str, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+) -> bool:
     """Mark one comment outdated via the GraphQL ``minimizeComment`` mutation.
 
     The single minimization primitive, shared by stale-finding resolution and
@@ -275,14 +296,21 @@ def minimize_comment(target_dir: Path, node_id: str) -> bool:
         that is.
     """
     try:
-        response = _graphql(target_dir, _MINIMIZE_COMMENT_MUTATION, {"subjectId": node_id})
+        response = _graphql(
+            target_dir, _MINIMIZE_COMMENT_MUTATION, {"subjectId": node_id}, auth=auth
+        )
         return bool(response["data"]["minimizeComment"]["minimizedComment"]["isMinimized"])
     except (GitError, KeyError, TypeError):
         return False
 
 
 def fetch_prior_diagram_comments(
-    target_dir: Path, repo_slug: str, pr_number: int, *, bot_login: str | None
+    target_dir: Path,
+    repo_slug: str,
+    pr_number: int,
+    *,
+    bot_login: str | None,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> list[PriorDiagramComment]:
     """Inventory the bot's prior standalone diagram comments on a PR (issue #1113).
 
@@ -318,6 +346,7 @@ def fetch_prior_diagram_comments(
         f"repos/{owner}/{name}/issues/{pr_number}/comments",
         paginate=True,
         idempotent=True,
+        auth=auth,
     )
     if not isinstance(comments, list):
         return []
@@ -337,7 +366,12 @@ def fetch_prior_diagram_comments(
     return prior
 
 
-def resolve_threads(target_dir: Path, stale: list[PriorFinding]) -> tuple[int, int]:
+def resolve_threads(
+    target_dir: Path,
+    stale: list[PriorFinding],
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> tuple[int, int]:
     """Mark stale findings outdated via GraphQL ``minimizeComment``.
 
     One mutation per stale finding, keyed on the carrying comment's GraphQL
@@ -360,7 +394,7 @@ def resolve_threads(target_dir: Path, stale: list[PriorFinding]) -> tuple[int, i
             )
             failed += 1
             continue
-        if minimize_comment(target_dir, finding.comment_node_id):
+        if minimize_comment(target_dir, finding.comment_node_id, auth=auth):
             resolved += 1
         else:
             print_warning(

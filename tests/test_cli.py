@@ -995,12 +995,12 @@ def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatc
     invoking_repo.mkdir()
     monkeypatch.chdir(invoking_repo)
 
-    def fake_gh_repo_view(repo: Any) -> tuple[Any, ...]:
+    def fake_gh_repo_view(repo: Any, **_kwargs: Any) -> tuple[Any, ...]:
         assert Path(repo) == invoking_repo
         return ("existential-birds", "daydream")
 
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None)
     monkeypatch.setattr(sys, "argv", ["daydream"])
 
     config = _parse_args()
@@ -1039,8 +1039,8 @@ def test_real_cli_stack_entry(
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo: None)
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch: None)
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo, **_kwargs: None)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch, **_kwargs: None)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     monkeypatch.setattr(
