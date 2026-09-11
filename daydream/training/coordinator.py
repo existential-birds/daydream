@@ -551,7 +551,7 @@ def _run_stage0(
 
     _atomic_write_json(stage_dir / "model-state.json", model.state_dict())
     # The gate report on disk is the artifact a Stage-3 run points
-    # --taskset.gate-report-path at (rl/daydream_review_v1 gate_refusal).
+    # --taskset.gate-report-path at (rl/daydream_review gate_refusal).
     # Its schema is the bare ``GateReport.to_dict()`` payload — top-level
     # ``passed``/``evidence_digest`` — so the boundary consumer reads it
     # unmodified. Split evidence lives beside it as its own artifact.

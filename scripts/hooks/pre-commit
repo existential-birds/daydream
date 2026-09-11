@@ -30,7 +30,7 @@ cd "$(git rev-parse --show-toplevel)"
 py_files=()
 while IFS= read -r path; do
     case "$path" in
-        daydream/*|tests/*|rl/daydream_review_v1/*) py_files+=("$path") ;;
+        daydream/*|tests/*|rl/daydream_review/*) py_files+=("$path") ;;
     esac
 done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.py' | tr '\0' '\n')
 if [ "${#py_files[@]}" -eq 0 ]; then

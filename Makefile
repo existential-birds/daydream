@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report
+.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
 
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
@@ -86,7 +86,14 @@ lockcheck:
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you
 # change rl/daydream_review; its vulture scan still runs here via `deadcode`.
-check: lockcheck install lint deadcode typecheck test actionlint coverage-report
+check: lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
+
+# Naming grep-gate (#1093): fails when a project-owned versioned identifier
+# reappears anywhere in tracked files. External tool-protocol version strings
+# are allowlisted inline in the script. Runs as part of `make check` so the
+# local and CI gates both enforce the neutral-naming decision.
+check-naming:
+	bash scripts/check-naming.sh
 
 # Install git hooks
 hooks:

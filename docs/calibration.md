@@ -84,7 +84,7 @@ Given the same inputs and the same `--seed`, the emitted artifact is
 byte-reproducible. The artifact records the SHA256 of every input file, the
 corpus lineage (`schema_version: corpus-v2`, `content_digests`, `as_of`,
 `valid_at`, `salt`, split rates), and the resolved version stamps. The
-artifact schema version is `calibration-artifact-v1`.
+artifact schema version is `calibration-artifact`.
 
 ## Validation is fail-closed
 
