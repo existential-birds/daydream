@@ -22,12 +22,16 @@ import json
 import os
 import sys
 import urllib.parse
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from daydream.backends import BackendExecutionInput
 from daydream.benchmark.harbor import candidate
 from daydream.config_file import DaydreamFileConfig
-from daydream.runner import RunConfig
+from daydream.git_ops import StaticGitHubAuth
+from daydream.github_app import GitHubExecutionInput
+from daydream.runner import RunConfig, RunnerExecutionInput
 
 _DEFAULT_REPO_DIR = "/workspace/repo"
 _DEFAULT_ARTIFACT_PATH = "/logs/artifacts/review.json"
@@ -61,104 +65,79 @@ class EntrypointError(Exception):
     """
 
 
-def build_run_config(
-    repo_dir: str,
-    trajectory_path: str | Path,
-    *,
-    backend: str,
-    model: str | None,
-    base_ref: str = "base",
-) -> RunConfig:
-    """Build the fully controlled in-process :class:`RunConfig`.
+@dataclass(frozen=True)
+class ParsedReviewerInput:
+    """Validated container controls and opaque per-run execution inputs."""
 
-    Review-only (``output_mode="review"``), headless, with archiving and
-    evaluation disabled and a controlled-empty :class:`DaydreamFileConfig` so
-    the target repository's ``.daydream.toml`` is never loaded. ``findings_out``
-    stays ``None`` -- the ``--findings-out`` emission path performs a live PR
-    lookup and must be forbidden for an offline snapshot. ``base_ref`` carries
-    the ``DAYDREAM_REVIEW_BASE_REF`` value rendered into the container env.
-
-    The review profile is resolved through the Harbor explicit-only resolver
-    (R10): the control-plane ``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` env (or the
-    packaged default) is parsed + validated BEFORE the run, so an invalid
-    candidate aborts here — no review ever starts and no artifact is written.
-    The target repo's own config can never change the candidate.
-
-    Raises:
-        EntrypointError: On an invalid review-profile candidate (the process
-            exits non-zero and ``publish_review`` is never reached).
-    """
-    from daydream.review_profile import ProfileError, resolve_harbor_profile
-
-    try:
-        resolved = resolve_harbor_profile(candidate_env=_CANDIDATE_ENV)
-    except ProfileError as exc:
-        raise EntrypointError(
-            f"invalid review-profile candidate: {exc}"
-        ) from exc
-    config = RunConfig(
-        target=str(repo_dir),
-        output_mode="review",
-        base=base_ref,
-        non_interactive=True,
-        archive=False,
-        run_eval=False,
-        findings_out=None,
-        trajectory_path=Path(trajectory_path),
-        backend=backend,
-        model=model,
-        file_config=DaydreamFileConfig(),
-    )
-    config.review_profile = resolved
-    return config
+    backend: str
+    model: str | None
+    repo_dir: Path
+    artifact_path: Path
+    trajectory_path: Path
+    case_id: str
+    base_ref: str
+    head_ref: str
+    profile_candidate: str | None
+    execution: RunnerExecutionInput = field(repr=False, compare=False)
 
 
-def require_supported_backend() -> str:
-    """Refuse any backend other than ``pi`` or ``claude``, before any reviewing.
+_GITHUB_CREDENTIAL_VARS = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GH_HOST",
+    "DAYDREAM_APP_ID",
+    "DAYDREAM_APP_PRIVATE_KEY",
+)
+_UNSELECTED_PI_CREDENTIALS = ("ZAI_API_KEY", "NOUS_API_KEY")
+_SCRUB_PREFIXES = (
+    "DAYDREAM_JUDGE_",
+    "ANTHROPIC_",
+    "CLAUDE_CODE_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "PI_",
+    "DAYDREAM_APP_",
+)
 
-    Reads ``DAYDREAM_REVIEW_BACKEND`` (default ``"pi"``). An unsupported
-    backend raises :class:`EntrypointError` before tools are installed or
-    network access is widened.
-    """
-    backend = os.environ.get(_BACKEND_ENV, "pi").strip().lower()
+
+def require_supported_backend(environment: Mapping[str, str]) -> str:
+    """Validate the selected Harbor reviewer backend from its container map."""
+    backend = environment.get(_BACKEND_ENV, "pi").strip().lower()
     if backend not in _SUPPORTED_BACKENDS:
-        supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
+        supported = ", ".join(repr(item) for item in _SUPPORTED_BACKENDS)
         raise EntrypointError(
             f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
         )
     return backend
 
 
+def _required_env(environment: Mapping[str, str], name: str) -> str:
+    value = environment.get(name, "").strip()
+    if not value:
+        raise EntrypointError(f"missing required environment variable {name!r}")
+    return value
 
-def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "pi") -> None:
-    """Map only reviewer config/credential into the selected backend's env.
 
-    The mapping is backend-aware. For ``pi`` (default) the reviewer is
-    intentionally OpenRouter-only: the control-plane credential becomes Pi's
-    generic ``PI_API_KEY`` and the Daydream Pi backend maps it to
-    ``OPENROUTER_API_KEY`` only in the child process. For ``claude`` the
-    ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_BASE_URL``
-    credentials are preserved into the environment and the openrouter.ai
-    base-URL requirement does not apply (any HTTPS ``ANTHROPIC_BASE_URL`` with
-    a concrete hostname is accepted). In both branches any inherited raw provider or judge credential
-    is cleared first so it cannot leak into the reviewed scope; a bad base URL
-    or a missing credential fails closed.
+def _sanitize_reviewer_environment(
+    environment: Mapping[str, str], *, backend: str,
+) -> dict[str, str]:
+    """Return a native backend map with all unrelated credentials removed."""
+    source = dict(environment)
+    sanitized = {
+        key: value
+        for key, value in source.items()
+        if key not in _GITHUB_CREDENTIAL_VARS
+        and key not in _UNSELECTED_PI_CREDENTIALS
+        and not any(key.startswith(prefix) for prefix in _SCRUB_PREFIXES)
+    }
+    # Credentials are mapped into the backend-native names below. Keeping their
+    # control-plane aliases would let downstream code choose an ambient path.
+    sanitized.pop(_API_KEY_ENV, None)
+    sanitized.pop(_BASE_URL_ENV, None)
+    sanitized.pop("DAYDREAM_SKILLS_DIR", None)
 
-    The caller must pass an already-validated *backend* (see
-    :func:`require_supported_backend`); credential mapping never substitutes a
-    fallback for a missing credential.
-    """
-    source = dict(os.environ if env is None else env)
-    for prefix in (
-        "DAYDREAM_JUDGE_",
-        "ANTHROPIC_",
-        "CLAUDE_CODE_",
-        "OPENAI_",
-        "OPENROUTER_",
-        "PI_",
-    ):
-        for key in [k for k in os.environ if k.startswith(prefix)]:
-            os.environ.pop(key, None)
     if backend == "claude":
         api_key = (source.get("ANTHROPIC_API_KEY") or "").strip()
         auth_token = (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
@@ -176,15 +155,14 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "
                 or parsed.username is not None
                 or parsed.password is not None
             ):
-                raise EntrypointError(
-                    "ANTHROPIC_BASE_URL must be an HTTPS endpoint"
-                )
-            os.environ["ANTHROPIC_BASE_URL"] = base_url
+                raise EntrypointError("ANTHROPIC_BASE_URL must be an HTTPS endpoint")
+            sanitized["ANTHROPIC_BASE_URL"] = base_url
         if api_key:
-            os.environ["ANTHROPIC_API_KEY"] = api_key
+            sanitized["ANTHROPIC_API_KEY"] = api_key
         if auth_token:
-            os.environ["ANTHROPIC_AUTH_TOKEN"] = auth_token
-        return
+            sanitized["ANTHROPIC_AUTH_TOKEN"] = auth_token
+        return sanitized
+
     api_key = (source.get(_API_KEY_ENV) or "").strip()
     base_url = (source.get(_BASE_URL_ENV) or "").strip()
     if not base_url:
@@ -205,16 +183,78 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "
         raise EntrypointError(
             "missing required environment variable 'DAYDREAM_REVIEW_API_KEY'"
         )
-    os.environ["PI_PROVIDER"] = "openrouter"
-    os.environ["PI_API_KEY"] = api_key
-    os.environ["PI_TELEMETRY"] = "0"
+    sanitized["PI_PROVIDER"] = "openrouter"
+    sanitized["PI_API_KEY"] = api_key
+    sanitized["PI_TELEMETRY"] = "0"
+    for control in ("PI_THINKING", "PI_CODING_AGENT_DIR"):
+        if control in source:
+            sanitized[control] = source[control]
+    return sanitized
 
 
-def _required_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise EntrypointError(f"missing required environment variable {name!r}")
-    return value
+def parse_reviewer_environment(environment: Mapping[str, str]) -> ParsedReviewerInput:
+    """Parse one Harbor container map without reading or mutating process state."""
+    source = dict(environment)
+    backend = require_supported_backend(source)
+    sanitized = _sanitize_reviewer_environment(source, backend=backend)
+    backend_execution = BackendExecutionInput.from_environment(sanitized, backend=backend)
+    github_environment = dict(sanitized)
+    for credential in ("PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        github_environment.pop(credential, None)
+    execution = RunnerExecutionInput(
+        backend=backend_execution,
+        github=GitHubExecutionInput(auth=StaticGitHubAuth(github_environment)),
+    )
+    return ParsedReviewerInput(
+        backend=backend,
+        model=source.get("DAYDREAM_REVIEW_MODEL"),
+        repo_dir=Path(source.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)),
+        artifact_path=Path(source.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)),
+        trajectory_path=Path(source.get(_TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))),
+        case_id=_required_env(source, _CASE_ID_ENV),
+        base_ref=source.get(_BASE_REF_ENV, "base").strip() or "base",
+        head_ref=source.get(_HEAD_REF_ENV, "head").strip() or "head",
+        profile_candidate=source.get(_CANDIDATE_ENV) or None,
+        execution=execution,
+    )
+
+
+def build_run_config(
+    repo_dir: str | Path,
+    trajectory_path: str | Path,
+    *,
+    backend: str,
+    model: str | None,
+    profile_candidate: str | None,
+    base_ref: str = "base",
+) -> RunConfig:
+    """Build the fixed review configuration from already parsed controls."""
+    from daydream.review_profile import ProfileError, resolve_harbor_profile
+
+    try:
+        profile_environment = (
+            {} if profile_candidate is None else {_CANDIDATE_ENV: profile_candidate}
+        )
+        resolved = resolve_harbor_profile(
+            candidate_env=_CANDIDATE_ENV, env=profile_environment
+        )
+    except ProfileError as exc:
+        raise EntrypointError(f"invalid review-profile candidate: {exc}") from exc
+    config = RunConfig(
+        target=str(repo_dir),
+        output_mode="review",
+        base=base_ref,
+        non_interactive=True,
+        archive=False,
+        run_eval=False,
+        findings_out=None,
+        trajectory_path=Path(trajectory_path),
+        backend=backend,
+        model=model,
+        file_config=DaydreamFileConfig(),
+    )
+    config.review_profile = resolved
+    return config
 
 
 def publish_review(
@@ -225,13 +265,7 @@ def publish_review(
     base_ref: str = "base",
     head_ref: str = "head",
 ) -> None:
-    """Publish the candidate artifact from the runner's merged-items output.
-
-    Locates ``<repo_dir>/.daydream/deep/merged-items.json``; raises
-    :class:`CandidateError` (via its ``kind``) on a missing/corrupt merged
-    output, an over-limit candidate set, or a failed artifact write -- never
-    silently truncates or substitutes a fallback artifact.
-    """
+    """Publish the candidate artifact from the runner's merged-items output."""
     repo_dir = Path(repo_dir)
     merged = repo_dir / ".daydream" / "deep" / "merged-items.json"
     try:
@@ -259,45 +293,28 @@ def publish_review(
     candidate.write_candidate_artifact_atomic(artifact_path, artifact)
 
 
-async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
-    """Run the in-process reviewer and publish the candidate artifact.
-
-    Returns an exit code (0 on a completed review, non-zero on any failure).
-    *monkeypatch_env* is a test-only seam overriding/augmenting the process
-    environment from the caller; production defaults remain the fixed
-    in-container paths.
-    """
-    saved_env = None
-    if monkeypatch_env is not None:
-        saved_env = os.environ.copy()
-        for key, value in monkeypatch_env.items():
-            os.environ[key] = value
+async def main(environment: Mapping[str, str]) -> int:
+    """Run one parsed Harbor container input and publish its candidate artifact."""
     try:
-        backend = require_supported_backend()
-        apply_reviewer_env(backend=backend)
-        case_id = _required_env(_CASE_ID_ENV)
-        repo_dir = os.environ.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)
-        artifact_path = os.environ.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)
-        trajectory_path = os.environ.get(_TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))
-        base_ref = os.environ.get(_BASE_REF_ENV, "base").strip() or "base"
-        head_ref = os.environ.get(_HEAD_REF_ENV, "head").strip() or "head"
+        parsed = parse_reviewer_environment(environment)
         config = build_run_config(
-            repo_dir=repo_dir,
-            trajectory_path=trajectory_path,
-            backend=backend,
-            model=os.environ.get("DAYDREAM_REVIEW_MODEL"),
-            base_ref=base_ref,
+            repo_dir=parsed.repo_dir,
+            trajectory_path=parsed.trajectory_path,
+            backend=parsed.backend,
+            model=parsed.model,
+            profile_candidate=parsed.profile_candidate,
+            base_ref=parsed.base_ref,
         )
         from daydream import runner
 
-        if await runner.run(config) != 0:
+        if await runner.run(config, execution=parsed.execution) != 0:
             raise EntrypointError("daydream runner exited non-zero")
         publish_review(
-            repo_dir=repo_dir,
-            artifact_path=artifact_path,
-            case_id=case_id,
-            base_ref=base_ref,
-            head_ref=head_ref,
+            repo_dir=parsed.repo_dir,
+            artifact_path=parsed.artifact_path,
+            case_id=parsed.case_id,
+            base_ref=parsed.base_ref,
+            head_ref=parsed.head_ref,
         )
         return 0
     except (EntrypointError, candidate.CandidateError) as exc:
@@ -306,13 +323,7 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    finally:
-        # Test-only seam hygiene: never leak monkeypatched vars (or the
-        # reviewer env vars) into the surrounding process after main returns.
-        if saved_env is not None:
-            os.environ.clear()
-            os.environ.update(saved_env)
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(main(dict(os.environ))))

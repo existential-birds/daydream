@@ -563,25 +563,39 @@ async def _run_agent(
             # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
             # here — only inv.observe()/inv.observe_user_step() against the recorder.
             recorder = get_current_recorder()
-            try:
-                _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
-            except ValueError:
-                _default_attempts = 20
-            if _default_attempts < 0:
-                _default_attempts = 20
-
-            def _retry_delay_from_env(name: str, default: float) -> float:
+            retry_policy = getattr(backend, "retry_policy", None)
+            if retry_policy is not None:
+                max_attempts = retry_policy.attempts
+                base_delay = retry_policy.base_delay_s
+                max_delay = retry_policy.max_delay_s
+            else:
                 try:
-                    value = float(os.environ.get(name, str(default)))
+                    _default_attempts = int(
+                        os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20")
+                    )
                 except ValueError:
-                    return default
-                return value if math.isfinite(value) and value >= 0 else default
+                    _default_attempts = 20
+                if _default_attempts < 0:
+                    _default_attempts = 20
 
-            _default_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0)
-            _default_max_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0)
-            max_attempts = getattr(backend, "retry_attempts", _default_attempts)
-            base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
-            max_delay = getattr(backend, "retry_max_delay_s", _default_max_delay)
+                def _retry_delay_from_env(name: str, default: float) -> float:
+                    try:
+                        value = float(os.environ.get(name, str(default)))
+                    except ValueError:
+                        return default
+                    return value if math.isfinite(value) and value >= 0 else default
+
+                _default_delay = _retry_delay_from_env(
+                    "DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0
+                )
+                _default_max_delay = _retry_delay_from_env(
+                    "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
+                )
+                max_attempts = getattr(backend, "retry_attempts", _default_attempts)
+                base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
+                max_delay = getattr(
+                    backend, "retry_max_delay_s", _default_max_delay
+                )
             if max_attempts < 0:
                 raise ValueError("retry attempts must be >= 0")
             if not math.isfinite(base_delay):

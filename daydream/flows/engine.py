@@ -11,6 +11,7 @@ bodies, exactly where the flow helpers' try/excepts sit today.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,10 @@ if TYPE_CHECKING:
     from daydream.workspace import AuditWorkspace, WorkContext
 
 
+type BackendCache = dict[tuple[str, str | None, str | None, Path | None], Backend]
+type BackendFactory = Callable[[RunConfig, str, BackendCache, Path, AuditWorkspace | None], Backend]
+
+
 @dataclass
 class FlowContext:
     """Shared state a flow's steps read and write.
@@ -58,6 +63,9 @@ class FlowContext:
             Omitted by standalone extensions, it inherits the parent environment.
             This runtime capability is excluded from repr and must not enter data
             or artifact serializers.
+        _backend_factory: Runner-bound transport factory. It receives this
+            context's configuration, cache, workspace, and audit boundary;
+            omission keeps ordinary backend resolution.
     """
 
     config: RunConfig
@@ -72,9 +80,10 @@ class FlowContext:
     github_execution: GitHubExecutionInput = field(
         default_factory=GitHubExecutionInput, repr=False, compare=False, kw_only=True,
     )
-    _backend_cache: dict[
-        tuple[str, str | None, str | None, Path | None], Backend
-    ] = field(
+    _backend_factory: BackendFactory | None = field(
+        default=None, repr=False, compare=False, kw_only=True,
+    )
+    _backend_cache: BackendCache = field(
         default_factory=dict, repr=False
     )
 
@@ -86,6 +95,11 @@ class FlowContext:
         ``(backend_name, model, reasoning_effort, audit_root)`` tuple for the
         lifetime of this context.
         """
+        if self._backend_factory is not None:
+            return self._backend_factory(
+                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
+            )
+
         from daydream.runner import _resolve_backend
 
         return _resolve_backend(

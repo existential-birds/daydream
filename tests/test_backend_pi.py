@@ -63,6 +63,66 @@ MakeConfig = Callable[..., "RunConfig"]
 Mute = Callable[..., None]
 
 
+def test_backend_execution_input_is_immutable_parsed_and_returns_fresh_environment(
+    tmp_path: Path,
+) -> None:
+    from daydream.backends import BackendExecutionInput, RetryPolicy
+
+    source = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": "/run/bin",
+        "PI_PROVIDER": "openrouter",
+        "PI_THINKING": "high",
+        "PI_API_KEY": "run-secret",
+        "PI_CODING_AGENT_DIR": str(tmp_path / "pi-agent"),
+        "DAYDREAM_PI_FANOUT_CONCURRENCY": "3",
+        "DAYDREAM_PI_RETRY_ATTEMPTS": "4",
+        "DAYDREAM_PI_RETRY_BASE_DELAY_S": "0.25",
+        "DAYDREAM_PI_RETRY_MAX_DELAY_S": "5",
+        "DAYDREAM_STREAM_IDLE_TIMEOUT_S": "7",
+    }
+
+    execution = BackendExecutionInput.from_environment(source, backend="pi")
+    source["PI_API_KEY"] = "mutated"
+    first = execution.child_environment()
+    first["PI_API_KEY"] = "also-mutated"
+
+    assert execution.retry_policy == RetryPolicy(
+        attempts=4, base_delay_s=0.25, max_delay_s=5.0
+    )
+    assert execution.fanout_concurrency == 3
+    assert execution.pi_provider == "openrouter"
+    assert execution.pi_thinking == "high"
+    assert execution.pi_agent_dir == tmp_path / "pi-agent"
+    assert execution.stream_idle_timeout_s == 7.0
+    assert execution.pi_response_idle_timeout_s == 7.0
+    assert execution.child_environment()["PI_API_KEY"] == "run-secret"
+    assert "run-secret" not in repr(execution)
+
+
+def test_backend_execution_input_uses_backend_specific_defaults(tmp_path: Path) -> None:
+    from daydream.backends import BackendExecutionInput, RetryPolicy
+
+    environment = {"HOME": str(tmp_path), "PATH": "/run/bin"}
+
+    pi = BackendExecutionInput.from_environment(environment, backend="pi")
+    codex = BackendExecutionInput.from_environment(environment, backend="codex")
+    claude = BackendExecutionInput.from_environment(environment, backend="claude")
+
+    assert pi.retry_policy == RetryPolicy(20, 10.0, 120.0)
+    assert pi.fanout_concurrency == 10
+    assert pi.pi_agent_dir == tmp_path / ".pi" / "agent"
+    assert codex.retry_policy == claude.retry_policy == RetryPolicy(20, 2.0, 120.0)
+    assert codex.fanout_concurrency == claude.fanout_concurrency == 8
+
+
+def test_backend_execution_input_rejects_explicit_osprey() -> None:
+    from daydream.backends import BackendExecutionInput
+
+    with pytest.raises(ValueError, match="osprey"):
+        BackendExecutionInput.from_environment({}, backend="osprey")
+
+
 @pytest.mark.asyncio
 async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -133,6 +193,45 @@ async def _run_and_capture_args(
         async for _ in backend.execute(Path("/tmp"), prompt, **kwargs):
             pass
     return list(mock_exec.call_args.args), mock_exec
+
+
+@pytest.mark.asyncio
+async def test_pi_execution_input_controls_native_argv_environment_and_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.backends import BackendExecutionInput, RetryPolicy
+
+    execution = BackendExecutionInput.from_environment(
+        {
+            "HOME": str(tmp_path / "run-home"),
+            "PATH": "/run/bin",
+            "PI_PROVIDER": "openrouter",
+            "PI_THINKING": "high",
+            "PI_API_KEY": "run-key",
+            "DAYDREAM_PI_FANOUT_CONCURRENCY": "2",
+            "DAYDREAM_PI_RETRY_ATTEMPTS": "1",
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S": "0",
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S": "4",
+        },
+        backend="pi",
+    )
+    monkeypatch.setenv("PI_PROVIDER", "zai")
+    monkeypatch.setenv("PI_THINKING", "low")
+    monkeypatch.setenv("PI_API_KEY", "ambient-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-native-key")
+
+    backend = PiBackend(model="fixture-model", execution_input=execution)
+    args, mock_exec = await _run_and_capture_args(backend)
+    child = mock_exec.call_args.kwargs["env"]
+
+    assert args[args.index("--provider") + 1] == "openrouter"
+    assert args[args.index("--thinking") + 1] == "high"
+    assert child["OPENROUTER_API_KEY"] == "run-key"
+    assert child["PATH"] == "/run/bin"
+    assert "PI_API_KEY" not in child
+    assert "ambient-key" not in repr(child)
+    assert backend.fanout_concurrency == 2
+    assert backend.retry_policy == RetryPolicy(1, 0.0, 4.0)
 
 
 @pytest.mark.asyncio

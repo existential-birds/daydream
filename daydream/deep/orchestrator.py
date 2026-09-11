@@ -136,7 +136,7 @@ from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_
 from daydream.extensions import get_registry
 from daydream.extensions.api import BreakLoop, FlowStep, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.flows.engine import FlowContext, run_flow
+from daydream.flows.engine import BackendFactory, FlowContext, run_flow
 from daydream.generated_files import (
     is_generated_file,
     related_manifest_paths,
@@ -5571,6 +5571,7 @@ async def run_deep(
     run_artifacts: _RunArtifacts | None = None,
     run_context: RunContext | None = None,
     github_execution: GitHubExecutionInput | None = None,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Execute the deep-review pipeline (D-07) across every PR-process mode.
 
@@ -5604,6 +5605,7 @@ async def run_deep(
         run_artifacts=run_artifacts,
         run_context=run_context,
         github_execution=execution,
+        backend_factory=backend_factory,
     )
 
 
@@ -5672,6 +5674,7 @@ async def _run_review_spine(
     run_artifacts: _RunArtifacts | None,
     run_context: RunContext | None = None,
     github_execution: GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
     run_context = resolve_run_context(run_context)
@@ -5924,6 +5927,7 @@ async def _run_review_spine(
             artifacts=None if run_artifacts is None else run_artifacts.session,
             run_context=run_context,
             github_execution=github_execution,
+            _backend_factory=backend_factory,
             data={
                 "mode": mode,
                 "diff": bounded_diff,

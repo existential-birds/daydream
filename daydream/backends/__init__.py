@@ -31,14 +31,160 @@ import os
 import re
 import unicodedata
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union
 
 from daydream.trajectory import now_iso
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Complete retry settings owned by one constructed backend."""
+
+    attempts: int
+    base_delay_s: float
+    max_delay_s: float
+
+
+def _parsed_nonnegative_int(
+    environment: Mapping[str, str], name: str, default: int
+) -> int:
+    raw = environment.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a valid integer; using default %d", name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("%s=%r is negative; using default %d", name, raw, default)
+        return default
+    return value
+
+
+def _parsed_nonnegative_float(
+    environment: Mapping[str, str], name: str, default: float
+) -> float:
+    raw = environment.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a valid float; using default %g", name, raw, default)
+        return default
+    if not math.isfinite(value):
+        logger.warning("%s=%r is not finite; using default %g", name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("%s=%r is negative; using default %g", name, raw, default)
+        return default
+    return value
+
+
+def _parsed_positive_int(
+    environment: Mapping[str, str], name: str, default: int
+) -> int:
+    value = _parsed_nonnegative_int(environment, name, default)
+    if value == 0:
+        logger.warning("%s must be positive; using default %d", name, default)
+        return default
+    return value
+
+
+@dataclass(frozen=True)
+class BackendExecutionInput:
+    """Run-owned native process settings for one backend kind.
+
+    The complete environment is copied into an immutable private mapping.
+    Native transports receive a fresh mutable copy for each invocation.
+    """
+
+    _environment: Mapping[str, str] = field(repr=False, compare=False)
+    retry_policy: RetryPolicy
+    fanout_concurrency: int
+    pi_provider: str | None
+    pi_thinking: str | None
+    pi_agent_dir: Path | None
+    stream_idle_timeout_s: float | None
+    pi_response_idle_timeout_s: float | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "_environment", MappingProxyType(dict(self._environment))
+        )
+
+    @classmethod
+    def from_environment(
+        cls, environment: Mapping[str, str], *, backend: str
+    ) -> BackendExecutionInput:
+        """Parse one complete environment without consulting process globals."""
+        from daydream.backends._subprocess import (
+            DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
+            DEFAULT_STREAM_IDLE_TIMEOUT_S,
+        )
+
+        if backend not in {"pi", "codex", "claude"}:
+            if backend == "osprey":
+                raise ValueError("explicit BackendExecutionInput is not supported for osprey")
+            raise ValueError(f"unsupported backend for execution input: {backend!r}")
+
+        copied = dict(environment)
+        base_delay_default = 10.0 if backend == "pi" else 2.0
+        fanout_name = (
+            "DAYDREAM_PI_FANOUT_CONCURRENCY"
+            if backend == "pi"
+            else "DAYDREAM_FANOUT_CONCURRENCY"
+        )
+        fanout_default = 10 if backend == "pi" else 8
+        idle = _parsed_nonnegative_float(
+            copied, "DAYDREAM_STREAM_IDLE_TIMEOUT_S", DEFAULT_STREAM_IDLE_TIMEOUT_S
+        )
+        response_idle = _parsed_nonnegative_float(
+            copied,
+            "DAYDREAM_STREAM_IDLE_TIMEOUT_S",
+            DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
+        )
+        home = copied.get("HOME")
+        agent_dir_raw = copied.get("PI_CODING_AGENT_DIR")
+        pi_agent_dir = (
+            Path(agent_dir_raw)
+            if agent_dir_raw
+            else Path(home) / ".pi" / "agent"
+            if home
+            else None
+        )
+
+        return cls(
+            copied,
+            RetryPolicy(
+                attempts=_parsed_nonnegative_int(
+                    copied, "DAYDREAM_PI_RETRY_ATTEMPTS", 20
+                ),
+                base_delay_s=_parsed_nonnegative_float(
+                    copied, "DAYDREAM_PI_RETRY_BASE_DELAY_S", base_delay_default
+                ),
+                max_delay_s=_parsed_nonnegative_float(
+                    copied, "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
+                ),
+            ),
+            _parsed_positive_int(copied, fanout_name, fanout_default),
+            copied.get("PI_PROVIDER") or None,
+            copied.get("PI_THINKING") or None,
+            pi_agent_dir,
+            None if idle == 0 else idle,
+            None if response_idle == 0 else response_idle,
+        )
+
+    def child_environment(self) -> dict[str, str]:
+        """Return a fresh complete environment for one native transport."""
+        return dict(self._environment)
 
 AUDIT_ROOT_ISOLATION_V1 = "claude-pretooluse-v1"
 AuditIsolationReason = Literal[
@@ -1178,6 +1324,7 @@ def create_backend(
     osprey_binary: str | None = None,
     audit_root: Path | None = None,
     audit_outward_symlinks: frozenset[Path] = frozenset(),
+    execution_input: BackendExecutionInput | None = None,
 ) -> Backend:
     """Create a backend by name.
 
@@ -1214,18 +1361,30 @@ def create_backend(
             reasoning_effort=reasoning_effort,
             audit_root=audit_root,
             audit_outward_symlinks=audit_outward_symlinks,
+            execution_input=execution_input,
         )
     if audit_root is not None and name in {"codex", "pi", "osprey"}:
         raise AuditIsolationError(name, "unsupported_backend")
     if name == "codex":
         from daydream.backends.codex import CodexBackend
 
-        return CodexBackend(model=model or DEFAULT_CODEX_MODEL, reasoning_effort=reasoning_effort)
+        return CodexBackend(
+            model=model or DEFAULT_CODEX_MODEL,
+            reasoning_effort=reasoning_effort,
+            execution_input=execution_input,
+        )
     if name == "pi":
         from daydream.backends.pi import PiBackend
 
-        return PiBackend(model=model, cwd=cwd, reasoning_effort=reasoning_effort)
+        return PiBackend(
+            model=model,
+            cwd=cwd,
+            reasoning_effort=reasoning_effort,
+            execution_input=execution_input,
+        )
     if name == "osprey":
+        if execution_input is not None:
+            raise ValueError("explicit BackendExecutionInput is not supported for osprey")
         from daydream.backends.osprey import OspreyBackend
 
         return OspreyBackend(
@@ -1249,6 +1408,7 @@ __all__ = [
     "AuditIsolationError",
     "AuditIsolationReason",
     "Backend",
+    "BackendExecutionInput",
     "ClaudeBackend",
     "ClaudeRequestConfig",
     "CodexRequestConfig",
@@ -1269,6 +1429,7 @@ __all__ = [
     "PiRequestConfig",
     "ReasoningChoicePart",
     "RequestEvent",
+    "RetryPolicy",
     "ResultEvent",
     "TextChoicePart",
     "TextEvent",

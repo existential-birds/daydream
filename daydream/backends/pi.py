@@ -37,6 +37,7 @@ from typing import Any
 
 from daydream.backends import (
     AgentEvent,
+    BackendExecutionInput,
     ContinuationToken,
     CostEvent,
     GenerationEndEvent,
@@ -116,15 +117,28 @@ def _read_pi_default_model(path: Path) -> str | None:
     return model.strip() if isinstance(model, str) and model.strip() else None
 
 
-def _configured_pi_model(cwd: Path) -> str | None:
+_AMBIENT_AGENT_DIR = object()
+
+
+def _configured_pi_model(
+    cwd: Path, *, agent_dir: Path | None | object = _AMBIENT_AGENT_DIR
+) -> str | None:
     """Return the effective Pi settings default, if one is configured.
 
     Pi merges project settings over global settings. We mirror only the
     ``defaultModel`` field because that is the setting daydream must not replace
     with its DeepSeek fallback.
     """
-    agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent"))
-    settings_paths = (cwd / ".pi" / "settings.json", agent_dir / "settings.json")
+    if agent_dir is _AMBIENT_AGENT_DIR:
+        resolved_agent_dir: Path | None = Path(
+            os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent")
+        )
+    else:
+        assert agent_dir is None or isinstance(agent_dir, Path)
+        resolved_agent_dir = agent_dir
+    settings_paths = [cwd / ".pi" / "settings.json"]
+    if resolved_agent_dir is not None:
+        settings_paths.append(resolved_agent_dir / "settings.json")
     for settings_path in settings_paths:
         model = _read_pi_default_model(settings_path)
         if model:
@@ -476,6 +490,7 @@ class PiBackend:
         *,
         cwd: Path | None = None,
         reasoning_effort: str | None = None,
+        execution_input: BackendExecutionInput | None = None,
     ):
         """Initialize the backend with an optional explicit model override.
 
@@ -488,21 +503,36 @@ class PiBackend:
         """
         self._model_override = model
         self.reasoning_effort = reasoning_effort
+        self._execution_input = execution_input
         # ``.model`` must be resolved at construction (runner/recorder read it
         # before execute); cache the settings lookup so execute() need not
         # re-read settings.json for the same workspace.
         self._configured_cache: tuple[Path, str | None] | None = None
         configured: str | None = None
         if model is None and cwd is not None:
-            configured = _configured_pi_model(cwd)
+            configured = _configured_pi_model(
+                cwd,
+                agent_dir=(
+                    execution_input.pi_agent_dir
+                    if execution_input is not None
+                    else _AMBIENT_AGENT_DIR
+                ),
+            )
             self._configured_cache = (cwd, configured)
         self.model = model or configured or DEFAULT_PI_MODEL
-        self.fanout_concurrency = resolve_fanout_concurrency(
-            "DAYDREAM_PI_FANOUT_CONCURRENCY", _PI_DEFAULT_FANOUT_CONCURRENCY
-        )
-        self.retry_attempts = _pi_retry_attempts()
-        self.retry_base_delay_s = _pi_retry_base_delay()
-        self.retry_max_delay_s = _pi_retry_max_delay()
+        if execution_input is not None:
+            self.fanout_concurrency = execution_input.fanout_concurrency
+            self.retry_policy = execution_input.retry_policy
+            self.retry_attempts = self.retry_policy.attempts
+            self.retry_base_delay_s = self.retry_policy.base_delay_s
+            self.retry_max_delay_s = self.retry_policy.max_delay_s
+        else:
+            self.fanout_concurrency = resolve_fanout_concurrency(
+                "DAYDREAM_PI_FANOUT_CONCURRENCY", _PI_DEFAULT_FANOUT_CONCURRENCY
+            )
+            self.retry_attempts = _pi_retry_attempts()
+            self.retry_base_delay_s = _pi_retry_base_delay()
+            self.retry_max_delay_s = _pi_retry_max_delay()
         self._transports: list[CliTransport] = []
 
     async def execute(
@@ -555,7 +585,11 @@ class PiBackend:
         if self._model_override is not None:
             self.model = self._model_override
             args.extend(["--model", self.model])
-            provider = os.environ.get("PI_PROVIDER")
+            provider = (
+                self._execution_input.pi_provider
+                if self._execution_input is not None
+                else os.environ.get("PI_PROVIDER")
+            )
             if provider is None:
                 provider = _PI_DEFAULT_PROVIDER
                 if self.model.casefold().startswith("glm-"):
@@ -577,11 +611,22 @@ class PiBackend:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
             else:
-                configured_model = _configured_pi_model(cwd)
+                configured_model = _configured_pi_model(
+                    cwd,
+                    agent_dir=(
+                        self._execution_input.pi_agent_dir
+                        if self._execution_input is not None
+                        else _AMBIENT_AGENT_DIR
+                    ),
+                )
             self.model = configured_model or DEFAULT_PI_MODEL
             if configured_model is None:
                 args.extend(["--model", self.model])
-            provider = os.environ.get("PI_PROVIDER")
+            provider = (
+                self._execution_input.pi_provider
+                if self._execution_input is not None
+                else os.environ.get("PI_PROVIDER")
+            )
             if provider is None and configured_model is None:
                 provider = _PI_DEFAULT_PROVIDER
             elif configured_model is None and provider and provider != _PI_DEFAULT_PROVIDER:
@@ -603,14 +648,22 @@ class PiBackend:
                     _PI_DEFAULT_PROVIDER,
                 )
 
-        api_key = os.environ.get("PI_API_KEY")
-        thinking = self.reasoning_effort or os.environ.get("PI_THINKING")
+        child_env = (
+            self._execution_input.child_environment()
+            if self._execution_input is not None
+            else os.environ.copy()
+        )
+        api_key = child_env.get("PI_API_KEY")
+        thinking = self.reasoning_effort or (
+            self._execution_input.pi_thinking
+            if self._execution_input is not None
+            else os.environ.get("PI_THINKING")
+        )
         if provider:
             args.extend(["--provider", provider])
         if thinking:
             args.extend(["--thinking", thinking])
 
-        child_env = os.environ.copy()
         child_env.pop("PI_API_KEY", None)
         if api_key:
             native_key_name = _PI_PROVIDER_API_KEY_ENV.get(provider.casefold()) if provider else None
@@ -745,8 +798,18 @@ class PiBackend:
             self._transports.append(transport)
             await transport.start()
 
-            response_idle_timeout_s = stream_idle_timeout_s(default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S)
-            tool_idle_timeout_s = stream_idle_timeout_s(default=DEFAULT_STREAM_IDLE_TIMEOUT_S)
+            if self._execution_input is not None:
+                response_idle_timeout_s = (
+                    self._execution_input.pi_response_idle_timeout_s
+                )
+                tool_idle_timeout_s = self._execution_input.stream_idle_timeout_s
+            else:
+                response_idle_timeout_s = stream_idle_timeout_s(
+                    default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
+                )
+                tool_idle_timeout_s = stream_idle_timeout_s(
+                    default=DEFAULT_STREAM_IDLE_TIMEOUT_S
+                )
             active_tool_calls = 0
             is_first_line = True
             async for raw_line in transport.lines(

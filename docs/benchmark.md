@@ -72,6 +72,21 @@ material in your control.
 - Credentials are **never written into the workspace or the compiled task** —
   they stay in the environment that launched the command.
 
+The in-container reviewer snapshots its environment once at the process entry
+point. Parsing produces immutable runtime inputs for the selected backend and
+GitHub transport, without changing the parent process environment. Native
+subprocesses receive fresh copies of that complete environment, including the
+owning run's provider, retry policy, paths, and idle limits. Concurrent embedded
+reviews therefore keep separate credentials and execution settings.
+
+Harbor removes unrelated provider keys, GitHub tokens, App credentials, and
+`GH_HOST` even for read-only reviews. The GitHub transport also omits the selected
+model provider's credential. Supplied home and configuration paths retain their
+normal filesystem lookup behavior. A profile candidate comes only from the
+explicit control-plane input. These runtime capabilities stay outside
+configuration, artifacts, and trajectories. Ordinary Daydream CLI callers omit
+the runtime input and retain their existing environment inheritance.
+
 ### Privacy rule
 
 Every example in this runbook uses placeholders only: `OWNER/REPO`, `<40-hex>`,
