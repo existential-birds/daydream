@@ -655,7 +655,7 @@ def test_projected_records_carry_per_repo_license_decision(
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     records = [json.loads(line) for line in
-               (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line]
+               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
     assert records
     for rec in records:
         lineage = rec["lineage"]
@@ -678,7 +678,7 @@ def test_build_with_only_global_license_and_no_policy_is_refused(
 def test_schema_validation_accepts_evolved_v2_records(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
-    # The projected records validate against the edited schema/v2.json
+    # The projected records validate against the edited schema/record-schema.json
     # (repo_slug required in lineage; license_decision required as object).
     import jsonschema  # noqa: PLC0415
 
@@ -686,7 +686,7 @@ def test_schema_validation_accepts_evolved_v2_records(
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     schema = json.loads((tmp_path / "out" / "schema.json").read_text())
     for rec in (json.loads(line) for line in
-                (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line):
+                (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line):
         jsonschema.validate(rec, schema)  # no raise
 
 
@@ -781,21 +781,21 @@ def test_v2_loader_refuses_partial_projection_without_success_marker(tmp_path: P
         load_dataset_v2(out)
 
 
-def test_emitted_records_validate_against_shipped_v2_schema(tmp_path: Path) -> None:
-    # The projector copies schema/v2.json beside its output, so every emitted
-    # record must validate against that exact artifact (TRAINING_SCHEMA_V2_PATH
+def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None:
+    # The projector copies schema/record-schema.json beside its output, so every emitted
+    # record must validate against that exact artifact (TRAINING_RECORD_SCHEMA_PATH
     # is the consumed-by-test canonical contract; nothing may ship a schema the
     # projector's own output cannot satisfy).
     from jsonschema import Draft202012Validator
 
-    from daydream.training.schema import TRAINING_SCHEMA_V2_PATH
+    from daydream.training.schema import TRAINING_RECORD_SCHEMA_PATH
 
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "proj"
     summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
     assert summary["emitted"] >= 1
-    validator = Draft202012Validator(json.loads(TRAINING_SCHEMA_V2_PATH.read_text()))
+    validator = Draft202012Validator(json.loads(TRAINING_RECORD_SCHEMA_PATH.read_text()))
     records = [
         json.loads(line)
         for line in (out / "corpus.jsonl").read_text().splitlines()
@@ -890,7 +890,7 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
                    "--license-policy", str(_policy_file(bundle_dir.parent)),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc == 0
-    assert (tmp_path / "out" / "corpus-v2.jsonl").is_file()
+    assert (tmp_path / "out" / "corpus.jsonl").is_file()
     assert (tmp_path / "out" / "lineage.json").is_file()
 
 
@@ -1018,7 +1018,7 @@ def test_projection_rejects_c5_repo_and_refuses_success(
     with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO):
         build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     assert not (tmp_path / "out" / "_SUCCESS").exists()
-    assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
+    assert not (tmp_path / "out" / "corpus.jsonl").exists()  # refuse = write nothing
 
 
 def test_unopted_copyleft_repo_refuses_projection(
@@ -1034,7 +1034,7 @@ def test_unopted_copyleft_repo_refuses_projection(
     with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED):
         build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=policy))
     assert not (tmp_path / "out" / "_SUCCESS").exists()
-    assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
+    assert not (tmp_path / "out" / "corpus.jsonl").exists()  # refuse = write nothing
 
 
 def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
@@ -1179,7 +1179,7 @@ def _run_build_v2_cli(
     """Drive ``daydream corpus build`` (the production entrypoint) over the
     fixture's bundle + annotation bundle, returning (exit code, combined
     terminal output). The projection publishes into ``tmp_path/<out_name>/``."""
-    out = tmp_path / out_name / "corpus-v2.jsonl"
+    out = tmp_path / out_name / "corpus.jsonl"
     ann = bundle_dir.parent / (bundle_dir.name + "-annotations")
     rc = _run_cli(["corpus", "build", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(ann),
@@ -1275,7 +1275,7 @@ def test_end_to_end_clean_mixed_repo_publishes(
     assert rc == 0, out
     assert (tmp_path / "pub" / "_SUCCESS").is_file()
     records = [json.loads(line) for line in
-               (tmp_path / "pub" / "corpus-v2.jsonl").read_text().splitlines() if line]
+               (tmp_path / "pub" / "corpus.jsonl").read_text().splitlines() if line]
     assert records
     for rec in records:
         lineage = rec["lineage"]

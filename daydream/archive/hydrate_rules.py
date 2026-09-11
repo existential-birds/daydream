@@ -1,7 +1,7 @@
 """Version constants and stable reason-code registry for hub hydration (#982).
 
 Expanded by later hydrate tasks; Task 2 lands only the constants the frozen
-curation-manifest-v1 schema (the #983 contract) references.
+curation-manifest schema (the #983 contract) references.
 """
 from __future__ import annotations
 

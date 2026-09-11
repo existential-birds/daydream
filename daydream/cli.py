@@ -447,7 +447,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="PATH",
-        help="Output path; corpus-v2.jsonl, the split manifests, and lineage.json "
+        help="Output path; corpus.jsonl, the split manifests, and lineage.json "
         "are written beside it (its parent directory)",
     )
 
@@ -568,7 +568,7 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
-    # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
+    # (corpus.jsonl, split manifests, lineage.json) into that
     # directory, finishing with _SUCCESS — so the whole set, twin included, is
     # covered by the fail-closed completeness gate.
     out_dir = args.out.parent

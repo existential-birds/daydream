@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.test_corpus_v2 import (
+from tests.test_corpus_projection import (
     _policy_file,
     _write_annotations_snapshot,
     _write_bundle,
@@ -28,7 +28,7 @@ def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
 def _records(out_dir: Path) -> list[dict[str, Any]]:
     return [
         json.loads(line)
-        for line in (out_dir / "corpus-v2.jsonl").read_text().splitlines()
+        for line in (out_dir / "corpus.jsonl").read_text().splitlines()
         if line.strip()
     ]
 
@@ -57,8 +57,8 @@ def test_flag_off_emits_only_outcome_finding_records(tmp_path: Path) -> None:
 def test_flag_off_is_the_default(tmp_path: Path) -> None:
     out_dir, _out, _snap = _build(tmp_path)
     off_dir, _out_off, _snap2 = _build(tmp_path / "b", emit_process_traces=False)
-    assert (off_dir / "corpus-v2.jsonl").read_bytes() == (
-        out_dir / "corpus-v2.jsonl"
+    assert (off_dir / "corpus.jsonl").read_bytes() == (
+        out_dir / "corpus.jsonl"
     ).read_bytes()
 
 

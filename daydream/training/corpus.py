@@ -120,7 +120,7 @@ def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
 def _single_outcome_label(labels: list[str], session_id: str) -> str | None:
     """Return the sole outcome label, warning when multiple are present.
 
-    The training schema (schema/v1.json) defines ``outcome_label`` as a single
+    The training record schema defines ``outcome_label`` as a single
     string.  When a run carries more than one label only the first is exported;
     a warning is emitted so the data loss is visible rather than silent.
     """
@@ -128,7 +128,7 @@ def _single_outcome_label(labels: list[str], session_id: str) -> str | None:
         warnings.warn(
             f"Session {session_id!r} has {len(labels)} outcome labels "
             f"{labels!r}; exporting only the first ({labels[0]!r}). "
-            "Widen schema/v1.json `outcome_label` to an array to preserve all labels.",
+            "Widen the training record schema's `outcome_label` to an array to preserve all labels.",
             stacklevel=3,
         )
     return labels[0] if labels else None
@@ -228,7 +228,7 @@ def _build_record(
     reward: dict[str, Any] | None = None,
     composite_reward: float | None = None,
 ) -> dict[str, Any] | None:
-    """Assemble a training record matching ``schema/v1.json``.
+    """Assemble a training record matching the training record schema.
 
     The returned dict carries refs (``fix_diff_ref``, ``recommended_diff_ref``,
     ``trajectory_ref``, ``spans[*].content_path``) instead of embedded content,
@@ -310,7 +310,7 @@ def _build_record(
             annotation, or ``None``.
 
     Returns:
-        A dict that validates against ``daydream/training/schema/v1.json``, or
+        A dict that validates against the training record schema, or
         ``None`` when the derivative gate refuses to project the row
         (credential-bearing bundle with no released derivative — M17; the
         caller skips + warns, never raises).

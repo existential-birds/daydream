@@ -834,7 +834,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     annotation evidence carries ``valid_at > as_of`` (raise ``ValueError``
     naming the session and both timestamps — refusal, not drop) → write
     ``corpus.jsonl`` plus ``train.jsonl``/``validation.jsonl``/``holdout.jsonl``
-    atomically, copy ``schema/v2.json`` alongside, and write ``lineage.json``
+    atomically, copy ``schema/record-schema.json`` alongside, and write ``lineage.json``
     pinning the annotation bundle's provenance (no wall-clock timestamps — every
     manifest byte is a function of the immutable inputs, so re-runs are
     byte-for-byte identical), finishing with a ``_SUCCESS`` completeness
@@ -855,10 +855,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     ``adjudication-report.json`` with their evidence (D8: report output, not
     a pipeline stage — unless ``emit_process_traces`` opts them into the
     record population as schema-distinct ``process-trace``/``task-only``
-    records). ``corpus.jsonl`` is also published as the versioned
-    twin ``corpus-v2.jsonl`` from the same in-memory bytes via the same
-    atomic write, before ``_SUCCESS`` — covered by the identical fail-closed
-    completeness gate, so the twin can never diverge from the canonical file.
+    records).
     """
     bundle = load_curated_bundle(config.bundle_dir)
     assert config.annotation_bundle_dir is not None  # __post_init__ guarantees
@@ -1094,7 +1091,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                             task_identity["diff_digest"] = diff_digest
                             task_identity["diff_ref"] = diff_ref
                             # The raw diff body is embedded on the record
-                            # (schema v2.json ``diff``) so Stage-2 RFT inputs
+                            # (training record schema ``diff``) so Stage-2 RFT inputs
                             # carry it without an archive-side materialization
                             # step — the projection is the frozen boundary.
                             rec["diff"] = batch_artifacts.diff
@@ -1187,8 +1184,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
 
     canonical = _dump_jsonl(records)
     _atomic_write(config.out_dir / "corpus.jsonl", canonical)
-    # Versioned twin of the canonical corpus (same bytes, atomic, pre-_SUCCESS).
-    _atomic_write(config.out_dir / "corpus-v2.jsonl", canonical)
     for split_name, filename in _SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
         _atomic_write(config.out_dir / filename, _dump_jsonl(split_records))
@@ -1197,7 +1192,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         json.dumps(adjudication, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     )
 
-    schema_src = Path(__file__).parent.parent / "schema" / "v2.json"
+    schema_src = Path(__file__).parent.parent / "schema" / "record-schema.json"
     _atomic_write(config.out_dir / "schema.json", schema_src.read_text(encoding="utf-8"))
 
     split_counts = {name: 0 for name in _SPLIT_FILENAMES}

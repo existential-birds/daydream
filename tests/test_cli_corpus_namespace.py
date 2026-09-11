@@ -171,9 +171,9 @@ def _run_build_v2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]
 ) -> tuple[int, str]:
     """Drive ``daydream corpus build`` through ``cli.main`` over the
-    standard fixture bundle pair (from tests.test_corpus_v2) and return
+    standard fixture bundle pair (from tests.test_corpus_projection) and return
     (exit code, captured stdout+stderr)."""
-    from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
+    from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
 
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
@@ -182,7 +182,7 @@ def _run_build_v2(
         "corpus", "build",
         "--bundle-root", str(bundle_dir),
         "--annotation-bundle-root", str(snap.parent),
-        "--out", str(out_dir / "corpus-v2.jsonl"),
+        "--out", str(out_dir / "corpus.jsonl"),
         *extra_args,
     ])
     captured = capsys.readouterr()

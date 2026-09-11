@@ -223,13 +223,13 @@ class TestApplyShareCaps:
 
 class TestBuildWiring:
     def _share_cfg(self, out: Path, bundle: Path, snap: Path, **share: Any) -> Any:
-        from tests.test_corpus_v2 import _cfg
+        from tests.test_corpus_projection import _cfg
 
         return _cfg(out, bundle, snap, **share)
 
     def _build(self, tmp_path: Path, **share: Any) -> tuple[Path, dict[str, Any]]:
         from daydream.training.corpus_projection.projector import build_frozen_corpus
-        from tests.test_corpus_v2 import (
+        from tests.test_corpus_projection import (
             _admit_second_batch,
             _write_annotations_snapshot,
             _write_bundle,
@@ -293,7 +293,7 @@ class TestBuildWiring:
         import hashlib
 
         from daydream.training.corpus_projection.projector import build_frozen_corpus
-        from tests.test_corpus_v2 import (
+        from tests.test_corpus_projection import (
             _admit_second_batch,
             _write_annotations_snapshot,
             _write_bundle,
@@ -379,7 +379,7 @@ class TestBuildWiring:
 
     def test_zero_population_cap_fails_closed(self, tmp_path: Path) -> None:
         from daydream.training.corpus_projection.projector import build_frozen_corpus
-        from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
+        from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
 
         bundle = _write_bundle(tmp_path)
         snap = _write_annotations_snapshot(bundle, session_id="sess-a",
@@ -403,7 +403,7 @@ class TestCliShareFlags:
     projection path."""
 
     def _base_argv(self, tmp_path: Path) -> list[str]:
-        from tests.test_corpus_v2 import (
+        from tests.test_corpus_projection import (
             _admit_second_batch,
             _policy_file,
             _write_annotations_snapshot,
@@ -477,7 +477,7 @@ class TestCliShareFlags:
     ) -> None:
         from daydream.cli import _handle_build_corpus_command
         from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
-        from tests.test_corpus_v2 import _policy_file
+        from tests.test_corpus_projection import _policy_file
 
         argv = self._base_argv(tmp_path) + [
             "--dry-run", "--max-stack-share", "0.5", "--max-repo-share", "0.6",
@@ -506,7 +506,7 @@ class TestCliShareFlags:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         from daydream.cli import _handle_build_corpus_command
-        from tests.test_corpus_v2 import _policy_file
+        from tests.test_corpus_projection import _policy_file
 
         argv = self._base_argv(tmp_path) + ["--dry-run", "--max-stack-share", "0.5"]
         rc = _handle_build_corpus_command(argv)

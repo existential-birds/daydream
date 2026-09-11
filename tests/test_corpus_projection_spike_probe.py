@@ -25,7 +25,7 @@ from daydream.training.corpus_projection.projector import (
     build_frozen_corpus,
     read_batch_artifacts,
 )
-from tests.test_corpus_v2 import (
+from tests.test_corpus_projection import (
     _cfg,
     _write_annotations_snapshot,
     _write_bundle,

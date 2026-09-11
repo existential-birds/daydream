@@ -329,7 +329,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     Stage-2 rows are replayable through ``run_rft`` with no fixture
     post-processing.
     """
-    from tests.fixtures.training.build_corpus_v2_50 import build_projection_50
+    from tests.fixtures.training.build_projection_50 import build_projection_50
 
     proj_dir = build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)

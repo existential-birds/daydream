@@ -711,7 +711,7 @@ def _manifest_repo_slug(data: dict[str, Any]) -> str | None:
 def _manifest_license_evidence(data: dict[str, Any]) -> dict[str, str] | None:
     """Declared license evidence (``spdx_id`` + ``source``) from a session manifest.
 
-    Schema-shaped: only the two string fields the frozen curation-manifest-v1
+    Schema-shaped: only the two string fields the frozen curation-manifest
     schema allows are carried; anything else (missing, blank, non-dict) is ``None``.
     """
     raw = data.get("license_evidence")
@@ -2556,7 +2556,7 @@ def verify_publication(
     # 2. Curation manifest: schema-valid and consistent with the pinned inputs.
     from jsonschema import Draft202012Validator  # noqa: PLC0415  # lazy: verify-time only
 
-    schema_path = Path(__file__).parent.parent / "training" / "schema" / "curation-manifest-v1.json"
+    schema_path = Path(__file__).parent.parent / "training" / "schema" / "curation-manifest.json"
     doc = json.loads(_download("curation-manifest.json").decode("utf-8"))
     errors = sorted(Draft202012Validator(json.loads(schema_path.read_text())).iter_errors(doc), key=str)
     if errors:

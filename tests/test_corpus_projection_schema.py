@@ -7,7 +7,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-SCHEMA = json.loads((Path(__file__).parent.parent / "daydream/training/schema/v2.json").read_text())
+SCHEMA = json.loads((Path(__file__).parent.parent / "daydream/training/schema/record-schema.json").read_text())
 
 
 def _base_record(**overrides: Any) -> dict[str, Any]:

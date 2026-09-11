@@ -1,8 +1,8 @@
-"""50-record corpus-v2 integration fixture (mirrors the v1 ``records-50``).
+"""50-record frozen-corpus projection integration fixture.
 
-Builds a real corpus-v2 projection directory with :func:`build_frozen_corpus`
+Builds a real frozen-corpus projection directory with :func:`build_frozen_corpus`
 over a curated bundle + annotation snapshot — the same staging helpers
-``tests.test_corpus_v2`` uses — sized so that:
+``tests.test_corpus_projection`` uses — sized so that:
 
 - exactly 50 records are emitted,
 - both gold classes (accepted + rejected) are present, including on the
@@ -12,13 +12,13 @@ over a curated bundle + annotation snapshot — the same staging helpers
 - every admitted batch carries ``findings.json`` (localized finding text),
   ``diff.patch``, and a ``manifest.json`` with ``git.head_sha`` plus
   ``code_context.{base_sha, head_sha}`` (the producer-realistic namespaces),
-  so the additive v2 enrichment is exercised end-to-end.
+  so the per-finding record enrichment is exercised end-to-end.
 
 The build is fully deterministic: the same inputs produce byte-identical
 projection directories, so the loader's directory-level digest — and the
 pipeline run's ``run_identity.corpus_digest`` — is stable across runs.
 
-The projector embeds the raw diff body on every record (schema v2.json
+The projector embeds the raw diff body on every record (training record schema
 ``diff``) directly from the bundle's ``batches/<sid>/diff.patch``, so the
 fixture needs no post-processing: the real projector -> Stage-2 journey
 (``coordinator._rft_rows`` over ``build_frozen_corpus`` output) carries the
@@ -35,7 +35,7 @@ from typing import Any
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
-from tests.test_corpus_v2 import (
+from tests.test_corpus_projection import (
     _policy_file,
     _write_annotations_snapshot,
     _write_bundle,
@@ -193,10 +193,10 @@ def _add_batch(
 
 
 def build_projection_50(tmp_path: Path) -> Path:
-    """Materialize the 50-record corpus-v2 projection under ``tmp_path``.
+    """Materialize the 50-record frozen-corpus projection under ``tmp_path``.
 
     Returns:
-        The projection directory (the ``--corpus-v2`` input).
+        The projection directory (the ``train --projection`` input).
 
     Raises:
         AssertionError: When the deterministic build does not produce the
@@ -206,7 +206,7 @@ def build_projection_50(tmp_path: Path) -> Path:
     """
     from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
 
-    work = tmp_path / "corpus-v2-fixture"
+    work = tmp_path / "projection-fixture"
     bundle_dir = _write_bundle(work)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
     dispositions = _plan_dispositions()

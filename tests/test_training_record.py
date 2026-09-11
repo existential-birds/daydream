@@ -6,12 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-import jsonschema
 import pytest
 
 from daydream.training.corpus import _build_record, _build_spans
-
-SCHEMA_PATH = Path(__file__).parent.parent / "daydream" / "training" / "schema" / "v1.json"
 
 # Minimal ATIF v1.6-shaped trajectory used by record builder tests that only
 # care about manifest-driven fields (review_output, code_context, etc.).
@@ -127,7 +124,7 @@ def test_spans_empty_for_trajectory_with_no_agent_steps() -> None:
     assert _build_spans({}) == []
 
 
-def test_record_validates_against_v1_schema() -> None:
+def test_record_carries_required_v1_shape() -> None:
     manifest_row = _make_manifest_row()
     trajectory = {
         "steps": [
@@ -142,8 +139,23 @@ def test_record_validates_against_v1_schema() -> None:
     }
     record = _build_record(manifest_row, trajectory, stack="python")
     assert record is not None
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    jsonschema.validate(record, schema)
+    # The v1 JSONSchema artifact is gone (legacy-only); assert the core shape
+    # the surviving builders guarantee instead.
+    assert record["schema_version"] == "1"
+    for key in (
+        "session_id",
+        "repo_slug",
+        "skill",
+        "stack",
+        "code_context",
+        "review_output",
+        "fix_diff_ref",
+        "outcome_label",
+        "grounding_score",
+        "spans",
+        "trajectory_ref",
+    ):
+        assert key in record
 
 
 @pytest.mark.parametrize(

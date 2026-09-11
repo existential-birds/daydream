@@ -274,7 +274,7 @@ def _materialize_diff(rec: dict[str, Any]) -> str | None:
 
     v1 records exports carry only ``fix_diff_ref`` — a
     pointer to the archived reviewed-INPUT ``diff.patch`` — never a raw
-    ``diff`` body (``schema/v1.json`` is ``additionalProperties: false``).
+    ``diff`` body (the training record schema is ``additionalProperties: false``).
     The pointer is relative to the record's bronze run dir under the archive
     root; an unavailable, missing, or unreadable patch returns ``None`` so
     the caller's fail-closed identity check refuses the record rather than

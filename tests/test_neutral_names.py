@@ -34,6 +34,34 @@ def test_old_package_name_gone() -> None:
         importlib.import_module("daydream.training.corpus_v2")
 
 
+def test_schema_files_neutral() -> None:
+    from pathlib import Path
+
+    import daydream.training
+
+    schema_dir = Path(daydream.training.__file__).parent / "schema"
+    assert (schema_dir / "record-schema.json").is_file()
+    assert not (schema_dir / "v1.json").exists()
+    assert not (schema_dir / "v2.json").exists()
+    assert (schema_dir / "curation-manifest.json").is_file()
+    assert not (schema_dir / "curation-manifest-v1.json").exists()
+
+
+def test_versioned_test_files_gone() -> None:
+    from pathlib import Path
+
+    tests_dir = Path(__file__).parent
+    for stale in (
+        "test_corpus_v2.py",
+        "test_stacks_v2_load.py",
+        "test_training_contract_v1_v2.py",
+        "test_training_coordinator_v2.py",
+        "test_training_rft_v2_sha.py",
+        "test_training_rubric_v2.py",
+    ):
+        assert not (tests_dir / stale).exists()
+
+
 def test_rubric_module_neutral() -> None:
     importlib.import_module("daydream.training.rubric")
     with pytest.raises(ModuleNotFoundError):

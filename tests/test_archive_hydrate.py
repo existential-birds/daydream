@@ -65,8 +65,8 @@ def test_fake_hub_roundtrip_and_revision(tmp_path: Path) -> None:
 
 
 class TestCurationManifestSchema:
-    SCHEMA = Path(hydrate_rules.__file__).parent.parent / "training" / "schema" / "curation-manifest-v1.json"
-    FIXTURE = Path(__file__).parent / "fixtures" / "training" / "curation-manifest-v1-fixture.json"
+    SCHEMA = Path(hydrate_rules.__file__).parent.parent / "training" / "schema" / "curation-manifest.json"
+    FIXTURE = Path(__file__).parent / "fixtures" / "training" / "curation-manifest-fixture.json"
 
     def _validate(self, instance: dict[str, object]) -> None:
         from jsonschema import Draft202012Validator

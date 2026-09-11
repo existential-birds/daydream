@@ -11,7 +11,7 @@ import pytest
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
-from tests.test_corpus_v2 import _cfg, _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_projection import _cfg, _write_annotations_snapshot, _write_bundle
 
 
 def _read_split_memberships(out_dir: Path) -> tuple[list[str], list[str], list[str]]:
@@ -191,7 +191,7 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
 def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path) -> None:
     import hashlib
 
-    from tests.test_corpus_v2 import (
+    from tests.test_corpus_projection import (
         _admit_second_batch,
         _write_annotations_snapshot,
         _write_bundle,
@@ -229,7 +229,7 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
             _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,
                  max_profile_share=0.7)
         )
-    for name in ("corpus.jsonl", "corpus-v2.jsonl", "lineage.json",
+    for name in ("corpus.jsonl", "corpus.jsonl", "lineage.json",
                  "train.jsonl", "validation.jsonl", "holdout.jsonl"):
         assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
     train, val, hold = _read_split_memberships(tmp_path / "a")
@@ -251,7 +251,7 @@ def test_late_outcome_evidence_is_refused(tmp_path: Path) -> None:
     # (every artifact the projector emits, plus the _SUCCESS completeness
     # marker — a regression that wrote any of them before raising fails)
     late_dir = tmp_path / "late"
-    for name in ("corpus.jsonl", "corpus-v2.jsonl", "train.jsonl", "validation.jsonl",
+    for name in ("corpus.jsonl", "corpus.jsonl", "train.jsonl", "validation.jsonl",
                  "holdout.jsonl", "adjudication-report.json", "schema.json",
                  "lineage.json", "_SUCCESS"):
         assert not (late_dir / name).exists(), name

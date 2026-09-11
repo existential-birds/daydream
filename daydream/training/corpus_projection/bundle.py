@@ -19,7 +19,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_REPO_IDENTITY_MISSING,
 )
 
-_SCHEMA_PATH = Path(__file__).parent.parent / "schema" / "curation-manifest-v1.json"
+_SCHEMA_PATH = Path(__file__).parent.parent / "schema" / "curation-manifest.json"
 # The only producer (daydream.archive.hydrate.finalize) writes the manifest as
 # ``curation-manifest.json`` under ``curated/<curation-id>/``; the bundle root
 # is that curated directory.
