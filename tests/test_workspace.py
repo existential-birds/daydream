@@ -47,7 +47,7 @@ def test_resolve_base_falls_back_when_pr_lookup_fails(
     monkeypatch.setattr(
         git_ops,
         "gh_pr_list_for_branch",
-        lambda *_args: (_ for _ in ()).throw(GitError("gh auth failed")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(GitError("gh auth failed")),
     )
     monkeypatch.setattr(git_ops, "default_branch", lambda _repo: "trunk")
 

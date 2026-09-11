@@ -398,6 +398,7 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
         path: str,
         *,
         pr_number: int | None = None,
+        **_kwargs: Any,
     ) -> list[tuple[int, int]]:
         if path == "a.py":
             return [(8, 12)]  # 10 is inside
@@ -442,6 +443,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
         path: str,
         *,
         pr_number: int | None = None,
+        **_kwargs: Any,
     ) -> list[tuple[int, int]]:
         if path == "conftest.py":
             return [(90, 105)]  # 89 is 1 below start
@@ -887,7 +889,9 @@ def test_find_open_pr_returns_pr_info(
     """Real git for branch; gh wrappers stubbed for the PR + repo lookups."""
     row, base, head = _local_pr_row(git_repo)
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r")
+    )
     info = pr_review.find_open_pr(git_repo)
     assert info is not None
     assert (info.number, info.head_sha, info.base_sha, info.owner, info.repo) == (
@@ -904,7 +908,11 @@ def test_find_open_pr_captures_head_repo_for_fork_pr(
     row, _, _ = _local_pr_row(git_repo, head_owner="forky")
     row["headRepository"] = {"name": "widgets", "nameWithOwner": "forky/widgets"}
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("acme", "widgets"))
+    monkeypatch.setattr(
+        git_ops,
+        "gh_repo_view_required",
+        lambda _r, **_kwargs: ("acme", "widgets"),
+    )
     info = pr_review.find_open_pr(git_repo)
     assert info is not None
     assert (info.owner, info.repo) == ("acme", "widgets")
@@ -927,7 +935,7 @@ def test_find_pr_by_number_raises_when_slug_unresolved(
     row, _, _ = _local_pr_row(git_repo)
     monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
 
-    def fail_slug(_repo: Path) -> tuple[str, str]:
+    def fail_slug(_repo: Path, **_kwargs: Any) -> tuple[str, str]:
         raise GitError("gh repo view failed: auth")
 
     monkeypatch.setattr(git_ops, "gh_repo_view_required", fail_slug)
@@ -941,7 +949,9 @@ def test_find_pr_by_number_assembles_pr_info(
     """Valid lookups assemble a fully-populated PRInfo from the gh view row."""
     row, base, head = _local_pr_row(git_repo, head_owner="forky")
     monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r")
+    )
     info = pr_review.find_pr_by_number(git_repo, 7)
     assert info is not None
     assert (
@@ -984,7 +994,9 @@ def test_pr_info_rejects_malformed_row_fields(
 ) -> None:
     row, _, _ = _local_pr_row(git_repo)
     row[field] = value
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r")
+    )
     with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
         pr_review._pr_info_from_row(git_repo, row)
 
@@ -995,7 +1007,9 @@ def test_pr_info_rejects_missing_requested_head_metadata(
 ) -> None:
     row, _, _ = _local_pr_row(git_repo)
     del row[missing_field]
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r")
+    )
     with pytest.raises(GitError, match="invalid PR row"):
         pr_review._pr_info_from_row(git_repo, row)
 
@@ -1006,7 +1020,9 @@ def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(
     row, _, _ = _local_pr_row(git_repo)
     row["headRepository"] = None
     row["headRepositoryOwner"] = {"login": 7}
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r")
+    )
     with pytest.raises(GitError, match="invalid PR row"):
         pr_review._pr_info_from_row(git_repo, row)
 
@@ -1018,7 +1034,9 @@ def test_pr_info_accepts_null_same_repo_head_metadata(
     row, _, _ = _local_pr_row(git_repo)
     row["headRepository"] = None
     row["headRepositoryOwner"] = head_owner
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r")
+    )
 
     assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
 
@@ -1042,7 +1060,11 @@ def test_fork_pr_uses_upstream_base_for_both_lookup_paths(
     _git(git_repo, "remote", "add", "origin", "https://github.com/forky/r.git")
     _git(git_repo, "remote", "add", "upstream", "https://github.com/acme/widgets.git")
     _git(git_repo, "update-ref", "refs/remotes/upstream/main", base)
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("acme", "widgets"))
+    monkeypatch.setattr(
+        git_ops,
+        "gh_repo_view_required",
+        lambda _r, **_kwargs: ("acme", "widgets"),
+    )
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
     monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
 
@@ -1070,7 +1092,11 @@ def test_pr_base_remote_matching_is_credential_safe(
         "https://user:top-secret@github.com/acme/widgets.git?token=private",
     )
     _git(git_repo, "update-ref", "refs/remotes/origin/main", unrelated)
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("acme", "widgets"))
+    monkeypatch.setattr(
+        git_ops,
+        "gh_repo_view_required",
+        lambda _r, **_kwargs: ("acme", "widgets"),
+    )
 
     with pytest.raises(GitError) as excinfo:
         pr_review._pr_info_from_row(git_repo, row)
@@ -1100,7 +1126,7 @@ def _assumed_context(answer: str) -> RunContext:
 async def test_post_skips_when_no_pr(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: None)
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: None)
     warnings: list[str] = []
     monkeypatch.setattr(
         pr_review,
@@ -1120,7 +1146,7 @@ async def test_post_skips_when_no_pr(
 async def test_post_fails_with_safe_diagnostic_when_pr_lookup_errors(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def fail_lookup(_target_dir: Path) -> PRInfo | None:
+    def fail_lookup(_target_dir: Path, **_kwargs: Any) -> PRInfo | None:
         raise GitError("gh pr list failed: authentication required")
 
     monkeypatch.setattr(pr_review, "find_open_pr", fail_lookup)
@@ -1148,7 +1174,7 @@ async def test_post_succeeds_and_prints_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
 ) -> None:
     """On a successful submit the URL is forwarded to print_success."""
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
         pr_review,
         "classify",
@@ -1160,7 +1186,7 @@ async def test_post_succeeds_and_prints_url(
     captured: dict[str, Any] = {}
 
     def fake_submit(
-        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+        _td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any
     ) -> tuple[str | None, str | None]:
         captured["payload"] = payload
         return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
@@ -1194,7 +1220,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
     pr: PRInfo,
 ) -> None:
     """_post with approve_on_clean=True + clean classified -> APPROVE payload."""
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
         pr_review,
         "classify",
@@ -1215,7 +1241,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
     captured: dict[str, Any] = {}
 
     def fake_submit(
-        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+        _td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any
     ) -> tuple[str | None, str | None]:
         captured["payload"] = payload
         return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
@@ -1245,7 +1271,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     pr: PRInfo,
 ) -> None:
     """When submit returns an error, the warning surfaces git_ops's preserved-path text."""
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
         pr_review,
         "classify",
@@ -1283,7 +1309,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
 async def test_post_skipped_when_user_declines(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
 ) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
         pr_review,
         "classify",
@@ -1337,14 +1363,14 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     merged = tmp_path / "merged-items.json"
     merged.write_text(json.dumps({"items": []}))
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
         pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues()
     )
     captured: dict[str, Any] = {}
 
     def fake_submit(
-        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+        _td: Path, _pr: PRInfo, payload: dict[str, Any], **_kwargs: Any
     ) -> tuple[str | None, str | None]:
         captured["payload"] = payload
         return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
@@ -1667,7 +1693,7 @@ def test_file_hunks_falls_back_to_gh_when_base_unreachable(
     git_ops gh wrapper (no remote/auth required).
     """
     monkeypatch.setattr(
-        git_ops, "gh_pr_diff", lambda _r, _n: _GH_PR_DIFF
+        git_ops, "gh_pr_diff", lambda _r, _n, **_kwargs: _GH_PR_DIFF
     )
     hunks = pr_review.file_hunks(
         git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42
@@ -1900,7 +1926,7 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
         lambda *_a, **_k: [PriorDiagramComment("IC_prior", ("sequence",))],
     )
 
-    def minimize(_target: Path, node_id: str) -> bool:
+    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
         calls.append(("minimize", node_id))
         return True
 
@@ -1941,7 +1967,7 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
         ],
     )
 
-    def minimize(_target: Path, node_id: str) -> bool:
+    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
         calls.append(("minimize", node_id))
         return True
 

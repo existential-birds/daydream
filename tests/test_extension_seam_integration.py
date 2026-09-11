@@ -21,6 +21,7 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolStartEvent
 from daydream.deep.orchestrator import _step_post_review
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
+from daydream.github_app import GitHubExecutionInput
 from daydream.pr_review import ParsedIssue
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import RunConfig
@@ -163,6 +164,7 @@ async def test_post_review_uses_published_items_path(
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         assert run_context is ctx.run_context
         await _record_path(posted_paths, path)
@@ -453,6 +455,7 @@ async def test_fork_disables_arbiter_in_deep(
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         assert run_context is not None
         return None
@@ -802,6 +805,7 @@ async def test_custom_phase_full_stack(
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         assert run_context is not None
         return None
@@ -840,6 +844,7 @@ async def test_flow_deep_routes_to_deep_helper(
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
         run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         assert run_context is not None
         return None
@@ -918,3 +923,28 @@ def test_ext_dir_renderer_override_reaches_pr_review(
     finally:
         set_registry(prev)
     assert "EXT::inline::T" in body and pr_review.DAYDREAM_FOOTER in body
+
+
+def test_existing_extension_context_construction_keeps_auth_separate(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """API v6 positional construction keeps data identity and hides credentials."""
+    data: dict[str, Any] = {"extension-marker": "retained"}
+    config = RunConfig(target=str(tmp_path))
+    work = make_work(tmp_path)
+    registry = Registry()
+    standalone = FlowContext(config, work, registry, data)
+    assert standalone.data is data
+    assert standalone.github_execution.auth.environment_for_request() is None
+    assert standalone.github_execution.auth is git_ops.INHERIT_GITHUB_AUTH
+
+    execution = GitHubExecutionInput(git_ops.StaticGitHubAuth({
+        "PATH": "/test/bin", "GH_TOKEN": "installation-secret-marker",
+    }))
+    owned = FlowContext(config, work, registry, data, github_execution=execution)
+    assert owned.data is data
+    assert owned.github_execution is execution
+    assert data == {"extension-marker": "retained"}
+    assert "installation-secret-marker" not in repr(owned)
+    assert "github_execution" not in repr(owned)

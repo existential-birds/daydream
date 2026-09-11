@@ -130,6 +130,7 @@ async def open_workspace(
     skip_tests: bool,
     allow_unborn: bool = False,
     private_owner: PrivateWorkspaceOwner | None = None,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> AsyncIterator[WorkContext]:
     """Open a workspace for a daydream run, yielding a :class:`WorkContext`.
 
@@ -208,7 +209,7 @@ async def open_workspace(
         git_ops.fetch(source)
 
     resolved_ref = _resolve_ref(source, branch) if is_ephemeral else None
-    base_branch = _resolve_base(source, branch, base)
+    base_branch = _resolve_base(source, branch, base, auth=auth)
 
     run_id = _make_run_id()
     worktree_path: Path | None = None
@@ -785,14 +786,17 @@ def _resolve_ref(source: Path, branch: str | None) -> str:
     return f"origin/{branch}"
 
 
-def _resolve_base(source: Path, branch: str | None, base: str | None) -> str:
+def _resolve_base(
+    source: Path, branch: str | None, base: str | None, *,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+) -> str:
     """Pick the base branch per the locked resolution rules."""
     if base is not None:
         return base
 
     if branch is not None and shutil.which("gh") is not None:
         try:
-            prs = git_ops.gh_pr_list_for_branch(source, branch)
+            prs = git_ops.gh_pr_list_for_branch(source, branch, auth=auth)
         except GitError as exc:
             _logger.debug("PR base lookup failed for branch %r: %s", branch, exc)
             prs = []

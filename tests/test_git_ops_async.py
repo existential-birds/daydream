@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -35,6 +36,332 @@ def _budget(
 def _page_endpoint(endpoint: str, page: int, *, per_page: int = 100) -> str:
     separator = "&" if "?" in endpoint else "?"
     return f"{endpoint}{separator}per_page={per_page}&page={page}"
+
+
+@pytest.mark.asyncio
+async def test_async_requests_keep_refreshing_session_environments_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, str] | None] = []
+    refresh_calls = {"a": 0, "b": 0}
+
+    class CompletedProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"{}", b""
+
+    async def create_process(*_args: Any, **kwargs: Any) -> CompletedProcess:
+        captured.append(kwargs["env"])
+        return CompletedProcess()
+
+    def session(name: str) -> git_ops.RefreshingGitHubAuth:
+        def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
+            refresh_calls[name] += 1
+            return (
+                git_ops.StaticGitHubAuth(
+                    {
+                        "PATH": f"/{name}/tools",
+                        "GH_TOKEN": f"ghs_{name}_fresh_token_1234567890",
+                    }
+                ),
+                float("inf"),
+            )
+
+        return git_ops.RefreshingGitHubAuth(
+            git_ops.StaticGitHubAuth(
+                {
+                    "PATH": f"/{name}/tools",
+                    "GH_TOKEN": f"ghs_{name}_expired_token_1234567890",
+                }
+            ),
+            expires_at=0,
+            refresh=refresh,
+        )
+
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+    await asyncio.gather(
+        git_ops._run_gh_async(
+            tmp_path,
+            ["api", "/user"],
+            auth=session("a"),
+            budget=_budget(),
+        ),
+        git_ops._run_gh_async(
+            tmp_path,
+            ["api", "/user"],
+            auth=session("b"),
+            budget=_budget(),
+        ),
+    )
+    await git_ops._run_gh_async(
+        tmp_path,
+        ["api", "/user"],
+        auth=git_ops.INHERIT_GITHUB_AUTH,
+        budget=_budget(),
+    )
+
+    assert sorted(env["GH_TOKEN"] for env in captured if env is not None) == [
+        "ghs_a_fresh_token_1234567890",
+        "ghs_b_fresh_token_1234567890",
+    ]
+    assert captured[-1] is None
+    assert refresh_calls == {"a": 1, "b": 1}
+
+
+@pytest.mark.asyncio
+async def test_sync_and_async_requests_share_one_session_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, str] | None] = []
+    refresh_calls = 0
+
+    class CompletedProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"{}", b""
+
+    def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        time.sleep(0.02)
+        return (
+            git_ops.StaticGitHubAuth(
+                {"PATH": "/tools", "GH_TOKEN": "ghs_shared_fresh_token_1234567890"}
+            ),
+            float("inf"),
+        )
+
+    def run_process(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured.append(kwargs["env"])
+        return subprocess.CompletedProcess(args[0], 0, "{}", "")
+
+    async def create_process(*_args: Any, **kwargs: Any) -> CompletedProcess:
+        captured.append(kwargs["env"])
+        return CompletedProcess()
+
+    auth = git_ops.RefreshingGitHubAuth(
+        git_ops.StaticGitHubAuth(
+            {"PATH": "/tools", "GH_TOKEN": "ghs_shared_expired_token_1234567890"}
+        ),
+        expires_at=0,
+        refresh=refresh,
+    )
+    monkeypatch.setattr(subprocess, "run", run_process)
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+
+    await asyncio.gather(
+        asyncio.to_thread(
+            git_ops._run_gh,
+            tmp_path,
+            ["api", "/user"],
+            auth=auth,
+        ),
+        git_ops._run_gh_async(
+            tmp_path,
+            ["api", "/user"],
+            auth=auth,
+            budget=_budget(),
+        ),
+    )
+
+    assert refresh_calls == 1
+    assert len(captured) == 2
+    assert all(
+        environment is not None
+        and environment["GH_TOKEN"] == "ghs_shared_fresh_token_1234567890"
+        for environment in captured
+    )
+
+
+@pytest.mark.asyncio
+async def test_expired_budget_never_resolves_auth_or_spawns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_calls = 0
+    spawn_calls = 0
+
+    class Auth:
+        def environment_for_request(self) -> None:
+            nonlocal auth_calls
+            auth_calls += 1
+
+    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal spawn_calls
+        spawn_calls += 1
+        raise AssertionError("expired budget must not spawn gh")
+
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+    budget = git_ops.GitHubRequestBudget(
+        deadline=0.0,
+        per_request_seconds=1.0,
+        monotonic=lambda: 1.0,
+    )
+
+    with pytest.raises(git_ops.DeadlineExpired):
+        await git_ops._run_gh_async(
+            tmp_path,
+            ["api", "/user"],
+            auth=Auth(),
+            budget=budget,
+        )
+
+    assert auth_calls == 0
+    assert spawn_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_blocked_auth_resolution_keeps_loop_responsive_and_is_cancellable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    spawn_calls = 0
+
+    class BlockingAuth:
+        def environment_for_request(self) -> None:
+            loop.call_soon_threadsafe(started.set)
+            try:
+                release.wait(timeout=2)
+            finally:
+                finished.set()
+
+    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal spawn_calls
+        spawn_calls += 1
+        raise AssertionError("cancelled auth resolution must not spawn gh")
+
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+    task = asyncio.create_task(
+        git_ops._run_gh_async(
+            tmp_path,
+            ["api", "/user"],
+            auth=BlockingAuth(),
+            budget=_budget(seconds=2, per_request=1),
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        heartbeat = asyncio.Event()
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+
+    assert spawn_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_auth_resolution_timeout_never_spawns_and_redacts_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    spawn_calls = 0
+
+    class BlockingAuth:
+        def environment_for_request(self) -> None:
+            loop.call_soon_threadsafe(started.set)
+            try:
+                release.wait(timeout=2)
+            finally:
+                finished.set()
+
+    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal spawn_calls
+        spawn_calls += 1
+        raise AssertionError("timed-out auth resolution must not spawn gh")
+
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+    task = asyncio.create_task(
+        git_ops._run_gh_async(
+            tmp_path,
+            ["api", "Authorization: Bearer secret-value"],
+            auth=BlockingAuth(),
+            budget=_budget(seconds=0.5, per_request=0.5),
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        with pytest.raises(git_ops.GitTimeoutError) as excinfo:
+            await task
+        assert "secret-value" not in str(excinfo.value)
+        assert excinfo.value.__cause__ is None
+    finally:
+        pending = not task.done()
+        if pending:
+            task.cancel()
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        if pending:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert started.is_set()
+    assert spawn_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_auth_resolution_that_consumes_budget_never_spawns_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    times = iter((0.0, 2.0))
+    spawn_calls = 0
+
+    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal spawn_calls
+        spawn_calls += 1
+        raise AssertionError("exhausted budget must not spawn gh")
+
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+    budget = git_ops.GitHubRequestBudget(
+        deadline=1.0,
+        per_request_seconds=1.0,
+        monotonic=lambda: next(times),
+    )
+
+    with pytest.raises(git_ops.DeadlineExpired):
+        await git_ops._run_gh_async(
+            tmp_path,
+            ["api", "/user"],
+            auth=git_ops.INHERIT_GITHUB_AUTH,
+            budget=budget,
+        )
+
+    assert spawn_calls == 0
 
 
 @pytest.mark.asyncio
@@ -256,7 +583,9 @@ async def test_deadline_recomputed_before_each_spawn_and_partial_discarded(
     endpoint = "repos/acme/widgets/commits/" + "c" * 40 + "/statuses"
     fake_gh.set_response("GET", _page_endpoint(endpoint, 1), [{"id": n} for n in range(100)])
     fake_gh.set_response("GET", _page_endpoint(endpoint, 2), [{"id": 100}])
-    readings = iter((0.0, 11.0))
+    # Each request checks the shared deadline before and after auth resolution.
+    # The first page gets both reads; the second expires at its pre-auth check.
+    readings = iter((0.0, 0.0, 11.0))
     budget = git_ops.GitHubRequestBudget(
         deadline=10.0,
         per_request_seconds=5.0,

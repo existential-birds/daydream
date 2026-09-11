@@ -42,7 +42,7 @@ from typing import Any, Literal
 
 import pytest
 
-from daydream import cli
+from daydream import cli, git_ops
 from daydream.phases import UnconfinedFindingError
 from tests.harness.git_helpers import bare_remote, commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
@@ -70,10 +70,24 @@ def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     - signal-handler install is a no-op concern here; leave it real — it is a
       cheap, side-effect-free part of the production entrypoint we want covered.
     """
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_repo_view", lambda repo: ("acme", Path(repo).name)
-    )
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
+    def repo_view(
+        repo: Path,
+        *,
+        auth: git_ops.GitHubAuth,
+    ) -> tuple[str, str]:
+        assert auth is git_ops.INHERIT_GITHUB_AUTH
+        return "acme", Path(repo).name
+
+    def pr_view(
+        _repo: Path,
+        _branch: int | None,
+        *,
+        auth: git_ops.GitHubAuth,
+    ) -> None:
+        assert auth is git_ops.INHERIT_GITHUB_AUTH
+
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", repo_view)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", pr_view)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
 
 

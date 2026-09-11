@@ -276,7 +276,7 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """
     for attempt in range(_MAX_RATE_LIMIT_RETRIES):
         try:
-            return git_ops.gh_api(Path("."), endpoint, **kwargs)
+            return git_ops.gh_api(Path("."), endpoint, **kwargs, auth=git_ops.INHERIT_GITHUB_AUTH)
         except RateLimitError as exc:
             if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
                 raise

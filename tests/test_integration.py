@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -1509,6 +1510,7 @@ async def test_run_comment_full_flow(
         pr_number: int | None = None,
         diagram_blocks: Any=None,
         run_context: RunContext | None = None,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> None:
         posted.extend(json.loads(merged_items_path.read_text())["items"])
         posted_posts.append(post)
@@ -1703,7 +1705,7 @@ async def test_run_comment_missing_pr_exits_nonzero(
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: None)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: None)
 
     config = make_config(tmp_path, output_mode="comment")
 
@@ -1741,10 +1743,10 @@ async def test_run_comment_submission_failure_exits_nonzero(
         repo="widgets",
         url="https://example/pr/7",
     )
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
     monkeypatch.setattr(
         "daydream.pr_review._submit_review",
-        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+        lambda _td, _pr, _payload, **_kwargs: (None, "gh api failed: HTTP 500"),
     )
 
     config = make_config(tmp_path, output_mode="comment")
@@ -1785,10 +1787,10 @@ async def test_run_loop_submission_failure_warns_and_continues(
         repo="widgets",
         url="https://example/pr/7",
     )
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
     monkeypatch.setattr(
         "daydream.pr_review._submit_review",
-        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+        lambda _td, _pr, _payload, **_kwargs: (None, "gh api failed: HTTP 500"),
     )
 
     # Approve the PR-post gate but decline the apply-fixes gate so the run ends

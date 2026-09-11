@@ -142,6 +142,7 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import GitError, GitPathState, IndexSnapshot, WorktreeRollbackSnapshot
+from daydream.github_app import GitHubExecutionInput
 from daydream.json_utils import atomic_write_json
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
@@ -1200,7 +1201,9 @@ async def _step_intent(ctx: FlowContext) -> None:
     pr_description: str | None = None
     if config.pr_number is not None:
         try:
-            pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+            pr_view = git_ops.gh_pr_view(
+                target_dir, config.pr_number, auth=ctx.github_execution.auth
+            )
         except git_ops.GitError as exc:
             print_warning(
                 console,
@@ -2682,7 +2685,11 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
     diagrams = (ctx.data.get("diagrams") or {}).get("payload")
     return Stop(
         _emit_findings_from_items(
-            ctx.work.repo, ctx.config, findings_items, diagrams=diagrams
+            ctx.work.repo,
+            ctx.config,
+            findings_items,
+            diagrams=diagrams,
+            auth=ctx.github_execution.auth,
         )
     )
 
@@ -2755,6 +2762,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         approve_on_clean=_approve_on_clean(ctx.config),
         diagram_blocks=(ctx.data.get("diagrams") or {}).get("blocks"),
         run_context=ctx.run_context,
+        auth=ctx.github_execution.auth,
         **pr_kwargs,
     )
     if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
@@ -3379,10 +3387,16 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     payload: dict[str, Any] = diagrams.get("payload") or {}
 
     if ctx.config.findings_out is not None:
-        return Stop(_emit_diagram_findings(ctx.work.repo, ctx.config, payload))
+        return Stop(
+            _emit_diagram_findings(
+                ctx.work.repo, ctx.config, payload, auth=ctx.github_execution.auth
+            )
+        )
 
     try:
-        pr = _resolve_pr(ctx.work.repo, console, ctx.config.pr_number)
+        pr = _resolve_pr(
+            ctx.work.repo, console, ctx.config.pr_number, auth=ctx.github_execution.auth
+        )
     except GitError as exc:
         print_error(console, "Diagram PR Lookup Failed", str(exc))
         return Stop(1)
@@ -3400,6 +3414,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
         body=render_diagram_comment_body(payload),
         kinds=diagram_comment_kinds(payload),
         bot_login=os.environ.get("DAYDREAM_BOT_HANDLE") or None,
+        auth=ctx.github_execution.auth,
     )
     if url is None:
         suffix = f" ({error})" if error else ""
@@ -4337,6 +4352,7 @@ def _strict_scope_and_scrub(
         phase=phase,
         round_number=round_number,
         file_scope_issues=_scope_issue_filing(ctx.config),
+        auth=ctx.github_execution.auth,
     )
     scrub_smart_quotes_changed_files(
         ctx.work.repo,
@@ -4365,6 +4381,7 @@ def _enforce_terminal_confinement(
             phase=phase,
             round_number=round_number,
             file_scope_issues=_scope_issue_filing(ctx.config),
+            auth=ctx.github_execution.auth,
         )
         key = EvidenceKey(
             _capture_full_delta_key(ctx.work, state),
@@ -5105,7 +5122,9 @@ def _resolve_remote_ci_target(ctx: FlowContext, receipt: PushReceipt) -> RemoteC
     if receipt.pushed_repository is None:
         raise GitError("the successful push remote has no GitHub repository identity")
 
-    pr = pr_review.find_pr_by_number(ctx.work.repo, configured_pr)
+    pr = pr_review.find_pr_by_number(
+        ctx.work.repo, configured_pr, auth=ctx.github_execution.auth
+    )
     if pr is None:
         raise GitError(f"configured pull request #{configured_pr} was not found")
     base_repository = f"{pr.owner}/{pr.repo}"
@@ -5268,7 +5287,9 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                 try:
                     verdict = await wait_for_remote_ci(
                         target,
-                        fetcher=GitHubRemoteCIFetcher(limits=limits),
+                        fetcher=GitHubRemoteCIFetcher(
+                            limits=limits, auth=ctx.github_execution.auth
+                        ),
                         limits=limits,
                         monotonic_started_at=monotonic_started,
                         on_snapshot=persist,
@@ -5549,6 +5570,7 @@ async def run_deep(
     *,
     run_artifacts: _RunArtifacts | None = None,
     run_context: RunContext | None = None,
+    github_execution: GitHubExecutionInput | None = None,
 ) -> int:
     """Execute the deep-review pipeline (D-07) across every PR-process mode.
 
@@ -5574,12 +5596,14 @@ async def run_deep(
         Exit code (0 on success, 1 on failure).
     """
     run_context = resolve_run_context(run_context)
+    execution = github_execution or GitHubExecutionInput()
     return await _run_review_spine(
         config,
         work,
         _resolve_mode(config),
         run_artifacts=run_artifacts,
         run_context=run_context,
+        github_execution=execution,
     )
 
 
@@ -5647,6 +5671,7 @@ async def _run_review_spine(
     *,
     run_artifacts: _RunArtifacts | None,
     run_context: RunContext | None = None,
+    github_execution: GitHubExecutionInput,
 ) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
     run_context = resolve_run_context(run_context)
@@ -5898,6 +5923,7 @@ async def _run_review_spine(
             private_workspace_owner=None if run_artifacts is None else run_artifacts.owner,
             artifacts=None if run_artifacts is None else run_artifacts.session,
             run_context=run_context,
+            github_execution=github_execution,
             data={
                 "mode": mode,
                 "diff": bounded_diff,

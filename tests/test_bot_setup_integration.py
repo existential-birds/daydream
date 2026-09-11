@@ -33,7 +33,7 @@ def test_callback_listener_captures_code_then_exchanges(monkeypatch: pytest.Monk
     """The callback seam exchanges the manifest code for creds + slug."""
     monkeypatch.setattr(
         "daydream.bot_setup.exchange_manifest_code",
-        lambda repo, code: (AppCredentials(7, "-----BEGIN-----\n"), "acme-bot"),
+        lambda repo, code, **kwargs: (AppCredentials(7, "-----BEGIN-----\n"), "acme-bot"),
     )
     listener = bot_setup._ManifestListener(repo_dir=Path("."), org=None)
     creds, slug = listener._handle_code("codeXYZ")
@@ -62,7 +62,7 @@ def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch: pytest.
     """The seam threads the listener's repo_dir and the callback code unchanged."""
     captured: dict[str, object] = {}
 
-    def fake_exchange(repo: Any, code: Any) -> tuple[Any, ...]:
+    def fake_exchange(repo: Any, code: Any, **_kwargs: Any) -> tuple[Any, ...]:
         captured["repo"] = repo
         captured["code"] = code
         return AppCredentials(42, "pem"), "slug-x"
@@ -79,7 +79,7 @@ def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch: pytest.M
     """An empty/missing callback code (user declined) aborts with a clear error."""
     called = False
 
-    def fake_exchange(repo: Any, code: Any) -> tuple[Any, ...]:
+    def fake_exchange(repo: Any, code: Any, **_kwargs: Any) -> tuple[Any, ...]:
         nonlocal called
         called = True
         return AppCredentials(1, "pem"), "slug"

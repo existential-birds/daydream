@@ -33,7 +33,7 @@ from typing import Any
 
 import jsonschema
 
-from daydream import pr_review
+from daydream import git_ops, pr_review
 from daydream.pr_review import ParsedIssue, PRInfo
 
 FINDINGS_SCHEMA_VERSION = 1
@@ -215,6 +215,7 @@ def build_findings_artifact(
     run_info: str | None,
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> dict[str, Any]:
     """Classify issues against the PR diff and build the findings artifact.
 
@@ -237,7 +238,7 @@ def build_findings_artifact(
         the remainder carry ``placement="body"``. Both non-inline placements
         have ``line=None``.
     """
-    classified = pr_review.classify(target_dir, pr, issues)
+    classified = pr_review.classify(target_dir, pr, issues, auth=auth)
     findings = [
         _finding_dict(issue, placement="inline", line=entry["line"])
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)

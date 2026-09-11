@@ -10,7 +10,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +37,7 @@ from daydream.backends import (
 from daydream.exploration import ExplorationContext
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
+from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import RunContext, current_run_context
 from daydream.runner import RunConfig
 from daydream.trajectory import (
@@ -46,6 +47,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
 )
 from daydream.workspace import AuditWorkspace, WorkContext
+from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -348,6 +350,45 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     assert private_path.is_file()
     assert "Findings artifact prepared." in output
     assert str(private_path) not in output
+
+
+def test_findings_artifact_diff_fallback_uses_the_run_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing local PR objects keep artifact classification on the owning session."""
+    from daydream.pr_review import PRInfo
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    auth = git_ops.StaticGitHubAuth({"PATH": "/usr/bin", "GH_TOKEN": "artifact-owner"})
+    seen: list[git_ops.GitHubAuth] = []
+    monkeypatch.setattr(
+        "daydream.pr_review.find_pr_by_number",
+        lambda *_args, **_kwargs: PRInfo(
+            number=7, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
+            owner="owner", repo="repo", url="https://example.invalid/owner/repo/pull/7",
+        ),
+    )
+
+    def read_diff(
+        target_dir: Path,
+        number: int,
+        *,
+        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+    ) -> str:
+        assert target_dir == repo
+        assert number == 7
+        seen.append(auth)
+        return ""
+
+    monkeypatch.setattr(git_ops, "gh_pr_diff", read_diff)
+    destination = tmp_path / "findings.json"
+    assert runner._write_findings_for_parsed(
+        repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth,
+    ) == 0
+    assert seen == [auth]
+    assert "artifact-owner" not in destination.read_text()
 
 
 def _feature_repo(tmp_path: Path, *, remote: bool = False) -> Path:
@@ -947,7 +988,7 @@ async def test_run_dispatches_to_expected_flow(
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
         ) -> int:
             assert run_context is current_run_context()
             called.append((name, work, config))
@@ -983,7 +1024,7 @@ async def test_run_rejects_head_mismatch_before_dispatch(
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1014,7 +1055,7 @@ async def test_run_allows_matching_approved_head(
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1051,7 +1092,7 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1087,7 +1128,7 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1143,7 +1184,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     events: list[str] = []
     payloads: list[dict[str, Any]] = []
 
-    def fake_mint(*_args: object) -> SimpleNamespace:
+    def fake_mint(*_args: object, **_kwargs: object) -> SimpleNamespace:
         events.append("mint")
         return SimpleNamespace(
             token="installation-token",
@@ -1162,13 +1203,17 @@ async def test_deep_run_mints_app_identity_before_posting_path(
         url="https://example/pr/123",
     )
 
-    def fake_find_open_pr(_target_dir: object) -> pr_review.PRInfo:
+    received_auth: list[git_ops.GitHubAuth] = []
+
+    def fake_find_open_pr(_target_dir: object, *, auth: git_ops.GitHubAuth) -> pr_review.PRInfo:
+        received_auth.append(auth)
         events.append("find-open-pr")
         return fake_pr
 
     def fake_submit_review(
-        _target_dir: object, _pr: object, payload: dict[str, Any]
+        _target_dir: object, _pr: object, payload: dict[str, Any], *, auth: git_ops.GitHubAuth,
     ) -> tuple[str, None]:
+        received_auth.append(auth)
         events.append("post")
         payloads.append(payload)
         return "https://example/pr/123#review-1", None
@@ -1192,7 +1237,9 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     # action, and the review is submitted only after classify + build_payload.
     assert events == ["mint", "find-open-pr", "post"], events
     assert config.identity == "daydream-review[bot]"
-    assert git_ops.get_gh_token_env() == {"GH_TOKEN": "installation-token"}
+    assert len(received_auth) == 2 and received_auth[0] is received_auth[1]
+    environment = received_auth[0].environment_for_request()
+    assert environment is not None and environment["GH_TOKEN"] == "installation-token"
     assert payloads, "deep flow never reached _submit_review"
 
 
@@ -1207,7 +1254,7 @@ async def test_review_run_does_not_mint_app_identity(
     """``--review`` remains report-only when App credentials are configured."""
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
-    monkeypatch.setattr("daydream.github_app.resolve_user_identity", lambda _target: "operator")
+    monkeypatch.setattr("daydream.github_app.resolve_user_identity", lambda _target, **_kwargs: "operator")
 
     def mint_forbidden(*_args: object) -> SimpleNamespace:
         pytest.fail("report-only --review must not mint an App installation token")
@@ -1219,7 +1266,7 @@ async def test_review_run_does_not_mint_app_identity(
         _work: WorkContext,
         config: RunConfig,
         _run_artifacts: Any = None,
-        *, run_context: RunContext,
+        *, run_context: RunContext, github_execution: GitHubExecutionInput,
     ) -> int:
         assert run_context is current_run_context()
         assert config.identity == "operator"
@@ -1327,7 +1374,7 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
         work: WorkContext,
         config: RunConfig,
         _run_artifacts: Any = None,
-        *, run_context: RunContext,
+        *, run_context: RunContext, github_execution: GitHubExecutionInput,
     ) -> int:
         assert run_context is current_run_context()
         seen["output_mode"] = config.output_mode
@@ -1819,7 +1866,7 @@ async def test_run_threads_non_interactive_into_runtime(
 
     async def stub(
         work: Any, config: Any, _run_artifacts: Any = None, *,
-        run_context: RunContext,
+        run_context: RunContext, github_execution: GitHubExecutionInput,
     ) -> int:
         assert current_run_context() is run_context
         received.append(run_context)
@@ -2542,3 +2589,125 @@ def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert m.review_backend is None
     assert m.fix_backend == "claude"
     assert m.test_backend == "claude"
+
+
+async def test_overlapping_posting_runs_keep_their_own_github_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir,
+) -> None:
+    """A read-only run cannot clear either overlapping posting credential."""
+    repositories = {name: _feature_repo(tmp_path / name) for name in ("first", "second", "reader")}
+    ext_dir.write_module(
+        "from daydream import git_ops\n"
+        "from daydream.extensions import FlowStep\n"
+        "async def auth_probe(ctx):\n"
+        "    data = ctx.data\n"
+        "    login = git_ops.gh_api(ctx.work.repo, '/user', auth=ctx.github_execution.auth)['login']\n"
+        "    assert login == ctx.config.identity == ctx.run_context.github_identity.login\n"
+        "    assert ctx.data is data and ctx.artifacts is not None\n"
+        "    assert 'installation-' not in repr(ctx)\n"
+        "def register(registry):\n"
+        "    registry.register_phase(FlowStep(name='auth-probe', run=auth_probe))\n"
+        "    registry.insert_after('deep', anchor='intent', step='auth-probe')\n"
+    )
+    labels = {path: name for name, path in repositories.items()}
+    heads = {name: git_ops.head_sha(path) for name, path in repositories.items()}
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "fake-private-key")
+    monkeypatch.setenv("GH_TOKEN", "personal-token")
+    minted: dict[str, int] = {"first": 0, "second": 0}
+    entered = {name: anyio.Event() for name in repositories}
+    release = anyio.Event()
+    requests: list[tuple[str, tuple[str, ...], str | None]] = []
+    posted: dict[str, dict[str, Any]] = {}
+    real_run = subprocess.run
+
+    def mint(repo_dir: Path, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        name = labels[repo_dir]
+        minted[name] += 1
+        return SimpleNamespace(
+            token=f"installation-{name}-{minted[name]}",
+            identity=f"{name}-app[bot]",
+            # Force one refresh at the first post-review GitHub request.
+            expires_at=0.0 if minted[name] == 1 else 4_102_444_800.0,
+        )
+
+    def github_subprocess(args: list[str], *pargs: Any, **kwargs: Any) -> Any:
+        if not args or args[0] != "gh":
+            return real_run(args, *pargs, **kwargs)
+        name = labels[Path(kwargs["cwd"])]
+        env = kwargs.get("env")
+        token = None if env is None else env.get("GH_TOKEN")
+        requests.append((name, tuple(args[1:3]), token))
+        if args[1:3] == ["pr", "list"]:
+            output = json.dumps([{
+                "number": 41,
+                "headRefOid": heads[name],
+                "headRefName": "feature",
+                "baseRefName": "main",
+                "headRepository": {"name": name},
+                "headRepositoryOwner": {"login": "acme"},
+                "url": f"https://github.com/acme/{name}/pull/41",
+            }])
+        elif args[1:3] == ["repo", "view"]:
+            output = f"acme/{name}"
+        elif args[1:3] == ["api", "/user"]:
+            output = json.dumps({"login": "personal-user" if token is None else f"{name}-app[bot]"})
+        elif args[1] == "api" and args[2].endswith("/reviews"):
+            payload_file = Path(args[args.index("--input") + 1])
+            posted[name] = json.loads(payload_file.read_text())
+            output = json.dumps({"html_url": f"https://github.com/acme/{name}/pull/41#review"})
+        else:
+            raise AssertionError(f"Unexpected GitHub request: {args[1:]}")
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+    class CoordinatedBackend(ScriptedBackend):
+        async def execute(
+            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            name = labels[cwd]
+            entered[name].set()
+            if name != "reader":
+                await release.wait()
+            structured: dict[str, Any] = {"issues": []}
+            if "verdicts" in (kwargs.get("output_schema") or {}).get("properties", {}):
+                structured["verdicts"] = []
+            yield TextEvent(text="No issues found.")
+            yield ResultEvent(structured_output=structured, continuation=None)
+
+    monkeypatch.setattr("daydream.github_app._mint_installation_token", mint)
+    monkeypatch.setattr(subprocess, "run", github_subprocess)
+    monkeypatch.setattr(runner, "create_backend", lambda *args, **kwargs: CoordinatedBackend())
+    configs = {
+        name: RunConfig(
+            target=str(path), base="main", pr_repo=f"acme/{name}",
+            output_mode="review" if name == "reader" else "comment",
+            shallow=True, stack="python", backend="claude", non_interactive=True,
+            approve_on_clean=True, archive=False,
+        ) for name, path in repositories.items()
+    }
+    results: dict[str, int] = {}
+
+    async def run_posting(name: str) -> None:
+        results[name] = await runner.run(configs[name])
+
+    with anyio.fail_after(45):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(run_posting, "first")
+            await entered["first"].wait()
+            tasks.start_soon(run_posting, "second")
+            await entered["second"].wait()
+            results["reader"] = await runner.run(configs["reader"])
+            release.set()
+
+    assert results == {"reader": 0, "first": 0, "second": 0}
+    assert set(posted) == {"first", "second"}
+    for name in ("first", "second"):
+        assert posted[name]["event"] == "APPROVE"
+        owned = [token for run_name, _command, token in requests if run_name == name]
+        assert owned and set(owned) == {f"installation-{name}-2"}
+        assert minted[name] == 2
+        assert configs[name].identity == f"{name}-app[bot]"
+    assert configs["reader"].identity == "personal-user"
+    assert all(token is None for name, _command, token in requests if name == "reader")

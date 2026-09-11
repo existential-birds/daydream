@@ -50,12 +50,13 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
-from collections.abc import Iterable, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Generator, Literal, overload
+from types import MappingProxyType
+from typing import Any, Literal, Protocol, overload
 from urllib.parse import quote, urlparse
 
 from daydream.backends._subprocess import terminate_process
@@ -72,92 +73,97 @@ _RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "secondary rate limit",
 )
 
-# Module-level state for the ``gh`` subprocess environment. Configured at run
-# entry from GitHub App credentials and refreshed before expiry; read by
-# ``_run_gh`` so every ``gh`` call authenticates under a current installation
-# token. ``None`` means inherit the parent env. Access only through the helpers
-# below.
-_gh_token_env: dict[str, str] | None = None
-_gh_token_expires_at: float | None = None
-_gh_token_refresh: Callable[[], tuple[dict[str, str], float]] | None = None
-
 # Refresh before the credential's actual deadline so a request cannot start
 # with a token that expires while GitHub is processing it.
 _GH_TOKEN_REFRESH_SKEW_SECONDS = 300
 
 
-def set_gh_token_env(
-    env: dict[str, str] | None,
-    *,
-    expires_at: float | None = None,
-    refresh: Callable[[], tuple[dict[str, str], float]] | None = None,
-) -> None:
-    """Set the environment overrides passed to ``gh`` subprocesses.
+class GitHubAuth(Protocol):
+    """Resolve the complete environment for one ``gh`` subprocess request."""
 
-    Args:
-        env: Mapping of env-var overrides (e.g. ``{"GH_TOKEN": token}``) merged
-            with the live ``os.environ`` at subprocess call time, or ``None`` to
-            inherit the parent process environment without any overrides.
-        expires_at: Unix timestamp at which the injected token expires.
-        refresh: Callback that returns a replacement environment and expiry.
-    """
-    global _gh_token_env, _gh_token_expires_at, _gh_token_refresh
-    _gh_token_env = env
-    _gh_token_expires_at = expires_at
-    _gh_token_refresh = refresh
+    def environment_for_request(self) -> Mapping[str, str] | None: ...
 
 
-def get_gh_token_env() -> dict[str, str] | None:
-    """Get the environment currently passed to ``gh`` subprocesses.
+@dataclass(frozen=True)
+class InheritGitHubAuth:
+    """Request live parent-process environment inheritance from ``gh``."""
 
-    Returns:
-        The environment mapping, or ``None`` when ``gh`` inherits the parent
-        process environment.
-    """
-    return _gh_token_env
+    def environment_for_request(self) -> None:
+        return None
 
 
-@contextmanager
-def scoped_gh_token_env(env: dict[str, str] | None) -> Generator[None, None, None]:
-    """Temporarily replace the complete ``gh`` token state."""
-    prior = (_gh_token_env, _gh_token_expires_at, _gh_token_refresh)
-    set_gh_token_env(env)
-    try:
-        yield
-    finally:
-        set_gh_token_env(prior[0], expires_at=prior[1], refresh=prior[2])
+INHERIT_GITHUB_AUTH = InheritGitHubAuth()
+
+_GITHUB_CREDENTIAL_ENV_KEYS = frozenset(
+    {
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    }
+)
 
 
-def reset_gh_token_env() -> None:
-    """Reset the ``gh`` subprocess environment to parent-process inheritance."""
-    global _gh_token_env, _gh_token_expires_at, _gh_token_refresh
-    _gh_token_env = None
-    _gh_token_expires_at = None
-    _gh_token_refresh = None
+@dataclass(frozen=True)
+class StaticGitHubAuth:
+    """An immutable complete subprocess environment containing a credential."""
+
+    environment: Mapping[str, str] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+
+    def environment_for_request(self) -> Mapping[str, str]:
+        return dict(self.environment)
 
 
-def _gh_token_env_for_request() -> dict[str, str] | None:
-    """Return the injected token environment, refreshing it before expiry."""
-    global _gh_token_env, _gh_token_expires_at, _gh_token_refresh
-    if (
-        _gh_token_env is None
-        or _gh_token_expires_at is None
-        or _gh_token_refresh is None
-        or time.time() < _gh_token_expires_at - _GH_TOKEN_REFRESH_SKEW_SECONDS
-    ):
-        return _gh_token_env
+class RefreshingGitHubAuth:
+    """A per-session credential refreshed under an instance-local lock."""
 
-    prior = (_gh_token_env, _gh_token_expires_at, _gh_token_refresh)
-    try:
-        env, expires_at = _gh_token_refresh()
-    except Exception as exc:
-        _gh_token_env, _gh_token_expires_at, _gh_token_refresh = prior
-        raise GitError(f"failed to refresh GitHub App installation token: {exc}") from exc
+    def __init__(
+        self,
+        initial: StaticGitHubAuth,
+        *,
+        expires_at: float,
+        refresh: Callable[[], tuple[StaticGitHubAuth, float]],
+    ) -> None:
+        self._current = initial
+        self._base_environment = {
+            name: value
+            for name, value in initial.environment.items()
+            if name not in _GITHUB_CREDENTIAL_ENV_KEYS
+        }
+        self._expires_at = expires_at
+        self._refresh = refresh
+        self._lock = threading.Lock()
 
-    _gh_token_env = env
-    _gh_token_expires_at = expires_at
-    _gh_token_refresh = prior[2]
-    return _gh_token_env
+    def environment_for_request(self) -> Mapping[str, str]:
+        if time.time() < self._expires_at - _GH_TOKEN_REFRESH_SKEW_SECONDS:
+            return self._current.environment_for_request()
+
+        with self._lock:
+            if time.time() < self._expires_at - _GH_TOKEN_REFRESH_SKEW_SECONDS:
+                return self._current.environment_for_request()
+            try:
+                replacement, expires_at = self._refresh()
+            except Exception:
+                raise GitError(
+                    "failed to refresh GitHub App installation token"
+                ) from None
+            if not isinstance(replacement, StaticGitHubAuth):
+                raise GitError("GitHub App refresh returned invalid authentication")
+            replacement_base = {
+                name: value
+                for name, value in replacement.environment.items()
+                if name not in _GITHUB_CREDENTIAL_ENV_KEYS
+            }
+            if replacement_base != self._base_environment:
+                raise GitError(
+                    "GitHub App refresh changed the bound base environment"
+                )
+            self._current = replacement
+            self._expires_at = expires_at
+            return self._current.environment_for_request()
 
 
 # Header names whose values are secrets. ``gh api -H "Authorization: Bearer
@@ -548,6 +554,7 @@ def _run_gh(
     repo: Path,
     args: list[str],
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     timeout: int | None = None,
     input_text: str | None = None,
     retries: int = 0,
@@ -569,11 +576,9 @@ def _run_gh(
             Read-only callers pass :func:`_gh_retries` to ride out host CPU
             starvation.
 
-    The subprocess environment is sourced from the module token state when set
-    (via :func:`set_gh_token_env`), so ``gh`` authenticates under the minted
-    installation token. Expiring tokens are refreshed before the subprocess is
-    launched. When no token state is configured, ``env`` is ``None`` and ``gh``
-    inherits the parent process environment.
+    The subprocess environment is resolved from *auth* once for the complete
+    retry sequence. ``None`` requests live parent-process inheritance; an
+    explicit mapping is already complete and is passed through unchanged.
 
     Returns:
         The completed process with text-decoded stdout/stderr.
@@ -586,8 +591,8 @@ def _run_gh(
     """
     if timeout is None:
         timeout = _gh_timeout()
-    token_env = _gh_token_env_for_request()
-    env = {**os.environ, **token_env} if token_env is not None else None
+    environment = auth.environment_for_request()
+    env = dict(environment) if environment is not None else None
     last_timeout: subprocess.TimeoutExpired | None = None
     for attempt in range(retries + 1):
         try:
@@ -3660,7 +3665,12 @@ def _pr_view_is_absent(stderr: str, pr: int | None) -> bool:
     )
 
 
-def gh_pr_view(repo: Path, pr: int | None = None) -> dict[str, Any] | None:
+def gh_pr_view(
+    repo: Path,
+    pr: int | None = None,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> dict[str, Any] | None:
     """Return ``gh pr view`` output, or ``None`` only when the PR is absent.
 
     When *pr* is ``None``, ``gh pr view`` infers the PR from the currently
@@ -3682,7 +3692,7 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict[str, Any] | None:
             ",".join(GH_PR_VIEW_FIELDS),
         ]
     )
-    proc = _run_gh(repo, args, retries=_gh_retries())
+    proc = _run_gh(repo, args, auth=auth, retries=_gh_retries())
     if proc.returncode != 0:
         if _pr_view_is_absent(proc.stderr, pr):
             return None
@@ -3697,7 +3707,12 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict[str, Any] | None:
     return data
 
 
-def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict[str, Any]]:
+def gh_pr_list_for_branch(
+    repo: Path,
+    branch: str,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> list[dict[str, Any]]:
     """List open PRs whose head ref is *branch*.
 
     Returns:
@@ -3718,6 +3733,7 @@ def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict[str, Any]]:
             "--json",
             ",".join(GH_PR_LIST_FIELDS),
         ],
+        auth=auth,
         retries=_gh_retries(),
     )
     if proc.returncode != 0:
@@ -3734,13 +3750,23 @@ def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict[str, Any]]:
     return rows
 
 
-def gh_pr_diff(repo: Path, pr: int) -> str:
+def gh_pr_diff(
+    repo: Path,
+    pr: int,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> str:
     """Return the unified diff for *pr* as text.
 
     Raises:
         GitError: If ``gh pr diff`` fails.
     """
-    proc = _run_gh(repo, ["pr", "diff", str(pr)], retries=_gh_retries())
+    proc = _run_gh(
+        repo,
+        ["pr", "diff", str(pr)],
+        auth=auth,
+        retries=_gh_retries(),
+    )
     if proc.returncode != 0:
         raise GitError(f"gh pr diff {pr} failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -3810,7 +3836,11 @@ def remote_contains_commit(repo: Path, branch: str, sha: str, *, remote: str = "
     return any(line.split()[0] == sha for line in proc.stdout.splitlines() if line.strip())
 
 
-def gh_repo_view(repo: Path) -> tuple[str, str] | None:
+def gh_repo_view(
+    repo: Path,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> tuple[str, str] | None:
     """Return the ``(owner, name)`` slug for the current repository.
 
     Returns:
@@ -3820,6 +3850,7 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     proc = _run_gh(
         repo,
         ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        auth=auth,
         retries=_gh_retries(),
     )
     if proc.returncode != 0:
@@ -3827,11 +3858,16 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     return split_owner_repo(proc.stdout.strip())
 
 
-def gh_repo_view_required(repo: Path) -> tuple[str, str]:
+def gh_repo_view_required(
+    repo: Path,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> tuple[str, str]:
     """Return the current repository slug, raising on command or shape failure."""
     proc = _run_gh(
         repo,
         ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        auth=auth,
         retries=_gh_retries(),
     )
     if proc.returncode != 0:
@@ -3897,11 +3933,27 @@ async def _run_gh_async(
     repo: Path,
     args: list[str],
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     budget: GitHubRequestBudget,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one cancellable ``gh`` process within a shared float deadline."""
-    token_env = _gh_token_env_for_request()
-    env = {**os.environ, **token_env} if token_env is not None else None
+    """Run one cancellable ``gh`` process within a shared float deadline.
+
+    Authentication resolution runs in a worker so a contended refresh lock
+    cannot block the event loop. Deadline expiry or task cancellation prevents
+    this request from spawning ``gh``. A synchronous refresh already running
+    in the worker may still finish for its own auth session afterward.
+    """
+    auth_timeout = budget.next_timeout()
+    try:
+        environment = await asyncio.wait_for(
+            asyncio.to_thread(auth.environment_for_request),
+            timeout=auth_timeout,
+        )
+    except TimeoutError:
+        raise GitTimeoutError(
+            f"GitHub authentication timed out after {auth_timeout:g}s"
+        ) from None
+    env = dict(environment) if environment is not None else None
     timeout = budget.next_timeout()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -3949,6 +4001,7 @@ async def _gh_api_read(
     repo: Path,
     endpoint: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     budget: GitHubRequestBudget,
 ) -> Any:
     """Read one GitHub endpoint with explicit version headers."""
@@ -3956,7 +4009,7 @@ async def _gh_api_read(
     for header in _GITHUB_JSON_HEADERS:
         args.extend(("-H", header))
     args.extend(("--method", "GET", endpoint))
-    proc = await _run_gh_async(repo, args, budget=budget)
+    proc = await _run_gh_async(repo, args, auth=auth, budget=budget)
     if proc.returncode != 0:
         diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
         raise _gh_error_for(f"gh api {endpoint} failed: {diagnostic}", proc.stderr)
@@ -3972,6 +4025,7 @@ async def gh_api_bounded_pages(
     repo: Path,
     endpoint: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     envelope: str | None,
     limits: GitHubPageLimits,
     budget: GitHubRequestBudget,
@@ -3986,7 +4040,12 @@ async def gh_api_bounded_pages(
         page_endpoint = (
             f"{endpoint}{separator}per_page={limits.per_page}&page={page}"
         )
-        value = await _gh_api_read(repo, page_endpoint, budget=budget)
+        value = await _gh_api_read(
+            repo,
+            page_endpoint,
+            auth=auth,
+            budget=budget,
+        )
         total_count: int | None = None
         if envelope is None:
             rows = value
@@ -4031,11 +4090,12 @@ async def gh_pr_ci_snapshot(
     name: str,
     number: int,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     budget: GitHubRequestBudget,
 ) -> dict[str, Any]:
     """Return one PR object from the bounded asynchronous read boundary."""
     endpoint = f"repos/{owner}/{name}/pulls/{number}"
-    value = await _gh_api_read(repo, endpoint, budget=budget)
+    value = await _gh_api_read(repo, endpoint, auth=auth, budget=budget)
     if not isinstance(value, dict):
         raise GitError(f"gh api {endpoint} returned an invalid top-level shape")
     return value
@@ -4047,6 +4107,7 @@ async def gh_active_branch_rules(
     name: str,
     branch: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     limits: GitHubPageLimits,
     budget: GitHubRequestBudget,
 ) -> list[dict[str, Any]]:
@@ -4054,7 +4115,12 @@ async def gh_active_branch_rules(
     encoded_branch = quote(branch, safe="")
     endpoint = f"repos/{owner}/{name}/rules/branches/{encoded_branch}"
     return await gh_api_bounded_pages(
-        repo, endpoint, envelope=None, limits=limits, budget=budget
+        repo,
+        endpoint,
+        auth=auth,
+        envelope=None,
+        limits=limits,
+        budget=budget,
     )
 
 
@@ -4064,6 +4130,7 @@ async def gh_classic_required_checks(
     name: str,
     branch: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     budget: GitHubRequestBudget,
 ) -> dict[str, Any] | None:
     """Return classic required checks, or None only for unprotected branches."""
@@ -4073,7 +4140,7 @@ async def gh_classic_required_checks(
         "/protection/required_status_checks"
     )
     try:
-        value = await _gh_api_read(repo, endpoint, budget=budget)
+        value = await _gh_api_read(repo, endpoint, auth=auth, budget=budget)
     except GitError as exc:
         absent = f"gh api {endpoint} failed: gh: Branch not protected (HTTP 404)"
         if type(exc) is GitError and str(exc) == absent:
@@ -4090,13 +4157,19 @@ async def gh_commit_check_runs(
     name: str,
     sha: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     limits: GitHubPageLimits,
     budget: GitHubRequestBudget,
 ) -> list[dict[str, Any]]:
     """Return the latest check runs for an exact commit SHA."""
     endpoint = f"repos/{owner}/{name}/commits/{sha}/check-runs?filter=latest"
     return await gh_api_bounded_pages(
-        repo, endpoint, envelope="check_runs", limits=limits, budget=budget
+        repo,
+        endpoint,
+        auth=auth,
+        envelope="check_runs",
+        limits=limits,
+        budget=budget,
     )
 
 
@@ -4106,13 +4179,19 @@ async def gh_commit_statuses(
     name: str,
     sha: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     limits: GitHubPageLimits,
     budget: GitHubRequestBudget,
 ) -> list[dict[str, Any]]:
     """Return legacy statuses for an exact commit SHA."""
     endpoint = f"repos/{owner}/{name}/commits/{sha}/statuses"
     return await gh_api_bounded_pages(
-        repo, endpoint, envelope=None, limits=limits, budget=budget
+        repo,
+        endpoint,
+        auth=auth,
+        envelope=None,
+        limits=limits,
+        budget=budget,
     )
 
 
@@ -4121,13 +4200,19 @@ async def gh_actions_workflows(
     owner: str,
     name: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     limits: GitHubPageLimits,
     budget: GitHubRequestBudget,
 ) -> list[dict[str, Any]]:
     """Return repository Actions workflows."""
     endpoint = f"repos/{owner}/{name}/actions/workflows"
     return await gh_api_bounded_pages(
-        repo, endpoint, envelope="workflows", limits=limits, budget=budget
+        repo,
+        endpoint,
+        auth=auth,
+        envelope="workflows",
+        limits=limits,
+        budget=budget,
     )
 
 
@@ -4135,6 +4220,7 @@ def gh_api(
     repo: Path,
     endpoint: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     method: str = "GET",
     paginate: bool = False,
     input_data: Any | None = None,
@@ -4186,7 +4272,7 @@ def gh_api(
     if input_data is None:
         method_args = ["-X", method.upper()] if method.upper() != "GET" else []
         args = ["api", *header_args, *method_args, *output_args, endpoint]
-        proc = _run_gh(repo, args, retries=retries)
+        proc = _run_gh(repo, args, auth=auth, retries=retries)
         if proc.returncode != 0:
             raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         return _parse_gh_json(proc.stdout, jq, endpoint)
@@ -4204,7 +4290,7 @@ def gh_api(
         finally:
             tmp.close()
         args = ["api", *header_args, endpoint, "--method", method.upper(), "--input", str(tmp_path), *output_args]
-        proc = _run_gh(repo, args, retries=retries)
+        proc = _run_gh(repo, args, auth=auth, retries=retries)
         if proc.returncode != 0:
             raise _gh_error_for(
                 f"gh api {endpoint} failed: {proc.stderr.strip()}{payload_note}",
@@ -4247,7 +4333,14 @@ def _gh_failure_is_absence(exc: GitError) -> bool:
     return _GH_HTTP_404_RE.search(str(exc)) is not None
 
 
-def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
+def gh_file_at_ref(
+    repo: Path,
+    slug: str,
+    ref: str,
+    path: str,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> bytes:
     """Return the bytes of *path* at commit *ref* via the GitHub contents API.
 
     The no-checkout counterpart to :func:`show`: the privileged poster reads
@@ -4278,7 +4371,12 @@ def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
     base = f"repos/{owner}/{name}"
     where = f"{slug}@{ref}:{relative}"
     try:
-        payload = gh_api(repo, f"{base}/contents/{quote(relative)}?ref={ref}", idempotent=True)
+        payload = gh_api(
+            repo,
+            f"{base}/contents/{quote(relative)}?ref={ref}",
+            auth=auth,
+            idempotent=True,
+        )
     except GitError as exc:
         if _gh_failure_is_absence(exc):
             raise PathAbsentError(str(exc)) from exc
@@ -4293,7 +4391,12 @@ def gh_file_at_ref(repo: Path, slug: str, ref: str, path: str) -> bytes:
     blob_sha = payload.get("sha")
     if not isinstance(blob_sha, str) or _COMMIT_SHA_RE.fullmatch(blob_sha) is None:
         raise GitError(f"{where} carries no readable content")
-    blob = gh_api(repo, f"{base}/git/blobs/{blob_sha}", idempotent=True)
+    blob = gh_api(
+        repo,
+        f"{base}/git/blobs/{blob_sha}",
+        auth=auth,
+        idempotent=True,
+    )
     blob_content = blob.get("content") if isinstance(blob, dict) else None
     if not isinstance(blob, dict) or blob.get("encoding") != "base64" or not isinstance(blob_content, str):
         raise GitError(f"{where} carries no readable blob content")
@@ -4319,6 +4422,7 @@ def gh_secret_set(
     name: str,
     value: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     org: str | None = None,
     repo_slug: str | None = None,
 ) -> None:
@@ -4335,7 +4439,7 @@ def gh_secret_set(
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
     args = ["secret", "set", name, *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args, input_text=value)
+    proc = _run_gh(repo, args, auth=auth, input_text=value)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh secret set {name} failed: {proc.stderr.strip()}", proc.stderr)
 
@@ -4345,6 +4449,7 @@ def gh_variable_set(
     name: str,
     value: str,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     org: str | None = None,
     repo_slug: str | None = None,
 ) -> None:
@@ -4360,15 +4465,22 @@ def gh_variable_set(
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
     args = ["variable", "set", name, "--body", value, *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args)
+    proc = _run_gh(repo, args, auth=auth)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh variable set {name} failed: {proc.stderr.strip()}", proc.stderr)
 
 
-def _gh_name_list(repo: Path, kind: str, org: str | None, repo_slug: str | None) -> list[str]:
+def _gh_name_list(
+    repo: Path,
+    kind: str,
+    org: str | None,
+    repo_slug: str | None,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> list[str]:
     """Run ``gh <kind> list --json name`` and return the names."""
     args = [kind, "list", "--json", "name", *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args, retries=_gh_retries())
+    proc = _run_gh(repo, args, auth=auth, retries=_gh_retries())
     if proc.returncode != 0:
         raise _gh_error_for(f"gh {kind} list failed: {proc.stderr.strip()}", proc.stderr)
     try:
@@ -4378,7 +4490,13 @@ def _gh_name_list(repo: Path, kind: str, org: str | None, repo_slug: str | None)
     return [entry["name"] for entry in entries]
 
 
-def gh_secret_list(repo: Path, *, org: str | None = None, repo_slug: str | None = None) -> list[str]:
+def gh_secret_list(
+    repo: Path,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+    org: str | None = None,
+    repo_slug: str | None = None,
+) -> list[str]:
     """Return the names of Actions secrets at the given scope.
 
     Args:
@@ -4391,10 +4509,16 @@ def gh_secret_list(repo: Path, *, org: str | None = None, repo_slug: str | None 
     Raises:
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
-    return _gh_name_list(repo, "secret", org, repo_slug)
+    return _gh_name_list(repo, "secret", org, repo_slug, auth=auth)
 
 
-def gh_variable_list(repo: Path, *, org: str | None = None, repo_slug: str | None = None) -> list[str]:
+def gh_variable_list(
+    repo: Path,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+    org: str | None = None,
+    repo_slug: str | None = None,
+) -> list[str]:
     """Return the names of Actions variables at the given scope.
 
     Args:
@@ -4404,11 +4528,18 @@ def gh_variable_list(repo: Path, *, org: str | None = None, repo_slug: str | Non
     Raises:
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
-    return _gh_name_list(repo, "variable", org, repo_slug)
+    return _gh_name_list(repo, "variable", org, repo_slug, auth=auth)
 
 
 def gh_pr_create(
-    repo: Path, *, head: str, base: str, title: str, body: str, repo_slug: str | None = None
+    repo: Path,
+    *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+    head: str,
+    base: str,
+    title: str,
+    body: str,
+    repo_slug: str | None = None,
 ) -> str:
     """Open a pull request via ``gh pr create`` and return its URL.
 
@@ -4422,7 +4553,7 @@ def gh_pr_create(
     args = ["pr", "create", "--head", head, "--base", base, "--title", title, "--body", body]
     if repo_slug is not None:
         args += ["--repo", repo_slug]
-    proc = _run_gh(repo, args)
+    proc = _run_gh(repo, args, auth=auth)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)
     return proc.stdout.strip()
@@ -4431,6 +4562,7 @@ def gh_pr_create(
 def gh_issue_create(
     repo: Path,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     title: str,
     body: str,
     repo_slug: str | None = None,
@@ -4475,7 +4607,7 @@ def gh_issue_create(
         for label in labels:
             args += ["--label", label]
     try:
-        proc = _run_gh(repo, args)
+        proc = _run_gh(repo, args, auth=auth)
     finally:
         try:
             Path(body_path).unlink()
@@ -4489,6 +4621,7 @@ def gh_issue_create(
 def gh_issue_list(
     repo: Path,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     state: str = "open",
     search: str | None = None,
     limit: int = 100,
@@ -4531,7 +4664,7 @@ def gh_issue_list(
     if repo_slug is not None:
         args += ["--repo", repo_slug]
     try:
-        proc = _run_gh(repo, args, retries=_gh_retries())
+        proc = _run_gh(repo, args, auth=auth, retries=_gh_retries())
     except GitError as exc:
         _logger.warning("gh issue list failed (%s, returning []): %s", type(exc).__name__, exc)
         return []
@@ -4547,6 +4680,7 @@ def gh_issue_list(
 def gh_issue_list_strict(
     repo: Path,
     *,
+    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     state: str = "all",
     repo_slug: str,
 ) -> list[dict[str, Any]]:
@@ -4581,6 +4715,7 @@ def gh_issue_list_strict(
     rows = gh_api(
         repo,
         endpoint,
+        auth=auth,
         paginate=True,
         jq=".[]",
         idempotent=True,

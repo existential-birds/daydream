@@ -89,9 +89,13 @@ def test_connect_infers_repository_and_lists_open_and_closed_issues(
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
-    monkeypatch.setattr(git_ops, "gh_repo_view", lambda repo: ("acme", "widgets"))
+    monkeypatch.setattr(
+        git_ops, "gh_repo_view", lambda repo, **_kwargs: ("acme", "widgets")
+    )
 
-    def list_strict(repo: Path, *, state: str, repo_slug: str) -> list[dict[str, Any]]:
+    def list_strict(
+        repo: Path, *, state: str, repo_slug: str, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
         captured.update(repo=repo, state=state, repo_slug=repo_slug)
         return []
 

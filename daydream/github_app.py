@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import os
 import time
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import jwt as pyjwt
 
@@ -49,19 +49,47 @@ class AppCredentials:
     """
 
     app_id: int
-    private_key: str
+    private_key: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class GitHubIdentity:
+    """The non-secret GitHub login displayed for a run."""
+
+    login: str
+
+
+@dataclass(frozen=True)
+class GitHubExecutionInput:
+    """Credential-bearing GitHub subprocess input owned by one run."""
+
+    auth: git_ops.GitHubAuth = field(
+        default=git_ops.INHERIT_GITHUB_AUTH,
+        repr=False,
+        compare=False,
+    )
+
+
+@dataclass(frozen=True)
+class ResolvedGitHubSession:
+    """One resolved display identity and its separate execution input."""
+
+    identity: GitHubIdentity
+    execution: GitHubExecutionInput = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class _InstallationToken:
     """A minted installation credential and its GitHub-provided expiry."""
 
-    token: str
+    token: str = field(repr=False)
     identity: str
     expires_at: float
 
 
-def resolve_credentials() -> AppCredentials | None:
+def resolve_credentials(
+    environment: Mapping[str, str] | None = None,
+) -> AppCredentials | None:
     """Resolve GitHub App credentials from the environment.
 
     Returns:
@@ -73,8 +101,9 @@ def resolve_credentials() -> AppCredentials | None:
             misconfiguration; names the missing var), or if ``DAYDREAM_APP_ID``
             is present but not parseable as an integer.
     """
-    app_id_raw = os.environ.get(APP_ID_ENV)
-    private_key = os.environ.get(APP_PRIVATE_KEY_ENV)
+    source = os.environ if environment is None else environment
+    app_id_raw = source.get(APP_ID_ENV)
+    private_key = source.get(APP_PRIVATE_KEY_ENV)
 
     if app_id_raw is None and private_key is None:
         return None
@@ -107,40 +136,50 @@ def mint_jwt(app_id: int, private_key: str) -> str:
     return pyjwt.encode(payload, private_key, algorithm="RS256")
 
 
-def build_gh_env(token: str) -> dict[str, str]:
-    """Build a subprocess environment with ``GH_TOKEN`` set.
+_APP_AUTH_ENV_KEYS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    APP_PRIVATE_KEY_ENV,
+)
+
+
+def build_gh_env(
+    token: str,
+    *,
+    base_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Bind *token* to a sanitized, complete subprocess environment.
 
     Args:
         token: Token to inject as ``GH_TOKEN`` (App JWT or installation token).
+        base_environment: Complete environment to copy and sanitize.
 
     Returns:
-        A dict of env-var overrides containing ``GH_TOKEN``.  Merged with the
-        live ``os.environ`` at subprocess call time by
-        :func:`daydream.git_ops._run_gh`.
+        A complete environment with ambient credential variables removed and
+        the explicit token installed as ``GH_TOKEN``.
     """
-    return {"GH_TOKEN": token}
+    environment = dict(base_environment)
+    for name in _APP_AUTH_ENV_KEYS:
+        environment.pop(name, None)
+    environment["GH_TOKEN"] = token
+    return environment
 
 
-@contextmanager
-def _scoped_gh_token(token: str) -> Generator[None, None, None]:
-    """Temporarily set the git_ops GH token singleton, restoring it on exit."""
-    with git_ops.scoped_gh_token_env(build_gh_env(token)):
-        yield
-
-
-@contextmanager
-def app_jwt_auth(app_id: int, private_key: str) -> Generator[dict[str, str], None, None]:
-    """Mint an App JWT and yield its ``Authorization: Bearer`` headers.
-
-    GitHub only accepts App JWTs via the Bearer scheme (gh sends ``GH_TOKEN``
-    with the token scheme), so the yielded explicit header authenticates;
-    the JWT is also injected as ``GH_TOKEN`` via the ``git_ops`` token
-    singleton for the duration of the block so ``gh`` runs without ambient
-    auth, then the prior singleton value is restored.
-    """
+def build_app_jwt_auth(
+    app_id: int,
+    private_key: str,
+    *,
+    base_environment: Mapping[str, str] | None = None,
+) -> tuple[git_ops.StaticGitHubAuth, dict[str, str]]:
+    """Build explicit static auth and Bearer headers for one App JWT."""
     jwt_token = mint_jwt(app_id, private_key)
-    with _scoped_gh_token(jwt_token):
-        yield {"Authorization": f"Bearer {jwt_token}"}
+    base = os.environ if base_environment is None else base_environment
+    auth = git_ops.StaticGitHubAuth(
+        build_gh_env(jwt_token, base_environment=base)
+    )
+    return auth, {"Authorization": f"Bearer {jwt_token}"}
 
 
 def _mint_installation_token(
@@ -149,6 +188,8 @@ def _mint_installation_token(
     private_key: str,
     owner: str,
     repo: str,
+    *,
+    base_environment: Mapping[str, str] | None = None,
 ) -> _InstallationToken:
     """Exchange App credentials for a scoped installation access token.
 
@@ -166,17 +207,47 @@ def _mint_installation_token(
             installation for *owner*, or the token exchange fails or omits the
             ``token`` field.
     """
-    with app_jwt_auth(app_id, private_key) as bearer:
-        installation_id, identity = _find_installation(repo_dir, owner, repo, bearer)
-        token, expires_at = _exchange_for_token(repo_dir, installation_id, owner, repo, bearer)
+    auth, bearer = build_app_jwt_auth(
+        app_id,
+        private_key,
+        base_environment=base_environment,
+    )
+    installation_id, identity = _find_installation(
+        repo_dir,
+        owner,
+        repo,
+        bearer,
+        auth=auth,
+    )
+    token, expires_at = _exchange_for_token(
+        repo_dir,
+        installation_id,
+        owner,
+        repo,
+        bearer,
+        auth=auth,
+    )
     return _InstallationToken(token=token, identity=identity, expires_at=expires_at)
 
 
-def _find_installation(repo_dir: Path, owner: str, repo: str, headers: dict[str, str]) -> tuple[int, str]:
+def _find_installation(
+    repo_dir: Path,
+    owner: str,
+    repo: str,
+    headers: dict[str, str],
+    *,
+    auth: git_ops.GitHubAuth,
+) -> tuple[int, str]:
     """List App installations and return ``(id, "{slug}[bot]")`` for *owner*."""
     try:
         installations = git_ops.gh_api(
-            repo_dir, "/app/installations", paginate=True, jq=".[]", headers=headers, idempotent=True
+            repo_dir,
+            "/app/installations",
+            paginate=True,
+            jq=".[]",
+            headers=headers,
+            idempotent=True,
+            auth=auth,
         )
     except git_ops.GitError as exc:
         raise ValueError(f"failed to list App installations: {exc}") from exc
@@ -200,6 +271,8 @@ def _exchange_for_token(
     owner: str,
     repo: str,
     headers: dict[str, str],
+    *,
+    auth: git_ops.GitHubAuth,
 ) -> tuple[str, float]:
     """Exchange an installation id for an access token scoped to *repo*.
 
@@ -214,6 +287,7 @@ def _exchange_for_token(
             method="POST",
             input_data={"repositories": [repo]},
             headers=headers,
+            auth=auth,
         )
     except git_ops.GitError as exc:
         raise ValueError(f"failed to mint installation token for {owner}/{repo}: {exc}") from exc
@@ -231,7 +305,12 @@ def _exchange_for_token(
     return token, expires_at
 
 
-def exchange_manifest_code(repo_dir: Path, code: str) -> tuple[AppCredentials, str]:
+def exchange_manifest_code(
+    repo_dir: Path,
+    code: str,
+    *,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+) -> tuple[AppCredentials, str]:
     """Exchange a GitHub App-manifest code for the created App's credentials.
 
     Completing the App-from-manifest flow yields a temporary ``code`` that is
@@ -253,7 +332,12 @@ def exchange_manifest_code(repo_dir: Path, code: str) -> tuple[AppCredentials, s
             never substituted with a placeholder.
     """
     try:
-        payload = git_ops.gh_api(repo_dir, f"/app-manifests/{code}/conversions", method="POST")
+        payload = git_ops.gh_api(
+            repo_dir,
+            f"/app-manifests/{code}/conversions",
+            method="POST",
+            auth=auth,
+        )
     except git_ops.GitError as exc:
         raise GitHubAppError(f"failed to exchange App manifest code: {exc}") from exc
 
@@ -274,13 +358,18 @@ def exchange_manifest_code(repo_dir: Path, code: str) -> tuple[AppCredentials, s
     return AppCredentials(app_id=app_id, private_key=private_key), slug
 
 
-def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict[str, Any]:
+def get_app_metadata(
+    repo_dir: Path,
+    app_id: int,
+    private_key: str,
+    *,
+    base_environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Read the authenticated App's metadata (``permissions``, ``slug``) via ``GET /app``.
 
-    Mints an App JWT, then calls ``GET /app`` with an explicit
-    ``Authorization: Bearer`` header (the only scheme GitHub accepts for App
-    JWTs); the JWT is injected as ``GH_TOKEN`` via the ``git_ops`` token
-    singleton for the duration of the call and restored afterward.
+    Mints an App JWT, then calls ``GET /app`` with matching explicit static
+    auth and an ``Authorization: Bearer`` header (the only scheme GitHub
+    accepts for App JWTs). No ambient credential state is changed.
 
     Args:
         repo_dir: Working directory for the ``gh`` subprocess.
@@ -293,18 +382,32 @@ def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict[str,
     Raises:
         GitHubAppError: If the call fails or returns a non-object payload.
     """
-    with app_jwt_auth(app_id, private_key) as bearer:
-        try:
-            payload = git_ops.gh_api(repo_dir, "/app", headers=bearer, idempotent=True)
-        except git_ops.GitError as exc:
-            raise GitHubAppError(f"failed to read App metadata: {exc}") from exc
+    auth, bearer = build_app_jwt_auth(
+        app_id,
+        private_key,
+        base_environment=base_environment,
+    )
+    try:
+        payload = git_ops.gh_api(
+            repo_dir,
+            "/app",
+            headers=bearer,
+            idempotent=True,
+            auth=auth,
+        )
+    except git_ops.GitError as exc:
+        raise GitHubAppError(f"failed to read App metadata: {exc}") from exc
 
     if not isinstance(payload, dict):
         raise GitHubAppError("App metadata response is not a JSON object")
     return payload
 
 
-def resolve_user_identity(repo_dir: Path) -> str:
+def resolve_user_identity(
+    repo_dir: Path,
+    *,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+) -> str:
     """Resolve the ambient ``gh``-authenticated user login via ``GET /user``.
 
     Returns:
@@ -313,7 +416,12 @@ def resolve_user_identity(repo_dir: Path) -> str:
         run, so this function never raises.
     """
     try:
-        login = git_ops.gh_api(repo_dir, "/user", idempotent=True).get("login")
+        login = git_ops.gh_api(
+            repo_dir,
+            "/user",
+            idempotent=True,
+            auth=auth,
+        ).get("login")
     except Exception:  # noqa: BLE001 - identity display is cosmetic; never abort a run
         return "unknown"
     if isinstance(login, str) and login:
@@ -321,20 +429,22 @@ def resolve_user_identity(repo_dir: Path) -> str:
     return "unknown"
 
 
-def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: bool) -> str:
-    """Resolve the active GitHub identity for a run, minting App tokens if configured.
+def resolve_run_identity(
+    target_dir: Path,
+    pr_repo: str | None,
+    *,
+    is_posting: bool,
+    base_environment: Mapping[str, str] | None = None,
+) -> ResolvedGitHubSession:
+    """Resolve one run-owned GitHub identity and execution credential.
 
-    Always clears any previously injected token first, so a run never
-    inherits the App identity of an earlier run in the same process.
-    Minting is only attempted when ``is_posting`` is true — a read-only run
-    never needs a scoped installation token. When not posting, any
-    configured App credentials are ignored entirely and the ambient ``gh``
-    identity is returned unconditionally. When posting, without App
-    credentials the ambient identity is returned; with credentials, a
-    scoped installation token is minted, injected into every ``gh``
-    subprocess via the ``git_ops`` token singleton, and the App identity
-    captured during minting is returned. When posting and the owner/repo
-    cannot be determined, or minting fails, that is a hard abort.
+    Credentials are validated before the read-only decision, preserving
+    configuration error behavior. Read-only and no-App paths use live parent
+    inheritance unless an explicit complete base environment was supplied.
+    Posting with App credentials mints one installation token and returns a
+    per-session refreshing auth value; no process-global credential is read or
+    changed. When posting and the owner/repo cannot be determined, or minting
+    fails, that is a hard abort.
 
     Args:
         target_dir: Resolved target directory for ``gh repo view`` fallback.
@@ -343,45 +453,91 @@ def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: b
             feedback replies) and therefore requires a scoped token.
 
     Returns:
-        The resolved GitHub login, or ``"unknown"`` when the (cosmetic)
-        identity lookup fails.
+        The resolved non-secret identity and separate execution input.
 
     Raises:
         GitHubAppError: On partial/malformed credentials, undeterminable
             owner/repo while posting, or minting/injection failure.
     """
-    git_ops.reset_gh_token_env()
+    source_environment = dict(
+        os.environ if base_environment is None else base_environment
+    )
     try:
-        credentials = resolve_credentials()
+        credentials = resolve_credentials(source_environment)
     except ValueError as exc:
         raise GitHubAppError(str(exc)) from exc
+    inherited_auth: git_ops.GitHubAuth
+    if base_environment is None:
+        inherited_auth = git_ops.INHERIT_GITHUB_AUTH
+    else:
+        inherited_auth = git_ops.StaticGitHubAuth(source_environment)
     if credentials is None or not is_posting:
-        return resolve_user_identity(target_dir)
+        return ResolvedGitHubSession(
+            GitHubIdentity(
+                resolve_user_identity(target_dir, auth=inherited_auth)
+            ),
+            GitHubExecutionInput(inherited_auth),
+        )
 
-    owner_repo = _owner_repo_for(pr_repo, target_dir)
+    owner_repo = _owner_repo_for(pr_repo, target_dir, auth=inherited_auth)
     if owner_repo is None:
         raise GitHubAppError("Cannot determine owner/repo for installation token minting")
 
     owner, repo = owner_repo
     try:
-        minted = _mint_installation_token(target_dir, credentials.app_id, credentials.private_key, owner, repo)
+        minted = _mint_installation_token(
+            target_dir,
+            credentials.app_id,
+            credentials.private_key,
+            owner,
+            repo,
+            base_environment=source_environment,
+        )
 
-        def refresh() -> tuple[dict[str, str], float]:
-            fresh = _mint_installation_token(target_dir, credentials.app_id, credentials.private_key, owner, repo)
-            return build_gh_env(fresh.token), fresh.expires_at
+        def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
+            fresh = _mint_installation_token(
+                target_dir,
+                credentials.app_id,
+                credentials.private_key,
+                owner,
+                repo,
+                base_environment=source_environment,
+            )
+            return (
+                git_ops.StaticGitHubAuth(
+                    build_gh_env(
+                        fresh.token,
+                        base_environment=source_environment,
+                    )
+                ),
+                fresh.expires_at,
+            )
 
-        git_ops.set_gh_token_env(
-            build_gh_env(minted.token),
+        auth = git_ops.RefreshingGitHubAuth(
+            git_ops.StaticGitHubAuth(
+                build_gh_env(
+                    minted.token,
+                    base_environment=source_environment,
+                )
+            ),
             expires_at=minted.expires_at,
             refresh=refresh,
         )
-    except Exception as exc:
-        raise GitHubAppError(f"App token resolution failed: {exc}") from exc
+    except Exception:
+        raise GitHubAppError("App token resolution failed") from None
 
-    return minted.identity
+    return ResolvedGitHubSession(
+        GitHubIdentity(minted.identity),
+        GitHubExecutionInput(auth),
+    )
 
 
-def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | None:
+def _owner_repo_for(
+    pr_repo: str | None,
+    target_dir: Path,
+    *,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+) -> tuple[str, str] | None:
     """Determine ``(owner, repo)`` for installation-token minting.
 
     Prefers *pr_repo* (``"owner/repo"``) when set; otherwise derives it from
@@ -391,4 +547,4 @@ def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | 
         parsed = git_ops.split_owner_repo(pr_repo)
         if parsed is not None:
             return parsed
-    return git_ops.gh_repo_view(target_dir)
+    return git_ops.gh_repo_view(target_dir, auth=auth)
