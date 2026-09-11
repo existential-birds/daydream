@@ -234,7 +234,7 @@ def _read_review_output_length(run_dir: Path) -> int | None:
     return len(text) if text is not None else None
 
 
-def assemble_scoring_inputs(run_dir: Path, row: HarvestRow) -> ScoringInputs:
+def assemble_scoring_inputs(run_dir: Path, row: Mapping[str, Any]) -> ScoringInputs:
     """Reduce one run's bronze artifacts to intrinsic :class:`ScoringInputs`.
 
     Reads the structured bronze artifacts under ``run_dir/deep`` and the
@@ -248,8 +248,9 @@ def assemble_scoring_inputs(run_dir: Path, row: HarvestRow) -> ScoringInputs:
 
     Args:
         run_dir: The archived run directory (bronze bundle root).
-        row: The indexed manifest row; ``row["grounding_rate"]`` supplies the
-            grounding axis (``None`` when unavailable).
+        row: Indexed or flattened manifest metadata; ``row["grounding_rate"]``
+            supplies the grounding axis (``None`` when unavailable). Bronze-only
+            callers do not need harvest's repository or session identity.
 
     Returns:
         A :class:`ScoringInputs` with the verdicts list (or ``None``), the
@@ -288,7 +289,7 @@ def assemble_scoring_inputs(run_dir: Path, row: HarvestRow) -> ScoringInputs:
 
     return ScoringInputs(
         verifier_verdicts=verifier_verdicts,
-        grounding_rate=row.grounding_rate,
+        grounding_rate=row.get("grounding_rate"),
         format_valid=format_valid,
         length=_read_review_output_length(run_dir),
     )
@@ -1020,7 +1021,7 @@ class _ProductionHarvestServices:
         set_run_pr_link(self.archive_dir, row.session_id, number, repo)
 
     def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs:
-        return assemble_scoring_inputs(row.archive_path, row)
+        return assemble_scoring_inputs(row.archive_path, {"grounding_rate": row.grounding_rate})
 
     def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]:
         if row.findings_fingerprints is not None:

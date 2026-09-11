@@ -40,7 +40,7 @@ from daydream.training.harvest import (
     build_annotation as _build_annotation,
 )
 from daydream.training.harvest_types import HarvestRow
-from daydream.training.reward import ScoringInputs, score_trajectory
+from daydream.training.reward import score_trajectory
 from daydream.ui import create_console
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit
@@ -192,15 +192,6 @@ def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
 def _typed_row(raw: dict[str, Any], *, row_number: int = 1) -> HarvestRow:
     """Construct the public validated row used by acquisition and reduction tests."""
     return HarvestRow.from_mapping(raw, row_number=row_number)
-
-
-def _bronze_inputs(run_dir: Path, raw: dict[str, Any]) -> ScoringInputs:
-    """Exercise the public bronze parser with a validated archive row."""
-    return assemble_scoring_inputs(run_dir, _typed_row({
-        "session_id": raw.get("session_id", "scoring-inputs"),
-        "archive_path": str(run_dir),
-        **raw,
-    }))
 
 
 def _services(config: HarvestConfig, *, github: Callable[..., Any]) -> HarvestTestServices:
@@ -388,7 +379,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
            "grounding_rate": 1.0, "changed_files": "[]"}
 
     # Intrinsic-only baseline: same inputs scored with no posterior.
-    intrinsic_inputs = _bronze_inputs(run_dir, row)
+    intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
     intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
 
     _write_findings(run_dir, _FP_A)
@@ -736,7 +727,7 @@ def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path) -> No
     (run_dir / "deep" / "recommendation-verdicts.json").write_text(
         '{"verdicts":[{"issue_id":1,"verdict":"consistent"}]}'
     )
-    inputs = _bronze_inputs(run_dir, {"grounding_rate": 0.75})
+    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.75})
     assert inputs.verifier_verdicts == [{"issue_id": 1, "verdict": "consistent"}]
     assert inputs.grounding_rate == 0.75 and inputs.format_valid is True
 
@@ -744,7 +735,7 @@ def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path) -> No
 def test_assemble_shallow_run_has_null_verdicts(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    inputs = _bronze_inputs(run_dir, {"grounding_rate": None})
+    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": None})
     assert inputs.verifier_verdicts is None
 
 
@@ -760,7 +751,7 @@ def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: P
     (run_dir / "deep" / "stack-python-records.json").write_text(
         json.dumps({"records": [{"id": "i1"}]})
     )
-    inputs = _bronze_inputs(run_dir, {"grounding_rate": 0.5})
+    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.5})
     assert inputs.verifier_verdicts is None          # declined ⇒ no verdicts
     assert inputs.format_valid is True                # absence is expected, not malformed
 
@@ -769,7 +760,7 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path) -> Non
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     (run_dir / "deep" / "recommendation-verdicts.json").write_text("{not json")
-    inputs = _bronze_inputs(run_dir, {"grounding_rate": 1.0})
+    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 1.0})
     assert inputs.format_valid is False
 
 
@@ -786,13 +777,13 @@ def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path) 
     run_dir.mkdir()
 
     # Default run: eval ran by default, so the manifest row carries grounding_rate.
-    default_inputs = _bronze_inputs(run_dir, {"grounding_rate": 1.0})
+    default_inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 1.0})
     default_breakdown = score_trajectory(default_inputs)
     assert default_breakdown.axes_present["grounding"] is True
     assert default_breakdown.grounding == 1.0
 
     # --no-eval run: no grounding_rate, so the axis is absent.
-    no_eval_inputs = _bronze_inputs(run_dir, {"grounding_rate": None})
+    no_eval_inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": None})
     no_eval_breakdown = score_trajectory(no_eval_inputs)
     assert no_eval_breakdown.axes_present["grounding"] is False
     assert no_eval_breakdown.grounding is None
