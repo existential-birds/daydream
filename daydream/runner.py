@@ -323,7 +323,6 @@ class RunConfig:
     fix_model: str | None = None
     test_model: str | None = None
     exploration_context: ExplorationContext | None = None
-    exploration_depth: int = 1
     exploration_model: str | None = None
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None

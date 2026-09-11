@@ -1,6 +1,5 @@
 """Unit tests for daydream.tree_sitter_index.detect_affected_files()."""
 
-import inspect
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +61,7 @@ def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path) -> Non
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "widget.py").write_text("x = 1\n")
     (tmp_path / "app.py").write_text("import pkg.widget\n")
-    results = detect_affected_files(_modified_diff("app.py"), tmp_path, depth=1)
+    results = detect_affected_files(_modified_diff("app.py"), tmp_path)
     assert results, "static resolution must produce rows"
     assert all(f.provenance == "static" for f in results)
 
@@ -79,7 +78,7 @@ def test_python_impact_surface(tmp_path: Path) -> None:
             "daydream_demo/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
         },
     )
-    results = detect_affected_files(diff_text, repo, depth=1)
+    results = detect_affected_files(diff_text, repo)
     paths_by_role = {(r.path, r.role) for r in results}
     assert ("daydream_demo/api.py", "modified") in paths_by_role
     assert ("daydream_demo/models.py", "modified") in paths_by_role
@@ -159,7 +158,7 @@ def test_python_multilevel_relative_imports(
     expected_import_path: str | set[str],
 ) -> None:
     repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
+    results = detect_affected_files(_modified_diff(api_rel), repo)
     imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
     if isinstance(expected_import_path, str):
         assert imports_pairs == {(expected_import_path, "imports")}
@@ -195,7 +194,7 @@ def test_python_parent_relative_imports(
     expected_import_paths: set[str],
 ) -> None:
     repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
+    results = detect_affected_files(_modified_diff(api_rel), repo)
     imports_paths = {r.path for r in results if r.role == "imports"}
     assert imports_paths == expected_import_paths
 
@@ -212,7 +211,7 @@ def test_typescript_impact_surface(tmp_path: Path) -> None:
             "src/models.ts": "// Models module\n\nexport class User {}\n",
         },
     )
-    results = detect_affected_files(diff_text, repo, depth=1)
+    results = detect_affected_files(diff_text, repo)
     assert any(r.path == "src/api.ts" and r.role == "modified" for r in results)
     assert any(r.path == "src/models.ts" and r.role == "modified" for r in results)
     assert ("src/models.ts", "imports") in {
@@ -246,7 +245,7 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(Path, "rglob", one_go_traversal)
 
     results = detect_affected_files(
-        _modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go"), repo, depth=1
+        _modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go"), repo
     )
     imports_paths = {r.path for r in results if r.role == "imports"}
     assert imports_paths == {"models/user.go", "models/order.go", "helpers/format.go"}
@@ -262,17 +261,12 @@ def test_rust_impact_surface(tmp_path: Path) -> None:
             "src/models.rs": "// models module\n\npub struct User;\n",
         },
     )
-    results = detect_affected_files(diff_text, repo, depth=1)
+    results = detect_affected_files(diff_text, repo)
     assert any(r.path == "src/api.rs" and r.role == "modified" for r in results)
     assert any(r.path == "src/models.rs" and r.role == "modified" for r in results)
     assert ("src/models.rs", "imports") in {
         (r.path, r.role) for r in results
     }
-
-
-def test_default_depth_is_one() -> None:
-    sig = inspect.signature(detect_affected_files)
-    assert sig.parameters["depth"].default == 1
 
 
 def test_unsupported_language_gets_modified_role(tmp_path: Path) -> None:
@@ -287,7 +281,7 @@ def test_unsupported_language_gets_modified_role(tmp_path: Path) -> None:
     )
     (tmp_path / "lib").mkdir()
     (tmp_path / "lib" / "foo.rb").write_text("class Foo\n  def bar; end\nend\n")
-    results = detect_affected_files(diff_text, tmp_path, depth=1)
+    results = detect_affected_files(diff_text, tmp_path)
     assert len(results) == 1
     assert results[0].path == "lib/foo.rb"
     assert results[0].role == "modified"
@@ -303,7 +297,7 @@ def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path) -> None:
         "@@ -1,1 +0,0 @@\n"
         "-print('bye')\n"
     )
-    results = detect_affected_files(diff_text, tmp_path, depth=1)
+    results = detect_affected_files(diff_text, tmp_path)
     assert len(results) == 1
     assert results[0].path == "gone.py"
     assert results[0].role == "modified"
@@ -320,7 +314,7 @@ def test_reverse_edge_finds_code_importer(tmp_path: Path) -> None:
     _git(repo, "add", "pkg/widget.py", "caller.py")
     _commit(repo, "add widget + caller")
 
-    results = detect_affected_files(_modified_diff("pkg/widget.py"), repo, depth=1)
+    results = detect_affected_files(_modified_diff("pkg/widget.py"), repo)
     assert "caller.py" in _importers(results)
 
 
@@ -332,7 +326,7 @@ def test_reverse_edge_skips_generic_stem(tmp_path: Path) -> None:
     _git(repo, "add", "app.py", "unrelated.py")
     _commit(repo, "add app + unrelated")
 
-    results = detect_affected_files(_modified_diff("app.py"), repo, depth=1)
+    results = detect_affected_files(_modified_diff("app.py"), repo)
     assert _importers(results) == set()
 
 
@@ -345,7 +339,7 @@ def test_reverse_edge_excludes_non_code_files(tmp_path: Path) -> None:
     _git(repo, "add", "widget.py", "notes.md", "caller.py")
     _commit(repo, "add code + docs")
 
-    importers = _importers(detect_affected_files(_modified_diff("widget.py"), repo, depth=1))
+    importers = _importers(detect_affected_files(_modified_diff("widget.py"), repo))
     assert "caller.py" in importers
     assert "notes.md" not in importers
 
@@ -379,7 +373,7 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(git_ops, "grep", no_legacy_grep)
 
     results = detect_affected_files(
-        _modified_diff("widget.py") + _modified_diff("gadget.py"), repo, depth=1
+        _modified_diff("widget.py") + _modified_diff("gadget.py"), repo
     )
     importers = _importers(results)
     widget = {p for p in importers if p.startswith("widget_importer_")}
@@ -444,7 +438,7 @@ def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> Non
     _configure_identity(tmp_path)
     _git(tmp_path, "add", ".")
     _commit(tmp_path, "init")
-    results = detect_affected_files(diff, tmp_path, depth=1)
+    results = detect_affected_files(diff, tmp_path)
     assert any(r.path == "app.py" and r.role == "imported_by" for r in results)
 
 
