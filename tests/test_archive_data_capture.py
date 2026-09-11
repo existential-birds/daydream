@@ -327,6 +327,10 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
 
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["pr"] == {
+        "number": no_ci_remote.pr_number,
+        "repo": "bAsE-uSeR/pRoJeCt",
+    }
     assert manifest["phase_states"]["push"]["status"] == "succeeded"
     assert manifest["phase_states"]["remote_ci"]["status"] == "succeeded"
     assert manifest["pipeline_status"] == "succeeded"

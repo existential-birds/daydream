@@ -19,19 +19,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
-from daydream.archive.manifest import (
-    ArchiveRecorderProvenance,
-    _flow_fix_test_steps,
-    _flow_phase_steps,
-    _runtime_flow_name,
-    build_manifest_from_snapshot,
-)
+from daydream.archive.manifest import build_manifest_from_snapshot
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import DaydreamRunFlow
 
 if TYPE_CHECKING:
@@ -57,43 +53,6 @@ def _warn(message: str) -> None:
     from daydream.ui import create_console, print_warning
 
     print_warning(create_console(), message)
-
-
-def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
-    """Whether the executed flow runs the deep cross-stack/single-stack merge.
-
-    The deep pipeline's merge step runs for normal and review flows. Improve-only,
-    diagram-only (issue #1113) and the legacy PR compatibility label do not run
-    the merge spine. Diagram-only must answer False explicitly: it reuses the
-    deep preamble and deliberately keeps a prior deep run's
-    ``.daydream/deep/`` artifacts on disk (D21), so a True here would make it
-    adopt that run's ``merged-items.json`` as its own pipeline state.
-    Custom flows are classified from their registered pipeline (a fork
-    composing the built-in deep merge step is detected as it runs), mirroring
-    ``_flow_fix_test_steps`` in ``archive.manifest``.
-    """
-    if flow is DaydreamRunFlow.PR:
-        return False
-    if flow is DaydreamRunFlow.IMPROVE:
-        return False
-    if flow is DaydreamRunFlow.DIAGRAM:
-        return False
-    if flow is DaydreamRunFlow.CUSTOM:
-        from daydream.archive.manifest import _flow_phase_steps, _runtime_flow_name
-
-        steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
-        return any("merge" in step for step in steps)
-    return True
-
-
-def _flow_push_remote_steps(
-    flow: DaydreamRunFlow, flow_name: str | None
-) -> tuple[bool, bool]:
-    """Return exact commit/push and remote-CI capabilities for this run."""
-    if flow in {DaydreamRunFlow.TTT, DaydreamRunFlow.PR}:
-        return False, False
-    steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
-    return ("commit" in steps, "remote-ci" in steps)
 
 
 def get_archive_dir() -> Path:
@@ -124,11 +83,10 @@ def _validate_frozen_artifacts(artifacts: ArtifactTreeSnapshot) -> None:
 
 def _copy_snapshot_bundle(
     *,
+    run: ArchiveRunSnapshot,
     artifacts: ArtifactTreeSnapshot,
     artifact_provenance: ArtifactEvidenceProvenance,
     run_dir: Path,
-    recorder_provenance: ArchiveRecorderProvenance,
-    write_snapshot: RunWriteSnapshot,
 ) -> None:
     """Assemble an archive only from frozen tree and immutable document bytes.
 
@@ -137,7 +95,12 @@ def _copy_snapshot_bundle(
     """
     from daydream.artifact_visibility import OutputLabel
 
-    _project_documents(write_snapshot, run_dir, session_id=recorder_provenance.session_id)
+    recorder_provenance = run.recorder_provenance
+    _project_documents(
+        run.trajectories,
+        run_dir,
+        session_id=recorder_provenance.session_id,
+    )
     findings_routes = [
         route for route in artifacts.destinations if route.label is OutputLabel.FINDINGS_OUTPUT
     ]
@@ -161,10 +124,8 @@ def _copy_snapshot_bundle(
 def _manifest_state(
     *,
     target_dir: Path,
-    recorder_provenance: ArchiveRecorderProvenance,
-    config: RunConfig,
-    status: str,
-    frozen_extra: dict[str, Any],
+    run: ArchiveRunSnapshot,
+    frozen_extra: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Derive the status, fix, and pipeline manifest fields for one run tree.
 
@@ -175,15 +136,15 @@ def _manifest_state(
     """
     from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 
+    recorder_provenance = run.recorder_provenance
+    phases = run.identity.phases
     session_id = recorder_provenance.session_id
-    runs_fix, runs_test = _flow_fix_test_steps(recorder_provenance.run_flow, config.flow_name)
-    runs_merge = (
-        _flow_runs_merge(recorder_provenance.run_flow, config.flow_name)
-        and getattr(config, "start_at", None) != "fix"
-    )
-    runs_push, runs_remote_ci = _flow_push_remote_steps(
-        recorder_provenance.run_flow, config.flow_name
-    )
+    status = run.trajectories.status
+    runs_merge = phases.merge
+    runs_fix = phases.fix
+    runs_test = phases.test
+    runs_push = phases.push
+    runs_remote_ci = phases.remote_ci
     # A deep fix run that hit per-group failures left partial/reverted edits in
     # the tree; the run is NOT "complete".
     fix_failures = _read_fix_failures(target_dir) if runs_fix else None
@@ -234,16 +195,17 @@ def _discard_or_note(path: Path, exc: BaseException, stage: str, *, recreate: bo
 
 def finalize_archive_run(
     *,
-    recorder_provenance: ArchiveRecorderProvenance,
+    run: ArchiveRunSnapshot,
     artifacts: ArtifactTreeSnapshot,
     artifact_provenance: ArtifactEvidenceProvenance,
     config: RunConfig,
-    write_snapshot: RunWriteSnapshot,
     work: WorkContext | None,
     upload: bool = True,
     dump_path: Path | None = None,
 ) -> None:
     """Strictly archive one immutable run or raise a closed typed error."""
+    recorder_provenance = run.recorder_provenance
+    write_snapshot = run.trajectories
     session_id = recorder_provenance.session_id
     if (
         session_id != artifacts.session_id
@@ -275,11 +237,10 @@ def finalize_archive_run(
         assembly_dir.mkdir()
         assembly_created = True
         _copy_snapshot_bundle(
+            run=run,
             artifacts=artifacts,
             artifact_provenance=artifact_provenance,
             run_dir=assembly_dir,
-            recorder_provenance=recorder_provenance,
-            write_snapshot=write_snapshot,
         )
         target_dir = artifacts.root
         git_ctx = capture_git_context(work.repo if work is not None else target_dir)
@@ -312,20 +273,15 @@ def finalize_archive_run(
         frozen_root = frozen.get("main")
         frozen_extra = frozen_root.get("extra") if isinstance(frozen_root, dict) else None
         manifest = build_manifest_from_snapshot(
-            recorder_provenance=recorder_provenance,
-            write_snapshot=write_snapshot,
-            config=config,
+            run=run,
             git_ctx=git_ctx,
             archive_path=run_dir,
             evaluation=evaluation,
             source_path=str(work.source) if work is not None else None,
-            cwd=str(work.repo) if work is not None else None,
             provenance=capture_executable_provenance(),
             **_manifest_state(
                 target_dir=target_dir,
-                recorder_provenance=recorder_provenance,
-                config=config,
-                status=write_snapshot.status,
+                run=run,
                 frozen_extra=frozen_extra if isinstance(frozen_extra, dict) else {},
             ),
         )

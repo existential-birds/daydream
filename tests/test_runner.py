@@ -39,7 +39,8 @@ from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import RunContext, current_run_context
-from daydream.runner import RunConfig
+from daydream.run_snapshot import ArchiveRunSnapshot
+from daydream.runner import RunConfig, capture_manifest_run_identity
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
@@ -2501,11 +2502,13 @@ def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) ->
     """Build a manifest for ``config``/``flow`` from one real frozen snapshot."""
     snapshot = _capture_snapshot(tmp_path, "complete")
     return build_manifest_from_snapshot(
-        recorder_provenance=archive_recorder_provenance_from_snapshot(
-            write_snapshot=snapshot, run_flow=flow
+        run=ArchiveRunSnapshot(
+            recorder_provenance=archive_recorder_provenance_from_snapshot(
+                write_snapshot=snapshot, run_flow=flow
+            ),
+            identity=capture_manifest_run_identity(config, flow, build_registry(), tmp_path),
+            trajectories=snapshot,
         ),
-        write_snapshot=snapshot,
-        config=config,
         git_ctx=GitContext(),
         status="complete",
         archive_path=tmp_path,
@@ -2607,6 +2610,139 @@ def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert m.review_backend is None
     assert m.fix_backend == "claude"
     assert m.test_backend == "claude"
+
+
+@pytest.mark.parametrize("flow", list(DaydreamRunFlow))
+def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:
+    identity = capture_manifest_run_identity(
+        RunConfig(fix_backend="codex", test_backend="pi"), flow, build_registry(), tmp_path,
+    )
+    runs_fix = flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.PR)
+    runs_test = flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP)
+    assert identity.fix_backend == ("codex" if runs_fix else None)
+    assert identity.test_backend == ("pi" if runs_test else None)
+    assert identity.phases.fix is runs_fix
+    assert identity.phases.test is runs_test
+    assert identity.phases.merge is (flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.TTT))
+    assert identity.phases.push is runs_test
+    assert identity.phases.remote_ci is runs_test
+
+
+@pytest.mark.parametrize(
+    ("flow", "flow_name", "registered_name", "steps", "fix", "test", "merge", "push", "remote_ci"),
+    [
+        (DaydreamRunFlow.CUSTOM, "fork", "fork", ["fix", "test", "commit"], True, True, False, True, False),
+        (DaydreamRunFlow.CUSTOM, "fork", "fork", ["exploration", "intent"], False, False, False, False, False),
+        (DaydreamRunFlow.CUSTOM, "fork", "fork", ["custom-merge", "remote-ci"], False, False, True, False, True),
+        (DaydreamRunFlow.DEEP, None, "deep", ["exploration", "intent"], False, False, True, False, False),
+        (DaydreamRunFlow.NORMAL, None, "deep", ["exploration", "intent"], False, False, True, False, False),
+        (
+            DaydreamRunFlow.IMPROVE, "improve", "improve", ["fix", "test", "commit", "remote-ci"],
+            True, True, False, True, True,
+        ),
+        (DaydreamRunFlow.DIAGRAM, "diagram", "diagram", ["fix", "test"], True, True, False, False, False),
+        (DaydreamRunFlow.CUSTOM, "unknown", "fork", ["fix", "test"], False, False, False, False, False),
+    ],
+)
+def test_manifest_identity_uses_registered_pipeline(
+    tmp_path: Path, flow: DaydreamRunFlow, flow_name: str | None, registered_name: str,
+    steps: list[str], fix: bool, test: bool, merge: bool, push: bool, remote_ci: bool,
+) -> None:
+    registry = build_registry()
+    registry.set_flow(registered_name, steps)
+    config = RunConfig(flow_name=flow_name, fix_backend="codex", test_backend="pi")
+    identity = capture_manifest_run_identity(config, flow, registry, tmp_path)
+    registry.set_flow(registered_name, [])
+    assert (identity.phases.fix, identity.phases.test, identity.phases.merge) == (fix, test, merge)
+    assert (identity.phases.push, identity.phases.remote_ci) == (push, remote_ci)
+    assert identity.fix_backend == ("codex" if fix else None)
+    assert identity.test_backend == ("pi" if test else None)
+
+
+@pytest.mark.parametrize("flow_name", [None, *runner._DEEP_FLOW_ALIASES])
+@pytest.mark.parametrize("shallow", [False, True])
+def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
+    tmp_path: Path, flow_name: str | None, shallow: bool,
+) -> None:
+    from daydream.config_file import DaydreamFileConfig
+
+    config = RunConfig(
+        flow_name=flow_name, shallow=shallow, review_backend="claude",
+        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}}),
+    )
+    identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), tmp_path)
+    assert identity.per_stack_review_backend == "codex"
+    assert identity.per_stack_review_model == "gpt-psr"
+    assert identity.review_backend == "claude"
+    assert identity.phases.per_stack_review
+    assert identity.deep is not shallow
+
+
+@pytest.mark.parametrize(
+    ("flow", "flow_name", "start_at"),
+    [
+        (DaydreamRunFlow.IMPROVE, "improve", "review"),
+        (DaydreamRunFlow.CUSTOM, "custom-flow", "review"),
+        (DaydreamRunFlow.DIAGRAM, None, "review"),
+        (DaydreamRunFlow.DEEP, "deep", "merge"),
+        (DaydreamRunFlow.DEEP, "deep", "fix"),
+    ],
+)
+def test_manifest_identity_omits_review_tier_without_review_spine(
+    tmp_path: Path, flow: DaydreamRunFlow, flow_name: str | None, start_at: str,
+) -> None:
+    identity = capture_manifest_run_identity(
+        RunConfig(flow_name=flow_name, start_at=start_at), flow, build_registry(), tmp_path,
+    )
+    assert not identity.phases.per_stack_review
+    assert identity.per_stack_review_backend is None
+    assert identity.per_stack_review_model is None
+    if start_at == "fix":
+        assert not identity.phases.merge
+
+
+@pytest.mark.parametrize(
+    ("backend", "review_backend", "file_backend", "file_review", "expected_backend", "expected_review"),
+    [
+        ("claude", "codex", None, None, "claude", "codex"),
+        ("codex", None, None, None, "codex", None),
+        (None, None, "pi", None, "pi", None),
+        ("claude", None, "pi", "codex", "claude", "codex"),
+    ],
+)
+def test_manifest_identity_separates_general_backend_and_review_override(
+    tmp_path: Path, backend: str | None, review_backend: str | None, file_backend: str | None,
+    file_review: str | None, expected_backend: str, expected_review: str | None,
+) -> None:
+    from daydream.config_file import DaydreamFileConfig
+
+    config = RunConfig(
+        backend=backend, review_backend=review_backend,
+        file_config=DaydreamFileConfig(
+            backend=file_backend, phases={} if file_review is None else {"review": {"backend": file_review}},
+        ),
+    )
+    identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), tmp_path)
+    assert identity.backend == expected_backend
+    assert identity.review_backend == expected_review
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_manifest_identity_captures_pi_working_directory_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool,
+) -> None:
+    from daydream.config import DEFAULT_PI_MODEL
+
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "empty-global"))
+    if configured:
+        settings = tmp_path / ".pi" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"defaultModel": "configured-reviewer"}))
+    identity = capture_manifest_run_identity(
+        RunConfig(backend="pi"), DaydreamRunFlow.DEEP, build_registry(), tmp_path,
+    )
+    assert identity.per_stack_review_backend == "pi"
+    assert identity.per_stack_review_model == ("configured-reviewer" if configured else DEFAULT_PI_MODEL)
 
 
 async def test_overlapping_posting_runs_keep_their_own_github_auth(

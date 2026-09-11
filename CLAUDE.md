@@ -86,6 +86,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 |------|----------------|
 | `cli.py` | Args, signals, process lifecycle, subcommand dispatch |
 | `runner.py` | Flow preambles (workspace, diff, recorder), backend resolution, registry, dispatch |
+| `run_snapshot.py` | Immutable manifest identity and archive aggregate; runner captures policy before recorder entry |
 | `flows/` | `FlowContext` + `run_flow()` engine: ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups |
 | `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
 | `deep/orchestrator.py` | Public deep/diagram entry points, flow assembly, mode gates, diff/stack preamble, and success-only cleanup dispatch |

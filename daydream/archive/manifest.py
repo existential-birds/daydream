@@ -1,8 +1,8 @@
 """Run archive manifest builder.
 
-Assembles a ``manifest.json`` from the recorder, run config, git context,
-and optional evaluation results. The manifest is the single source of
-truth for what's in an archive bundle.
+Assembles a ``manifest.json`` from an immutable public run snapshot, git
+context, and optional evaluation results. The manifest is the single source
+of truth for what's in an archive bundle.
 
 Provenance namespaces: ``git.*`` and ``code_context.*`` record provenance
 of the repository under review (target ``base_sha``/``head_sha``); the
@@ -25,32 +25,25 @@ Exports:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import GitContext
-from daydream.config import DEFAULT_PI_MODEL
-from daydream.extensions import UnresolvedExtensionError, get_registry
+from daydream.run_snapshot import (
+    ArchiveRecorderProvenance as ArchiveRecorderProvenance,
+)
+from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import DaydreamRunFlow
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from daydream.runner import RunConfig
+    from daydream.archive.provenance import ExecutableProvenance
     from daydream.trajectory import RunWriteSnapshot
 
 MANIFEST_SCHEMA_VERSION = "1.0"
-
-
-@dataclass(frozen=True)
-class ArchiveRecorderProvenance:
-    """Immutable recorder identity recovered from one frozen root document."""
-
-    session_id: str
-    run_flow: DaydreamRunFlow
-    pr_number: int | None
-    pr_repo: str | None
 
 
 def archive_recorder_provenance_from_snapshot(
@@ -94,79 +87,6 @@ def archive_recorder_provenance_from_snapshot(
         pr_number=pr_number,
         pr_repo=pr_repo,
     )
-
-
-def _runtime_flow_name(flow: DaydreamRunFlow, flow_name: str | None) -> str | None:
-    """Return the registered flow name ``run_flow`` resolved for this label.
-
-    The deep family (NORMAL/DEEP/TTT/PR — four mode labels of the single
-    registered ``deep`` flow, #330) always resolves to ``"deep"`` regardless
-    of ``config.flow_name``; ``IMPROVE`` resolves ``"improve"``; ``CUSTOM`` is
-    the literal ``--flow`` name; ``DIAGRAM`` (issue #1113) resolves the
-    two-step ``diagram`` flow. Builtins are seeded before the session's
-    registry loads, so a fork registering a built-in name is resolved exactly
-    as it runs (issue #648).
-    """
-    if flow is DaydreamRunFlow.IMPROVE:
-        return "improve"
-    if flow is DaydreamRunFlow.DIAGRAM:
-        return "diagram"
-    if flow is DaydreamRunFlow.CUSTOM:
-        return flow_name
-    return "deep"
-
-
-def _flow_phase_steps(flow_name: str | None) -> set[str]:
-    """Return the set of phase steps in the registered flow's pipeline.
-
-    Introspects the per-run registry (builtins are seeded before extension
-    load) — the same source ``run_flow`` resolves — so a fork flow composing
-    the built-in ``fix``/``test`` phases is detected exactly as it runs them.
-    An unknown/absent flow yields an empty set: we record no backend rather
-    than invent one for phases that never ran (#648).
-    """
-    if not flow_name:
-        return set()
-    try:
-        entries = get_registry().flow(flow_name)
-    except UnresolvedExtensionError:
-        return set()
-    step_names: set[str] = set()
-    for entry in entries:
-        if isinstance(entry, str):
-            step_names.add(entry)
-        else:
-            step_names.update(entry.steps)
-    return step_names
-
-
-def _flow_fix_test_steps(flow: DaydreamRunFlow, flow_name: str | None) -> tuple[bool, bool]:
-    """Return ``(runs_fix, runs_test)`` for the pipeline ``run_flow`` executes.
-
-    Issue #648 gates the manifest's fix/test backend labels on the step
-    pipeline ``run_flow`` actually executes, resolved from the per-run registry
-    for every label — not just ``CUSTOM`` — because ``Registry.set_flow`` has no
-    built-in-name guard: a fork overriding ``deep`` or ``improve`` runs its own
-    pipeline while the label would suggest the built-in. Two labels are fixed
-    by runtime mode, not the registry:
-
-    - Review/comment (``TTT``) stops after ``post-review`` and never runs the
-      fix cycle, so it records neither backend.
-    - The legacy PR compatibility mode runs its fix phase but never the test
-      step, so it records a fix backend only.
-
-    ``NORMAL``/``DEEP``/``IMPROVE``/``DIAGRAM``/``CUSTOM`` are classified by the
-    registered pipeline (``NORMAL``/``DEEP`` → the ``deep`` flow; ``IMPROVE`` →
-    ``improve``; ``DIAGRAM`` → the ``diagram`` flow, whose two steps run neither
-    fix nor test; ``CUSTOM`` → the literal ``--flow`` name).
-    """
-    if flow is DaydreamRunFlow.TTT:
-        return False, False
-    if flow is DaydreamRunFlow.PR:
-        # Feedback runs the fix phase (fix-items) but never the test phase.
-        return True, False
-    steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
-    return ("fix" in steps, "test" in steps)
 
 
 def _omit_falsy(**fields: Any) -> dict[str, Any]:
@@ -492,63 +412,24 @@ class Manifest:
 
 def build_manifest_from_snapshot(
     *,
-    recorder_provenance: ArchiveRecorderProvenance,
-    write_snapshot: RunWriteSnapshot,
-    config: RunConfig,
+    run: ArchiveRunSnapshot,
     git_ctx: GitContext,
     status: str,
     archive_path: Path,
-    evaluation: dict[str, Any] | None = None,
+    evaluation: Mapping[str, Any] | None = None,
     source_path: str | None = None,
-    cwd: str | None = None,
-    fix_failures: dict[str, str] | None = None,
-    fix_leftover_untracked: list[str] | None = None,
-    fix_quality_gate: dict[str, Any] | None = None,
+    fix_failures: Mapping[str, str] | None = None,
+    fix_leftover_untracked: Sequence[str] | None = None,
+    fix_quality_gate: Mapping[str, Any] | None = None,
     recommended_capture: str | None = None,
     pipeline_status: str = "unknown",
-    phase_states: dict[str, Any] | None = None,
-    provenance: Any | None = None,
+    phase_states: Mapping[str, Any] | None = None,
+    provenance: ExecutableProvenance | None = None,
 ) -> Manifest:
-    """Construct a Manifest from run context.
-
-    Args:
-        recorder_provenance: Immutable identity for the archived run.
-        write_snapshot: Frozen trajectory bytes the run totals and timings come
-            from.
-        config: The RunConfig for this run.
-        git_ctx: Captured git metadata.
-        status: Run status (``complete``, ``partial``, ``failed``).
-        archive_path: Absolute path to the archive directory for this run.
-        evaluation: Optional ``analyze_session()`` result dict.
-        source_path: Absolute path to the source repository at archive time.
-        cwd: The repository directory daydream operated on (``work.repo``), used
-            to mirror PiBackend's cwd-configured default model resolution.
-        fix_failures: Map of dropped fix file-group -> reason, or ``None`` when
-            every fix applied. Ignored when the resolved flow has no fix phase.
-        fix_leftover_untracked: Sorted list of untracked paths left behind by a
-            failed fix pass, or ``None``. Ignored when the resolved flow has no
-            fix phase.
-        fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
-            (issue #315), or ``None`` when the artifact is absent. Ignored when
-            the resolved flow has no fix phase.
-        recommended_capture: Which tree produced the archived ``recommended.patch``
-            (``"pre_test"`` = fix-phase fallback, ``"post_test"`` = post-heal
-            re-capture), or ``None`` on legacy runs. On fix-bearing flows an
-            absent sidecar defaults ``recommended_patch_capture`` to ``"pre_test"``;
-            flows with no fix phase leave it
-            ``None`` since they never produce a fix-phase fallback capture.
-        pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
-            cancelled/unknown) derived from per-phase terminal states; distinct
-            from ``status``/``archive_status`` (archive finalization).
-        phase_states: Per-phase terminal states (``merge``/``fix``/``test``/
-            ``push``/``remote_ci``), each ``{"ran": bool, "status": str}``
-            plus optional bounded details, or ``None`` for legacy runs.
-        provenance: The ``ExecutableProvenance`` of the Daydream executable that
-            produced this run, or ``None`` (never merged into ``git.*``).
-
-    Returns:
-        A fully populated Manifest.
-    """
+    """Construct a manifest from captured identity and frozen trajectory bytes."""
+    recorder_provenance = run.recorder_provenance
+    write_snapshot = run.trajectories
+    identity = run.identity
     if recorder_provenance.session_id != write_snapshot.root_trajectory_id:
         raise ValueError("archive provenance does not match frozen snapshot")
     from daydream.trajectory import compute_timing_summary, snapshot_trajectories
@@ -565,107 +446,44 @@ def build_manifest_from_snapshot(
         "any_cost_seen": final_metrics.get("total_cost_usd") is not None,
     }
     timing_summary = compute_timing_summary(write_snapshot)
-
-    # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
-    from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
-        _DEEP_FLOW_ALIASES,
-        _default_backend_name,
-        _resolved_backend_name,
-        _resolved_model,
-        _resolved_review_backend_name,
-    )
-
-    # ``backend`` records the phase-agnostic general default (config.backend →
-    # file-config global → "claude"), never a per-phase override.
-    # ``review_backend`` is an override marker, NOT an effective value: it is
-    # stamped only when a review-specific override exists, and it can differ
-    # from the backend review actually ran on (a CLI ``--backend`` masks a
-    # file-config review override). Sibling fields ``fix_backend``/
-    # ``test_backend`` are effective per-phase values; ``review_backend`` is
-    # not.
-
-    # Per-stack reviewers (issue #646) execute on the "per_stack_review" phase key —
-    # NOT the "review" tier — so archives record that tier's resolved backend and
-    # model from its own key. The per-stack-reviews step runs in every deep-flow
-    # mode (loop, shallow, review, comment); shallow is NOT excluded — a collapsed
-    # single stack is still reviewed through phase_per_stack_reviews. Only improve/custom
-    # flows (which never invoke the deep orchestrator) have no per-stack fan-out, so
-    # those runs leave both fields None (and to_dict() omits them). The deep-flow
-    # alias set is runner._DEEP_FLOW_ALIASES — the same list _dispatch_selected_flow
-    # routes — so the gate cannot drift from the actual flow routing.
-    # A diagram-only run (issue #1113) reuses the deep preamble but its flow is
-    # exploration -> diagram -> post-diagram, so it has no per-stack fan-out.
-    # start_at defaults to "review" on the real RunConfig; getattr keeps the
-    # gate robust to lighter config fakes that omit the field.
-    _start_at = getattr(config, "start_at", "review")
-    per_stack_reviews_ran = (
-        (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
-        and _start_at not in ("merge", "fix")
-        and recorder_provenance.run_flow is not DaydreamRunFlow.DIAGRAM
-    )
-    per_stack_review_backend: str | None = None
-    per_stack_review_model: str | None = None
-    if per_stack_reviews_ran:
-        per_stack_review_backend = _resolved_backend_name(config, "per_stack_review")
-        per_stack_review_model = _resolved_model(config, "per_stack_review")
-        if per_stack_review_model is None and per_stack_review_backend == "pi":
-            # Pi's default is a backend fallback (resolved by PiBackend from cwd)
-            # that intentionally never appears in PHASE_DEFAULT_MODELS, so
-            # _resolved_model returns None here even though the per-stack reviewers
-            # ran on a concrete model. Mirror PiBackend's own precedence — a
-            # cwd-configured default first, then DEFAULT_PI_MODEL — so the archived
-            # identity matches what actually ran (#646 finding 1).
-            from pathlib import Path
-
-            from daydream.backends.pi import _configured_pi_model
-            per_stack_review_model = (
-                _configured_pi_model(Path(cwd)) if cwd else None
-            ) or DEFAULT_PI_MODEL
-
-    # Gate fix/test backend labels on whether this flow's step pipeline actually
-    # includes those phases (issue #648): improve never reaches the fix/test
-    # STEPS, TTT (review/comment) gates them off at runtime (_fix_cycle_enabled
-    # is loop/shallow only), and custom flows are classified from their registered pipeline
-    # (every ``--flow`` run is stamped CUSTOM regardless of step composition), so
-    # a fork composing the built-in fix/test steps records backends like the deep
-    # family. Registry-resolved for every label so fork overrides of built-in
-    # ``deep``/``improve`` are classified by the pipeline actually executed.
-    runs_fix, runs_test = _flow_fix_test_steps(
-        recorder_provenance.run_flow,
-        config.flow_name,
-    )
+    runs_fix = identity.phases.fix
+    profile = identity.profile
 
     m = Manifest(
         session_id=recorder_provenance.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
         status=status,
         run_flow=recorder_provenance.run_flow.value,
-        skill=config.stack,
-        model=None,
-        backend=_default_backend_name(config),
-        review_backend=_resolved_review_backend_name(config),
-        fix_backend=_resolved_backend_name(config, "fix") if runs_fix else None,
-        test_backend=_resolved_backend_name(config, "test") if runs_test else None,
-        per_stack_review_backend=per_stack_review_backend,
-        per_stack_review_model=per_stack_review_model,
+        skill=identity.skill,
+        model=identity.model,
+        backend=identity.backend,
+        review_backend=identity.review_backend,
+        fix_backend=identity.fix_backend,
+        test_backend=identity.test_backend,
+        per_stack_review_backend=identity.per_stack_review_backend,
+        per_stack_review_model=identity.per_stack_review_model,
         archive_status=status,
         pipeline_status=pipeline_status,
-        phase_states=phase_states,
+        phase_states=dict(phase_states) if phase_states is not None else None,
         daydream=provenance,
-        review_only=config.output_mode == "review",
-        deep=not config.shallow,
-        fix_failures=(fix_failures or None) if runs_fix else None,
-        fix_leftover_untracked=(fix_leftover_untracked or None) if runs_fix else None,
-        fix_quality_gate=(fix_quality_gate or None) if runs_fix else None,
+        review_only=identity.review_only,
+        deep=identity.deep,
+        fix_failures=(dict(fix_failures) or None) if runs_fix and fix_failures is not None else None,
+        fix_leftover_untracked=(
+            (list(fix_leftover_untracked) or None) if runs_fix and fix_leftover_untracked is not None else None
+        ),
+        fix_quality_gate=(
+            (dict(fix_quality_gate) or None) if runs_fix and fix_quality_gate is not None else None
+        ),
         recommended_patch_capture=(
             recommended_capture
             if recommended_capture
-            else (
-                "pre_test"
-                if runs_fix and recorder_provenance.run_flow is not DaydreamRunFlow.PR
-                else None
-            )
+            else ("pre_test" if runs_fix and recorder_provenance.run_flow is not DaydreamRunFlow.PR else None)
         ),
+        profile_schema_version=profile.schema_version if profile is not None else None,
+        profile_name=profile.name if profile is not None else None,
+        profile_source_kind=profile.source_kind if profile is not None else None,
+        profile_digest=profile.digest if profile is not None else None,
         source_path=source_path,
         remote_url=git_ctx.remote_url,
         repo_slug=git_ctx.repo_slug,
@@ -682,17 +500,6 @@ def build_manifest_from_snapshot(
         total_cached_tokens=totals["cached"] or None,
         archive_path=str(archive_path),
     )
-
-    # Review-profile provenance (issue #885, R12): the resolved profile lives
-    # on ``config.review_profile`` (set once by the runner composition root);
-    # archive it so results attribute to the exact policy tested. A direct
-    # caller that skipped resolution leaves the fields None (omitted).
-    resolved_profile = getattr(config, "review_profile", None)
-    if resolved_profile is not None:
-        m.profile_schema_version = resolved_profile.profile.schema_version
-        m.profile_name = resolved_profile.profile.name
-        m.profile_source_kind = resolved_profile.source_kind
-        m.profile_digest = resolved_profile.digest
 
     # Lifecycle timing comes from the immutable write snapshot. A snapshot the
     # reducer cannot span (no lifecycle stamps, or a cutoff it cannot match)

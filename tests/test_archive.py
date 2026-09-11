@@ -6,8 +6,8 @@ Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flo
 import json
 import sqlite3
 import subprocess
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -46,7 +46,6 @@ from daydream.artifact_visibility import (
     RoutedDestination,
     _manifest,
 )
-from daydream.config_file import DaydreamFileConfig
 from daydream.remote_ci import (
     CIObservation,
     PRCIBinding,
@@ -55,6 +54,12 @@ from daydream.remote_ci import (
     RequiredContext,
     RequiredPolicy,
     write_remote_ci_verdict,
+)
+from daydream.run_snapshot import (
+    ArchiveRunSnapshot,
+    ManifestRunIdentity,
+    RunPhaseCapabilities,
+    RunProfileIdentity,
 )
 from daydream.runner import RunConfig
 from daydream.trajectory import (
@@ -175,6 +180,7 @@ def _strict_archive(
     config: Any,
     write_snapshot: RunWriteSnapshot,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
+    identity: ManifestRunIdentity | None = None,
     destinations: tuple[RoutedDestination, ...] = (),
     work: Any = None,
     upload: bool = False,
@@ -189,9 +195,7 @@ def _strict_archive(
     from daydream.archive import finalize_archive_run
 
     finalize_archive_run(
-        recorder_provenance=archive_recorder_provenance_from_snapshot(
-            write_snapshot=write_snapshot, run_flow=run_flow,
-        ),
+        run=_archive_snapshot(write_snapshot, run_flow=run_flow, identity=identity),
         artifacts=ArtifactTreeSnapshot(
             session_id=session_id,
             workspace_key="workspace",
@@ -207,33 +211,84 @@ def _strict_archive(
             # to one resolve unchanged inside the other.
             live_root=target,
         ),
-        config=cast(RunConfig, config),
-        write_snapshot=write_snapshot,
+        config=config,
         work=work,
         upload=upload,
         dump_path=dump_path,
     )
 
 
-@dataclass
-class _MockConfig:
-    stack: str | None = "python"
-    backend: str | None = None
-    model: str | None = None
-    review_backend: str | None = None
-    fix_backend: str | None = None
-    test_backend: str | None = None
-    output_mode: str = "loop"
-    shallow: bool = False
-    bot: str | None = None
-    flow_name: str | None = None
-    loop: bool = False
-    archive: bool = True
-    run_eval: bool = False
-    dump_artifacts: str | None = None
-    trajectory_hub_repo: str | None = None
-    file_config: DaydreamFileConfig | None = None
-    findings_out: str | None = None
+def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
+    """Build the public, already-resolved identity supplied by the runner."""
+    identity = ManifestRunIdentity(
+        flow_name=None,
+        skill="python",
+        model=None,
+        backend="claude",
+        review_backend=None,
+        fix_backend="claude",
+        test_backend="claude",
+        per_stack_review_backend="claude",
+        per_stack_review_model="sonnet",
+        review_only=False,
+        deep=True,
+        profile=None,
+        phases=RunPhaseCapabilities(
+            per_stack_review=True,
+            merge=True,
+            fix=True,
+            test=True,
+            push=True,
+            remote_ci=True,
+        ),
+    )
+    return replace(identity, **overrides)
+
+
+def _manifest_write_snapshot(
+    *,
+    session_id: str = "abcd1234-0000-0000-0000-000000000000",
+    final_metrics: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> RunWriteSnapshot:
+    """Build explicit immutable root bytes for manifest-reducer tests."""
+    snapshot_extra = dict(extra or {})
+    payload = {
+        "session_id": session_id,
+        "trajectory_id": session_id,
+        "steps": [],
+        "final_metrics": dict(_DEFAULT_FINAL_METRICS if final_metrics is None else final_metrics),
+        "extra": snapshot_extra,
+    }
+    return RunWriteSnapshot(
+        status="complete",
+        cutoff_at=str(snapshot_extra.get("run_ended_at", "2026-01-01T00:00:01Z")),
+        root_trajectory_id=session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id=session_id,
+                path=Path("/frozen/trajectory.json"),
+                json_bytes=json.dumps(payload).encode(),
+            ),
+        ),
+    )
+
+
+def _archive_snapshot(
+    trajectories: RunWriteSnapshot,
+    *,
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
+    identity: ManifestRunIdentity | None = None,
+) -> ArchiveRunSnapshot:
+    """Join frozen trajectory provenance with the runner's public identity."""
+    return ArchiveRunSnapshot(
+        recorder_provenance=archive_recorder_provenance_from_snapshot(
+            write_snapshot=trajectories,
+            run_flow=run_flow,
+        ),
+        identity=identity or _manifest_identity(),
+        trajectories=trajectories,
+    )
 
 
 def _run_git_init_with_credential_origin(repo: Path, origin_url: str) -> None:
@@ -326,20 +381,19 @@ def _build(
     tmp_path: Path,
     *,
     git_ctx: GitContext | None = None,
-    recorder: _MockRecorder | None = None,
-    config: Any | None = None,
+    write_snapshot: RunWriteSnapshot | None = None,
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
+    identity: ManifestRunIdentity | None = None,
     **kw: Any,
 ) -> Manifest:
-    """Build a manifest from one frozen snapshot of the mock recorder/config pair."""
-    active_recorder = recorder or _MockRecorder()
-    write_snapshot = kw.pop("write_snapshot", None) or _write_snapshot(active_recorder)
+    """Build a manifest from immutable public archive inputs."""
+    snapshot = write_snapshot or _manifest_write_snapshot()
     return build_manifest_from_snapshot(
-        recorder_provenance=archive_recorder_provenance_from_snapshot(
-            write_snapshot=write_snapshot,
-            run_flow=active_recorder.run_flow,
+        run=_archive_snapshot(
+            snapshot,
+            run_flow=run_flow,
+            identity=identity,
         ),
-        write_snapshot=write_snapshot,
-        config=cast(RunConfig, _MockConfig() if config is None else config),
         git_ctx=git_ctx if git_ctx is not None else GitContext(),
         status="complete",
         archive_path=tmp_path,
@@ -359,7 +413,7 @@ def test_build_manifest_basic(tmp_path: Path) -> None:
         ),
     )
 
-    assert m.session_id == _MockRecorder().session_id
+    assert m.session_id == "abcd1234-0000-0000-0000-000000000000"
     assert m.run_flow == "normal"
     assert m.skill == "python"
     # Per-phase models replaced config.model; the manifest stamps model as None.
@@ -374,61 +428,57 @@ def test_build_manifest_basic(tmp_path: Path) -> None:
     assert m.head_sha == "a" * 40
 
 
-@pytest.mark.parametrize(
-    "flow",
-    list(DaydreamRunFlow),
-    ids=[f.value for f in DaydreamRunFlow],
-)
-def test_build_manifest_fix_test_backend_gated_per_flow(
-    tmp_path: Path, flow: DaydreamRunFlow,
-) -> None:
-    """Issue #648: backend labels track the executed step pipeline.
+def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> None:
+    """Resolved profile provenance is preserved in the manifest projection."""
+    profile = RunProfileIdentity(
+        schema_version=7,
+        name="focused",
+        source_kind="explicit",
+        digest="e2e-profile-digest",
+    )
 
-    Driven over every ``DaydreamRunFlow`` member: the deep family's
-    fix-bearing mode labels (NORMAL for shallow, DEEP for loop) resolve
-    fix/test backends exactly as today, while TTT (review/comment) gates the
-    fix/test STEPS off at runtime (``_fix_cycle_enabled`` is loop/shallow
-    only) and drops both labels. PR (feedback) runs its own ``fix-items``
-    phase (``_step_fix_items``, ``backend_for("fix")``) but never the ``test``
-    step, so it keeps a fix backend and drops only test. IMPROVE's built-in
-    pipeline defines no fix/test phase, so it drops both. CUSTOM is classified
-    by its registered pipeline; with no fork flow configured here it cannot
-    prove a fix/test phase, so it drops both. DIAGRAM (issue #1113) runs
-    exploration -> diagram -> post-diagram and no fix/test phase, so it drops
-    both as well.
-    """
-    recorder = _MockRecorder(run_flow=flow)
-    config = _MockConfig(fix_backend="codex", test_backend="codex")
-    m = _build(tmp_path, recorder=recorder, config=config)
-    run = m.to_dict()["run"]
-    if flow is DaydreamRunFlow.PR:
-        # Feedback runs fix-items but never the test step.
-        assert m.fix_backend == "codex"
-        assert m.test_backend is None
-        assert run["fix_backend"] == "codex"
-        assert "test_backend" not in run
-    elif flow in (
-        DaydreamRunFlow.IMPROVE,
-        DaydreamRunFlow.TTT,
-        DaydreamRunFlow.CUSTOM,
-        DaydreamRunFlow.DIAGRAM,
-    ):
-        assert m.fix_backend is None
-        assert m.test_backend is None
-        assert "fix_backend" not in run
-        assert "test_backend" not in run
-    else:
-        assert m.fix_backend == "codex"
-        assert m.test_backend == "codex"
-        assert run["fix_backend"] == "codex"
-        assert run["test_backend"] == "codex"
+    manifest = _build(
+        tmp_path,
+        identity=_manifest_identity(profile=profile),
+    ).to_dict()
+
+    assert {
+        key: manifest[key]
+        for key in (
+            "profile_schema_version",
+            "profile_name",
+            "profile_source_kind",
+            "profile_digest",
+        )
+    } == {
+        "profile_schema_version": 7,
+        "profile_name": "focused",
+        "profile_source_kind": "explicit",
+        "profile_digest": "e2e-profile-digest",
+    }
+
+
+def test_build_manifest_omits_unresolved_profile_identity(tmp_path: Path) -> None:
+    """A direct legacy caller with no resolved profile keeps all four keys absent."""
+    manifest = _build(tmp_path).to_dict()
+
+    assert {
+        "profile_schema_version",
+        "profile_name",
+        "profile_source_kind",
+        "profile_digest",
+    }.isdisjoint(manifest)
+
+
 
 
 def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
-    recorder = _MockRecorder(run_flow=DaydreamRunFlow.DIAGRAM)
     m = _build(
         tmp_path,
-        recorder=recorder,
+        run_flow=DaydreamRunFlow.DIAGRAM,
+        identity=_manifest_identity(
+            phases=replace(_manifest_identity().phases, fix=False, test=False)
+        ),
         fix_failures={"src/old.py": "reverted"},
         fix_leftover_untracked=["src/leftover.py"],
         fix_quality_gate={"enabled": True, "rounds": []},
@@ -439,70 +489,8 @@ def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> N
     assert m.fix_quality_gate is None
 
 
-def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every ``--flow`` run is stamped CUSTOM regardless of step composition, so
-    a fork flow is classified from its registered pipeline, not its label: one
-    composing the built-in fix/test steps records backends, one without them
-    records none.
-    """
-    from daydream.extensions import build_registry
-
-    registry = build_registry()
-    registry.set_flow("fix-cycle-fork", ["exploration", "intent", "fix", "test", "commit"])
-    registry.set_flow("review-only-fork", ["exploration", "intent"])
-    monkeypatch.setattr("daydream.archive.manifest.get_registry", lambda: registry)
-
-    for flow_name, fix_backend, test_backend in (
-        ("fix-cycle-fork", "codex", "codex"),
-        ("review-only-fork", None, None),
-    ):
-        recorder = _MockRecorder(run_flow=DaydreamRunFlow.CUSTOM)
-        config = _MockConfig(
-            fix_backend="codex", test_backend="codex", flow_name=flow_name,
-        )
-        m = _build(tmp_path, recorder=recorder, config=config)
-        assert m.fix_backend == fix_backend
-        assert m.test_backend == test_backend
-        run = m.to_dict()["run"]
-        assert ("fix_backend" in run) == (fix_backend is not None)
-        assert ("test_backend" in run) == (test_backend is not None)
 
 
-def test_build_manifest_classifies_fork_override_of_builtin_flow(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Issue #648: fork overrides of built-in flow names are classified by
-    the registry pipeline actually executed by ``run_flow``, not by the label.
-
-    ``Registry.set_flow`` has no built-in-name guard, so a fork overriding
-    ``deep`` (dropping fix/test) or ``improve`` (adding fix/test) runs its own
-    pipeline while the recorder label still suggests the built-in. The manifest
-    must follow the registry in both directions.
-    """
-    from daydream.extensions import build_registry
-
-    registry = build_registry()
-    # Override built-ins after seeding, exactly as an extension would.
-    registry.set_flow("deep", ["exploration", "intent"])
-    registry.set_flow("improve", ["exploration", "fix", "test"])
-    monkeypatch.setattr("daydream.archive.manifest.get_registry", lambda: registry)
-
-    for flow, flow_name, fix_backend, test_backend in (
-        (DaydreamRunFlow.DEEP, None, None, None),
-        (DaydreamRunFlow.NORMAL, None, None, None),
-        (DaydreamRunFlow.IMPROVE, None, "codex", "codex"),
-    ):
-        recorder = _MockRecorder(run_flow=flow)
-        config = _MockConfig(
-            fix_backend="codex", test_backend="codex", flow_name=flow_name,
-        )
-        m = _build(tmp_path, recorder=recorder, config=config)
-        assert m.fix_backend == fix_backend
-        assert m.test_backend == test_backend
 
 
 def test_fix_cycle_classification_covers_every_run_flow() -> None:
@@ -625,91 +613,12 @@ async def test_custom_flow_archive_real_path_omits_fix_test_backend(
     _assert_archive_omits_fix_test_backend(archive_dir, "custom")
 
 
-@pytest.mark.parametrize(
-    ("flow_name", "shallow"),
-    [
-        pytest.param(None, False, id="default-deep-loop"),
-        pytest.param(None, True, id="shallow-single-stack"),
-        pytest.param("deep", False, id="flow-deep"),
-        pytest.param("shallow", False, id="flow-shallow"),
-        pytest.param("review", False, id="flow-review"),
-    ],
-)
-def test_build_manifest_per_stack_review_tier(
-    tmp_path: Path, flow_name: str | None, shallow: bool
-) -> None:
-    """Issue #646: every deep-flow mode that executes per-stack reviews records the
-    per-stack tier resolved from its own key — including shallow, whose collapsed
-    single stack is still reviewed by ``phase_per_stack_reviews`` on the
-    ``per_stack_review`` tier."""
-    fc = DaydreamFileConfig(
-        model=None, backend=None,
-        phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}},
-    )
-    config = RunConfig(
-        target=str(tmp_path), backend=None, model=None,
-        file_config=fc, shallow=shallow, flow_name=flow_name,
-        review_backend="claude",
-    )
-    m = _build(tmp_path, config=config)
-    run = m.to_dict()["run"]
-    assert m.per_stack_review_backend == "codex"  # per-stack tier resolved from its own key
-    assert m.per_stack_review_model == "gpt-psr"
-    # Post-#647, review_backend is an override marker (_resolved_review_backend_name),
-    # so it stays the explicit review override "claude" — distinct from the
-    # per-stack tier resolved from its own key. The per-stack model is the
-    # load-bearing part of the identity.
-    assert m.review_backend == "claude"
-    assert run["per_stack_review_backend"] == "codex"
-    assert run["per_stack_review_model"] == "gpt-psr"
-    assert run["review_backend"] == "claude"
 
 
-def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(
-    tmp_path: Path,
-) -> None:
-    """Issue #646 finding 3: the per-stack gate derives from the same alias list
-    ``runner._dispatch_selected_flow`` routes (no third inline copy), so adding
-    or renaming a deep-flow alias surfaces here instead of silently misstating
-    "who reviewed" in archived runs."""
-    from daydream.runner import _DEEP_FLOW_ALIASES
-
-    assert _DEEP_FLOW_ALIASES  # non-empty; every alias must record the identity
-    for flow_name in _DEEP_FLOW_ALIASES:
-        m = _build(
-            tmp_path,
-            config=RunConfig(target=str(tmp_path), backend=None, model=None, flow_name=flow_name),
-        )
-        assert m.per_stack_review_backend is not None
-        assert m.per_stack_review_model is not None
-        assert "per_stack_review_backend" in m.to_dict()["run"]
 
 
-def test_build_manifest_omits_per_stack_review_without_spine(tmp_path: Path) -> None:
-    """Issue #646: improve/custom flows record no per-stack review identity."""
-    for config in (
-        RunConfig(target=str(tmp_path), backend=None, model=None, flow_name="improve"),
-        RunConfig(target=str(tmp_path), backend=None, model=None, flow_name="custom-flow"),
-    ):
-        m = _build(tmp_path, config=config)
-        run = m.to_dict()["run"]
-        assert m.per_stack_review_backend is None
-        assert m.per_stack_review_model is None
-        assert "per_stack_review_backend" not in run
-        assert "per_stack_review_model" not in run
 
 
-def test_build_manifest_pi_deep_records_backend_default_model(tmp_path: Path) -> None:
-    """Issue #646: a Pi deep run with no explicit model override records Pi's
-    backend default. Pi's default intentionally lives outside PHASE_DEFAULT_MODELS
-    (it is a backend fallback), so _resolved_model alone leaves the load-bearing
-    model NULL; the manifest surfaces the backend default instead."""
-    from daydream.config import DEFAULT_PI_MODEL
-
-    m = _build(tmp_path, config=RunConfig(target=str(tmp_path), backend="pi", model=None))
-    assert m.per_stack_review_backend == "pi"
-    assert m.per_stack_review_model == DEFAULT_PI_MODEL
-    assert m.to_dict()["run"]["per_stack_review_model"] == DEFAULT_PI_MODEL
 
 
 def test_manifest_to_dict_structure(tmp_path: Path) -> None:
@@ -717,7 +626,7 @@ def test_manifest_to_dict_structure(tmp_path: Path) -> None:
 
     d = m.to_dict()
     assert d["schema_version"] == "1.0"
-    assert d["session_id"] == _MockRecorder().session_id
+    assert d["session_id"] == "abcd1234-0000-0000-0000-000000000000"
     assert "run" in d and d["run"]["flow"] == "normal"
     assert "git" in d
     assert "pr" in d
@@ -802,13 +711,13 @@ def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
     """The snapshot's own run span fills wall-clock even when --eval did not run."""
-    recorder = _MockRecorder()
     m = _build(
         tmp_path,
-        recorder=recorder,
-        write_snapshot=_write_snapshot(
-            recorder,
-            lifecycle=("2026-01-01T00:00:00Z", "2026-01-01T00:00:12.300000Z"),
+        write_snapshot=_manifest_write_snapshot(
+            extra={
+                "run_started_at": "2026-01-01T00:00:00Z",
+                "run_ended_at": "2026-01-01T00:00:12.300000Z",
+            },
         ),
     )
 
@@ -819,10 +728,10 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
 def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
     tmp_path: Path,
 ) -> None:
-    recorder = _MockRecorder(session_id="snapshot-session")
+    session_id = "snapshot-session"
     payload = {
-        "session_id": recorder.session_id,
-        "trajectory_id": recorder.session_id,
+        "session_id": session_id,
+        "trajectory_id": session_id,
         "steps": [],
         "final_metrics": {"total_prompt_tokens": 7, "total_steps": 0},
         "extra": {
@@ -833,14 +742,14 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
                     "phase": "review",
                     "event": "phase_start",
                     "timestamp": "2026-01-01T00:00:02Z",
-                    "session_id": recorder.session_id,
+                    "session_id": session_id,
                     "scope_id": "review",
                 },
                 {
                     "phase": "review",
                     "event": "phase_end",
                     "timestamp": "2026-01-01T00:00:08Z",
-                    "session_id": recorder.session_id,
+                    "session_id": session_id,
                     "scope_id": "review",
                     "status": "succeeded",
                 },
@@ -850,11 +759,11 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
     snapshot = RunWriteSnapshot(
         status="complete",
         cutoff_at="2026-01-01T00:00:10Z",
-        root_trajectory_id=recorder.session_id,
+        root_trajectory_id=session_id,
         documents=(
             TrajectoryDocumentSnapshot(
-                recorder.session_id,
-                recorder.path,
+                session_id,
+                Path("/frozen/snapshot-session.json"),
                 json.dumps(payload).encode(),
             ),
         ),
@@ -862,7 +771,6 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
 
     manifest = _build(
         tmp_path,
-        recorder=recorder,
         write_snapshot=snapshot,
         evaluation={"timing": {"total_wall_clock_seconds": 42.5}},
     )
@@ -1446,8 +1354,7 @@ def test_feedback_run_leaves_recommended_patch_capture_none() -> None:
     absent sidecar must leave ``recommended_patch_capture`` ``None`` rather
     than defaulting to ``"pre_test"`` (feedback's ``_step_fix_items`` never
     writes ``recommended.patch``)."""
-    recorder = _MockRecorder(run_flow=DaydreamRunFlow.PR)
-    m = _build(tmp_path=Path("/tmp"), recorder=recorder)
+    m = _build(tmp_path=Path("/tmp"), run_flow=DaydreamRunFlow.PR)
     assert m.recommended_patch_capture is None
     assert "recommended_patch_capture" not in m.to_dict()
 
@@ -1519,6 +1426,7 @@ def _assemble_bundle(
 
     snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(recorder)
     _copy_snapshot_bundle(
+        run=_archive_snapshot(snapshot, run_flow=recorder.run_flow),
         artifacts=ArtifactTreeSnapshot(
             session_id=recorder.session_id,
             workspace_key="workspace",
@@ -1533,10 +1441,6 @@ def _assemble_bundle(
             live_root=target,
         ),
         run_dir=run_dir,
-        recorder_provenance=archive_recorder_provenance_from_snapshot(
-            write_snapshot=snapshot, run_flow=recorder.run_flow,
-        ),
-        write_snapshot=snapshot,
     )
 
 
@@ -1720,7 +1624,7 @@ def test_dump_artifacts_refuses_credential_bearing_bundle(
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
     dest.mkdir()
-    config = _MockConfig(archive=True, dump_artifacts=str(dest))
+    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest))
 
     target, _, recorder = _setup_bundle(tmp_path, session_id)
     # Inject a credential into the serialized trajectory the bundle will carry.
@@ -1754,7 +1658,7 @@ def test_dump_artifacts_copies_clean_bundle(
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
     dest.mkdir()
-    config = _MockConfig(archive=True, dump_artifacts=str(dest))
+    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest))
     target, _, recorder = _setup_bundle(tmp_path, session_id)
 
     _strict_archive(
@@ -1773,7 +1677,7 @@ def test_dump_artifacts_copies_clean_bundle(
 
 def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
     session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = _MockConfig(archive=True)
+    config = RunConfig(target=str(tmp_path), archive=True)
 
     target, _, recorder = _setup_bundle(tmp_path, session_id)
 
@@ -2609,63 +2513,14 @@ def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
     assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]
 
 
-def test_manifest_backend_is_general_default_not_review_override(
-    tmp_path: Path,
-) -> None:
-    """#647: backend records the general default even when review differs."""
-    m = _build(tmp_path, config=_MockConfig(backend="claude", review_backend="codex"))
-    assert m.backend == "claude"
-    assert m.review_backend == "codex"
 
 
-def test_manifest_review_backend_none_when_no_override(tmp_path: Path) -> None:
-    """#647: only a general backend -> review_backend stays None."""
-    m = _build(tmp_path, config=_MockConfig(backend="codex"))
-    assert m.backend == "codex"
-    assert m.review_backend is None
 
 
-def test_manifest_backend_falls_back_to_file_config_global(tmp_path: Path) -> None:
-    """#647: no CLI backend -> backend resolves from the file-config global."""
-    m = _build(
-        tmp_path,
-        config=_MockConfig(backend=None, file_config=DaydreamFileConfig(backend="file-backend")),
-    )
-    assert m.backend == "file-backend"
-    assert m.review_backend is None
 
 
-def test_manifest_review_backend_from_file_config_phase(tmp_path: Path) -> None:
-    """#647: a file-config review-phase override stamps review_backend only."""
-    m = _build(
-        tmp_path,
-        config=_MockConfig(
-            backend="claude",
-            file_config=DaydreamFileConfig(phases={"review": {"backend": "codex"}}),
-        ),
-    )
-    assert m.backend == "claude"
-    assert m.review_backend == "codex"
 
 
-def test_archive_records_general_backend_and_override(tmp_path: Path, archive_dir: Path) -> None:
-    """#647: the archive persists the general backend + nullable review override."""
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = _MockConfig(archive=True, backend="claude", review_backend="codex")
-    target, _, recorder = _setup_bundle(tmp_path, session_id)
-    _strict_archive(
-        target=target,
-        session_id=session_id,
-        config=config,
-        write_snapshot=_write_snapshot(recorder),
-    )
-    manifest_data = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
-    assert manifest_data["run"]["backend"] == "claude"
-    assert manifest_data["run"]["review_backend"] == "codex"
-    rows = query_runs(archive_dir)
-    assert len(rows) == 1
-    assert rows[0]["backend"] == "claude"
-    assert rows[0]["review_backend"] == "codex"
 
 
 async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -> None:
@@ -2701,11 +2556,7 @@ async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -
 
     write_snapshot = snapshots[-1]
     m = build_manifest_from_snapshot(
-        recorder_provenance=archive_recorder_provenance_from_snapshot(
-            write_snapshot=write_snapshot, run_flow=recorder.run_flow,
-        ),
-        write_snapshot=write_snapshot,
-        config=cast(RunConfig, _MockConfig()),
+        run=_archive_snapshot(write_snapshot, run_flow=recorder.run_flow),
         git_ctx=GitContext(),
         status="complete",
         archive_path=tmp_path,
@@ -2717,62 +2568,10 @@ async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -
     assert m.total_cost_usd == pytest.approx(0.25)
 
 
-def test_build_manifest_pi_records_cwd_configured_default_model(tmp_path: Path) -> None:
-    """Issue #646 finding 1: a Pi deep run with no explicit override records the
-    model PiBackend actually resolved — the cwd-configured default from
-    ``<repo>/.pi/settings.json``, not DEFAULT_PI_MODEL — so the archived
-    'who reviewed' identity matches what ran."""
-    from daydream.backends.pi import _configured_pi_model
-    from daydream.config import DEFAULT_PI_MODEL
-
-    # Configure a Pi default in the repo cwd (the same seam PiBackend reads).
-    pi_dir = tmp_path / ".pi"
-    pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
-        json.dumps({"defaultModel": "gpt-psr-configured"}), encoding="utf-8"
-    )
-    assert _configured_pi_model(tmp_path) == "gpt-psr-configured"
-
-    m = _build(
-        tmp_path,
-        config=RunConfig(target=str(tmp_path), backend="pi", model=None),
-        cwd=str(tmp_path),
-    )
-    assert m.per_stack_review_backend == "pi"
-    assert m.per_stack_review_model == "gpt-psr-configured"
-    assert m.per_stack_review_model != DEFAULT_PI_MODEL
-    assert m.to_dict()["run"]["per_stack_review_model"] == "gpt-psr-configured"
 
 
-def test_build_manifest_pi_falls_back_to_default_when_no_cwd_config(
-    tmp_path: Path,
-) -> None:
-    """Issue #646 finding 1: with no cwd-configured Pi default (and no cwd passed),
-    the manifest records DEFAULT_PI_MODEL as before — the fallback path is intact."""
-    from daydream.config import DEFAULT_PI_MODEL
-
-    m = _build(tmp_path, config=RunConfig(target=str(tmp_path), backend="pi", model=None))
-    assert m.per_stack_review_backend == "pi"
-    assert m.per_stack_review_model == DEFAULT_PI_MODEL
 
 
-def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(
-    tmp_path: Path,
-) -> None:
-    """Issue #646 finding 2: a --start-at merge/fix resume skips
-    phase_per_stack_reviews (orchestrator.py:1132), so the manifest must not
-    attribute the resume config's per-stack tier to the prior run's artifacts."""
-    for start_at in ("merge", "fix"):
-        config = RunConfig(
-            target=str(tmp_path), backend=None, model=None,
-            flow_name="deep", start_at=start_at,
-        )
-        m = _build(tmp_path, config=config)
-        run = m.to_dict()["run"]
-        assert m.per_stack_review_backend is None, f"start_at={start_at}"
-        assert m.per_stack_review_model is None, f"start_at={start_at}"
-        assert "per_stack_review_backend" not in run, f"start_at={start_at}"
-        assert "per_stack_review_model" not in run, f"start_at={start_at}"
 
 
 def test_manifest_splits_status_from_pipeline() -> None:
@@ -4049,59 +3848,6 @@ def test_current_archive_survives_invalid_utf8_fix_failures(
     assert [row["session_id"] for row in query_runs(archive_dir)] == [session_id]
 
 
-@pytest.mark.parametrize(
-    ("flow", "expected_pipeline"),
-    [
-        (DaydreamRunFlow.TTT, "succeeded"),
-        (DaydreamRunFlow.PR, "partial"),
-    ],
-)
-def test_nonpublishing_runtime_flows_ignore_matching_push_and_remote_artifacts(
-    tmp_path: Path,
-    archive_dir: Path,
-    make_config: MakeConfig,
-    flow: DaydreamRunFlow,
-    expected_pipeline: str,
-) -> None:
-    from daydream.archive import _flow_push_remote_steps
-
-    assert _flow_push_remote_steps(flow, None) == (False, False)
-    target = _frozen_target(tmp_path)
-    recorder = _MockRecorder(session_id="nonpublishing-session", run_flow=flow)
-    config = make_config(
-        target,
-        archive=True,
-        pr_repo="example/project",
-        pr_number=42,
-    )
-    _write_deep(target, "merged-items.json", {"items": []})
-    _write_push_verdict(target, session_id=recorder.session_id)
-    _write_remote_verdict(target, session_id=recorder.session_id)
-
-    _strict_archive(
-        target=target,
-        session_id=recorder.session_id,
-        run_flow=flow,
-        config=config,
-        write_snapshot=_write_snapshot(
-            recorder,
-            phase_events=(
-                _merge_events(recorder.session_id, "succeeded")
-                if flow is DaydreamRunFlow.TTT
-                else []
-            ),
-        ),
-    )
-
-    manifest = json.loads(
-        (archive_dir / "runs" / recorder.session_id / "manifest.json").read_text()
-    )
-    assert manifest["phase_states"]["push"] == {"ran": False, "status": "absent"}
-    assert manifest["phase_states"]["remote_ci"] == {
-        "ran": False,
-        "status": "absent",
-    }
-    assert manifest["pipeline_status"] == expected_pipeline
 
 
 def test_start_at_fix_archive_does_not_require_or_inherit_merge(
@@ -4128,6 +3874,9 @@ def test_start_at_fix_archive_does_not_require_or_inherit_merge(
         session_id=session_id,
         config=make_config(target, archive=True, start_at="fix"),
         write_snapshot=_write_snapshot(recorder, phase_events=[fix_start]),
+        identity=_manifest_identity(
+            phases=replace(_manifest_identity().phases, merge=False)
+        ),
     )
 
     manifest = json.loads(
@@ -4691,6 +4440,20 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
         run_flow=DaydreamRunFlow.DIAGRAM,
         config=make_config(target, archive=True),
         write_snapshot=_write_snapshot(recorder),
+        identity=_manifest_identity(
+            fix_backend=None,
+            test_backend=None,
+            per_stack_review_backend=None,
+            per_stack_review_model=None,
+            phases=RunPhaseCapabilities(
+                per_stack_review=False,
+                merge=False,
+                fix=False,
+                test=False,
+                push=False,
+                remote_ci=False,
+            ),
+        ),
     )
 
     manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
@@ -4734,6 +4497,20 @@ def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
         run_flow=DaydreamRunFlow.DIAGRAM,
         config=make_config(target, archive=True, run_eval=True),
         write_snapshot=_write_snapshot(recorder),
+        identity=_manifest_identity(
+            fix_backend=None,
+            test_backend=None,
+            per_stack_review_backend=None,
+            per_stack_review_model=None,
+            phases=RunPhaseCapabilities(
+                per_stack_review=False,
+                merge=False,
+                fix=False,
+                test=False,
+                push=False,
+                remote_ci=False,
+            ),
+        ),
     )
 
     run_dir = archive_dir / "runs" / recorder.session_id
@@ -4751,35 +4528,41 @@ def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(
         build_manifest_from_snapshot,
     )
 
-    recorder = _MockRecorder(pr_number=7, pr_repo="Owner/Repo")
-    snapshot = _write_snapshot(recorder)
+    session_id = "frozen-pr-session"
+    snapshot = _manifest_write_snapshot(
+        session_id=session_id,
+        extra={"pr_number": 7, "pr_repo": "Owner/Repo"},
+    )
     payload = json.loads(snapshot.documents[0].json_bytes)
     payload["extra"] = {"pr_number": 7, "pr_repo": "Owner/Repo"}
     document = TrajectoryDocumentSnapshot(
-        trajectory_id=recorder.session_id,
+        trajectory_id=session_id,
         path=snapshot.documents[0].path,
         json_bytes=json.dumps(payload).encode(),
     )
     snapshot = RunWriteSnapshot(
         status="complete",
         cutoff_at=snapshot.cutoff_at,
-        root_trajectory_id=recorder.session_id,
+        root_trajectory_id=session_id,
         documents=(document,),
     )
     provenance = archive_recorder_provenance_from_snapshot(
         write_snapshot=snapshot,
         run_flow=DaydreamRunFlow.NORMAL,
     )
-    recorder.pr_number = 99
-    recorder.pr_repo = "mutated/repo"
-    config = _MockConfig()
-    config.pr_number = 100  # type: ignore[attr-defined]
-    config.pr_repo = "also/mutated"  # type: ignore[attr-defined]
+    live_recorder = _MockRecorder(pr_number=7, pr_repo="Owner/Repo")
+    live_config = RunConfig(target=str(tmp_path), pr_number=7, pr_repo="Owner/Repo")
+    live_recorder.pr_number = 99
+    live_recorder.pr_repo = "mutated/repo"
+    live_config.pr_number = 100
+    live_config.pr_repo = "also/mutated"
 
     manifest = build_manifest_from_snapshot(
-        recorder_provenance=provenance,
-        write_snapshot=snapshot,
-        config=cast(Any, config),
+        run=ArchiveRunSnapshot(
+            recorder_provenance=provenance,
+            identity=_manifest_identity(),
+            trajectories=snapshot,
+        ),
         git_ctx=GitContext(),
         status="complete",
         archive_path=tmp_path,
@@ -4788,6 +4571,7 @@ def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(
     assert manifest.session_id == snapshot.root_trajectory_id
     assert manifest.pr_number == 7
     assert manifest.pr_repo == "Owner/Repo"
+    assert manifest.to_dict()["pr"] == {"number": 7, "repo": "Owner/Repo"}
 
 
 @pytest.mark.parametrize(
@@ -4868,7 +4652,6 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
 ) -> None:
     """The host finalizer cannot infer success from the legacy fail-open wrapper."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.archive.manifest import ArchiveRecorderProvenance
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
@@ -4920,16 +4703,10 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
 
     with pytest.raises(ArchiveFinalizationError, match="evaluation"):
         finalize_archive_run(
-            recorder_provenance=ArchiveRecorderProvenance(
-                session_id=session_id,
-                run_flow=DaydreamRunFlow.NORMAL,
-                pr_number=None,
-                pr_repo=None,
-            ),
+            run=_archive_snapshot(write_snapshot),
             artifacts=artifacts,
             artifact_provenance=artifact_provenance,
-            config=cast(Any, _MockConfig(run_eval=True)),
-            write_snapshot=write_snapshot,
+            config=RunConfig(target=str(tmp_path), run_eval=True),
             work=None,
             upload=False,
         )
@@ -4944,7 +4721,6 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
 ) -> None:
     """A code-running consumer cannot make archive bytes and manifest disagree."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.archive.manifest import ArchiveRecorderProvenance
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
@@ -5007,12 +4783,7 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
     )
 
     arguments: dict[str, Any] = dict(
-        recorder_provenance=ArchiveRecorderProvenance(
-            session_id,
-            DaydreamRunFlow.NORMAL,
-            None,
-            None,
-        ),
+        run=_archive_snapshot(snapshot),
         artifacts=artifacts,
         artifact_provenance=ArtifactEvidenceProvenance(
             "workspace",
@@ -5020,8 +4791,7 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
             public_source,
             tmp_path / "live",
         ),
-        config=cast(Any, _MockConfig(run_eval=True)),
-        write_snapshot=snapshot,
+        config=RunConfig(target=str(tmp_path), run_eval=True),
         work=None,
         upload=False,
     )
@@ -5056,7 +4826,6 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     discard a completed review without containing anything extra.
     """
     from daydream.archive import finalize_archive_run
-    from daydream.archive.manifest import ArchiveRecorderProvenance
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
@@ -5093,15 +4862,12 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _refuse)
 
     finalize_archive_run(
-        recorder_provenance=ArchiveRecorderProvenance(
-            session_id, DaydreamRunFlow.NORMAL, None, None
-        ),
+        run=_archive_snapshot(snapshot),
         artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ()),
         artifact_provenance=ArtifactEvidenceProvenance(
             "workspace", session_id, tmp_path / "source", tmp_path / "live"
         ),
-        config=cast(Any, _MockConfig(run_eval=False, archive=True)),
-        write_snapshot=snapshot,
+        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
         work=None,
         upload=True,
     )
@@ -5119,7 +4885,6 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
 ) -> None:
     """A frozen tree mutated after finalization starts is caught before the external upload."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.archive.manifest import ArchiveRecorderProvenance
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
@@ -5162,15 +4927,12 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
 
     with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
         finalize_archive_run(
-            recorder_provenance=ArchiveRecorderProvenance(
-                session_id, DaydreamRunFlow.NORMAL, None, None
-            ),
+            run=_archive_snapshot(snapshot),
             artifacts=artifacts,
             artifact_provenance=ArtifactEvidenceProvenance(
                 "workspace", session_id, tmp_path / "source", tmp_path / "live"
             ),
-            config=cast(Any, _MockConfig(run_eval=False, archive=True)),
-            write_snapshot=snapshot,
+            config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
             work=None,
             upload=True,
         )
@@ -5185,7 +4947,6 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
 ) -> None:
     """A refused secret scan publishes neither an archive nor dump bytes."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.archive.manifest import ArchiveRecorderProvenance
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
@@ -5234,20 +4995,16 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
 
     with pytest.raises(ArchiveFinalizationError, match="secret scan"):
         finalize_archive_run(
-            recorder_provenance=ArchiveRecorderProvenance(
-                session_id, DaydreamRunFlow.NORMAL, None, None
-            ),
+            run=_archive_snapshot(snapshot),
             artifacts=ArtifactTreeSnapshot(
                 session_id, "workspace", frozen, _manifest(frozen), ()
             ),
             artifact_provenance=ArtifactEvidenceProvenance(
                 "workspace", session_id, tmp_path / "source", tmp_path / "live"
             ),
-            config=cast(
-                Any,
-                _MockConfig(run_eval=False, archive=True, dump_artifacts="requested"),
+            config=RunConfig(
+                target=str(tmp_path), run_eval=False, archive=True, dump_artifacts="requested"
             ),
-            write_snapshot=snapshot,
             work=None,
             upload=False,
             dump_path=dump_stage,

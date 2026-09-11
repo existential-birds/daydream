@@ -18,6 +18,11 @@ import pytest
 
 from daydream.atif import Step
 from daydream.backends import AgentEvent
+from daydream.run_snapshot import (
+    ArchiveRunSnapshot,
+    ManifestRunIdentity,
+    RunPhaseCapabilities,
+)
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -162,8 +167,33 @@ def _finalize_strict_archive(
 
     session_id = recorder.session_id
     finalize_archive_run(
-        recorder_provenance=archive_recorder_provenance_from_snapshot(
-            write_snapshot=snapshot, run_flow=recorder.run_flow,
+        run=ArchiveRunSnapshot(
+            recorder_provenance=archive_recorder_provenance_from_snapshot(
+                write_snapshot=snapshot, run_flow=recorder.run_flow,
+            ),
+            identity=ManifestRunIdentity(
+                flow_name=None,
+                skill="python",
+                model=None,
+                backend="claude",
+                review_backend=None,
+                fix_backend="claude" if recorder.run_flow is DaydreamRunFlow.NORMAL else None,
+                test_backend="claude" if recorder.run_flow is DaydreamRunFlow.NORMAL else None,
+                per_stack_review_backend=None,
+                per_stack_review_model=None,
+                review_only=False,
+                deep=recorder.run_flow is DaydreamRunFlow.NORMAL,
+                profile=None,
+                phases=RunPhaseCapabilities(
+                    per_stack_review=False,
+                    merge=recorder.run_flow is DaydreamRunFlow.NORMAL,
+                    fix=recorder.run_flow is DaydreamRunFlow.NORMAL,
+                    test=recorder.run_flow is DaydreamRunFlow.NORMAL,
+                    push=False,
+                    remote_ci=False,
+                ),
+            ),
+            trajectories=snapshot,
         ),
         artifacts=ArtifactTreeSnapshot(
             session_id=session_id,
@@ -181,7 +211,6 @@ def _finalize_strict_archive(
             live_root=target,
         ),
         config=config,
-        write_snapshot=snapshot,
         work=None,
         upload=upload,
         dump_path=dump_path,
