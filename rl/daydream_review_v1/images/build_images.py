@@ -273,7 +273,13 @@ def acquire_mirror(
     ``_stream`` path (``CalledProcessError``); nothing is cached and no fallback
     mirror is ever substituted, so that slug's PRs fail per PR.
     """
-    slug = _repo_slug(entry.clone_url)
+    # Key by the repo slug the manifest/corpus use, never by a slug derived
+    # from the manifest clone_url: for the fixture sentinel ``_repo_slug``
+    # yields ``/daydream-rl-fixture``, not the manifest key ``FIXTURE_SLUG``.
+    if entry.clone_url == FIXTURE_CLONE_URL:
+        slug = FIXTURE_SLUG
+    else:
+        slug = _repo_slug(entry.clone_url)
     if slug in cache:
         return cache[slug][1]
     handle = tempfile.TemporaryDirectory[Any](prefix="daydream-rl-mirror-")

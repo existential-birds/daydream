@@ -14,6 +14,7 @@ rollout agent is one config key: ``backend``.
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import Any
 
 import verifiers.v1 as vf
@@ -179,16 +180,43 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             # image was not built with the ownership layer — a non-agent-
             # writable tree is a rebuild signal, never a runtime repair.
             preflight = await runtime.run(
-                ["run-as-agent", "sh", "-c", f"test -w {self.config.repo_path} && test -w /srv/mirror.git"],
+                [
+                    "run-as-agent",
+                    "sh",
+                    "-c",
+                    f"test -w {shlex.quote(self.config.repo_path)} && test -w /srv/mirror.git",
+                ],
                 env,
             )
-            if preflight.exit_code != 0:
+            # The two tree roots are not the deep flow's whole write surface:
+            # its git add/commit writes into <repo>/.git and the terminal push
+            # updates the mirror's refs, so the preflight probes those per-file
+            # surfaces too. A checkout whose .git or mirror refs stayed
+            # root-owned would pass the root probes yet EACCES on the agent's
+            # first commit or push — that partial-ownership state is a rebuild
+            # signal just like a missing layer, never a runtime repair. The
+            # path is shlex.quote()d because it is interpolated into the
+            # privileged `sh -c` string: an unbaked config value containing
+            # whitespace would word-split the probe onto the wrong paths, and
+            # shell metacharacters would execute as the sandbox agent uid with
+            # the rollout env.
+            surfaces = await runtime.run(
+                [
+                    "run-as-agent",
+                    "sh",
+                    "-c",
+                    f"test -w {shlex.quote(self.config.repo_path)}/.git && test -w /srv/mirror.git/refs",
+                ],
+                env,
+            )
+            if preflight.exit_code != 0 or surfaces.exit_code != 0:
                 raise RuntimeError(
-                    "repo and mirror are not agent-writable; the image was likely built "
-                    "without the ownership layer. Rebuild it with "
+                    "repo and mirror are not agent-writable (tree roots plus the per-file "
+                    "write surfaces: the checkout's .git and the mirror's refs); the image "
+                    "was likely built without the ownership layer. Rebuild it with "
                     "images/build_images.py, which bakes agent ownership for "
                     f"{self.config.repo_path} and /srv/mirror.git: "
-                    f"{preflight.stdout}{preflight.stderr}"
+                    f"{preflight.stdout}{preflight.stderr}{surfaces.stdout}{surfaces.stderr}"
                 )
             # Container launches drop from the container default user (root) to
             # the non-root agent identity through the image's root-owned
