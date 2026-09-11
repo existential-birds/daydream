@@ -194,7 +194,6 @@ async def pre_scan(
     backend: Backend,
     repo_root: Path,
     diff_text: str,
-    depth: int = 1,
     diff_ref: str = "HEAD",
     strategies: dict[str, str] | None = None,
 ) -> ExplorationContext:
@@ -212,7 +211,6 @@ async def pre_scan(
         repo_root: Repository root used by ``detect_affected_files``.
         diff_text: Raw git diff string (used locally for file detection only;
             never embedded in specialist prompts).
-        depth: Static-resolution depth (forwarded to ``detect_affected_files``).
         diff_ref: Git ref or range (e.g. ``"main...HEAD"``) passed to specialist
             prompts so they can run ``git diff <ref> -- <file>`` per file.
         strategies: Optional mapping of the four exploration strategy contents
@@ -235,7 +233,7 @@ async def pre_scan(
 
     static_files: list[FileInfo] = []
     try:
-        static_files = detect_affected_files(diff_text, repo_root, depth)
+        static_files = detect_affected_files(diff_text, repo_root)
     except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
         pass
 

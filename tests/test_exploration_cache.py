@@ -1,7 +1,7 @@
 """Cross-run reuse of the deep pipeline's exploration pre-scan.
 
 ``.daydream/exploration/`` now survives a run and is keyed by
-``head sha + diff + tier + depth + format version``
+``head sha + diff + tier + format version``
 (``daydream.exploration.exploration_cache_key``).
 A second run with an identical key reuses the directory verbatim and fires zero
 specialist agents; any key change re-runs the pre-scan and rewrites the files.
@@ -12,6 +12,7 @@ backend seam stubbed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -67,22 +68,64 @@ async def _run_deep(target: Path) -> int:
     return await run(RunConfig(target=str(target), start_at="review", cleanup=False))
 
 
+def _add_one_hop_graph_on_main(multi_stack_target: Path) -> None:
+    """Make a committed one-hop Python graph before the feature-only edit."""
+    _git(multi_stack_target, "checkout", "main")
+    (multi_stack_target / "changed.py").write_text(
+        "from dep import direct\n\n\ndef subject() -> str:\n    return direct()\n"
+    )
+    (multi_stack_target / "dep.py").write_text(
+        "from secondhop import indirect\n\n\ndef direct() -> str:\n    return indirect()\n"
+    )
+    (multi_stack_target / "secondhop.py").write_text(
+        "def indirect() -> str:\n    return 'base'\n"
+    )
+    (multi_stack_target / "consumer.py").write_text(
+        "from changed import subject\n\n\ndef consume() -> str:\n    return subject()\n"
+    )
+    (multi_stack_target / "outer_consumer.py").write_text(
+        "from consumer import consume\n\n\ndef outer() -> str:\n    return consume()\n"
+    )
+    _git(multi_stack_target, "add", "changed.py", "dep.py", "secondhop.py", "consumer.py", "outer_consumer.py")
+    _git(multi_stack_target, "commit", "-m", "add one-hop exploration graph")
+    _git(multi_stack_target, "checkout", "feature")
+    _git(multi_stack_target, "rebase", "main")
+    (multi_stack_target / "changed.py").write_text(
+        "from dep import direct\n\n\ndef subject() -> str:\n    return direct() + '-changed'\n"
+    )
+    _git(multi_stack_target, "add", "changed.py")
+    _git(multi_stack_target, "commit", "-m", "change one-hop graph root")
+
+
 async def test_second_run_reuses_exploration(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An exact key match reuses the directory and fires zero specialists."""
     silence(monkeypatch)
+    _add_one_hop_graph_on_main(multi_stack_target)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub1) > 0
 
     exploration = multi_stack_target / ".daydream" / "exploration"
     assert exploration.is_dir(), "exploration must survive the run"
-    assert (exploration / "cache-key").read_text().strip()
+    first_key = (exploration / "cache-key").read_text().strip()
+    first_exploration = (exploration / "exploration.json").read_bytes()
+    assert first_key
+    affected = {
+        (row["path"], row["role"])
+        for row in json.loads(first_exploration)["affected_files"]
+    }
+    assert ("changed.py", "modified") in affected
+    assert ("dep.py", "imports") in affected
+    assert ("consumer.py", "imported_by") in affected
+    assert all(path not in {"secondhop.py", "outer_consumer.py"} for path, _ in affected)
 
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) == 0, "cache hit must fire no specialists"
+    assert (exploration / "cache-key").read_text().strip() == first_key
+    assert (exploration / "exploration.json").read_bytes() == first_exploration
 
     # Reviewers are still grounded by the pointer.
     review_prompt = next(
@@ -171,29 +214,25 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     assert (exploration / "cache-key").read_text().strip() != "stale"
 
 
-async def test_depth_change_invalidates_cache(
+async def test_cache_version_change_invalidates_cache(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """exploration_depth is part of the key, so changing it re-runs the pre-scan."""
-    from daydream.runner import RunConfig, run
+    """A cache-format bump forces a real second-run pre-scan."""
+    from daydream import exploration as exploration_mod
 
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
-    assert await run(
-        RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)
-    ) == 0
+    assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub1) > 0
+    exploration = multi_stack_target / ".daydream" / "exploration"
+    first_key = (exploration / "cache-key").read_text().strip()
 
+    monkeypatch.setattr(exploration_mod, "_CACHE_VERSION", exploration_mod._CACHE_VERSION + 1)
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
-    assert await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            start_at="review",
-            cleanup=False,
-            exploration_depth=3,
-        )
-    ) == 0
-    assert _count_specialist_calls(stub2) > 0, "changed depth must re-fire specialists"
+    assert await _run_deep(multi_stack_target) == 0
+    assert _count_specialist_calls(stub2) > 0, "version change must re-fire specialists"
+    assert (exploration / "cache-key").read_text().strip() != first_key
+    assert "RUN2 SENTINEL" in (exploration / "dependencies.md").read_text()
 
 
 async def test_corrupt_key_file_is_a_miss_not_a_crash(
@@ -253,28 +292,27 @@ async def test_failed_exploration_is_not_durably_cached(
 def test_cache_key_is_sensitive_to_every_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each of head, diff, tier, depth, and the format version changes the key."""
+    """Each of head, diff, tier, and the format version changes the key."""
     from daydream import exploration as exploration_mod
     from daydream.exploration import exploration_cache_key
 
-    base = exploration_cache_key("sha1", "diff", "standard", 2)
-    assert base == exploration_cache_key("sha1", "diff", "standard", 2)
-    assert base != exploration_cache_key("sha2", "diff", "standard", 2)
-    assert base != exploration_cache_key("sha1", "other", "standard", 2)
-    assert base != exploration_cache_key("sha1", "diff", "deep", 2)
-    assert base != exploration_cache_key("sha1", "diff", "standard", 3)
+    base = exploration_cache_key("sha1", "diff", "standard")
+    assert base == exploration_cache_key("sha1", "diff", "standard")
+    assert base != exploration_cache_key("sha2", "diff", "standard")
+    assert base != exploration_cache_key("sha1", "other", "standard")
+    assert base != exploration_cache_key("sha1", "diff", "deep")
 
     # The format version is part of the key: a bump must change it. The override
     # value is arbitrary (never assert the production value), so a legitimate
     # upgrade stays green while a removal from the payload goes red.
     monkeypatch.setattr(exploration_mod, "_CACHE_VERSION", 999)
-    assert base != exploration_cache_key("sha1", "diff", "standard", 2)
+    assert base != exploration_cache_key("sha1", "diff", "standard")
 
 
 def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
     """Shifting content across the newline boundary changes the key."""
     from daydream.exploration import exploration_cache_key
 
-    assert exploration_cache_key("a", "b", "standard", 2) != exploration_cache_key(
-        "a\nb", "", "standard", 2
+    assert exploration_cache_key("a", "b", "standard") != exploration_cache_key(
+        "a\nb", "", "standard"
     )

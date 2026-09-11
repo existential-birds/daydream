@@ -146,10 +146,9 @@ def _handoff_turn(body: str) -> Turn:
     return (ResultEvent(structured_output={"handoff_prompt": body}, continuation=None),)
 
 
-def test_run_config_exploration_depth() -> None:
-    assert RunConfig().exploration_depth == 1
-    cfg = RunConfig(exploration_depth=2)
-    assert cfg.exploration_depth == 2
+def test_run_config_rejects_unsupported_exploration_depth() -> None:
+    with pytest.raises(TypeError, match="exploration_depth"):
+        RunConfig(exploration_depth=2)  # type: ignore[call-arg]
 
 
 def test_run_config_diagram_defaults_to_unset_not_auto() -> None:

@@ -255,8 +255,8 @@ exploration pre-scan (cached across runs)
   artifacts — so it writes no `diff-key` either. Its recorder/manifest label is `DaydreamRunFlow.DIAGRAM`,
   never `TTT`: that mapping would make `_flow_runs_merge` true and let the run inherit the surviving
   `merged-items.json` as its own pipeline state.
-- `.daydream/exploration/` survives the run, reused only on an **exact** key match (format version + head SHA + diff + tier +
-  depth, in a sibling `cache-key` file) — a near-match hit would misground every prompt. Uncommitted edits
+- `.daydream/exploration/` survives the run, reused only on an **exact** key match (format version + head SHA + diff + tier,
+  in a sibling `cache-key` file) — a near-match hit would misground every prompt. Uncommitted edits
   are not in the key, so an exact hit on a dirty tree can serve pre-edit exploration. `--shallow`/`--review`
   delete the directory, so alternating modes always miss.
 - `--start-at` refuses stale artifacts: a fresh run records its diff in `.daydream/deep/diff-key`; a resume

@@ -1090,7 +1090,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
         # The in-process context short-circuits first; the disk cache is only
         # consulted when there is no in-memory context to reuse.
         cache_key = exploration_cache_key(
-            ctx.work.head_sha or "", diff, tier, config.exploration_depth
+            ctx.work.head_sha or "", diff, tier
         )
         if (
             exploration_path.is_dir()
@@ -1120,7 +1120,6 @@ async def _step_exploration(ctx: FlowContext) -> None:
                     explore_backend,
                     target_dir,
                     diff,
-                    config.exploration_depth,
                     diff_ref=_compute_diff_ref(target_dir),
                     strategies={
                         "exploration.pattern_scan": ctx.strategy("exploration.pattern_scan"),
@@ -5891,7 +5890,7 @@ async def _run_review_spine(
 
         # Nothing is torn down after the flow. .daydream/exploration/ is a
         # content-keyed cache (see ``exploration_cache_key``) the next run reuses
-        # on an exact head+diff+tier+depth match and rewrites on a miss, and
+        # on an exact head+diff+tier match and rewrites on a miss, and
         # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
         # subsequent --start-at resumes can find the artifacts they need.
         #

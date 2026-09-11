@@ -591,7 +591,7 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(
         er,
         "detect_affected_files",
-        lambda diff_text, repo_root, depth: [FileInfo("services/taste/dep.py", "imports", "helper")],
+        lambda diff_text, repo_root: [FileInfo("services/taste/dep.py", "imports", "helper")],
     )
     # 2 files => single tier => dependency_tracer gets static_files.
     diff_text = _multifile_diff(["services/taste/a.py", "services/taste/b.py"])
@@ -608,8 +608,11 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pyt
     """Fallback seeding is rename-aware: a renamed file seeds its new path, not the old one."""
     import daydream.exploration_runner as er
 
-    # Force the fallback path: static resolution yields nothing.
-    monkeypatch.setattr(er, "detect_affected_files", lambda diff_text, repo_root, depth: [])
+    # Force the fallback path with a genuine static-analysis failure.
+    def analyzer_failure(diff_text: str, repo_root: Path) -> list[FileInfo]:
+        raise OSError("tree-sitter source unavailable")
+
+    monkeypatch.setattr(er, "detect_affected_files", analyzer_failure)
     # A rename plus a second file => 2 files => single tier => dependency_tracer runs.
     rename_diff = (
         "diff --git a/services/taste/old_name.py b/services/taste/new_name.py\n"
@@ -648,6 +651,12 @@ def test_pre_scan_threads_profile_strategy(tmp_path: Path) -> None:
 
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     ctx = anyio.run(
-        lambda: er.pre_scan(cast(Backend, _SpecialistMockBackend()), tmp_path, diff_text, 1, "HEAD", strategies)
+        lambda: er.pre_scan(
+            cast(Backend, _SpecialistMockBackend()),
+            tmp_path,
+            diff_text,
+            diff_ref="HEAD",
+            strategies=strategies,
+        )
     )
     assert ctx is not None
