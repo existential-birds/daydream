@@ -100,7 +100,7 @@ def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> li
         body = _assemble_body(fields)
         if not title.strip() or not body.strip():
             continue
-        entry: dict[str, Any] = {
+        entry_input = {
             "title": title,
             "body": body,
             "severity": fields.severity,
@@ -108,19 +108,8 @@ def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> li
             "start_line": fields.line_int,
             "end_line": fields.line_int,
         }
-        # Enforce the verifier's per-finding bounds fail-closed, reusing the
-        # verifier's own validators so no drift surfaces as a verifier-rejected
-        # artifact after the builder already declared success: an over-long
-        # body (>8 KiB), a non-enum severity, a
-        # rooted/'..'-containing/NUL path, or a non-positive/non-ascending
-        # line range are each a typed failure, never an artifact the verifier
-        # would reject (``_validate_location`` re-checks path + lines on parse).
         try:
-            vc._validate_title(title)
-            vc._validate_body(body)
-            vc._validate_severity(entry["severity"])
-            vc._validate_path(entry["path"])
-            vc._validate_lines(entry["start_line"], entry["end_line"])
+            entry = vc.parse_finding_content(entry_input)
         except vc.VerifierError as exc:
             raise CandidateError(
                 f"cannot build candidate finding: {exc}", kind="invalid_finding"
@@ -175,6 +164,12 @@ def build_candidate_artifact(
             f"candidate artifact exceeds {vc.MAX_ARTIFACT_BYTES} bytes",
             kind="over_limit",
         )
+    try:
+        vc.validate_candidate_artifact(artifact)
+    except vc.VerifierError as exc:
+        raise CandidateError(
+            f"cannot build candidate artifact: {exc}", kind="invalid_finding"
+        ) from exc
     return artifact
 
 
