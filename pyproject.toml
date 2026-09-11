@@ -46,7 +46,7 @@ dev = [
     "pytest-xdist>=3.6",
     "ruff>=0.16.6",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
-    "types-pyyaml>=6.0.12.20260815",
+    "types-pyyaml>=6.0.12.20260906",
     "types-requests>=2.32",
     "types-protobuf>=6.32",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
