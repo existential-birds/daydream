@@ -244,9 +244,9 @@ class Transaction:
 
     The context manager *stores* a transaction; it does not auto-*commit*.
     Callers drive ``stage``/``prepare``/``begin_commit``/``commit`` explicitly
-    so a simulated crash (``inject_crash``) leaves the journal in the exact
-    mid-state ``recover_startup`` is meant to heal. ``__exit__`` is therefore a
-    no-op — partial state is deliberately left for recovery to adjudicate.
+    so an interrupted operation leaves the exact mid-state
+    ``recover_startup`` is meant to heal. ``__exit__`` is therefore a no-op —
+    partial state is deliberately left for recovery to adjudicate.
     """
 
     def __init__(self, root: Path, *, op_id: str, kind: str) -> None:
@@ -408,10 +408,7 @@ class Transaction:
 
         A transaction enters ``committing`` by rewriting the journal with
         ``state == committing`` and ``applied_count == 0`` before any target
-        is replaced. Both ``begin_commit`` and the per-target crash-injection
-        branch collapse to this single sequence, so the ``target-<n>``
-        mid-loop crash state stays byte-identical to a real halt reached via
-        ``begin_commit``.
+        is replaced.
         """
         self._state = "committing"
         self._applied_count = 0
@@ -432,43 +429,41 @@ class Transaction:
         self._apply_replacements()
         _fsync_dir(self._root)
 
-    def _apply_replacements(self, *, stop_after: int | None = None) -> None:
+    def _apply_replacements(self) -> None:
         """Apply targets in ``replacement_order``, fsyncing each rename.
 
         Each target's rename is made durable (file + *parent directory* fsync)
         before the next target is applied, so a crash at any per-target
         boundary still restores the whole before- or after-state, never a
-        checksum-drifted mix. ``stop_after`` (a test-only hook) applies only
-        the first ``N`` targets and leaves the journal ``committing`` with
-        ``applied_count == N``, byte-identical to a real mid-loop crash.
+        checksum-drifted mix.
         """
-        for i, rel in enumerate(self._replacement_order):
-            if stop_after is not None and i >= stop_after:
-                break
-            st = self._states[rel]
-            rel = _resolve_target(self._root, rel)
-            target = self._root / rel
-            ensure_private_dir(target.parent)
-            st.applied = True
-            self._applied_count += 1
-            self._write_journal()
-            _fsync_file(self._journal_path())
-            if st.operation == "retire":
-                target.unlink()
-            else:
-                if st.stage_path is None:
-                    raise WorkspaceCorrupt(
-                        f"{self._root}: replacement target {rel!r} has no staged file"
-                    )
-                os.replace(st.stage_path, target)
-                _fsync_file(target)
-                os.chmod(target, 0o600)
-            _fsync_dir(target.parent)
+        for rel in self._replacement_order:
+            self._apply_replacement(rel)
 
-    def commit(self) -> None:
-        """Run the full pipeline to ``complete`` and remove the journal."""
-        self.prepare()
-        self.begin_commit()
+    def _apply_replacement(self, rel: str) -> None:
+        """Durably apply one already-journaled target in replacement order."""
+        st = self._states[rel]
+        rel = _resolve_target(self._root, rel)
+        target = self._root / rel
+        ensure_private_dir(target.parent)
+        st.applied = True
+        self._applied_count += 1
+        self._write_journal()
+        _fsync_file(self._journal_path())
+        if st.operation == "retire":
+            target.unlink()
+        else:
+            if st.stage_path is None:
+                raise WorkspaceCorrupt(
+                    f"{self._root}: replacement target {rel!r} has no staged file"
+                )
+            os.replace(st.stage_path, target)
+            _fsync_file(target)
+            os.chmod(target, 0o600)
+        _fsync_dir(target.parent)
+
+    def _complete_commit(self) -> None:
+        """Publish and verify the durable complete state before cleanup."""
         self._state = "complete"
         self._write_journal()
         _fsync_file(self._journal_path())
@@ -488,71 +483,13 @@ class Transaction:
                 raise WorkspaceCorrupt(
                     f"{self._root}: commit verify {st.rel} expected {st.after_digest} got {actual}"
                 )
+
+    def commit(self) -> None:
+        """Run the full pipeline to ``complete`` and remove the journal."""
+        self.prepare()
+        self.begin_commit()
+        self._complete_commit()
         self._cleanup()
-
-    def inject_crash(self, boundary: str | None = None) -> None:
-        """Simulate a crash at a named pipeline boundary (test-only).
-
-        With ``boundary is None`` this simply halts at the transaction's
-        current state — recovery must adjudicate whatever phase is already
-        persisted. With a named ``boundary``
-        (``staged|backup|journal|data|manifest``) it first advances to that
-        boundary (so a caller may drive an arbitrary mid-state) and then
-        halts. A ``target-<n>`` boundary applies exactly the first ``n``
-        targets of ``replacement_order`` under ``committing`` and halts,
-        leaving a crash state byte-identical to a real mid-loop halt.
-        """
-        if boundary is None or boundary in ("staged", "backup"):
-            # Staging (and any backup file) is written but no journal is
-            # persisted yet — recovery finds nothing and leaves the target
-            # perfectly ``before``.
-            return
-        if boundary == "journal":
-            # Persist the ``prepared`` journal; recovery rolls the staged set
-            # back (no target was ever replaced).
-            self.prepare()
-            return
-        if boundary == "data":
-            # Begin the commit: targets are applied under ``committing`` and
-            # recovery rolls them back from backups.
-            self.prepare()
-            self.begin_commit()
-            return
-        if boundary == "manifest":
-            # Run the full commit to ``complete`` so recovery verifies the
-            # whole after-state.
-            self.prepare()
-            self.begin_commit()
-            self.force_state("complete")
-            return
-        if boundary is not None and boundary.startswith("target-"):
-            # Per-target boundary ``target-<n>``: prepare, then apply exactly
-            # the first ``n`` targets and halt before the parent-dir fsync of
-            # the next rename / the final root fsync. Recovery rolls all of
-            # them back, restoring the all-old state. ``target-0`` is exactly
-            # the ``journal`` boundary (prepared, nothing applied).
-            suffix = boundary[len("target-"):]
-            try:
-                n = int(suffix)
-            except ValueError:
-                raise ValueError(f"invalid target boundary {boundary!r}") from None
-            if not (0 <= n <= len(self._replacement_order)):
-                raise ValueError(f"target boundary {n!r} out of range")
-            self.prepare()
-            if n == 0:
-                return
-            self._begin_committing()
-            self._apply_replacements(stop_after=n)
-            return
-        raise ValueError(f"unknown crash boundary {boundary!r}")
-
-    def force_state(self, state: str) -> None:
-        """Force the journal into ``state`` (test-only hook)."""
-        if state not in ("prepared", "committing", "complete"):
-            raise ValueError(f"invalid journal state {state!r}")
-        self._state = state
-        self._write_journal()
-        _fsync_file(self._journal_path())
 
     def _cleanup(self) -> None:
         """Remove the journal + staging dir, leaving an empty ``transactions/`` root."""
@@ -563,7 +500,7 @@ class Transaction:
         return self
 
     # The journal state machine is driven explicitly above; leaving the with
-    # block after prepare()/begin_commit()/inject_crash() must NOT clean up so
+    # block after prepare()/begin_commit() must NOT clean up so
     # the persisted crash-state remains for recover_startup to heal.
     def __exit__(self, *_exc: object) -> Literal[False]:
         return False

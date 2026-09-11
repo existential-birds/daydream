@@ -1,8 +1,9 @@
 import fcntl
+import inspect
 import os
 import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -20,6 +21,7 @@ from daydream.benchmark.storage import (
     resolve_authoring_path,
     sha256_file,
 )
+from tests.harness.transaction_faults import TransactionFaultDriver
 
 
 def test_load_yaml_rejects_duplicate_keys(tmp_path: Path) -> None:
@@ -119,6 +121,17 @@ def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path) -> No
     assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
 
+def test_transaction_has_no_fault_or_state_forging_surface(tmp_path: Path) -> None:
+    tx = Transaction(tmp_path, op_id="surface", kind="write")
+    assert not hasattr(tx, "inject_crash")
+    assert not hasattr(tx, "force_state")
+    assert "stop_after" not in inspect.signature(tx._apply_replacements).parameters
+    faults = TransactionFaultDriver(tmp_path, op_id="faults", kind="write")
+    assert isinstance(faults.transaction, Transaction)
+    assert not hasattr(faults, "stage")
+    assert not hasattr(faults, "force_state")
+
+
 def test_transaction_retires_digest_matched_file_atomically(tmp_path: Path) -> None:
     bundle = tmp_path / "snapshots" / "old.bundle"
     bundle.parent.mkdir(parents=True)
@@ -132,11 +145,11 @@ def test_transaction_retires_digest_matched_file_atomically(tmp_path: Path) -> N
     assert (tmp_path / "benchmark.yaml").read_bytes() == b"after"
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2])
-def test_transaction_retirement_rolls_back_with_other_targets(
-    tmp_path: Path, applied: int
+@pytest.mark.parametrize("boundary", [0, 1, 2, 3, "manifest"])
+def test_transaction_retirement_recovers_with_other_targets(
+    tmp_path: Path, boundary: int | Literal["manifest"]
 ) -> None:
-    root = tmp_path / f"ws-{applied}"
+    root = tmp_path / f"ws-{boundary}"
     bundle = root / "snapshots" / "old.bundle"
     case = root / "cases" / "case.yaml"
     manifest = root / "benchmark.yaml"
@@ -145,15 +158,34 @@ def test_transaction_retirement_rolls_back_with_other_targets(
     bundle.write_bytes(b"old bundle")
     case.write_bytes(b"old case")
     manifest.write_bytes(b"old manifest")
-    with Transaction(root, op_id="retire-crash", kind="import") as tx:
+    faults = TransactionFaultDriver(root, op_id="retire-crash", kind="import")
+    with faults.transaction as tx:
         tx.retire("snapshots/old.bundle", expected_sha256=sha256_file(bundle))
         tx.stage("cases/case.yaml", b"new case")
         tx.stage("benchmark.yaml", b"new manifest")
-        tx.inject_crash(f"target-{applied}")
+        faults.halt_at("manifest" if boundary == "manifest" else f"target-{boundary}")
+    doc = load_json_strict(root / "transactions" / "retire-crash" / "journal.json")
+    applied = 3 if boundary == "manifest" else boundary
+    assert doc["state"] == (
+        "complete" if boundary == "manifest" else "prepared" if applied == 0 else "committing"
+    )
+    assert doc["applied_count"] == applied
+    if applied:
+        assert not bundle.exists()  # retirement was genuinely performed before recovery
+    if applied >= 2:
+        assert case.read_bytes() == b"new case"
+    if applied >= 3:
+        assert manifest.read_bytes() == b"new manifest"
     recover_startup(root)
-    assert bundle.read_bytes() == b"old bundle"
-    assert case.read_bytes() == b"old case"
-    assert manifest.read_bytes() == b"old manifest"
+    if boundary == "manifest":
+        assert not bundle.exists()
+        assert case.read_bytes() == b"new case"
+        assert manifest.read_bytes() == b"new manifest"
+    else:
+        assert bundle.read_bytes() == b"old bundle"
+        assert case.read_bytes() == b"old case"
+        assert manifest.read_bytes() == b"old manifest"
+    recover_startup(root)  # retirement recovery is idempotent after cleanup
 
 
 def test_transaction_retirement_refuses_digest_mismatch(tmp_path: Path) -> None:
@@ -176,28 +208,73 @@ def test_prepared_journal_rolls_back_on_startup(tmp_path: Path) -> None:
     assert not data.exists()
 
 
-def test_committing_journal_rolls_back_in_reverse(tmp_path: Path) -> None:
-    target = tmp_path / "target.yaml"
-    target.write_text("old")
-    with Transaction(tmp_path, op_id="op-3", kind="write") as tx:
-        _stage(tx, target, "new")
-        tx.prepare()
-        tx.begin_commit()  # set state=committing, apply target with new
-        tx.inject_crash()  # leave committing incomplete, applied=1
-    assert target.read_text() == "new"
+def test_committing_journal_rolls_back_in_reverse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rels = ["cases/a.yaml", "cases/b.yaml", "benchmark.yaml"]
+    for rel in rels:
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"before-{rel}")
+    faults = TransactionFaultDriver(tmp_path, op_id="op-3", kind="write")
+    with faults.transaction as tx:
+        for rel in rels:
+            _stage(tx, rel, f"after-{rel}")
+        faults.halt_at("target-3")
+    doc = load_json_strict(tmp_path / "transactions" / "op-3" / "journal.json")
+    assert doc["state"] == "committing" and doc["applied_count"] == 3
+    assert [(tmp_path / rel).read_text() for rel in rels] == [f"after-{rel}" for rel in rels]
+
+    observed: list[str] = []
+    real_replace = os.replace
+
+    def observe_replace(source: str | Path, destination: str | Path) -> None:
+        observed.append(Path(source).name)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", observe_replace)
     recover_startup(tmp_path)
-    assert target.read_text() == "old"  # restored from backup
+    assert observed == ["backup-0002.bin", "backup-0001.bin", "backup-0000.bin"]
+    assert [(tmp_path / rel).read_text() for rel in rels] == [f"before-{rel}" for rel in rels]
 
 
 def test_complete_journal_is_verified_and_cleaned(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("old")
-    with Transaction(tmp_path, op_id="op-4", kind="write") as tx:
+    faults = TransactionFaultDriver(tmp_path, op_id="op-4", kind="write")
+    with faults.transaction as tx:
         _stage(tx, target, "new")
-        tx.commit()
-        tx.force_state("complete")  # simulate crash right after mark-complete, before journal removal
+        faults.halt_at("manifest")
     recover_startup(tmp_path)
     assert target.read_text() == "new"  # after state verified, journal cleaned
+
+
+def test_complete_journal_rejects_altered_replacement_at_startup(tmp_path: Path) -> None:
+    target = tmp_path / "target.yaml"
+    target.write_text("old")
+    faults = TransactionFaultDriver(tmp_path, op_id="complete-altered", kind="write")
+    with faults.transaction as tx:
+        _stage(tx, target, "new")
+        faults.halt_at("manifest")
+    target.write_text("altered")
+    with pytest.raises(WorkspaceCorrupt, match="digest mismatch"):
+        recover_startup(tmp_path)
+    assert (tmp_path / "transactions" / "complete-altered" / "journal.json").exists()
+
+
+def test_complete_journal_rejects_reappearing_retired_target_at_startup(tmp_path: Path) -> None:
+    retired = tmp_path / "snapshots" / "old.bundle"
+    retired.parent.mkdir(parents=True)
+    retired.write_bytes(b"old")
+    faults = TransactionFaultDriver(tmp_path, op_id="complete-retired", kind="write")
+    with faults.transaction as tx:
+        tx.retire("snapshots/old.bundle", expected_sha256=sha256_file(retired))
+        tx.stage("benchmark.yaml", b"new manifest")
+        faults.halt_at("manifest")
+    retired.write_bytes(b"returned")
+    with pytest.raises(WorkspaceCorrupt, match="retired target"):
+        recover_startup(tmp_path)
+    assert (tmp_path / "transactions" / "complete-retired" / "journal.json").exists()
 
 
 def test_no_journal_orphan_is_corruption(tmp_path: Path) -> None:
@@ -225,9 +302,27 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
     for boundary in ("staged", "backup", "journal", "data", "manifest"):
         target = tmp_path / f"t-{boundary}.yaml"
         target.write_text("before")
-        with Transaction(tmp_path, op_id=f"op-{boundary}", kind="write") as tx:
+        faults = TransactionFaultDriver(tmp_path, op_id=f"op-{boundary}", kind="write")
+        with faults.transaction as tx:
             tx.stage(target.relative_to(tmp_path), b"after")
-            tx.inject_crash(boundary)
+            faults.halt_at(boundary)
+        op_dir = tmp_path / "transactions" / f"op-{boundary}"
+        journal = op_dir / "journal.json"
+        if boundary in ("staged", "backup"):
+            assert not journal.exists()
+            assert target.read_text() == "before"
+        else:
+            doc = load_json_strict(journal)
+            expected_state = {
+                "journal": "prepared",
+                "data": "committing",
+                "manifest": "complete",
+            }[boundary]
+            assert doc["state"] == expected_state
+            assert doc["applied_count"] == (0 if boundary == "journal" else 1)
+            assert target.read_text() == ("before" if boundary == "journal" else "after")
+            if boundary == "manifest":
+                assert (op_dir / "backup-0000.bin").exists()
         recover_startup(tmp_path)
         if boundary in ("staged", "backup"):
             # Crash before the journal is written: recovery has nothing to do
@@ -247,9 +342,10 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
 def test_prejournal_stage_residue_is_removed(tmp_path: Path) -> None:
     target = tmp_path / "t.yaml"
     target.write_text("before")
-    with Transaction(tmp_path, op_id="op-pre", kind="write") as tx:
+    faults = TransactionFaultDriver(tmp_path, op_id="op-pre", kind="write")
+    with faults.transaction as tx:
         _stage(tx, target, "after")
-        tx.inject_crash("staged")  # stage-*.bin written, NO journal.json
+        faults.halt_at("staged")  # stage-*.bin written, NO journal.json
     recover_startup(tmp_path)
     assert target.read_text() == "before"  # untouched
     txn = tmp_path / "transactions"
@@ -259,12 +355,31 @@ def test_prejournal_stage_residue_is_removed(tmp_path: Path) -> None:
 def test_prejournal_backup_residue_is_removed(tmp_path: Path) -> None:
     target = tmp_path / "t.yaml"
     target.write_text("before")
-    with Transaction(tmp_path, op_id="op-pre2", kind="write") as tx:
+    faults = TransactionFaultDriver(tmp_path, op_id="op-pre2", kind="write")
+    with faults.transaction as tx:
         _stage(tx, target, "after")
-        tx.inject_crash("backup")  # stage + backup written, NO journal.json
+        faults.halt_at("backup")  # stage + backup written, NO journal.json
     recover_startup(tmp_path)
     txn = tmp_path / "transactions"
     assert not txn.exists() or not list(txn.iterdir())
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["prepared", "committing", "complete", "unknown", "target-nope", "target--1", "target-2"],
+)
+def test_invalid_fault_boundaries_do_not_publish_a_journal_or_change_targets(
+    tmp_path: Path, boundary: str
+) -> None:
+    target = tmp_path / "target.yaml"
+    target.write_text("before")
+    faults = TransactionFaultDriver(tmp_path, op_id="invalid-boundary", kind="write")
+    with faults.transaction as tx:
+        _stage(tx, target, "after")
+        with pytest.raises(ValueError):
+            faults.halt_at(boundary)
+    assert target.read_text() == "before"
+    assert not (tmp_path / "transactions" / "invalid-boundary" / "journal.json").exists()
 
 
 def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path: Path) -> None:
@@ -288,11 +403,12 @@ def test_import_crash_transaction_restores_before_or_after(tmp_path: Path) -> No
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("before")
         manifest.write_text("ledger-before")
-        with Transaction(tmp_path, op_id=f"imp-{boundary}", kind="import") as tx:
+        faults = TransactionFaultDriver(tmp_path, op_id=f"imp-{boundary}", kind="import")
+        with faults.transaction as tx:
             tx.stage("imports/pr-000101.json", b"import-after")
             tx.stage("cases/pr-000101-aaaaaaaaaaaa.yaml", b"case-after")
             tx.stage("benchmark.yaml", b"ledger-after")
-            tx.inject_crash(boundary)
+            faults.halt_at(boundary)
         recover_startup(tmp_path)
         if boundary in ("journal", "data"):
             assert imp.read_text() == "before"
@@ -468,7 +584,7 @@ def test_empty_transactions_removes_only_positive_residue(tmp_path: Path) -> Non
 
 
 def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path: Path) -> None:
-    # 3 targets; inject a crash after each individual rename/fsync boundary.
+    # 3 targets; halt after each individual durable rename/fsync boundary.
     for n in range(0, 4):  # after applying 0, 1, 2, 3 of the 3 targets
         root = tmp_path / f"ws-{n}"
         root.mkdir()
@@ -479,10 +595,17 @@ def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path: Path) 
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(before[rel])
-        with Transaction(root, op_id=f"op-{n}", kind="import") as tx:
+        faults = TransactionFaultDriver(root, op_id=f"op-{n}", kind="import")
+        with faults.transaction as tx:
             for i in range(3):
                 _stage(tx, root / f"cases/t{i}.yaml", f"after-{i}")
-            tx.inject_crash(boundary=f"target-{n}")  # new per-target boundary
+            faults.halt_at(f"target-{n}")
+        doc = load_json_strict(root / "transactions" / f"op-{n}" / "journal.json")
+        assert doc["state"] == ("prepared" if n == 0 else "committing")
+        assert doc["applied_count"] == n
+        for i in range(3):
+            expected = f"after-{i}" if i < n else before[f"cases/t{i}.yaml"]
+            assert (root / f"cases/t{i}.yaml").read_text() == expected
         recover_startup(root)
         for rel, content in before.items():
             assert (root / rel).read_text() == content  # every target back to all-old
@@ -494,9 +617,10 @@ def test_single_target_target_boundary(tmp_path: Path) -> None:
     root.mkdir()
     t = root / "t.yaml"
     t.write_text("before")
-    with Transaction(root, op_id="op-1t", kind="write") as tx:
+    faults = TransactionFaultDriver(root, op_id="op-1t", kind="write")
+    with faults.transaction as tx:
         _stage(tx, t, "after")
-        tx.inject_crash(boundary="target-0")
+        faults.halt_at("target-0")
     recover_startup(root)
     assert t.read_text() == "before"
     assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
@@ -506,10 +630,10 @@ def test_verify_complete_preserves_0600_target(tmp_path: Path) -> None:
     t = tmp_path / "target.yaml"
     t.write_text("old")
     os.chmod(t, 0o600)
-    with Transaction(tmp_path, op_id="op-c", kind="write") as tx:
+    faults = TransactionFaultDriver(tmp_path, op_id="op-c", kind="write")
+    with faults.transaction as tx:
         _stage(tx, t, "new")
-        tx.commit()
-        tx.force_state("complete")
+        faults.halt_at("manifest")
     recover_startup(tmp_path)
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
 
@@ -532,7 +656,6 @@ def test_rollback_committing_restored_target_is_0600(tmp_path: Path) -> None:
     with Transaction(tmp_path, op_id="op-r", kind="write") as tx:
         _stage(tx, t, "new")
         tx.begin_commit()
-        tx.inject_crash()
     recover_startup(tmp_path)
     assert t.read_text() == "old"
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
@@ -544,7 +667,6 @@ def test_restart_recovery_is_idempotent(tmp_path: Path) -> None:
     with Transaction(tmp_path, op_id="op-idem", kind="write") as tx:
         _stage(tx, t, "new")
         tx.begin_commit()
-        tx.inject_crash()
     recover_startup(tmp_path)   # first pass: roll back committing journal
     first_txn = list((tmp_path / "transactions").iterdir()) if (tmp_path / "transactions").exists() else []
     recover_startup(tmp_path)   # second pass: must be a clean no-op
@@ -556,10 +678,10 @@ def test_restart_recovery_is_idempotent(tmp_path: Path) -> None:
 def test_complete_restart_recovery_is_idempotent(tmp_path: Path) -> None:
     t = tmp_path / "target.yaml"
     t.write_text("old")
-    with Transaction(tmp_path, op_id="op-idem2", kind="write") as tx:
+    faults = TransactionFaultDriver(tmp_path, op_id="op-idem2", kind="write")
+    with faults.transaction as tx:
         _stage(tx, t, "new")
-        tx.commit()
-        tx.force_state("complete")
+        faults.halt_at("manifest")
     recover_startup(tmp_path)
     recover_startup(tmp_path)   # second pass: complete journal already verified+cleaned
     assert t.read_text() == "new"
@@ -575,7 +697,6 @@ def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path: Path) -> None:
         _stage(tx, target, "new")
         tx.prepare()
         tx.begin_commit()   # state=committing, applied_count=1, target -> "new"
-        tx.inject_crash()
     # Corrupt the journal target rel to a non-canonical form that still
     # resolves inside root; keep replacement_order canonical (as the
     # validator's rels set is built from _resolve_target).
