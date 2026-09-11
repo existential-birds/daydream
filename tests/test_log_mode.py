@@ -366,6 +366,7 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
     with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
         await _emit_failure_handoff(
             backend, work, "failing test output", offer_clipboard=False,
+            allow_standalone=True,
         )
         captured = capsys.readouterr()
         out = captured.out + captured.err

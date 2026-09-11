@@ -15,6 +15,7 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops
+from daydream.artifact_visibility import ArtifactSession
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -1839,7 +1840,15 @@ async def test_run_populates_exploration_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_per_stack_reviews(backend: Any, work: Any, stacks: Any, **kwargs: dict[str, Any]) -> tuple[Any, ...]:
+    async def fake_per_stack_reviews(
+        backend: Any,
+        work: Any,
+        stacks: Any,
+        *,
+        artifact_session: ArtifactSession | None = None,
+        allow_standalone: bool = False,
+        **kwargs: Any,
+    ) -> tuple[Any, ...]:
         captured["exploration_dir"] = kwargs.get("exploration_dir")
         # Issue #745: reviewers write PER_STACK_RECORD_SCHEMA records files that
         # the loader requires; the fake must do the same or the run stops.
@@ -1847,7 +1856,9 @@ async def test_run_populates_exploration_context(
 
         from daydream.deep.artifacts import deep_dir, per_stack_records_path
 
-        dd = deep_dir(work.repo)
+        dd = deep_dir(
+            work.repo, session=artifact_session, allow_standalone=allow_standalone
+        )
         dd.mkdir(parents=True, exist_ok=True)
         for s in stacks:
             per_stack_records_path(dd, s.stack_name).write_text(
@@ -1921,7 +1932,9 @@ async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work:
     # Normal flow: phase_parse_feedback returns list of validated issues
     (tmp_path / ".review-output.md").write_text("# Review\n")
     normal_backend = _issue_backend({"issues": [enriched_normal_issue]})
-    normal_issues = await phase_parse_feedback(normal_backend, work)
+    normal_issues = await phase_parse_feedback(
+        normal_backend, work, allow_standalone=True
+    )
 
     # TTT flow: phase_alternative_review returns list of issues
     diff_path = tmp_path / "diff.txt"

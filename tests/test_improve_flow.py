@@ -77,9 +77,9 @@ def test_improve_dir_uses_active_artifact_route(
     from daydream.improve import artifacts
 
     routed = tmp_path / "private" / ".daydream"
-    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target: routed)
+    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target, **_kwargs: routed)
 
-    assert artifacts.improve_dir(tmp_path / "model-cwd") == routed / "improve"
+    assert artifacts.improve_dir(tmp_path / "model-cwd", allow_standalone=True) == routed / "improve"
     assert (routed / "improve").is_dir()
 
 

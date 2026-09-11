@@ -61,7 +61,7 @@ async def test_input_path_default_uses_review_output_file(
     """D-40 regression: default call (no kwarg) reads work.repo / REVIEW_OUTPUT_FILE."""
     backend = _SpyBackend()
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Issues\n1. [a.py:1] x\n")
-    await phase_parse_feedback(cast(Backend, backend), make_work(tmp_path))
+    await phase_parse_feedback(cast(Backend, backend), make_work(tmp_path), allow_standalone=True)
     assert str(tmp_path / REVIEW_OUTPUT_FILE) in backend.last_prompt
 
 
@@ -71,7 +71,9 @@ async def test_input_path_override_used_when_provided(tmp_path: Path, make_work:
     custom = tmp_path / ".daydream" / "deep" / "stack-python-review.md"
     custom.parent.mkdir(parents=True, exist_ok=True)
     custom.write_text("# Issues\n1. [api.py:1] x\n")
-    await phase_parse_feedback(cast(Backend, backend), make_work(tmp_path), input_path=custom)
+    await phase_parse_feedback(
+        cast(Backend, backend), make_work(tmp_path), input_path=custom, allow_standalone=True
+    )
     assert str(custom) in backend.last_prompt
     # Default path is NOT in the prompt when override is used
     assert str(tmp_path / REVIEW_OUTPUT_FILE) not in backend.last_prompt

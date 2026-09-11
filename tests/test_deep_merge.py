@@ -106,6 +106,7 @@ async def test_phase_cross_stack_merge_returns_output_path(
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
+        allow_standalone=True,
     )
     assert result == tmp_path / REVIEW_OUTPUT_FILE
 
@@ -120,6 +121,7 @@ async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
+        allow_standalone=True,
     )
     assert all(c["agents"] is None for c in backend.calls)
 

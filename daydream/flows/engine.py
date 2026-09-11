@@ -66,6 +66,9 @@ class FlowContext:
         _backend_factory: Runner-bound transport factory. It receives this
             context's configuration, cache, workspace, and audit boundary;
             omission keeps ordinary backend resolution.
+        allow_standalone_artifacts: Explicit opt-in for direct flow callers
+            without a runner-owned artifact session. Runner-created contexts
+            keep this false and pass ``artifacts`` to generated-path helpers.
     """
 
     config: RunConfig
@@ -76,6 +79,7 @@ class FlowContext:
     audit_workspace: AuditWorkspace | None = None
     private_workspace_owner: PrivateWorkspaceOwner | None = None
     artifacts: ArtifactSession | None = None
+    allow_standalone_artifacts: bool = field(default=False, kw_only=True)
     run_context: RunContext | None = field(default=None, kw_only=True)
     github_execution: GitHubExecutionInput = field(
         default_factory=GitHubExecutionInput, repr=False, compare=False, kw_only=True,

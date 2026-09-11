@@ -64,7 +64,7 @@ async def test_parse_feedback_renders_issue_table(
     }
     backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
 
-    items = await phase_parse_feedback(backend, make_work(tmp_path))
+    items = await phase_parse_feedback(backend, make_work(tmp_path), allow_standalone=True)
 
     out = rec.export_text()
     assert items == payload["issues"]
@@ -111,6 +111,7 @@ async def test_merge_prints_item_count(
         per_stack_records_paths=[],
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
         dedup_candidates_path=dedup,
     )
 
@@ -159,6 +160,7 @@ async def test_arbiter_prints_kept_dropped(
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     out = rec.export_text()
@@ -235,6 +237,7 @@ async def test_per_stack_failures_summarized_once(
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     out = rec.export_text()

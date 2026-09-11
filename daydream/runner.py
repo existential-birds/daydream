@@ -48,6 +48,7 @@ from daydream.artifact_visibility import (
     RoutedDestination,
     TrajectoryOutputRoute,
     artifact_dir_for,
+    artifact_session_active,
     open_artifact_session,
     private_root_locations,
     resolve_private_workspace_owner,
@@ -503,6 +504,7 @@ def _open_recorder(
     work: WorkContext | None,
     flow_kind: DaydreamRunFlow,
     run_artifacts: _RunArtifacts | None = None,
+    allow_standalone: bool = False,
 ) -> TrajectoryRecorder:
     """Construct the run's ``TrajectoryRecorder`` bound to the run's artifacts.
 
@@ -513,10 +515,15 @@ def _open_recorder(
     constructing ``TrajectoryRecorder`` directly, so the snapshot retention that
     feeds strict archive finalization can never be silently dropped. Session id
     and trajectory path are resolved here identically for all flows.
-    ``run_artifacts`` is ``None`` only for a standalone direct caller, which
-    retains no snapshot and therefore archives nothing.
+    A standalone direct caller passes ``allow_standalone=True`` with no
+    ``run_artifacts`` or active artifact session; it retains no snapshot and
+    therefore archives nothing.
     """
     if run_artifacts is None:
+        if not allow_standalone:
+            raise ArtifactVisibilityError("standalone recorder requires allow_standalone=True")
+        if artifact_session_active():
+            raise ArtifactVisibilityError("standalone recorder cannot run inside an active artifact session")
         session_id = str(uuid.uuid4())
         trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
     else:
@@ -1653,7 +1660,7 @@ async def _run_improve(
         )
         return 1
 
-    directory = improve_dir(target_dir)
+    directory = improve_dir(target_dir, session=run_artifacts.session, allow_standalone=False)
     tier = EFFORT_TIERS[config.improve_effort]
 
     async with _open_recorder(
@@ -1662,6 +1669,7 @@ async def _run_improve(
         work=work,
         flow_kind=DaydreamRunFlow.IMPROVE,
         run_artifacts=run_artifacts,
+        allow_standalone=False,
     ):
         _resolve_review_profile(config)
         # The standalone snapshot gives improve independent Git storage. The
@@ -1687,6 +1695,7 @@ async def _run_improve(
                 artifacts=run_artifacts.session,
                 run_context=run_context, github_execution=github_execution,
                 _backend_factory=backend_factory,
+                allow_standalone_artifacts=False,
             )
             ctx.data["audit_repo"] = audit.repo
             ctx.data["improve_dir"] = directory
@@ -1751,7 +1760,7 @@ async def _run_custom_flow(
         print_dim(console, "No diff found — custom flow will run without a diff seed.")
         diff = ""
 
-    daydream_dir = artifact_dir_for(target_dir)
+    daydream_dir = artifact_dir_for(target_dir, session=run_artifacts.session, allow_standalone=False)
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
@@ -1762,6 +1771,7 @@ async def _run_custom_flow(
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
         run_artifacts=run_artifacts,
+        allow_standalone=False,
     ):
         _resolve_review_profile(config)
         ctx = FlowContext(
@@ -1773,6 +1783,7 @@ async def _run_custom_flow(
             artifacts=run_artifacts.session,
             run_context=run_context, github_execution=github_execution,
             _backend_factory=backend_factory,
+            allow_standalone_artifacts=False,
         )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
@@ -1808,4 +1819,5 @@ async def _run_loop_deep(
     return await run_deep(
         config, work, run_artifacts=run_artifacts, run_context=run_context, github_execution=github_execution,
         backend_factory=backend_factory,
+        allow_standalone=False,
     )

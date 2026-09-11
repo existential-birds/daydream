@@ -126,7 +126,7 @@ def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
     prior = repo / ".daydream" / "runs" / "prior-public-run"
     prior.mkdir(parents=True)
     (prior / "trajectory.json").write_text(json.dumps({"reasoning": PRIOR_REASONING_CANARY}), encoding="utf-8")
-    legacy = repo / ".daydream" / "resume" / "legacy cache.json"
+    legacy = repo / ".daydream" / "exploration" / "legacy cache.json"
     legacy.parent.mkdir(parents=True)
     legacy.write_text(RESUME_CACHE_CANARY, encoding="utf-8")
     _seed_private_canaries(private_base)

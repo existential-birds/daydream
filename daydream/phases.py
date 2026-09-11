@@ -27,7 +27,13 @@ from daydream.agent import (
     resolve_gate,
     run_agent,
 )
-from daydream.artifact_visibility import artifact_dir_for, artifact_session_active, review_output_path_for
+from daydream.artifact_visibility import (
+    ArtifactSession,
+    ArtifactVisibilityError,
+    artifact_dir_for,
+    artifact_session_active,
+    review_output_path_for,
+)
 from daydream.backends import (
     Backend,
     ContinuationToken,
@@ -667,7 +673,11 @@ def _changed_files(repo: Path) -> list[Path]:
 
 
 def _resolve_handoff_paths(
-    recorder: TrajectoryRecorder | None, work: WorkContext,
+    recorder: TrajectoryRecorder | None,
+    work: WorkContext,
+    *,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
 ) -> tuple[Path, Path | None, Path | None, Path | None, Path | None, Path | None]:
     """Return ``(handoff_path, trajectory_path, trajectories_dir, diff_path, manifest_path, deep_dir)``.
 
@@ -681,12 +691,12 @@ def _resolve_handoff_paths(
     * Session-managed runs: projected trajectory subtree under
       ``<source>/.daydream/runs/<session_id>/`` (written by the recorder
       and published by the host shortly after this function runs).
-    * Ephemeral runs with archiving enabled: archive subtree under
-      ``<archive_root>/runs/<session_id>/`` (populated by the on_write
-      callback after ``__aexit__``).
-    * Ephemeral runs with archiving disabled: live paths, even though
-      the worktree will be removed — best-effort, with no persistent
-      copy of the artifacts available.
+    * Intentional standalone ephemeral runs with archiving enabled: archive
+      subtree under ``<archive_root>/runs/<session_id>/`` (populated by the
+      on_write callback after ``__aexit__``).
+    * Intentional standalone ephemeral runs with archiving disabled: live
+      paths, even though the worktree will be removed — best-effort, with no
+      persistent copy of the artifacts available.
 
     When *recorder* is ``None``, ``handoff_path`` falls back to
     ``<source>/.daydream/handoff-<ts>.md`` (no session id available) and
@@ -696,17 +706,47 @@ def _resolve_handoff_paths(
     the trajectory has not been flushed yet and the archive bundle has
     not been copied. The caller treats them as forward references.
     """
+    if artifact_session is None:
+        if not allow_standalone:
+            # Strict callers must supply the session even if a standalone
+            # archive would otherwise make a durable reference available.
+            artifact_dir_for(
+                work.repo,
+                session=None,
+                allow_standalone=False,
+            )
+        if artifact_session_active():
+            raise ArtifactVisibilityError(
+                "an explicit artifact session is required for handoff routing"
+            )
+
     if recorder is None:
         ts = datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - filename only
-        handoff_path = work.source / ".daydream" / f"handoff-{ts}.md"
+        unbound_target = work.source if work.is_ephemeral else work.repo
+        live_handoff = artifact_dir_for(
+            work.repo if artifact_session is not None else unbound_target,
+            session=artifact_session,
+            allow_standalone=allow_standalone,
+        ) / f"handoff-{ts}.md"
+        handoff_path = (
+            artifact_session.durable_path_for(live_handoff, repo=work.repo)
+            if artifact_session is not None
+            else live_handoff
+        )
         return handoff_path, None, None, None, None, None
 
-    active = artifact_session_active()
-    if active:
-        public_daydream_dir = work.source / ".daydream"
-        artifact_root = public_daydream_dir / "runs" / recorder.session_id
-        diff_path = public_daydream_dir / "diff.patch"
-        deep_dir = public_daydream_dir / "deep"
+    if artifact_session is not None:
+        live_daydream_dir = artifact_dir_for(
+            work.repo,
+            session=artifact_session,
+            allow_standalone=False,
+        )
+        live_artifact_root = live_daydream_dir / "runs" / recorder.session_id
+        artifact_root = artifact_session.durable_path_for(live_artifact_root, repo=work.repo)
+        diff_path = artifact_session.durable_path_for(
+            live_daydream_dir / "diff.patch", repo=work.repo,
+        )
+        deep_dir = artifact_session.durable_path_for(live_daydream_dir / "deep", repo=work.repo)
     elif work.is_ephemeral and recorder.on_write is not None:
         # The ephemeral worktree (and everything under it) will be
         # removed after the recorder exits; the archive callback copies
@@ -719,22 +759,18 @@ def _resolve_handoff_paths(
         diff_path = artifact_root / "diff.patch"
         deep_dir = artifact_root / "deep"
     else:
-        daydream_dir = artifact_dir_for(recorder.target_dir)
+        daydream_dir = artifact_dir_for(
+            recorder.target_dir,
+            session=artifact_session,
+            allow_standalone=allow_standalone,
+        )
         artifact_root = daydream_dir / "runs" / recorder.session_id
         diff_path = daydream_dir / "diff.patch"
         deep_dir = daydream_dir / "deep"
 
     trajectory_path = artifact_root / "trajectory.json"
-    if active:
-        # Project the recorder's exact private relative placement back into the
-        # public compatibility tree. A validated external explicit destination
-        # receives live writes instead, and needs no projection.
-        try:
-            live_relative = recorder.path.relative_to(artifact_dir_for(work.repo))
-        except ValueError:
-            trajectory_path = recorder.path
-        else:
-            trajectory_path = work.source / ".daydream" / live_relative
+    if artifact_session is not None:
+        trajectory_path = artifact_session.durable_path_for(recorder.path, repo=work.repo)
 
     return (
         artifact_root / "handoff.md",
@@ -747,13 +783,28 @@ def _resolve_handoff_paths(
 
 
 def _handoff_write_path(
-    handoff_reference: Path, recorder: TrajectoryRecorder | None, work: WorkContext
+    handoff_reference: Path,
+    recorder: TrajectoryRecorder | None,
+    work: WorkContext,
+    *,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
 ) -> Path:
     """Return the private active-session destination for a public handoff ref."""
-    if not artifact_session_active():
+    if artifact_session is None:
+        if not allow_standalone:
+            # Keep strict routing failure consistent with the public accessors.
+            artifact_dir_for(
+                work.repo,
+                session=artifact_session,
+                allow_standalone=False,
+            )
+        if artifact_session_active():
+            raise ArtifactVisibilityError(
+                "an explicit artifact session is required for handoff routing"
+            )
         return handoff_reference
-    live = artifact_dir_for(work.repo)
-    return live / handoff_reference.name if recorder is None else live / "runs" / recorder.session_id / "handoff.md"
+    return artifact_session.live_path_for(handoff_reference, repo=work.repo)
 
 
 def _write_handoff(path: Path, body: str) -> bool:
@@ -870,21 +921,14 @@ def _build_minimal_handoff(
     return "\n".join(parts)
 
 
-def _replace_known_handoff_paths(text: str, mappings: list[tuple[Path, Path]]) -> str:
-    """Replace only exact, validated live paths with their durable identities."""
-    pairs = sorted(((str(a), str(b)) for a, b in mappings), key=lambda p: len(p[0]), reverse=True)
-    for live, durable in pairs:
-        pattern = rf"(?<![A-Za-z0-9_./-]){re.escape(live)}" + r"(?=$|[\s`'\"\[\](){}<>:,;])"
-        text = re.sub(pattern, lambda _match: durable, text)
-    return text
-
-
 @bind_resolved_run_context
 async def _run_failure_summarizer(
     backend: Backend,
     work: WorkContext,
     test_output: str,
     *,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[str, Path, bool]:
     """Run the read-only failure-summarizer and write ``handoff.md``.
@@ -910,7 +954,12 @@ async def _run_failure_summarizer(
         diff_path,
         manifest_path,
         deep_dir,
-    ) = _resolve_handoff_paths(recorder, work)
+    ) = _resolve_handoff_paths(
+        recorder,
+        work,
+        artifact_session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
 
     # Drop a ``.partial`` snapshot of the trajectory before invoking the
     # summarizer. The recorder's ``_write()`` only fires in ``__aexit__``
@@ -936,25 +985,34 @@ async def _run_failure_summarizer(
         return None if path is None else path.with_suffix(path.suffix + ".partial")
 
     has_trajectory = recorder is not None
-    active_session = artifact_session_active()
+    active_session = artifact_session is not None
     changed_live = _changed_files(work.repo)
     durable_input_paths = _labelled(
         _partial_of(trajectory_path), diff_path, manifest_path, deep_dir
     )
-    transient_prefixes: list[Path] = []
+    private_runtime_paths: tuple[Path, ...] = ()
     if active_session:
+        assert artifact_session is not None
         changed_for_model = [path.relative_to(work.repo) for path in changed_live]
         durable_changed = [work.source / name for name in changed_for_model]
-        live_daydream = artifact_dir_for(work.repo)
+        private_runtime_paths = (
+            artifact_session.layout.artifact_runtime_root,
+            artifact_session.layout.operational_workspaces_root,
+        ) + ((work.repo,) if work.repo != work.source else ())
+
+        def _live(path: Path | None) -> Path | None:
+            return (
+                None
+                if path is None
+                else artifact_session.live_path_for(path, repo=work.repo)
+            )
+
         possible_inputs = _labelled(
-            _partial_of(None if recorder is None else recorder.path),
-            live_daydream / "diff.patch",
-            None if recorder is None else live_daydream / "runs" / recorder.session_id / "manifest.json",
-            live_daydream / "deep",
+            None if recorder is None else _partial_of(recorder.path),
+            _live(diff_path),
+            _live(manifest_path),
+            _live(deep_dir),
         )
-        transient_prefixes = [live_daydream]
-        if work.repo != work.source:
-            transient_prefixes.append(work.repo)
     else:
         changed_for_model = durable_changed = changed_live
         possible_inputs = durable_input_paths
@@ -963,13 +1021,6 @@ async def _run_failure_summarizer(
         for label, path in possible_inputs.items()
         if path is not None and path.is_file()
     }
-    known_path_mappings = [
-        (path, durable)
-        for label, path in readable_inputs.items()
-        if (durable := durable_input_paths[label]) is not None
-    ]
-    if active_session and work.repo != work.source:
-        known_path_mappings.extend(zip(changed_live, durable_changed, strict=True))
 
     prompt = _build_failure_summarizer_prompt(
         test_output=test_output,
@@ -1005,11 +1056,10 @@ async def _run_failure_summarizer(
             if isinstance(body, str) and body.strip():
                 if not active_session:
                     return body
-                normalized = _replace_known_handoff_paths(body, known_path_mappings)
-                if not any(str(prefix) in normalized for prefix in transient_prefixes):
-                    return normalized
+                if not any(str(path) in body for path in private_runtime_paths):
+                    return body
                 _logger.warning(
-                    "failure-summarizer output contained an unknown transient path; "
+                    "failure-summarizer output contained a private runtime path; "
                     "using the deterministic handoff"
                 )
         return None
@@ -1024,10 +1074,11 @@ async def _run_failure_summarizer(
 
     if body is None:
         fallback_output = test_output
-        if active_session:
-            fallback_output = _replace_known_handoff_paths(fallback_output, known_path_mappings)
-            for prefix in sorted({str(p) for p in transient_prefixes}, key=len, reverse=True):
-                fallback_output = fallback_output.replace(prefix, "[TRANSIENT_PATH]")
+        if active_session and any(
+            str(path) in fallback_output
+            for path in private_runtime_paths
+        ):
+            fallback_output = "Test output omitted because it contained a private runtime path."
         body = _build_minimal_handoff(
             test_output=fallback_output,
             trajectory_path=trajectory_path,
@@ -1039,7 +1090,16 @@ async def _run_failure_summarizer(
             has_trajectory=has_trajectory,
         )
 
-    written = _write_handoff(_handoff_write_path(handoff_path, recorder, work), body)
+    written = _write_handoff(
+        _handoff_write_path(
+            handoff_path,
+            recorder,
+            work,
+            artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
+        ),
+        body,
+    )
     return body, handoff_path, written
 
 
@@ -2009,13 +2069,22 @@ def _git_branch(cwd: Path) -> str:
     return name or ""
 
 
-def check_review_file_exists(target_dir: Path) -> None:
+def check_review_file_exists(
+    target_dir: Path,
+    *,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
+) -> None:
     """Check that the review output file exists.
 
     Raises:
         FileNotFoundError: If the review output file doesn't exist.
     """
-    review_output_path = review_output_path_for(target_dir)
+    review_output_path = review_output_path_for(
+        target_dir,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     if not review_output_path.exists():
         msg = f"""No review file found.
 
@@ -2035,6 +2104,8 @@ async def phase_parse_feedback(
     output_schema: dict[str, Any] | None = None,
     include_verdicts: Literal[False] = False,
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> list[dict[str, Any]]: ...
 
@@ -2048,6 +2119,8 @@ async def phase_parse_feedback(
     output_schema: dict[str, Any] | None = None,
     include_verdicts: Literal[True],
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
@@ -2061,6 +2134,8 @@ async def phase_parse_feedback(
     output_schema: dict[str, Any] | None = None,
     include_verdicts: bool = False,
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Phase 2: Parse feedback from review output and return validated items.
@@ -2138,7 +2213,11 @@ async def phase_parse_feedback(
     verdicts_empty = ', "verdicts": []' if include_verdicts else ""
 
     # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = input_path if input_path is not None else review_output_path_for(work.repo)
+    review_output_path = input_path if input_path is not None else review_output_path_for(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     if strategy is None:
         strategy = _rp.build_default_profile().strategies["parse"].content
     prompt = build_parse_prompt(
@@ -3362,6 +3441,8 @@ async def _emit_failure_handoff(
     output: str,
     *,
     offer_clipboard: bool,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> None:
     """Run the failure summarizer, display the handoff body, and optionally
@@ -3377,7 +3458,12 @@ async def _emit_failure_handoff(
     """
     run_context = resolve_run_context(run_context)
     body, handoff_path, handoff_written = await _run_failure_summarizer(
-        backend, work, output, run_context=run_context,
+        backend,
+        work,
+        output,
+        artifact_session=artifact_session,
+        allow_standalone=allow_standalone,
+        run_context=run_context,
     )
     if handoff_written:
         preview_lines = body.splitlines()
@@ -3436,6 +3522,8 @@ def _reject_test_healing_generated_file_edits(
     pre_untracked: set[str],
     pre_untracked_contents: dict[str, bytes] | None = None,
     snapshot_captured: bool = True,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
 ) -> list[str] | None:
     """Restore generated files, returning ``None`` if any restoration fails."""
     if not snapshot_captured:
@@ -3444,7 +3532,11 @@ def _reject_test_healing_generated_file_edits(
         return []
 
     ref = snapshot or "HEAD"
-    recovery_dir = artifact_dir_for(repo) / "partial-fixes"
+    recovery_dir = artifact_dir_for(
+        repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    ) / "partial-fixes"
 
     try:
         changed = git_ops.changed_files_against(
@@ -3518,7 +3610,11 @@ def _reject_test_healing_generated_file_edits(
             restoration_failed = True
 
     if direct_violations:
-        artifact = artifact_dir_for(repo) / "deep" / "generated-file-violations.json"
+        artifact = artifact_dir_for(
+            repo,
+            session=artifact_session,
+            allow_standalone=allow_standalone,
+        ) / "deep" / "generated-file-violations.json"
         try:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(
@@ -3727,6 +3823,8 @@ async def phase_test_and_heal(
     session_id: str | None = None,
     capture_tree_key: Callable[[], str] | None = None,
     footprint: AuthorizedFixFootprint | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> TestAndHealResult:
     """Phase 4: Run tests and prompt user on failure for action.
@@ -3805,6 +3903,8 @@ async def phase_test_and_heal(
             snapshot_captured=snapshot_captured,
             pre_untracked=pre_untracked,
             pre_untracked_contents=pre_untracked_contents,
+            artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
         )
         return guard_result is not None
 
@@ -3867,7 +3967,13 @@ async def phase_test_and_heal(
                 console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
             await _emit_failure_handoff(
-                backend, work, output, offer_clipboard=False, run_context=run_context,
+                backend,
+                work,
+                output,
+                offer_clipboard=False,
+                artifact_session=artifact_session,
+                allow_standalone=allow_standalone,
+                run_context=run_context,
             )
             return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
         if decision is True:
@@ -3985,7 +4091,13 @@ async def phase_test_and_heal(
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
             await _emit_failure_handoff(
-                backend, work, output, offer_clipboard=True, run_context=run_context,
+                backend,
+                work,
+                output,
+                offer_clipboard=True,
+                artifact_session=artifact_session,
+                allow_standalone=allow_standalone,
+                run_context=run_context,
             )
             return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
 
@@ -4841,6 +4953,8 @@ async def phase_per_stack_reviews(
     include_alternatives: bool = True,
     write_coverage_receipts: bool = False,
     strategies: dict[str, str] | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
@@ -4893,7 +5007,11 @@ async def phase_per_stack_reviews(
     from daydream.deep.prompts import _diff_blocks_for_files
     from daydream.deep.records import stamp_record_uids
 
-    deep_dir_path = _deep_dir(work.repo)
+    deep_dir_path = _deep_dir(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     recorder = get_current_recorder()
     if strategies is None:
         strategies = {
@@ -5216,6 +5334,8 @@ async def phase_supervise_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Adjudicate canonical merged findings in one batched LLM call."""
@@ -5226,7 +5346,11 @@ async def phase_supervise_review(
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Supervising {len(items)} merged finding(s)")
 
-    dd = deep_dir(work.repo)
+    dd = deep_dir(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     input_path = dd / "supervise-input.json"
     # Deliberately a verbatim dump of the canonical items, host-only fields and
     # all (``lens``, ``location_note``, ``severity_before_demotion``,
@@ -5355,6 +5479,8 @@ async def phase_arbiter_review(
     exploration_dir: Path | None = None,
     intent_authoritative: bool = False,
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
     """Re-review high-severity / contested per-stack findings with the arbiter (#168).
@@ -5402,7 +5528,11 @@ async def phase_arbiter_review(
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Arbitrating {len(selected_records)} high-severity/contested finding(s)")
 
-    dd = deep_dir(work.repo)
+    dd = deep_dir(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     input_path = arbiter_input_path(dd)
     arbiter_input = _index_records(selected_records, "arb_id")
     input_path.write_text(json.dumps(arbiter_input, indent=2))
@@ -5482,6 +5612,8 @@ async def phase_suppression_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Skeptical precision-mode second opinion over borderline findings (#232).
@@ -5519,7 +5651,11 @@ async def phase_suppression_review(
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Suppression-reviewing {len(selected_records)} borderline finding(s)")
 
-    dd = deep_dir(work.repo)
+    dd = deep_dir(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     input_path = suppression_input_path(dd)
     suppression_input = _index_records(selected_records, "sup_id")
     input_path.write_text(json.dumps(suppression_input, indent=2))
@@ -5953,6 +6089,8 @@ def _write_single_stack_merged_items(
     structural_records_path: Path | None,
     *,
     failed_stacks: dict[str, str] | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
 ) -> None:
     """Write the canonical ``merged-items.json`` for a tiny-diff run (issue #172).
 
@@ -5987,7 +6125,11 @@ def _write_single_stack_merged_items(
     from daydream.deep.artifacts import merged_items_path, merged_report_path
     from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
 
-    canonical_path = review_output_path_for(repo)
+    canonical_path = review_output_path_for(
+        repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     report_path = merged_report_path(deep_dir_path)
     items_path = merged_items_path(deep_dir_path)
 
@@ -6175,6 +6317,8 @@ async def phase_cross_stack_merge(
     intent_authoritative: bool = False,
     continuation: ContinuationToken | None = None,
     strategy: str | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
@@ -6233,8 +6377,16 @@ async def phase_cross_stack_merge(
     from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
     from daydream.deep.records import stack_name_from_records_source
 
-    dd = deep_dir(work.repo)
-    canonical_path = review_output_path_for(work.repo)
+    dd = deep_dir(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
+    canonical_path = review_output_path_for(
+        work.repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     report_path = merged_report_path(dd)
     items_path = merged_items_path(dd)
 
