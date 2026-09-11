@@ -34,6 +34,12 @@ updates:
           - patch
     commit-message:
       prefix: chore(deps)
+    # tree-sitter 0.26.0 is blocked in-repo: native Point-getter use-after-free
+    # that SIGSEGVs the process (py-tree-sitter#472). The fix (py-tree-sitter#466)
+    # is merged upstream but unreleased, and daydream/_tree_sitter_safety.py
+    # refuses 0.26.0. Hold the pin at 0.25.2 until a fixed version ships.
+    ignore:
+      - dependency-name: tree-sitter
 
   # Standalone RL package uv dependencies.
   - package-ecosystem: uv
