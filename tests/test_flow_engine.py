@@ -80,6 +80,43 @@ def test_backend_for_resolves_pi_model_from_workspace(tmp_path: Path) -> None:
     assert ctx.backend_for("review").model == "gpt-5.6-luna"
 
 
+def test_backend_factory_uses_context_workspace_and_cache(tmp_path: Path) -> None:
+    from daydream.backends import Backend
+    from daydream.runner import _resolve_backend
+    from daydream.workspace import AuditWorkspace
+
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"defaultModel": "context-model"}')
+    ctx = _ctx(Registry())
+    ctx.config.backend = "pi"
+    ctx.work = WorkContext(
+        repo=tmp_path, source=tmp_path, base_branch="main", base_sha="0" * 40,
+        head_branch="feature", head_sha="1" * 40, is_ephemeral=False, run_id="factory",
+    )
+
+    resolved_phases: list[str] = []
+
+    def factory(
+        config: RunConfig, phase: str,
+        cache: dict[tuple[str, str | None, str | None, Path | None], Backend],
+        cwd: Path, audit: AuditWorkspace | None,
+    ) -> Backend:
+        resolved_phases.append(phase)
+        assert config is ctx.config
+        assert cache is ctx._backend_cache
+        assert cwd == tmp_path
+        assert audit is ctx.audit_workspace
+        return _resolve_backend(config, phase, cache, cwd=cwd, audit_workspace=audit)
+
+    ctx._backend_factory = factory
+    review = ctx.backend_for("review")
+    assert review.model == "context-model"
+    assert ctx.backend_for("review") is review
+    assert len(ctx._backend_cache) == 1
+    assert resolved_phases == ["review", "review"]
+
+
 async def test_order_gating_stop_and_loop() -> None:
     reg = Registry()
     reg.register_phase(FlowStep("a", run=_trace("a")))

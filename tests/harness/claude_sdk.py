@@ -96,6 +96,18 @@ def patch_claude_sdk(
         result_message: Class the backend treats as ``ResultMessage``.
     """
     monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_class)
+
+    def _injected_client(
+        *,
+        options: Any,
+        transport: Any,
+        initialize_timeout_s: float,
+    ) -> Any:
+        return client_class(options=options)
+
+    monkeypatch.setattr(
+        "daydream.backends.claude._RunLocalClaudeSDKClient", _injected_client
+    )
     monkeypatch.setattr("daydream.backends.claude.AssistantMessage", assistant_message)
     monkeypatch.setattr("daydream.backends.claude.UserMessage", MockUserMessage)
     monkeypatch.setattr("daydream.backends.claude.ResultMessage", result_message)

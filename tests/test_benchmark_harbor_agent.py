@@ -1,6 +1,7 @@
 """Privacy-safe Daydream Harbor review agent (issue #780) tests."""
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -257,6 +258,7 @@ def test_entrypoint_build_run_config_is_controlled() -> None:
         trajectory_path="/logs/agent/trajectory.json",
         backend="pi",
         model="deepseek/deepseek-v4-flash-0731",
+        profile_candidate=None,
     )
     assert cfg.output_mode == "review"
     assert cfg.base == "base"
@@ -270,35 +272,29 @@ def test_entrypoint_build_run_config_is_controlled() -> None:
     assert cfg.file_config == DaydreamFileConfig()
 
 
-def test_entrypoint_backend_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_entrypoint_backend_fail_closed() -> None:
     from daydream.benchmark.harbor import entrypoint
 
-    monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "codex")
     with pytest.raises(entrypoint.EntrypointError) as exc:
-        entrypoint.require_supported_backend()
+        entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": "codex"})
     assert "pi" in str(exc.value)
 
 
-def test_entrypoint_backend_allowlist_pi_and_claude_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_entrypoint_backend_allowlist_pi_and_claude_pass() -> None:
     from daydream.benchmark.harbor import entrypoint
 
     for value in ("pi", "claude", "CLAUDE", " claude "):
-        monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", value)
-        assert entrypoint.require_supported_backend() == value.strip().lower()
+        assert entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value}) == value.strip().lower()
 
 
-def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
     from daydream.benchmark.harbor import entrypoint
 
     for value in ("codex", "opencode"):
-        monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", value)
         with pytest.raises(entrypoint.EntrypointError) as exc:
-            entrypoint.require_supported_backend()
+            entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value})
         assert "'pi'" in str(exc.value) and "'claude'" in str(exc.value)
-    monkeypatch.delenv("DAYDREAM_REVIEW_BACKEND", raising=False)
-    assert entrypoint.require_supported_backend() == "pi"
+    assert entrypoint.require_supported_backend({}) == "pi"
 
 
 # ---------------------------------------------------------------------------
@@ -774,8 +770,6 @@ def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytes
     """A real temp git repo/task plus a fake backend drives the production entrypoint
     through the in-process runner and publishes the exact findings and an explicit
     empty review (AC 3 / AC 5 gate)."""
-    import os
-
     from daydream.benchmark.harbor import entrypoint
     from daydream.benchmark.harbor import verifier_core as vc
     from tests.harness.stub_backend import install_stub_backend
@@ -785,17 +779,7 @@ def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytes
     case_id = "case-abc123def456"
     env = _end_env(repo, tmp_path, case_id)
 
-    saved = {key: os.environ.get(key) for key in env}
-    try:
-        import asyncio
-
-        rc = asyncio.run(entrypoint.main(monkeypatch_env=env))
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    rc = asyncio.run(entrypoint.main(env))
     assert rc == 0
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
     parsed = vc.validate_candidate_artifact(artifact)
@@ -853,7 +837,6 @@ def test_local_harbor_task_with_fake_backend(
     import asyncio
     import importlib
     import importlib.util
-    import os
 
     import pytest
 
@@ -950,20 +933,9 @@ def test_local_harbor_task_with_fake_backend(
     for prefix in _BANNED_PREFIXES:
         assert not any(k.startswith(prefix) for k in executed.child)
 
-    # Only the allowlisted child env reaches the executed entrypoint: drop the
-    # host secrets we planted so the in-process runner sees the container env,
-    # then really run the entrypoint against the captured child env.
-    for banned in _BANNED_VARS:
-        os.environ.pop(banned, None)
-    saved = {env_key: os.environ.get(env_key) for env_key in executed.child}
-    try:
-        rc = asyncio.run(entrypoint.main(monkeypatch_env=executed.child))
-    finally:
-        for env_key, value in saved.items():
-            if value is None:
-                os.environ.pop(env_key, None)
-            else:
-                os.environ[env_key] = value
+    # The entrypoint consumes exactly the captured child mapping; no host
+    # credentials need to be removed or restored around this in-process run.
+    rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
 
     # The child env carried the per-case task key through to a genuinely
@@ -1021,7 +993,6 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     in-container claude branch raises EntrypointError and rc != 0.
     """
     import asyncio
-    import os
 
     import pytest
 
@@ -1116,20 +1087,9 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
             continue  # exempted for backend="claude"
         assert not any(k.startswith(prefix) for k in executed.child)
 
-    # Only the allowlisted child env reaches the executed entrypoint: drop the
-    # host secrets we planted so the in-process runner sees the container env,
-    # then really run the entrypoint against the captured child env.
-    for banned in _BANNED_VARS:
-        os.environ.pop(banned, None)
-    saved = {env_key: os.environ.get(env_key) for env_key in executed.child}
-    try:
-        rc = asyncio.run(entrypoint.main(monkeypatch_env=executed.child))
-    finally:
-        for env_key, value in saved.items():
-            if value is None:
-                os.environ.pop(env_key, None)
-            else:
-                os.environ[env_key] = value
+    # The entrypoint consumes exactly the captured child mapping; no host
+    # credentials need to be removed or restored around this in-process run.
+    rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
 
     # The child env carried the claude credential through to a genuinely

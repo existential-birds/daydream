@@ -1,5 +1,6 @@
 """Tests for ClaudeBackend."""
 import json
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -91,6 +92,169 @@ def _capturing_client(captured: dict[str, Any]) -> type:
         ],
         captured=captured,
     )
+
+
+@pytest.mark.parametrize(
+    "version_admission_delay_s",
+    [pytest.param(0.0, id="version-completes"), pytest.param(2.1, id="version-times-out")],
+)
+@pytest.mark.asyncio
+async def test_injected_claude_uses_run_local_transport_for_version_and_main_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version_admission_delay_s: float,
+) -> None:
+    import anyio
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+
+    from daydream.backends.claude import (
+        _RunLocalClaudeSDKClient,
+        _RunLocalSubprocessCLITransport,
+    )
+
+    capture = tmp_path / "native-env.jsonl"
+    cli = tmp_path / "claude"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CAPTURE_LOG'], 'a', encoding='utf-8') as out:\n"
+        "    out.write(json.dumps({'kind': 'env', 'version': '-v' in sys.argv, "
+        "'anthropic': os.environ.get('ANTHROPIC_API_KEY'), "
+        "'ambient': os.environ.get('AMBIENT_ONLY'), "
+        "'path': os.environ.get('PATH'), 'pwd': os.environ.get('PWD')}) + '\\n')\n"
+        "if '-v' in sys.argv:\n"
+        "    print('2.1.0', flush=True)\n"
+        "else:\n"
+        "    for line in sys.stdin:\n"
+        "        message = json.loads(line)\n"
+        "        with open(os.environ['CAPTURE_LOG'], 'a', encoding='utf-8') as out:\n"
+        "            out.write(json.dumps({'kind': 'protocol', 'message': message}) + '\\n')\n"
+        "        if message.get('type') == 'control_request':\n"
+        "            print(json.dumps({'type': 'control_response', 'response': {"
+        "'subtype': 'success', 'request_id': message['request_id'], "
+        "'response': {}}}), flush=True)\n"
+        "        elif message.get('type') == 'user':\n"
+        "            print(json.dumps({'type': 'assistant', 'message': {"
+        "'id': 'm1', 'model': 'fixture-model', 'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': 'OK'}], "
+        "'stop_reason': 'end_turn', 'usage': {}}}), flush=True)\n"
+        "            print(json.dumps({'type': 'result', 'subtype': 'success', "
+        "'duration_ms': 1, 'duration_api_ms': 1, 'is_error': False, "
+        "'num_turns': 1, 'session_id': 's1', 'total_cost_usd': 0, "
+        "'usage': {}, 'result': 'OK'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    cli.chmod(0o755)
+    environment = {
+        "PATH": str(tmp_path),
+        "HOME": str(tmp_path / "run-home"),
+        "CAPTURE_LOG": str(capture),
+        "ANTHROPIC_API_KEY": "run-key",
+        "PWD": "/run/pwd",
+    }
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
+    monkeypatch.setenv("AMBIENT_ONLY", "must-not-cross")
+    monkeypatch.setenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "malformed-ambient")
+
+    open_process = anyio.open_process
+    spawn_attempts: list[tuple[bool, dict[str, str]]] = []
+
+    async def _record_open_process(
+        command: list[str], *args: Any, **kwargs: Any
+    ) -> Any:
+        native_environment = kwargs.get("env")
+        assert isinstance(native_environment, dict)
+        is_version = command == [str(cli), "-v"]
+        spawn_attempts.append((is_version, dict(native_environment)))
+        if is_version and version_admission_delay_s:
+            # The SDK's version check is explicitly best-effort and capped at
+            # two seconds. Model an overloaded host where process admission
+            # misses that window; the main SDK session must still start.
+            await anyio.sleep(version_admission_delay_s)
+        return await open_process(command, *args, **kwargs)
+
+    monkeypatch.setattr(anyio, "open_process", _record_open_process)
+
+    async def _hook(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"continue": True}
+
+    options = ClaudeAgentOptions(
+        cli_path=str(cli),
+        cwd=str(tmp_path),
+        env=dict(environment),
+        hooks={
+            "PreToolUse": [HookMatcher(matcher=None, hooks=[cast(Any, _hook)])]
+        },
+    )
+    transport = _RunLocalSubprocessCLITransport(options, environment=environment)
+
+    async with _RunLocalClaudeSDKClient(
+        options=options,
+        transport=transport,
+        initialize_timeout_s=60.0,
+    ) as client:
+        await client.query("review")
+        messages = [message async for message in client.receive_response()]
+
+    observations = [json.loads(line) for line in capture.read_text().splitlines()]
+    native = [item for item in observations if item["kind"] == "env"]
+    protocol = [item["message"] for item in observations if item["kind"] == "protocol"]
+    assert len(spawn_attempts) == 2
+    assert {is_version for is_version, _ in spawn_attempts} == {False, True}
+    for _, attempted_environment in spawn_attempts:
+        assert attempted_environment["ANTHROPIC_API_KEY"] == "run-key"
+        assert "AMBIENT_ONLY" not in attempted_environment
+        assert attempted_environment["PATH"] == str(tmp_path)
+        assert attempted_environment["PWD"] == str(tmp_path)
+        assert attempted_environment["HOME"] == str(tmp_path / "run-home")
+
+    main_native = [item for item in native if not item["version"]]
+    assert len(main_native) == 1
+    assert all(item["anthropic"] == "run-key" for item in native)
+    assert all(item["ambient"] is None for item in native)
+    assert all(item["path"] == str(tmp_path) for item in native)
+    assert main_native[0]["pwd"] == str(tmp_path)
+    initialize = next(item for item in protocol if item["type"] == "control_request")
+    assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
+    assert len(messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_backend_injected_environment_reaches_sdk_options_and_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.backends import BackendExecutionInput, RetryPolicy
+
+    captured: dict[str, Any] = {}
+    base_client = scripted_client(
+        [MockAssistantMessage(content=[MockTextBlock(text="OK")]), MockResultMessage()]
+    )
+
+    class CapturingClient(base_client):  # type: ignore[misc,valid-type]
+        def __init__(self, options: Any = None, transport: Any = None) -> None:
+            super().__init__(options=options)
+            captured["options"] = options
+            captured["transport"] = transport
+
+    patch_claude_sdk(monkeypatch, CapturingClient)
+    execution = BackendExecutionInput.from_environment(
+        {
+            "HOME": str(tmp_path / "home"),
+            "PATH": "/run/bin",
+            "ANTHROPIC_API_KEY": "run-key",
+            "DAYDREAM_FANOUT_CONCURRENCY": "4",
+            "DAYDREAM_PI_RETRY_ATTEMPTS": "3",
+        },
+        backend="claude",
+    )
+    backend = ClaudeBackend(model="opus", execution_input=execution)
+
+    _ = [event async for event in backend.execute(tmp_path, "review")]
+
+    assert captured["options"].env["ANTHROPIC_API_KEY"] == "run-key"
+    assert captured["options"].env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+    assert backend.fanout_concurrency == 4
+    assert backend.retry_policy == RetryPolicy(3, 2.0, 120.0)
 
 
 async def _drive_claude_backend_to_list(

@@ -721,6 +721,43 @@ def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch
     assert env["PATH"] == "/usr/bin"
 
 
+@pytest.mark.asyncio
+async def test_codex_execution_input_supplies_complete_native_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.backends import BackendExecutionInput, RetryPolicy
+
+    execution = BackendExecutionInput.from_environment(
+        {
+            "HOME": str(tmp_path / "run-home"),
+            "PATH": "/run/bin",
+            "OPENAI_API_KEY": "run-key",
+            "DAYDREAM_FANOUT_CONCURRENCY": "5",
+            "DAYDREAM_PI_RETRY_ATTEMPTS": "2",
+        },
+        backend="codex",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-key")
+    process = make_mock_process_from_fixture("simple_text.jsonl")
+    backend = CodexBackend(model="fixture-model", execution_input=execution)
+
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        return_value=process,
+    ) as mock_exec:
+        _ = [event async for event in backend.execute(tmp_path, "review")]
+
+    assert mock_exec.call_args.kwargs["env"] == {
+        "HOME": str(tmp_path / "run-home"),
+        "PATH": "/run/bin",
+        "OPENAI_API_KEY": "run-key",
+        "DAYDREAM_FANOUT_CONCURRENCY": "5",
+        "DAYDREAM_PI_RETRY_ATTEMPTS": "2",
+    }
+    assert backend.fanout_concurrency == 5
+    assert backend.retry_policy == RetryPolicy(2, 2.0, 120.0)
+
+
 @pytest.mark.skipif(
     sys.platform == "darwin",
     reason="darwin behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122 M3)",
@@ -1129,6 +1166,171 @@ async def test_codex_synthesizes_cost_for_known_model() -> None:
     assert mev.prompt_tokens == 15_000
     assert mev.completion_tokens == 2_000
     assert mev.cached_tokens == 5_000
+
+
+def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'[prices."{model}"]\ninput = {input_price}\noutput = {output_price}\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+async def _codex_cost_for_execution_input(model: str, environment: dict[str, str]) -> float | None:
+    from daydream.backends import BackendExecutionInput
+
+    backend = CodexBackend(
+        model=model,
+        execution_input=BackendExecutionInput.from_environment(environment, backend="codex"),
+    )
+    events = [event async for event in backend.execute(Path("/tmp"), "price this turn")]
+    costs = [event for event in events if isinstance(event, CostEvent)]
+    metrics = [event for event in events if isinstance(event, MetricsEvent)]
+    assert len(costs) == 1
+    assert len(metrics) == 1
+    assert metrics[0].cost_usd == costs[0].cost_usd
+    return costs[0].cost_usd
+
+
+def _codex_price_process() -> Any:
+    return make_mock_process([
+        '{"type":"thread.started","thread_id":"th_price"}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":1000000,'
+        '"cached_input_tokens":0,"output_tokens":1000000}}',
+    ])
+
+
+@pytest.mark.asyncio
+async def test_codex_injected_pricing_uses_each_captured_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent run inputs select their own price file, never the parent override."""
+    model = "run-local-price-model"
+    first = _write_model_prices(tmp_path / "first.toml", model=model, input_price=1.0, output_price=2.0)
+    second = _write_model_prices(tmp_path / "second.toml", model=model, input_price=10.0, output_price=20.0)
+    hostile = _write_model_prices(tmp_path / "ambient.toml", model=model, input_price=100.0, output_price=200.0)
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(hostile))
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
+
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=[_codex_price_process(), _codex_price_process()],
+    ):
+        first_cost, second_cost = await asyncio.gather(
+            _codex_cost_for_execution_input(model, {"DAYDREAM_PRICES_FILE": str(first)}),
+            _codex_cost_for_execution_input(model, {"DAYDREAM_PRICES_FILE": str(second)}),
+        )
+
+    assert first_cost == pytest.approx(3.0)
+    assert second_cost == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_codex_injected_pricing_falls_back_to_captured_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "captured-home-price-model"
+    run_home = tmp_path / "run-home"
+    _write_model_prices(
+        run_home / ".daydream" / "prices.toml",
+        model=model,
+        input_price=4.0,
+        output_price=5.0,
+    )
+    hostile = _write_model_prices(tmp_path / "ambient.toml", model=model, input_price=40.0, output_price=50.0)
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(hostile))
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
+
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        return_value=_codex_price_process(),
+    ):
+        cost = await _codex_cost_for_execution_input(
+            model, {"DAYDREAM_PRICES_FILE": "", "HOME": str(run_home)}
+        )
+
+    assert cost == pytest.approx(9.0)
+
+
+@pytest.mark.asyncio
+async def test_codex_injected_pricing_without_home_uses_builtins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_model = "ambient-only-price-model"
+    hostile = _write_model_prices(
+        tmp_path / "ambient.toml",
+        model=custom_model,
+        input_price=100.0,
+        output_price=200.0,
+    )
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(hostile))
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
+
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=[_codex_price_process(), _codex_price_process()],
+    ):
+        custom_cost = await _codex_cost_for_execution_input(custom_model, {"PATH": "/run/bin"})
+        builtin_cost = await _codex_cost_for_execution_input("gpt-5.6-sol", {"PATH": "/run/bin"})
+
+    assert custom_cost is None
+    # One million input tokens crosses the built-in long-context threshold;
+    # this also verifies resolve_prices retains its pricing-policy metadata.
+    assert builtin_cost == pytest.approx(55.0)
+
+
+@pytest.mark.asyncio
+async def test_codex_injected_missing_or_malformed_price_file_falls_back_to_builtins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile = _write_model_prices(
+        tmp_path / "ambient.toml",
+        model="gpt-5.5",
+        input_price=100.0,
+        output_price=200.0,
+    )
+    malformed = tmp_path / "malformed.toml"
+    malformed.write_text("this is = = not toml", encoding="utf-8")
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(hostile))
+
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=[_codex_price_process(), _codex_price_process()],
+    ):
+        missing_cost = await _codex_cost_for_execution_input(
+            "gpt-5.5", {"DAYDREAM_PRICES_FILE": str(tmp_path / "missing.toml")}
+        )
+        malformed_cost = await _codex_cost_for_execution_input(
+            "gpt-5.5", {"DAYDREAM_PRICES_FILE": str(malformed)}
+        )
+
+    assert missing_cost == pytest.approx(35.0)
+    assert malformed_cost == pytest.approx(35.0)
+
+
+@pytest.mark.asyncio
+async def test_codex_without_execution_input_preserves_ambient_price_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "ambient-price-model"
+    ambient = _write_model_prices(tmp_path / "ambient.toml", model=model, input_price=6.0, output_price=7.0)
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(ambient))
+
+    backend = CodexBackend(model=model)
+    events = await _run_inline_lines(
+        backend,
+        "price this turn",
+        [
+            '{"type":"thread.started","thread_id":"th_ambient_price"}',
+            '{"type":"turn.completed","usage":{"input_tokens":1000000,"output_tokens":1000000}}',
+        ],
+    )
+
+    costs = [event for event in events if isinstance(event, CostEvent)]
+    assert len(costs) == 1
+    assert costs[0].cost_usd == pytest.approx(13.0)
 
 
 @pytest.mark.asyncio
@@ -2057,6 +2259,115 @@ class TestResolveRealGitDir:
 
 class TestIsolatedChildEnvDarwinPath:
     """Darwin PATH-prepend in _isolated_child_env (issue #1122 M1/M4/M6/M7)."""
+
+    @staticmethod
+    def _install_xcrun(
+        root: Path,
+        *,
+        label: str,
+        exit_code: int = 0,
+    ) -> tuple[dict[str, str], Path, Path]:
+        bin_dir = root / label / "shim-bin"
+        git_dir = root / label / "real-git-bin"
+        bin_dir.mkdir(parents=True)
+        git_dir.mkdir(parents=True)
+        git = git_dir / "git"
+        git.write_text("#!/bin/sh\n", encoding="utf-8")
+        git.chmod(0o755)
+        log = root / f"{label}-probe.jsonl"
+        xcrun = bin_dir / "xcrun"
+        xcrun.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os\n"
+            "with open(os.environ['PROBE_LOG'], 'a', encoding='utf-8') as out:\n"
+            "    out.write(json.dumps(dict(os.environ), sort_keys=True) + '\\n')\n"
+            f"print({str(git)!r})\n"
+            f"raise SystemExit({exit_code})\n",
+            encoding="utf-8",
+        )
+        xcrun.chmod(0o755)
+        environment = {
+            "PATH": str(bin_dir),
+            "HOME": str(root / label / "home"),
+            "DEVELOPER_DIR": str(root / label / "developer"),
+            "PROBE_LOG": str(log),
+        }
+        return environment, git_dir, log
+
+    def test_injected_environments_probe_their_own_paths_despite_ambient_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from daydream.backends import codex
+
+        ambient, ambient_git_dir, _ = self._install_xcrun(
+            tmp_path, label="ambient"
+        )
+        first, first_git_dir, first_log = self._install_xcrun(
+            tmp_path, label="first"
+        )
+        second, second_git_dir, second_log = self._install_xcrun(
+            tmp_path, label="second"
+        )
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        for key, value in ambient.items():
+            monkeypatch.setenv(key, value)
+
+        assert codex._resolve_real_git_dir() == str(ambient_git_dir)
+        real_run = subprocess.run
+        probe_environments: list[dict[str, str] | None] = []
+
+        def recording_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            probe_environments.append(kwargs.get("env"))
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(codex.subprocess, "run", recording_run)
+        first["GIT_DIR"] = "/must/be/stripped"
+        first_child = codex._isolated_child_env(
+            Path("/source"), Path("/first-clone"), base_environment=first
+        )
+        second_child = codex._isolated_child_env(
+            Path("/source"), Path("/second-clone"), base_environment=second
+        )
+
+        assert first_child is not None and second_child is not None
+        assert first_child["PATH"].startswith(f"{first_git_dir}{os.pathsep}")
+        assert second_child["PATH"].startswith(f"{second_git_dir}{os.pathsep}")
+        first_probe = json.loads(first_log.read_text().strip())
+        second_probe = json.loads(second_log.read_text().strip())
+        expected_first = {
+            key: value for key, value in first.items() if key != "GIT_DIR"
+        }
+        assert probe_environments == [expected_first, second]
+        assert expected_first.items() <= first_probe.items()
+        assert second.items() <= second_probe.items()
+        assert "GIT_DIR" not in first_probe
+
+    def test_failed_injected_probe_leaves_path_and_ordinary_cache_unpoisoned(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from daydream.backends import codex
+
+        failed, _, failed_log = self._install_xcrun(
+            tmp_path, label="failed", exit_code=1
+        )
+        ambient, ambient_git_dir, ambient_log = self._install_xcrun(
+            tmp_path, label="ambient"
+        )
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        original_path = failed["PATH"]
+
+        child = codex._isolated_child_env(
+            Path("/source"), Path("/clone"), base_environment=failed
+        )
+
+        assert child is not None
+        assert child["PATH"] == original_path
+        assert failed_log.exists()
+        assert codex._REAL_GIT_RESOLVED is False
+        for key, value in ambient.items():
+            monkeypatch.setenv(key, value)
+        assert codex._resolve_real_git_dir() == str(ambient_git_dir)
+        assert ambient_log.exists()
 
     def test_darwin_prepends_real_git_dir_preserving_rest_of_path(
         self, monkeypatch: pytest.MonkeyPatch,

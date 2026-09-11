@@ -10,6 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anyio
@@ -128,6 +129,41 @@ async def test_run_agent_ignores_malformed_retry_environment(monkeypatch: pytest
     )
 
     assert output == "Review complete"
+    assert backend.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_agent_uses_backend_retry_policy_without_reading_ambient_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An injected backend policy is complete; ambient retry values are untouched."""
+    from daydream.backends import RetryPolicy
+
+    backend = _fail_then_succeed(
+        PiError("429 overloaded", retryable=True),
+        text="done",
+    )
+    backend_with_policy: Any = backend
+    backend_with_policy.retry_policy = RetryPolicy(
+        attempts=1, base_delay_s=0.0, max_delay_s=0.0
+    )
+
+    class _ForbiddenEnvironment:
+        def get(self, key: str, default: Any = None) -> Any:
+            if key.startswith("DAYDREAM_PI_RETRY_"):
+                raise AssertionError(f"ambient retry read: {key}")
+            return default
+
+    monkeypatch.setattr(
+        "daydream.agent.os", SimpleNamespace(environ=_ForbiddenEnvironment()),
+    )
+
+    output, _, _ = await run_agent(
+        backend, tmp_path, "review", phase=DaydreamPhase.REVIEW
+    )
+
+    assert output == "done"
     assert backend.call_count == 2
 
 

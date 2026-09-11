@@ -19,13 +19,14 @@ import tempfile
 import threading
 import uuid
 from collections import Counter
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from pathlib import Path
 from typing import Any
 
 from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
+    BackendExecutionInput,
     CodexRequestConfig,
     ContinuationToken,
     CostEvent,
@@ -47,7 +48,7 @@ from daydream.backends._transport import (
     StdinMode,
     TransportExitError,
 )
-from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
+from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _DIAGNOSTIC_LABEL_MAX_CHARS = 64
@@ -111,18 +112,53 @@ _REAL_GIT_RESOLUTION_LOCK = threading.Lock()
 _XCRUN_TIMEOUT_S = 5
 
 
-def _resolve_real_git_dir() -> str | None:
-    """Resolve the directory of the real (non-shim) ``git`` on macOS (issue #1122).
+def _probe_real_git_dir(environment: Mapping[str, str] | None) -> str | None:
+    """Run and validate one bounded ``xcrun --find git`` probe.
 
-    Runs ``xcrun --find git`` in the **parent** process — never inside the
-    sandboxed child, where ``xcrun`` itself is blocked — validates the target is
-    an existing executable file, and returns its parent directory. Resolved at
-    most once per process (negative results are cached too). On non-Darwin, or
-    whenever resolution fails (including the bounded timeout on a hung
-    ``xcrun``), returns ``None`` with a warning and the caller leaves the child
-    PATH unchanged (fail-open). The call never stalls the event loop:
-    ``execute()`` builds the child env through ``asyncio.to_thread``. Never
-    raises.
+    ``None`` preserves ordinary subprocess inheritance. An explicit mapping is
+    complete and is passed through without merging process globals.
+    """
+    kwargs: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+        "timeout": _XCRUN_TIMEOUT_S,
+    }
+    if environment is not None:
+        kwargs["env"] = dict(environment)
+    try:
+        proc = subprocess.run(["xcrun", "--find", "git"], **kwargs)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _logger.warning(
+            "codex: could not resolve real git via 'xcrun --find git' (%s); leaving child PATH unchanged",
+            exc,
+        )
+        return None
+    if proc.returncode != 0:
+        _logger.warning(
+            "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
+            "leaving child PATH unchanged",
+            proc.returncode,
+            proc.stderr.strip(),
+        )
+        return None
+    git_path = proc.stdout.strip()
+    if not git_path or not Path(git_path).is_file() or not os.access(git_path, os.X_OK):
+        _logger.warning(
+            "codex: could not resolve real git via 'xcrun --find git' (invalid target %r); "
+            "leaving child PATH unchanged",
+            git_path,
+        )
+        return None
+    return str(Path(git_path).parent)
+
+
+def _resolve_real_git_dir() -> str | None:
+    """Resolve and cache the ambient real-git directory on macOS (issue #1122).
+
+    Ordinary calls inherit the parent environment and cache positive and
+    negative results at most once per process. Explicit execution environments
+    use :func:`_probe_real_git_dir` directly and never consult this cache.
     """
     global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
     with _REAL_GIT_RESOLUTION_LOCK:
@@ -131,36 +167,7 @@ def _resolve_real_git_dir() -> str | None:
         _REAL_GIT_RESOLVED = True
         if sys.platform != "darwin":
             return None
-        try:
-            proc = subprocess.run(
-                ["xcrun", "--find", "git"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=_XCRUN_TIMEOUT_S,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            _logger.warning(
-                "codex: could not resolve real git via 'xcrun --find git' (%s); leaving child PATH unchanged",
-                exc,
-            )
-            return None
-        if proc.returncode != 0:
-            _logger.warning(
-                "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
-                "leaving child PATH unchanged",
-                proc.returncode, proc.stderr.strip(),
-            )
-            return None
-        git_path = proc.stdout.strip()
-        if not git_path or not Path(git_path).is_file() or not os.access(git_path, os.X_OK):
-            _logger.warning(
-                "codex: could not resolve real git via 'xcrun --find git' (invalid target %r); "
-                "leaving child PATH unchanged",
-                git_path,
-            )
-            return None
-        _REAL_GIT_DIR = str(Path(git_path).parent)
+        _REAL_GIT_DIR = _probe_real_git_dir(None)
         return _REAL_GIT_DIR
 
 
@@ -190,7 +197,12 @@ class _SharedCheckout:
         self.refs = 0
 
 
-def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None:
+def _isolated_child_env(
+    cwd: Path,
+    execution_cwd: Path,
+    *,
+    base_environment: dict[str, str] | None = None,
+) -> dict[str, str] | None:
     """Return the isolated subprocess environment, or ``None`` when no isolation.
 
     When *execution_cwd* differs from *cwd* (the disposable-clone case), the
@@ -199,25 +211,56 @@ def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None
     vars that could point the clone's git ops at the source. On Darwin only
     (issue #1122), the directory of the parent-resolved real git binary is
     prepended to the child PATH so the sandboxed child bypasses the xcrun shim;
-    resolution failure leaves PATH unchanged (fail-open). Returns ``None``
-    when the process runs in *cwd* unchanged (nothing to strip). The isolation is
+    resolution failure leaves PATH unchanged (fail-open). When the process runs
+    in *cwd* unchanged, an explicit base environment is returned intact; the
+    ordinary ambient-inheritance path returns ``None``. The isolation is
     path-hiding, not physical — a model that independently discovers the source
     path could still write to its refs.
     """
     if execution_cwd == cwd:
-        return None
-    child_env = os.environ.copy()
+        return dict(base_environment) if base_environment is not None else None
+    child_env = (
+        dict(base_environment) if base_environment is not None else os.environ.copy()
+    )
     for var in _GIT_REDIRECT_STRIP_VARS:
         child_env.pop(var, None)
     # Issue #1122: on macOS the default ``git`` on PATH is an xcrun shim that
-    # sprays diagnostic noise when invoked inside the Seatbelt sandbox. Prepend
-    # the parent-resolved real git directory so the child resolves the real
-    # binary directly. Fail-open: when resolution fails, PATH is unchanged.
+    # sprays diagnostic noise when invoked inside the Seatbelt sandbox. An
+    # explicit execution environment gets an uncached probe with that exact
+    # mapping; ordinary callers retain the ambient process cache. Fail-open:
+    # when resolution fails, PATH is unchanged.
     if sys.platform == "darwin":
-        real_git_dir = _resolve_real_git_dir()
+        real_git_dir = (
+            _probe_real_git_dir(child_env)
+            if base_environment is not None
+            else _resolve_real_git_dir()
+        )
         if real_git_dir and "PATH" in child_env:
             child_env["PATH"] = real_git_dir + os.pathsep + child_env["PATH"]
     return child_env
+
+
+def _resolved_prices_for_execution(
+    execution_input: BackendExecutionInput | None,
+) -> dict[str, ModelPrice]:
+    """Load per-turn prices from the owning run environment.
+
+    Ordinary direct callers retain the ambient override behavior. An injected
+    execution environment is complete, so absence of both its explicit prices
+    path and HOME means built-in pricing with no user override.
+    """
+    if execution_input is None:
+        return resolve_prices(load_user_prices())
+
+    environment = execution_input.child_environment()
+    prices_path = environment.get("DAYDREAM_PRICES_FILE")
+    if prices_path:
+        overrides = load_user_prices(Path(prices_path))
+    elif home := environment.get("HOME"):
+        overrides = load_user_prices(Path(home) / ".daydream" / "prices.toml")
+    else:
+        overrides = {}
+    return resolve_prices(overrides)
 
 
 def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
@@ -428,10 +471,23 @@ class CodexBackend:
     # summaries inlined rather than pointed at on-disk artifact files.
     read_only_disposable_clone = True
 
-    def __init__(self, model: str, reasoning_effort: str | None = None):
+    def __init__(
+        self,
+        model: str,
+        reasoning_effort: str | None = None,
+        *,
+        execution_input: BackendExecutionInput | None = None,
+    ):
         self.model = model
         self.reasoning_effort = reasoning_effort
-        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 8)
+        self._execution_input = execution_input
+        if execution_input is not None:
+            self.fanout_concurrency = execution_input.fanout_concurrency
+            self.retry_policy = execution_input.retry_policy
+        else:
+            self.fanout_concurrency = resolve_fanout_concurrency(
+                "DAYDREAM_FANOUT_CONCURRENCY", 8
+            )
         self._transports: list[CliTransport] = []
         # Disposable read-only checkouts shared across concurrent execute() calls
         # (built once per cwd, refcounted; cleaned up when the last holder exits).
@@ -672,7 +728,17 @@ class CodexBackend:
             # Built off the event loop (asyncio.to_thread, like the sibling git
             # calls above): the env copy and the bounded xcrun resolution must
             # never stall concurrent fan-out execute() calls.
-            child_env = await asyncio.to_thread(_isolated_child_env, cwd, execution_cwd)
+            base_environment = (
+                self._execution_input.child_environment()
+                if self._execution_input is not None
+                else None
+            )
+            child_env = await asyncio.to_thread(
+                _isolated_child_env,
+                cwd,
+                execution_cwd,
+                base_environment=base_environment,
+            )
 
             if execution_cwd != cwd:
                 # Rebind the prompt so no rendering of the caller's source
@@ -721,7 +787,11 @@ class CodexBackend:
             self._transports.append(transport)
             await transport.start()
 
-            idle_timeout_s = stream_idle_timeout_s()
+            idle_timeout_s = (
+                self._execution_input.stream_idle_timeout_s
+                if self._execution_input is not None
+                else stream_idle_timeout_s()
+            )
             async for raw_line in transport.lines(lambda: idle_timeout_s):
                 try:
                     event = json.loads(raw_line)
@@ -1113,7 +1183,7 @@ class CodexBackend:
                         total_input_tokens=in_tok or 0,
                         cached_input_tokens=cached_tokens or 0,
                         output_tokens=out_tok or 0,
-                        prices=resolve_prices(load_user_prices()),
+                        prices=_resolved_prices_for_execution(self._execution_input),
                     )
                     if in_tok is not None and out_tok is not None:
                         yield MetricsEvent(

@@ -36,7 +36,7 @@ from daydream.backends import (
 )
 from daydream.exploration import ExplorationContext
 from daydream.extensions.loader import build_registry
-from daydream.flows.engine import FlowContext
+from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import RunContext, current_run_context
 from daydream.runner import RunConfig
@@ -989,6 +989,7 @@ async def test_run_dispatches_to_expected_flow(
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
             run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_factory: BackendFactory | None,
         ) -> int:
             assert run_context is current_run_context()
             called.append((name, work, config))
@@ -1025,6 +1026,7 @@ async def test_run_rejects_head_mismatch_before_dispatch(
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
             run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_factory: BackendFactory | None,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1056,6 +1058,7 @@ async def test_run_allows_matching_approved_head(
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
             run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_factory: BackendFactory | None,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1093,6 +1096,7 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
             run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_factory: BackendFactory | None,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1129,6 +1133,7 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
             run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_factory: BackendFactory | None,
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
@@ -1267,6 +1272,7 @@ async def test_review_run_does_not_mint_app_identity(
         config: RunConfig,
         _run_artifacts: Any = None,
         *, run_context: RunContext, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
         assert config.identity == "operator"
@@ -1375,6 +1381,7 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
         config: RunConfig,
         _run_artifacts: Any = None,
         *, run_context: RunContext, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
         seen["output_mode"] = config.output_mode
@@ -1867,6 +1874,7 @@ async def test_run_threads_non_interactive_into_runtime(
     async def stub(
         work: Any, config: Any, _run_artifacts: Any = None, *,
         run_context: RunContext, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert current_run_context() is run_context
         received.append(run_context)

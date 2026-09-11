@@ -32,6 +32,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import current_run_context
 from daydream.runner import RunConfig
@@ -186,8 +187,10 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
         run_artifacts: Any = None,
         *,
         run_context: Any, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
+        assert backend_factory is None
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
@@ -265,8 +268,10 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
         run_artifacts: Any = None,
         *,
         run_context: Any, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
+        assert backend_factory is None
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
@@ -328,8 +333,10 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
         run_artifacts: Any = None,
         *,
         run_context: Any, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
+        assert backend_factory is None
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
         captured["output_mode"] = config.output_mode
@@ -396,8 +403,10 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
         run_artifacts: Any = None,
         *,
         run_context: Any, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
+        assert backend_factory is None
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         return 0
@@ -450,8 +459,10 @@ async def test_review_mode_on_base_branch_does_not_error(
         run_artifacts: Any = None,
         *,
         run_context: Any, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
     ) -> int:
         assert run_context is current_run_context()
+        assert backend_factory is None
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
         return 0

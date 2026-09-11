@@ -56,6 +56,7 @@ from daydream.backends import (
     AUDIT_ROOT_ISOLATION_V1,
     AuditIsolationError,
     Backend,
+    BackendExecutionInput,
     create_backend,
 )
 from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS, REVIEW_OUTPUT_FILE
@@ -68,6 +69,7 @@ from daydream.extensions import (
     set_registry,
 )
 from daydream.flows import FlowContext, run_flow
+from daydream.flows.engine import BackendCache, BackendFactory
 from daydream.git_ops import GitError
 from daydream.hunk_index import write_hunk_index
 from daydream.observability.config import (
@@ -113,6 +115,18 @@ if TYPE_CHECKING:
 # comments and exits; ``review`` writes a report and exits; ``diagram``
 # (issue #1113) runs the diagram-only flow and posts a standalone comment.
 OutputMode = Literal["loop", "comment", "review", "diagram"]
+
+
+@dataclass(frozen=True)
+class RunnerExecutionInput:
+    """Runtime-only backend and GitHub capabilities for an embedded run.
+
+    Kept outside RunConfig and all persisted run metadata. Ordinary callers
+    omit this input and retain native environment inheritance.
+    """
+
+    backend: BackendExecutionInput = field(repr=False, compare=False)
+    github: github_app.GitHubExecutionInput = field(repr=False, compare=False)
 
 
 @dataclass
@@ -777,12 +791,11 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
 def _resolve_backend(
     config: RunConfig,
     phase: str,
-    cache: dict[
-        tuple[str, str | None, str | None, Path | None], Backend
-    ] | None = None,
+    cache: BackendCache | None = None,
     *,
     cwd: Path | None = None,
     audit_workspace: AuditWorkspace | None = None,
+    execution_input: BackendExecutionInput | None = None,
 ) -> Backend:
     """Get or create the backend for a given phase, respecting all precedence tiers.
 
@@ -815,6 +828,8 @@ def _resolve_backend(
             differing models, effort levels, or audit roots yield distinct
             instances.
         cwd: Target workspace used for backend-specific configuration.
+        execution_input: Optional immutable settings for native transports.
+            The owning FlowContext keeps the cache local to this input.
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
@@ -831,6 +846,16 @@ def _resolve_backend(
     )
 
     def _make() -> Backend:
+        if execution_input is not None:
+            return create_backend(
+                backend_name,
+                model=resolved_model,
+                cwd=cwd if backend_name == "pi" else None,
+                reasoning_effort=resolved_effort,
+                audit_root=audit_root,
+                audit_outward_symlinks=audit_outward_symlinks,
+                execution_input=execution_input,
+            )
         # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
         # default model, and widening it churns every patched create_backend.
         if backend_name == "pi":
@@ -995,7 +1020,10 @@ def _run_posts_to_github(config: RunConfig) -> bool:
 # Public entry points
 
 
-async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLocations | None = None) -> int:
+async def run(
+    config: RunConfig | None = None, *, private_roots: PrivateRootLocations | None = None,
+    execution: RunnerExecutionInput | None = None,
+) -> int:
     """Execute a daydream run end-to-end.
 
     Opens the workspace via :func:`open_workspace` and dispatches to the single
@@ -1006,9 +1034,27 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
     Args:
         config: Optional configuration. Defaults to a fresh :class:`RunConfig`
             (interactive prompts for target dir, skill, cleanup).
+        execution: Optional immutable execution capabilities for an embedded
+            caller. Backend transports and GitHub requests use its complete
+            environments. Omission preserves ordinary CLI inheritance.
     """
     if config is None:
         config = RunConfig()
+
+    backend_factory: BackendFactory | None = None
+    if execution is not None:
+        backend_execution = execution.backend
+
+        def create_for_context(
+            flow_config: RunConfig, phase: str, cache: BackendCache,
+            cwd: Path, audit: AuditWorkspace | None,
+        ) -> Backend:
+            return _resolve_backend(
+                flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
+                execution_input=backend_execution,
+            )
+
+        backend_factory = create_for_context
 
     # Codex backends need shell output visible (the commands ARE the signal), so
     # disable quiet when any phase resolves to codex. Done before backend construction.
@@ -1029,12 +1075,16 @@ async def run(config: RunConfig | None = None, *, private_roots: PrivateRootLoca
     with bind_run_context(run_context):
         return await _run_with_context(
             config, private_roots=private_roots, run_context=run_context,
+            backend_factory=backend_factory,
+            github_execution=None if execution is None else execution.github,
         )
 
 
 async def _run_with_context(
     config: RunConfig, *, private_roots: PrivateRootLocations | None,
     run_context: RunContext,
+    backend_factory: BackendFactory | None = None,
+    github_execution: github_app.GitHubExecutionInput | None = None,
 ) -> int:
     """Execute with the runner's immutable policy bound before any output."""
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
@@ -1094,12 +1144,20 @@ async def _run_with_context(
                 return 1
 
             # Resolve the active GitHub identity only after source ownership
-            # succeeds. Posting flows may acquire an installation token here;
-            # read-only flows preserve the ambient identity.
+            # succeeds. Ordinary posting flows may acquire an installation
+            # token; embedded callers retain their supplied auth capability.
             try:
-                session = github_app.resolve_run_identity(
-                    target_dir, config.pr_repo, is_posting=_run_posts_to_github(config),
-                )
+                if github_execution is None:
+                    session = github_app.resolve_run_identity(
+                        target_dir, config.pr_repo, is_posting=_run_posts_to_github(config),
+                    )
+                else:
+                    session = github_app.ResolvedGitHubSession(
+                        identity=github_app.GitHubIdentity(github_app.resolve_user_identity(
+                            target_dir, auth=github_execution.auth,
+                        )),
+                        execution=github_execution,
+                    )
             except github_app.GitHubAppError as exc:
                 print_error(console, "GitHub App", str(exc))
                 observed.finish(1)
@@ -1113,6 +1171,7 @@ async def _run_with_context(
             result = await _run_workspace(
                 config, target_dir, skip_tests=skip_tests, private_owner=private_owner,
                 run_context=run_context, github_execution=session.execution,
+                backend_factory=backend_factory,
             )
             observed.finish(result)
             return result
@@ -1180,6 +1239,7 @@ async def _run_workspace(
     config: RunConfig, target_dir: Path, *, skip_tests: bool,
     private_owner: PrivateWorkspaceOwner, run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Keep workspace errors inside the run span so returned failures are recorded."""
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
@@ -1217,7 +1277,7 @@ async def _run_workspace(
                 try:
                     result = await _dispatch(
                         work, dispatch_config, run_artifacts, run_context=run_context,
-                        github_execution=github_execution,
+                        github_execution=github_execution, backend_factory=backend_factory,
                     )
                 except BaseException as exc:
                     primary = exc
@@ -1312,6 +1372,7 @@ async def _dispatch_selected_flow(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Route an explicit ``--flow <name>`` selection.
 
@@ -1333,10 +1394,12 @@ async def _dispatch_selected_flow(
             _require_reviewable_branch(work, config)
         return await _run_loop_deep(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+            backend_factory=backend_factory,
         )
     if name == "improve":
         return await _run_improve(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+            backend_factory=backend_factory,
         )
 
     # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
@@ -1344,6 +1407,7 @@ async def _dispatch_selected_flow(
     get_registry().flow(name)
     return await _run_custom_flow(
         work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        backend_factory=backend_factory,
     )
 
 
@@ -1364,6 +1428,7 @@ async def _dispatch(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Verify the approved head, then route to the resolved flow.
 
@@ -1387,6 +1452,7 @@ async def _dispatch(
             raise GitError("unborn checkout cannot satisfy a commit-anchored review")
         return await _run_improve(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+            backend_factory=backend_factory,
         )
     head_status = _verify_approved_head(work, config)
     if head_status != 0:
@@ -1395,6 +1461,7 @@ async def _dispatch(
     if config.flow_name is not None:
         return await _dispatch_selected_flow(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+            backend_factory=backend_factory,
         )
 
     # ``diagram`` joins comment/review in skipping ``_require_reviewable_branch``:
@@ -1403,13 +1470,17 @@ async def _dispatch(
     if config.output_mode in ("comment", "review", "diagram"):
         return await _run_loop_deep(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+            backend_factory=backend_factory,
         )
 
     # output_mode == "loop" (default deep) and --shallow both fix against a
     # base branch, so both must refuse to review the base branch against
     # itself (the guard was shared by loop + shallow pre-collapse, #330).
     _require_reviewable_branch(work, config)
-    return await _run_loop_deep(work, config, run_artifacts, run_context=run_context, github_execution=github_execution)
+    return await _run_loop_deep(
+        work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+        backend_factory=backend_factory,
+    )
 
 
 def _emit_diagram_findings(
@@ -1559,6 +1630,7 @@ async def _run_improve(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Preamble for the registered repository-wide improve flow."""
     from daydream.improve.artifacts import improve_dir
@@ -1614,6 +1686,7 @@ async def _run_improve(
                 private_workspace_owner=run_artifacts.owner,
                 artifacts=run_artifacts.session,
                 run_context=run_context, github_execution=github_execution,
+                _backend_factory=backend_factory,
             )
             ctx.data["audit_repo"] = audit.repo
             ctx.data["improve_dir"] = directory
@@ -1659,6 +1732,7 @@ async def _run_custom_flow(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Generic preamble for a fork-registered flow selected via ``--flow``.
 
@@ -1698,6 +1772,7 @@ async def _run_custom_flow(
             private_workspace_owner=run_artifacts.owner,
             artifacts=run_artifacts.session,
             run_context=run_context, github_execution=github_execution,
+            _backend_factory=backend_factory,
         )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
@@ -1724,6 +1799,7 @@ async def _run_loop_deep(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
+    backend_factory: BackendFactory | None = None,
 ) -> int:
     """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
     from daydream.deep.orchestrator import run_deep
@@ -1731,4 +1807,5 @@ async def _run_loop_deep(
     _resolve_review_profile(config)
     return await run_deep(
         config, work, run_artifacts=run_artifacts, run_context=run_context, github_execution=github_execution,
+        backend_factory=backend_factory,
     )
