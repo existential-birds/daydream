@@ -8,8 +8,8 @@
   commit `94f432d7126f5884d30a2cdde6f4e89908ebb6fd` (registry + 4 content
   schemas pinned byte-for-byte in `tests/fixtures/observability_contract/manifest.json`).
 - Dependency pins: OTel API/SDK/HTTP/gRPC/proto 1.44.0, traceloop 0.62.3,
-  semconv-ai 0.5.1, HTTPX 0.28.1, AnyIO 4.14.2, Pi 0.85.1, claude-agent-sdk
-  0.2.147.
+  semconv-ai 0.5.1, HTTPX 0.28.1, AnyIO 4.15.1, Pi 0.84.3, claude-agent-sdk
+  0.2.152.
 - Verification commands: representative-real (`representative_real_run` receipts)
   and sanitized-replay (`sanitized_protocol_replay`) public readback use separate
   commands below. Many vendor/limitation rows are per-backend; Claude, Codex,
