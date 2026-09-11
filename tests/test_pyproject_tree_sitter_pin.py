@@ -14,7 +14,7 @@ PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 def _tree_sitter_requirement() -> str:
     deps = tomllib.loads(PYPROJECT.read_text())["project"]["dependencies"]
-    return str(next(d for d in deps if d.startswith("tree-sitter")))
+    return str(next(d for d in deps if d.startswith("tree-sitter==")))
 
 
 def test_tree_sitter_is_pinned_to_known_good_version() -> None:
