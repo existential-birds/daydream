@@ -42,7 +42,7 @@ async def test_shallow_stack_uses_native_profile_strategy_no_skill(
 
     backend = ScriptedBackend(events=_CLEAN_TURN)
     install_backend(backend)
-    mute_side_effects("daydream.deep.orchestrator")
+    mute_side_effects("daydream.deep.fix_steps")
 
     rc = await runner.run(make_config(feature_branch_repo, shallow=True, stack="python"))
 
@@ -85,7 +85,7 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    mute_side_effects("daydream.deep.orchestrator", heal=False, commit=False)
+    mute_side_effects("daydream.deep.fix_steps", heal=False, commit=False)
 
     rc = await runner.run(make_config(multi_stack_target))
 

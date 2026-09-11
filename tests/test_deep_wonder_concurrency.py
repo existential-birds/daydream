@@ -22,7 +22,7 @@ async def _run_deep(target: Path) -> int:
 
 def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
 
 def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:

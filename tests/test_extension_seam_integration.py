@@ -18,7 +18,7 @@ import pytest
 
 from daydream import git_ops, pr_review, runner
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolStartEvent
-from daydream.deep.orchestrator import _step_post_review
+from daydream.deep.merge_steps import _step_post_review
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.github_app import GitHubExecutionInput
@@ -60,6 +60,90 @@ async def _filter_items(ctx):
 def register(r):
     r.register_phase(FlowStep(name="filter-items", run=_filter_items))
     r.insert_after("deep", anchor="load-items", step="filter-items")
+"""
+
+
+STABLE_KEYS_FILTER_EXT = """
+import json
+from pathlib import Path
+
+from daydream.extensions import FlowStep
+
+
+_PROBE = "stable-key-probe.json"
+
+
+def _shape(value):
+    if isinstance(value, Path):
+        return {"type": "Path", "name": value.name, "exists": value.exists()}
+    if isinstance(value, dict):
+        return {"type": "dict", "keys": sorted(value)}
+    if isinstance(value, list):
+        return {
+            "type": "list",
+            "length": len(value),
+            "descriptions": [
+                item.get("description") for item in value if isinstance(item, dict)
+            ],
+        }
+    return {"type": type(value).__name__, "value": value}
+
+
+def _record(ctx, name, keys):
+    assert ctx.artifacts is not None
+    path = (
+        ctx.artifacts.daydream_dir
+        / "runs"
+        / ctx.artifacts.layout.session_id
+        / _PROBE
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.loads(path.read_text()) if path.exists() else {}
+    payload[name] = {
+        "mapping_id": id(ctx.data),
+        "has_artifacts": ctx.artifacts is not None,
+        "values": {key: _shape(ctx.data[key]) for key in keys},
+    }
+    path.write_text(json.dumps(payload, sort_keys=True))
+
+
+async def _after_exploration(ctx):
+    _record(ctx, "after-exploration", ["diff", "diff_path", "tier", "exploration_dir"])
+
+
+async def _after_intent(ctx):
+    _record(ctx, "after-intent", ["intent_path", "alts_path", "intent_authoritative"])
+
+
+async def _after_diagram(ctx):
+    _record(ctx, "after-diagram", ["diagrams", "import_graph"])
+
+
+async def _filter_items(ctx):
+    _record(ctx, "after-load-items", ["items_file"])
+    items_file = ctx.data["items_file"]
+    payload = json.loads(items_file.read_text())
+    payload["items"] = [
+        item for item in payload["items"] if item["description"] != "DROP_ME"
+    ]
+    items_file.write_text(json.dumps(payload))
+
+
+async def _after_fix_gate(ctx):
+    _record(ctx, "after-fix-gate", ["items"])
+
+
+def register(r):
+    r.register_phase(FlowStep(name="stable-after-exploration", run=_after_exploration))
+    r.register_phase(FlowStep(name="stable-after-intent", run=_after_intent))
+    r.register_phase(FlowStep(name="stable-after-diagram", run=_after_diagram))
+    r.register_phase(FlowStep(name="filter-items", run=_filter_items))
+    r.register_phase(FlowStep(name="stable-after-fix-gate", run=_after_fix_gate))
+    r.insert_after("deep", anchor="exploration", step="stable-after-exploration")
+    r.insert_after("deep", anchor="intent", step="stable-after-intent")
+    r.insert_after("deep", anchor="diagram", step="stable-after-diagram")
+    r.insert_after("deep", anchor="load-items", step="filter-items")
+    r.insert_after("deep", anchor="fix-gate", step="stable-after-fix-gate")
 """
 
 
@@ -119,11 +203,13 @@ def _install_filtered_surface(
     ext_dir: ExtDir,
     target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    extension_source: str = FILTER_ITEMS_EXT,
 ) -> Any:
     """Install the one extension fork and a real-path deep backend."""
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
-    ext_dir.write_module(FILTER_ITEMS_EXT)
+    ext_dir.write_module(extension_source)
     backend = _install_stub_backend(monkeypatch, target)
     backend.merge_items = _filtered_items()
     _silence(monkeypatch)
@@ -278,6 +364,83 @@ async def test_fork_filter_controls_fix_prompts(
     fix_prompts = "\n".join(_fix_prompts(backend))
 
     assert rc == 0
+    assert KEEP_ME in fix_prompts
+    assert DROP_ME not in fix_prompts
+
+
+async def test_api_v6_stable_keys_share_state_and_reparse_filtered_items(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: Any,
+    make_config: MakeConfig,
+    tmp_path: Path,
+) -> None:
+    """The real deep flow preserves API v6 state by reference across extensions."""
+    from tests.harness.git_helpers import bare_remote
+    from tests.harness.git_helpers import git as _git
+    from tests.test_deep_orchestrator import _fix_prompts
+
+    backend = _install_filtered_surface(
+        ext_dir,
+        multi_stack_target,
+        monkeypatch,
+        extension_source=STABLE_KEYS_FILTER_EXT,
+    )
+    _serve_pr_view(fake_gh, multi_stack_target)
+    _git(
+        multi_stack_target,
+        "remote",
+        "add",
+        "origin",
+        str(bare_remote(tmp_path / "origin.git")),
+    )
+
+    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
+    probe_paths = list(
+        (multi_stack_target / ".daydream" / "runs").glob("*/stable-key-probe.json")
+    )
+    assert len(probe_paths) == 1
+    probe = json.loads(probe_paths[0].read_text())
+    values = {name: record["values"] for name, record in probe.items()}
+    fix_prompts = "\n".join(_fix_prompts(backend))
+
+    assert rc == 0
+    assert set(probe) == {
+        "after-exploration",
+        "after-intent",
+        "after-diagram",
+        "after-load-items",
+        "after-fix-gate",
+    }
+    assert len({record["mapping_id"] for record in probe.values()}) == 1
+    assert all(record["has_artifacts"] for record in probe.values())
+
+    assert values["after-exploration"]["diff"]["type"] == "str"
+    assert values["after-exploration"]["diff_path"]["type"] == "Path"
+    assert values["after-exploration"]["tier"]["type"] == "str"
+    assert values["after-exploration"]["exploration_dir"]["type"] in {"NoneType", "Path"}
+    assert values["after-intent"]["intent_path"]["type"] == "Path"
+    assert values["after-intent"]["alts_path"]["type"] == "Path"
+    assert values["after-intent"]["intent_authoritative"] == {
+        "type": "bool",
+        "value": False,
+    }
+    assert values["after-diagram"]["diagrams"]["type"] == "dict"
+    assert values["after-diagram"]["import_graph"]["type"] == "dict"
+    assert values["after-load-items"]["items_file"]["type"] == "Path"
+    filtered_items = json.loads(
+        (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text()
+    )["items"]
+    assert [item["description"] for item in filtered_items] == [
+        KEEP_ME,
+        "Structural maintainability concern",
+    ]
+    assert values["after-fix-gate"]["items"] == {
+        "type": "list",
+        "length": 2,
+        "descriptions": [KEEP_ME, "Structural maintainability concern"],
+    }
     assert KEEP_ME in fix_prompts
     assert DROP_ME not in fix_prompts
 
@@ -792,7 +955,7 @@ async def test_custom_phase_full_stack(
         return backend
 
     monkeypatch.setattr("daydream.runner.create_backend", fake_create)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.

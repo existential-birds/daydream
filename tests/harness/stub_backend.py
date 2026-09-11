@@ -1169,14 +1169,15 @@ class StubBackend:
 
 
 def silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
-    """Silence noise-only UI helpers in deep orchestrator + phases.
+    """Silence noise-only UI helpers at their deep-flow owners.
 
     ``prompts=False`` leaves the real interaction gateway input in place, for
     tests that drive a genuine gate.
     """
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **kw: None)
     if prompts:
         def answer(_console: Any, message: str, default: str = "") -> str:
             return "y" if "understanding correct" in message.lower() else "n"
@@ -1222,8 +1223,8 @@ def install_stub_backend(
     if pin_skill_availability:
         if enable_exploration:
             # Pin True so the pre_scan branch runs regardless of ambient module state.
-            monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", True)
+            monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", True)
         else:
             # Disable exploration pre-scan so it doesn't add extra backend calls.
-            monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+            monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     return stub

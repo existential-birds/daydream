@@ -128,10 +128,10 @@ def _install_deep_capture_backend(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     if not real_internal_phases:
         monkeypatch.setattr(
-            "daydream.deep.orchestrator.phase_test_and_heal",
+            "daydream.deep.fix_steps.phase_test_and_heal",
             lambda *a, **k: _ok(**k),
         )
-        monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+        monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
     return stub
 
 
@@ -387,7 +387,7 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)  # real_internal_phases=False
     stub.fix_edit_line = "# daydream recommended change\n"
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.phase_test_and_heal",
+        "daydream.deep.fix_steps.phase_test_and_heal",
         lambda *a, **k: _ok_with_heal_edit(multi_stack_target, **k),
     )
 

@@ -778,7 +778,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
 
     backend = InitialExplorationBarrierBackend(multi_stack_target)
     silence(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", True)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", True)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     clock_tick = 0
 
@@ -922,9 +922,8 @@ def patch_workspace(
 @pytest.fixture
 def silence_runner_ui(silence_console: Callable[..., None]) -> None:
     """Drop ``daydream.runner``'s UI helpers (notably the ``print_phase_hero``
-    banner). ``daydream.deep.orchestrator``'s own ``print_phase_hero`` /
-    ``print_dim`` bindings are deliberately left live: the AWAKEN-hero ordering
-    test spies on them via ``daydream.phases``.
+    banner). The phase module's ``print_phase_hero`` / ``print_dim`` bindings
+    remain live for the AWAKEN-hero ordering test.
     """
     silence_console("daydream.runner")
 
@@ -1660,10 +1659,10 @@ def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
 
 
 def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:
-    """Silence the runner / deep orchestrator / phases noise; keeps phase hero
-    and dim bindings alive so the hero-ordering test can spy on them."""
+    """Silence fix-cycle UI while leaving the observed phase hero bindings live."""
     silence_console("daydream.runner")
     silence_console("daydream.deep.orchestrator")
+    silence_console("daydream.deep.fix_steps")
     silence_console("daydream.phases", keep=("print_phase_hero", "print_dim"))
 
 
@@ -1716,7 +1715,7 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
             test_backend if phase == "test" else ScriptedBackend(model="stub-model")
         ),
     )
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
@@ -1725,8 +1724,8 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
     async def _noop_commit(*_a: Any, **_k: Any) -> None:
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _noop_fix)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _noop_fix)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
 
     # Capture hero + dim calls in order.
     calls: list[tuple[str, str]] = []  # (kind, payload)
@@ -1790,7 +1789,7 @@ async def test_fix_cycle_items_severity_ordered(
         "daydream.runner._resolve_backend",
         lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
     )
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     order: list[list[str]] = []
@@ -1816,9 +1815,9 @@ async def test_fix_cycle_items_severity_ordered(
     async def _noop_commit(*_a: Any, **_k: Any) -> None:
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _spy_fix_parallel)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _noop_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _spy_fix_parallel)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _noop_test)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
 
     exit_code = await runner.run(
         make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes")
@@ -1970,7 +1969,7 @@ async def test_fix_cycle_yes_commits_fixes(
         "daydream.runner._resolve_backend",
         lambda _config, _phase, cache=None, **_kwargs: commit_backend,
     )
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     async def _fix_writes(*_a: Any, **_k: Any) -> dict[str, str]:
@@ -1978,7 +1977,7 @@ async def test_fix_cycle_yes_commits_fixes(
         main_py.write_text(main_py.read_text() + "\n# daydream fix\n")
         return {}
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _fix_writes)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _fix_writes)
 
     # Pre-create the review output so the fix-gate decline path never triggers.
     (feature_branch_repo / REVIEW_OUTPUT_FILE).write_text("# Review\n")
@@ -2064,8 +2063,9 @@ async def _drive_fix_cycle_failing(
     # Silence the flow's terminal noise; the test phase is observed through the
     # backend script, not scraped rendering.
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **k: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **k: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **k: None)
     monkeypatch.setattr(
         "daydream.phases.console",
         type("C", (), {"print": lambda *a, **kw: None})(),
@@ -2084,7 +2084,7 @@ async def _drive_fix_cycle_failing(
             test_backend if phase == "test" else stub_backend
         ),
     )
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
@@ -2095,8 +2095,8 @@ async def _drive_fix_cycle_failing(
     async def _spy_commit(*_a: Any, **_k: Any) -> None:
         commit_calls.append(True)
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _noop_fix)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _noop_fix)
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _spy_commit)
     monkeypatch.setattr("daydream.phases.clipboard_available", lambda: clipboard_is_available)
 
     if stdin_answers is not None:

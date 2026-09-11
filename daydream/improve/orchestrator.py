@@ -23,7 +23,7 @@ from daydream.config import (
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.deep.orchestrator import _diff_changed_files
+from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
 from daydream.exploration import EXPLORATION_SECTION_PREFIX
 from daydream.exploration_runner import repo_scan

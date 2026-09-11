@@ -194,16 +194,42 @@ class _CodexShape(_DeepMockBackend):
 
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence noisy UI helpers across orchestrator, phases, and runner."""
+    """Silence noisy UI helpers at their current production owners."""
     noop = lambda *a, **kw: None  # noqa: E731 -- terse silencer
-    for module in (
-        "daydream.deep.orchestrator",
-        "daydream.phases",
-        "daydream.runner",
-    ):
-        for name in (
-            "print_stage_progress",
+    targets = {
+        "daydream.deep.orchestrator": (
             "print_preflight_notice",
+            "print_info",
+            "print_warning",
+            "print_error",
+        ),
+        "daydream.deep.review_steps": (
+            "print_stage_progress",
+            "print_phase_hero",
+            "print_warning",
+            "print_error",
+            "print_dim",
+        ),
+        "daydream.deep.merge_steps": (
+            "print_stage_progress",
+            "print_info",
+            "print_warning",
+            "print_error",
+        ),
+        "daydream.deep.diagram_steps": (
+            "print_info",
+            "print_success",
+            "print_warning",
+            "print_error",
+        ),
+        "daydream.deep.fix_steps": (
+            "print_info",
+            "print_success",
+            "print_warning",
+            "print_error",
+            "print_verification_summary",
+        ),
+        "daydream.phases": (
             "print_phase_hero",
             "print_info",
             "print_success",
@@ -211,8 +237,18 @@ def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
             "print_error",
             "print_dim",
             "print_issues_table",
-        ):
-            monkeypatch.setattr(f"{module}.{name}", noop, raising=False)
+        ),
+        "daydream.runner": (
+            "print_phase_hero",
+            "print_info",
+            "print_success",
+            "print_error",
+            "print_dim",
+        ),
+    }
+    for module, names in targets.items():
+        for name in names:
+            monkeypatch.setattr(f"{module}.{name}", noop)
 
 
 def _wire_mocks(monkeypatch: pytest.MonkeyPatch, backend: _DeepMockBackend) -> None:

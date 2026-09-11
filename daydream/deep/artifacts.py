@@ -11,9 +11,16 @@ The check_deep_artifacts() helper mirrors check_review_file_exists()
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
+
+# Structured merge-failure entry reserved in ``per-stack-failures.json`` (issue #361).
+# Distinct from per-stack entries (``{stack_name: reason}`` str->str) so the resume
+# loader can skip it rather than misread it as a failed stack.
+MERGE_FAILURE_KEY = "__merge__"
 
 # Stage prerequisites -- single source of truth.
 # Value is a list of file names (relative to deep_dir) that must exist before the
@@ -378,3 +385,22 @@ def check_deep_artifacts(
                 f"Resuming would review stale findings against changed code.\n"
                 f"Re-run without --start-at to regenerate them."
             )
+
+
+def _load_failures(path: Path) -> dict[str, Any]:
+    """Load a ``per-stack-failures.json`` into a dict, defaulting to ``{}`` on absent/malformed.
+
+    Shared defensive loader for the "load existing per-stack-failures.json"
+    pattern (resume loader in ``_per_stack_body`` and merge-failure salvage in
+    ``_salvage_merge_failure``). Content is returned verbatim -- including the
+    structured ``MERGE_FAILURE_KEY`` entry, which each caller filters or
+    handles per its own contract. Only a missing file, malformed JSON, or a
+    non-dict root degrades to the ``{}`` "no prior failures" default.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}

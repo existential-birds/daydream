@@ -685,6 +685,11 @@ including exceptions. This additive field does not change API version 6,
 
 ### Stable `ctx.data` keys
 
+Built-in deep steps use an internal `DeepState` view over this same dictionary.
+The view checks a value when a step reads it and writes back to the existing
+key. It does not copy the mapping or cache its values, so extension writes remain
+visible to later steps. Extensions continue to use `ctx.data` under API v6.
+
 Steps share state through `FlowContext.data`. Forks may **read** these keys;
 every other key is internal and may change without a version bump:
 

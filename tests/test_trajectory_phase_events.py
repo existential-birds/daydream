@@ -1057,6 +1057,10 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     mute_side_effects()
     silence_console("daydream.runner")
     silence_console("daydream.deep.orchestrator")
+    silence_console("daydream.deep.review_steps")
+    silence_console("daydream.deep.merge_steps")
+    silence_console("daydream.deep.diagram_steps")
+    silence_console("daydream.deep.fix_steps")
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(

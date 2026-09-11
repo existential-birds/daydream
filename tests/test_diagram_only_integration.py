@@ -67,6 +67,8 @@ def diagram_run(
     """Run a ``--diagram-only`` flow with a diagram-scripted stub backend."""
     for module in (
         "daydream.deep.orchestrator",
+        "daydream.deep.review_steps",
+        "daydream.deep.diagram_steps",
         "daydream.phases",
         "daydream.runner",
         "daydream.pr_review",
@@ -689,7 +691,7 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A returned failed result follows the same diagram-only exit path."""
-    from daydream.deep import orchestrator
+    from daydream.deep import diagram_steps
 
     async def _return_failure(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {
@@ -702,7 +704,7 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
             "mermaid": None,
         }
 
-    monkeypatch.setattr(orchestrator, "_run_diagram_kind", _return_failure)
+    monkeypatch.setattr(diagram_steps, "_run_diagram_kind", _return_failure)
     target = dr.build_cross_module_repo(tmp_path)
     _serve_pr(fake_gh, target)
 
@@ -747,7 +749,7 @@ async def test_pr_lookup_failure_in_diagram_only_mode_exits_one_with_diagnostic(
     fake_gh.set_response("pr-view", value={"__error__": "authentication required"})
     errors: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_error",
+        "daydream.deep.diagram_steps.print_error",
         lambda _console, title, message: errors.append((title, message)),
     )
 
@@ -906,6 +908,9 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
 
     for module in (
         "daydream.deep.orchestrator",
+        "daydream.deep.review_steps",
+        "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps",
         "daydream.phases",
         "daydream.runner",
         "daydream.pr_review",
