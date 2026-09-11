@@ -26,11 +26,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, cast, get_args
 
 from daydream.pr_review import parse_finding_markers
+from daydream.training._immutable_json import thaw_json
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (
     _QUALIFYING_ASSOCIATIONS,
@@ -104,7 +106,7 @@ class FixAppliedSignal:
     verdict: Literal["applied", "not_applied", "unknown"]
     hunks_applied: int
     hunks_total: int
-    window_commits: list[str] = field(default_factory=list)
+    window_commits: Sequence[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -234,7 +236,7 @@ class PerFindingResolution:
     fingerprint: str
     comment_id: int | None
     disposition: PerFindingDisposition
-    evidence: list[dict[str, Any]] = field(default_factory=list)
+    evidence: Sequence[Mapping[str, Any]] = field(default_factory=list)
     evidence_digest: str = ""
 
 
@@ -248,7 +250,7 @@ def resolution_to_dict(r: PerFindingResolution) -> dict[str, Any]:
         "fingerprint": r.fingerprint,
         "comment_id": r.comment_id,
         "disposition": r.disposition,
-        "evidence": list(r.evidence),
+        "evidence": [thaw_json(entry) for entry in r.evidence],
         "evidence_digest": r.evidence_digest,
     }
 

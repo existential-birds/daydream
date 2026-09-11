@@ -21,6 +21,7 @@ classifier dispositions), ``ambiguous`` / ``unanswered`` /
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -68,7 +69,7 @@ class Rubric:
     comment_resolution: CommentResolutionSignal
     local_commit_applied: LocalCommitAppliedSignal | None
     posterior_source: PosteriorSource
-    per_finding_resolutions: list[PerFindingResolution] | None = None
+    per_finding_resolutions: Sequence[PerFindingResolution] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation with explicit key order.
@@ -158,7 +159,7 @@ def derive_outcome_label(rubric: Rubric) -> str:
 
 def derive_per_finding_labels(
     rubric: Rubric,
-    per_finding: list[PerFindingResolution],
+    per_finding: Sequence[PerFindingResolution],
 ) -> list[PerFindingLabel]:
     """Reduce per-finding resolutions to one outcome label per finding.
 

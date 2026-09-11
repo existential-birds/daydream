@@ -9,9 +9,9 @@ old ``as_of`` reproduces a prior corpus byte-for-byte even after the reward
 formula changes.
 
 Drives the production ``run_harvest`` + ``run_build_corpus`` against a real
-SQLite index (no archive-layer mocking). The PR posterior fetch is stubbed via
-the ``daydream.training.harvest._gh_api`` monkeypatch — the same seam the other
-harvest tests use — so the run never touches the network or the ``gh`` CLI.
+SQLite index (no archive-layer mocking). The PR posterior fetch is supplied by
+an explicit per-run service, so the run never touches the network or the
+``gh`` CLI.
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from typing import Any
 import pytest
 
 from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
-from daydream.training.harvest import HarvestConfig, run_harvest
+from daydream.training.harvest import HarvestConfig, make_harvest_services, run_harvest
+from tests.harness.harvest_services import HarvestTestServices
 from tests.test_training_harvest import _fake_gh_merged, _seed_archived_deep_run
 
 
@@ -32,16 +33,24 @@ async def test_rescore_preserves_old_as_of_byte_for_byte(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
+    github = _fake_gh_merged("2026-02-01T00:00:00+00:00")
     monkeypatch.setattr("daydream.training.reward.REWARD_VERSION", "r1")
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
+    await run_harvest(
+        first_config,
+        services=HarvestTestServices(make_harvest_services(first_config), github=github),
+    )
     pin = datetime.now(timezone.utc).isoformat()
     out_a = tmp_path / "a.jsonl"
     run_build_corpus(BuildCorpusConfig(out_path=out_a, archive_dir=archive_dir,
                                        filters=CorpusFilters(include_all_labels=True), as_of=pin))
     bytes_a = out_a.read_bytes()
     monkeypatch.setattr("daydream.training.reward.REWARD_VERSION", "r2")  # bump + re-harvest
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
+    second_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2")
+    await run_harvest(
+        second_config,
+        services=HarvestTestServices(make_harvest_services(second_config), github=github),
+    )
     out_a2 = tmp_path / "a2.jsonl"
     run_build_corpus(BuildCorpusConfig(out_path=out_a2, archive_dir=archive_dir,
                                        filters=CorpusFilters(include_all_labels=True), as_of=pin))

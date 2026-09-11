@@ -28,16 +28,24 @@ from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training import harvest, labeler_versions, reward
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
+    AnnotationPayload,
     HarvestConfig,
-    _resolve_repo_for_row,
+    HarvestServices,
+    acquire_harvest_evidence,
     assemble_scoring_inputs,
-    build_annotation,
+    make_harvest_services,
     run_harvest,
 )
+from daydream.training.harvest import (
+    build_annotation as _build_annotation,
+)
+from daydream.training.harvest_types import HarvestRow
 from daydream.training.reward import score_trajectory
+from daydream.ui import create_console
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.harvest_services import HarvestTestServices
 from tests.harness.trajectory import diff_adding, make_manifest
 
 
@@ -181,13 +189,52 @@ def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")
 
 
+def _typed_row(raw: dict[str, Any], *, row_number: int = 1) -> HarvestRow:
+    """Construct the public validated row used by acquisition and reduction tests."""
+    return HarvestRow.from_mapping(raw, row_number=row_number)
+
+
+def _services(config: HarvestConfig, *, github: Callable[..., Any]) -> HarvestTestServices:
+    """Build an explicit per-run service with only the GitHub boundary replaced."""
+    return HarvestTestServices(make_harvest_services(config), github=github)
+
+
+def _acquire_annotation(
+    raw: dict[str, Any],
+    *,
+    run_dir: Path | None = None,
+    archive_dir: Path,
+    gh_api: Callable[..., Any],
+    repo_clone: Path | None = None,
+    services: HarvestServices | None = None,
+    valid_at_override: str | None = None,
+) -> AnnotationPayload:
+    """Acquire through an explicit provider, then exercise the pure reducer."""
+    row = _typed_row(raw)
+    if run_dir is not None:
+        assert row.archive_path == run_dir
+    config = HarvestConfig(archive_dir=archive_dir)
+    provider = services or HarvestTestServices(
+        make_harvest_services(config),
+        github=gh_api,
+    )
+    evidence = acquire_harvest_evidence(
+        row,
+        services=provider,
+        repo_resolution=repo_clone,
+        base_sha_status="available" if repo_clone is not None else "unavailable",
+        valid_at_override=valid_at_override,
+    )
+    return _build_annotation(row, evidence)
+
+
 def test_build_annotation_pr_row_labels_from_decisive_reply_evidence(tmp_path: Path) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
     row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(
+    ann = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
@@ -245,7 +292,7 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
     row = {"session_id": "s_pf", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+    ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged_per_finding("2026-02-01T00:00:00+00:00", fp_a, fp_b),
                            repo_clone=tmp_path)
     assert ann.rubric_json is not None
@@ -260,7 +307,7 @@ def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
     row = {"session_id": "s_626", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(
+    ann = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
@@ -336,7 +383,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
     intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
 
     _write_findings(run_dir, _FP_A)
-    payload = build_annotation(
+    payload = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
@@ -361,7 +408,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
     _write_findings(run_dir, _FP_A)
-    payload = build_annotation(
+    payload = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=archive_dir,
@@ -429,7 +476,7 @@ def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> No
             "user": {"login": "prfiona"},
         }
 
-    payload = build_annotation(
+    payload = _acquire_annotation(
         row, run_dir=run_dir, archive_dir=tmp_path, gh_api=fork_gh, repo_clone=tmp_path,
     )
     assert payload.labels == ["accepted"]
@@ -476,7 +523,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
         return {"merged": True, "merged_at": "2026-08-03T00:00:00Z", "state": "merged",
                 "user": {"login": "someone-else"}}
 
-    payload = build_annotation(
+    payload = _acquire_annotation(
         row, run_dir=run_dir, archive_dir=tmp_path, gh_api=review_gh, repo_clone=tmp_path,
     )
     assert payload.labels == ["rejected"]
@@ -490,7 +537,7 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
     row = {"session_id": "s2", "pr_repo": None, "pr_number": None, "branch": "feat",
            "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": None,
            "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
+    ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                            repo_clone=tmp_path)
     assert ann.valid_at is None                               # collapses to observed_at on write
     rb = json.loads(ann.reward_json)
@@ -544,7 +591,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
         "changed_files": "[]",
     }
     _write_findings(run_dir, _FP_A)
-    payload = build_annotation(
+    payload = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=archive_dir,
@@ -568,64 +615,89 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
 
 def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # n>=10 -> empirical
-    monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice", "carol"])
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
     _write_findings(run_dir, _FP_A)
-    p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable")),
-                         repo_clone=tmp_path)
+    config = HarvestConfig(archive_dir=tmp_path)
+    p = _acquire_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_unused_gh,
+        repo_clone=tmp_path,
+        services=HarvestTestServices(
+            make_harvest_services(config),
+            github=_fake_gh(
+                merged=False,
+                comments=_finding_comments(_FP_A, reply="not applicable"),
+                reviews=[{"user": {"login": "alice"}}, {"user": {"login": "carol"}}],
+            ),
+            reviewer_prior=lambda *_args, **_kwargs: (0.8, 12),
+        ),
+    )
     rb = json.loads(p.reward_json)
     assert rb["posterior_cost"] == pytest.approx(0.2)   # max(0, 1.0 - 0.8)
     assert rb["outcome_prior"] == 0.8 and rb["outcome_prior_n"] == 12
     assert p.composite_reward == rb["composite"]        # stored composite is pure intrinsic (C5)
-    assert p.has_posterior is True and p.reviewer_logins == ["alice", "carol"]
+    assert p.has_posterior is True and p.reviewer_logins == ["alice", "amelia", "carol"]
 
 
 def test_build_annotation_below_threshold_falls_back_to_default_prior(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.9, 4))  # n<10
-    monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice"])
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
     _write_findings(run_dir, _FP_A)
     rb = json.loads(
-        build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable")),
-                         repo_clone=tmp_path).reward_json
+        _acquire_annotation(
+            row,
+            run_dir=run_dir,
+            archive_dir=tmp_path,
+            gh_api=_unused_gh,
+            repo_clone=tmp_path,
+            services=HarvestTestServices(
+                make_harvest_services(HarvestConfig(archive_dir=tmp_path)),
+                github=_fake_gh(
+                    merged=False,
+                    comments=_finding_comments(_FP_A, reply="not applicable"),
+                    reviews=[{"user": {"login": "alice"}}],
+                ),
+                reviewer_prior=lambda *_args, **_kwargs: (0.9, 4),
+            ),
+        ).reward_json
     )
     assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 4  # n recorded; prior None -> 0.5
     assert rb["posterior_cost"] == 0.5
 
 
-def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> None:
     # PR-less row -> reviewer_logins == [], prior query never consulted, and the
     # local verdict is withheld from the posterior axis: a local commit is not a
     # maintainer acting in a PR, so the label is kept but has_posterior is False.
     from daydream.training.labeler_signals import LocalCommitAppliedSignal
 
-    monkeypatch.setattr(
-        harvest, "local_commit_applied_signal", lambda *a, **k: LocalCommitAppliedSignal(verdict="rejected")
-    )
-    monkeypatch.setattr(
-        harvest, "reviewer_set_penalty_prior",
-        lambda *a, **k: pytest.fail("reviewer_set_penalty_prior must not be called for a local row"),
-    )
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_local", "pr_repo": None, "pr_number": None, "branch": "feat",
            "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
-    p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
-                         repo_clone=tmp_path)
+    config = HarvestConfig(archive_dir=tmp_path)
+    p = _acquire_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_unused_gh,
+        repo_clone=tmp_path,
+        services=HarvestTestServices(
+            make_harvest_services(config),
+            local_commit_applied=lambda *_args, **_kwargs: LocalCommitAppliedSignal("rejected"),
+            reviewer_prior=lambda *_args, **_kwargs: pytest.fail("local rows have no reviewer prior"),
+        ),
+    )
     assert p.reviewer_logins == []
     assert p.labels == ["rejected"]  # label kept — consumers may still want it
     assert p.has_posterior is False  # ...but it is not maintainer-PR evidence
@@ -635,18 +707,17 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path, monkey
 
 
 def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Non-canonical reward_version -> the write must be refused.
-    def _custom_version_score(*args: Any, **kwargs: Any) -> Any:
-        from daydream.training.reward import RewardWeights
-        return score_trajectory(*args, **{**kwargs, "weights": RewardWeights(w_correctness=0.99)})
+    # A score whose captured default weights no longer match the canonical
+    # constant is marked custom, so publication must refuse it.
+    from daydream.training.reward import RewardWeights
 
-    monkeypatch.setattr(harvest, "score_trajectory", _custom_version_score)
+    monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights(is_default=True))
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_custom", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
     with pytest.raises((AssertionError, RuntimeError), match="canonical"):
-        build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+        _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                          gh_api=_fake_gh(merged=False), repo_clone=tmp_path)
 
 
@@ -764,6 +835,7 @@ def _seed_orphan_run(
     session_id: str,
     head_sha: str = "orphsha",
     branch: str = "feat/x",
+    base_branch: str | None = "main",
     source_path: Path | None = None,
 ) -> Path:
     """Seed an orphan deep run (no PR linkage) and index it under ``archive_dir``.
@@ -788,7 +860,7 @@ def _seed_orphan_run(
             repo_slug="org/repo",
             branch=branch,
             head_sha=head_sha,
-            base_branch="main",
+            base_branch=base_branch,
             pr_number=None,
             pr_repo=None,
             grounding_rate=1.0,
@@ -811,7 +883,7 @@ def _seed_pr_runs(
 
     Each run gets its own bronze dir under ``bronze_parent/<session_id>`` so the
     index carries ``count`` distinct rows; ``pr_number`` matches the session index
-    so a fake ``_gh_api`` can identify the row from the PR endpoint.
+    so a fake GitHub responder can identify the row from the PR endpoint.
     """
     for pr_number in range(1, count + 1):
         sid = f"s{pr_number}"
@@ -837,32 +909,153 @@ def _seed_pr_runs(
             _write_findings(run_dir, *fingerprints)
 
 
-async def test_harvest_writes_one_annotation(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_harvest_writes_one_annotation(tmp_path: Path, archive_dir: Any) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(
+        config,
+        services=_services(
+            config,
+            github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
+        ),
     )
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
     obs = latest_label_observation(archive_dir, "s1")
     assert obs is not None
     assert summary["annotated"] == 1
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
 
 
+@pytest.mark.parametrize(
+    ("malformed", "session_label"),
+    [
+        (
+            {"session_id": "bad/session", "archive_path": "/tmp/bronze"},
+            "bad/session",
+        ),
+        ({"archive_path": "/tmp/bronze"}, "<unknown>"),
+        ({"session_id": "missing-archive"}, "missing-archive"),
+        (
+            {
+                "session_id": "unsafe-slug",
+                "archive_path": "/tmp/bronze",
+                "pr_repo": "org/repo/extra",
+            },
+            "unsafe-slug",
+        ),
+    ],
+)
+async def test_harvest_rejects_malformed_index_row_before_any_side_effect(
+    tmp_path: Path,
+    archive_dir: Any,
+    capsys: pytest.CaptureFixture[str],
+    malformed: dict[str, Any],
+    session_label: str,
+) -> None:
+    """Malformed queued identity is isolated before cache, clone, GitHub, or writes."""
+    effects: list[str] = []
+
+    def _completed_sessions() -> set[str]:
+        effects.append("cache-read")
+        return set()
+
+    def _resolve_repo(*_args: Any, **_kwargs: Any) -> None:
+        effects.append("clone")
+        return None
+
+    def _github(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        effects.append("github")
+        return {}
+
+    def _append_annotation(*_args: Any, **_kwargs: Any) -> bool:
+        effects.append("write")
+        return True
+
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "cache")
+    services = HarvestTestServices(
+        make_harvest_services(config),
+        rows=[malformed],
+        completed_sessions=_completed_sessions,
+        resolve_repo=_resolve_repo,
+        github=_github,
+        append_annotation=_append_annotation,
+    )
+    summary = await run_harvest(
+        config,
+        services=services,
+    )
+
+    assert summary["considered"] == 1
+    assert summary["errors"] == 1
+    assert effects == []
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "row 1" in output and session_label in output
+
+
+async def test_harvest_validates_completed_rows_before_resume_filtering(
+    tmp_path: Path,
+    archive_dir: Any,
+) -> None:
+    """An invalid completed row still counts; a valid sibling continues normally."""
+    _seed_archived_deep_run(archive_dir, "done", merged_at="2026-02-01T00:00:00+00:00")
+    fresh_dir = _seed_deep_bronze(tmp_path / "fresh", verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id="fresh",
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            pr_repo="org/repo",
+            pr_number=42,
+            head_sha="abc",
+            base_branch="main",
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(fresh_dir),
+        ),
+    )
+    completed = query_runs(archive_dir, "session_id = ?", ("done",))[0]
+    fresh = query_runs(archive_dir, "session_id = ?", ("fresh",))[0]
+    malformed_completed = {"session_id": "done", "archive_path": "relative/bronze"}
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "cache")
+    services = HarvestTestServices(
+        make_harvest_services(config),
+        rows=[malformed_completed, completed, fresh],
+        completed={"done"},
+        github=_fake_gh(
+            merged_at="2026-02-01T00:00:00+00:00",
+            comments=_REPLIED_FINDING,
+        ),
+    )
+
+    summary = await run_harvest(config, services=services)
+
+    assert summary == {
+        "considered": 2,
+        "annotated": 1,
+        "would_annotate": 0,
+        "skipped": 0,
+        "errors": 1,
+        "aborted": 0,
+    }
+    assert latest_label_observation(archive_dir, "done") is None
+    assert latest_label_observation(archive_dir, "fresh") is not None
+
+
 async def test_harvest_stores_github_z_merge_timestamp_canonically(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path writer convergence: GitHub reports merged_at with a 'Z' suffix;
     the stored valid_at must be the canonical '+00:00' spelling."""
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00Z")
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00Z", comments=_REPLIED_FINDING),
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(
+        config,
+        services=_services(config, github=_fake_gh(merged_at="2026-02-01T00:00:00Z", comments=_REPLIED_FINDING)),
     )
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
     obs = latest_label_observation(archive_dir, "s1")
     assert obs is not None
     assert summary["annotated"] == 1
@@ -872,7 +1065,6 @@ async def test_harvest_stores_github_z_merge_timestamp_canonically(
 async def test_harvest_unresolved_daydream_comment_stays_unknown(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path: a merged PR whose only finding has no qualifying reply is ``unknown``.
 
@@ -882,11 +1074,14 @@ async def test_harvest_unresolved_daydream_comment_stays_unknown(
     """
     run_dir = _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
     _write_findings(run_dir, _FP_A)
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_finding_comments(_FP_A)),
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    await run_harvest(
+        config,
+        services=_services(
+            config,
+            github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_finding_comments(_FP_A)),
+        ),
     )
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
     row = query_runs(archive_dir, "session_id = ?", ("s-contest",))[0]
     assert json.loads(row["outcome_labels"]) == []  # unknown, never "accepted"
 
@@ -894,7 +1089,6 @@ async def test_harvest_unresolved_daydream_comment_stays_unknown(
 async def test_harvest_relinks_orphan_run_and_labels_it(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path: an orphan run (PR opened after launch) is re-linked at harvest.
 
@@ -907,9 +1101,7 @@ async def test_harvest_relinks_orphan_run_and_labels_it(
     """
     run_dir = _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph")
     _write_findings(run_dir, _FP_A, _FP_B)
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(
+    github = _fake_gh(
             merged_at="2026-02-01T00:00:00+00:00",
             comments=[
                 *_finding_comments(_FP_A, reply="applied"),
@@ -921,9 +1113,9 @@ async def test_harvest_relinks_orphan_run_and_labels_it(
                 },
             ],
             commit_pulls=_ORPHAN_COMMIT_PULLS,
-        ),
-    )
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+        )
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    await run_harvest(config, services=_services(config, github=github))
     row = query_runs(archive_dir, "session_id = ?", ("s-orph",))[0]
     assert row["pr_number"] == 7 and row["pr_repo"] == "org/repo"  # linkage persisted
     assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
@@ -976,8 +1168,8 @@ async def test_harvest_fork_pr_404_degrades_not_drops(
             return []
         return {}
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_fork_404)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_fork_404))
 
     assert summary["errors"] == 0  # benign 404 degraded; not a hard error
     obs = latest_label_observation(archive_dir, "s-fork")
@@ -1008,8 +1200,8 @@ async def test_harvest_orphan_422_degrades_not_drops(
     clone — the label degrades to ``"unknown"`` (empty), never ``"rejected"``.
     """
     _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-422")
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
     assert summary["errors"] == 0  # benign 422 degraded; not a hard error
     assert latest_label_observation(archive_dir, "s-orph-422") is not None  # annotated via local path
@@ -1059,9 +1251,8 @@ async def test_harvest_deleted_branch_ref_labels_unknown_not_rejected(
         branch="feat/squash-merged-and-deleted",
         source_path=clone,
     )
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
     assert summary["errors"] == 0  # benign 422 + unreadable window degrade, not error
     assert latest_label_observation(archive_dir, "s-gone") is not None  # still annotated
@@ -1119,9 +1310,8 @@ async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
         " existing\n"
         "+guarded = True\n"
     )
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
     assert summary["errors"] == 0
     row = query_runs(archive_dir, "session_id = ?", ("s-squash",))[0]
@@ -1154,9 +1344,8 @@ async def test_harvest_live_branch_with_no_followup_commits_still_labels_rejecte
         branch="feat/still-here",
         source_path=clone,
     )
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
     assert summary["errors"] == 0
     row = query_runs(archive_dir, "session_id = ?", ("s-live",))[0]
@@ -1164,10 +1353,11 @@ async def test_harvest_live_branch_with_no_followup_commits_still_labels_rejecte
     assert json.loads(row["outcome_labels"]) == ["rejected"]
 
 
+@pytest.mark.parametrize("branch", ["feat/fixed", ""])
 async def test_harvest_live_branch_with_applied_fix_labels_accepted(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
 ) -> None:
     """Real-path counterpart: a follow-up commit carrying the fix IS "accepted".
 
@@ -1175,14 +1365,17 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(
     the same real-git path, so the fix is pinned on the positive arm too.
     """
     clone = _make_repo_with_main(tmp_path, name="clone")
-    _git(clone, "checkout", "-b", "feat/fixed")
+    if branch:
+        _git(clone, "checkout", "-b", branch)
     head_sha = _git(clone, "rev-parse", "HEAD").strip()
+    session_id = "s-applied-empty-branch" if not branch else "s-applied"
     run_dir = _seed_orphan_run(
         archive_dir,
         tmp_path / "bronze",
-        session_id="s-applied",
+        session_id=session_id,
         head_sha=head_sha,
-        branch="feat/fixed",
+        branch=branch,
+        base_branch=None,
         source_path=clone,
     )
     # The recommended patch adds a line; a later commit on the branch lands it.
@@ -1198,18 +1391,16 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(
     (clone / "app.py").write_text("existing\nguarded = True\n")
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
-
-    row = query_runs(archive_dir, "session_id = ?", ("s-applied",))[0]
+    row = query_runs(archive_dir, "session_id = ?", (session_id,))[0]
     assert json.loads(row["outcome_labels"]) == ["accepted"]
 
 
 async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path: a merged PR where daydream tracked NO comments is unlabeled.
 
@@ -1221,12 +1412,11 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
     ``unknown`` (empty labels) and stay out of the posterior population.
     """
     _seed_archived_deep_run(archive_dir, "s-vacuous", merged_at="2026-02-01T00:00:00+00:00")
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00"),
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(
+        config,
+        services=_services(config, github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00")),
     )
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
     row = query_runs(archive_dir, "session_id = ?", ("s-vacuous",))[0]
@@ -1243,7 +1433,6 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
 async def test_harvest_merged_pr_with_reject_reply_is_contested(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The amelia#626 shape: merged PR + explicit human rejection ⇒ contested, never accepted (M10/M22).
 
@@ -1254,9 +1443,7 @@ async def test_harvest_merged_pr_with_reject_reply_is_contested(
     """
     run_dir = _seed_archived_deep_run(archive_dir, "s-reject", merged_at="2026-08-10T00:00:00Z")
     _write_findings(run_dir, _FP_A, _FP_B)
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(
+    github = _fake_gh(
             merged_at="2026-08-10T00:00:00Z",
             comments=[
                 *_finding_comments(_FP_A, reply="False positive — the code already handles this"),
@@ -1267,10 +1454,9 @@ async def test_harvest_merged_pr_with_reject_reply_is_contested(
                     "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
                 },
             ],
-        ),
-    )
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+        )
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=github))
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
     row = query_runs(archive_dir, "session_id = ?", ("s-reject",))[0]
@@ -1309,9 +1495,8 @@ async def test_harvest_unmerged_pr_with_no_semantic_reply_is_unknown(
             return []
         return {"merged": False, "merged_at": None, "state": "open"}
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_open)
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_open))
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
     row = query_runs(archive_dir, "session_id = ?", ("s-open",))[0]
@@ -1328,7 +1513,7 @@ def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
     row = {"session_id": "s-val", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(
+    ann = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
@@ -1348,7 +1533,7 @@ def test_valid_at_override_respected(tmp_path: Path) -> None:
     row = {"session_id": "s-val-ovr", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(
+    ann = _acquire_annotation(
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
@@ -1365,26 +1550,32 @@ def test_valid_at_override_respected(tmp_path: Path) -> None:
 async def test_labeler_version_is_not_reward_version(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """append_label_observation receives labeler_versions.LABELER_POLICY_VERSION (M13/M22)."""
     run_dir = _seed_archived_deep_run(archive_dir, "s-lv", merged_at="2026-08-10T00:00:00Z")
     _write_findings(run_dir, _FP_A)
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(
-            merged_at="2026-08-10T00:00:00Z",
-            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
-        ),
-    )
     captured: dict[str, Any] = {}
 
-    def _capture(_archive_dir: Path, _session_id: str, **kwargs: Any) -> bool:
-        captured.update(kwargs)
+    def _capture(_row: HarvestRow, payload: AnnotationPayload) -> bool:
+        captured.update(
+            labeler_version=labeler_versions.LABELER_POLICY_VERSION,
+            reply_classifier_version=payload.reply_classifier_version,
+            reply_evidence_digest=payload.reply_evidence_digest,
+        )
         return True
 
-    monkeypatch.setattr("daydream.training.harvest.append_label_observation", _capture)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(
+        config,
+        services=HarvestTestServices(
+            make_harvest_services(config),
+            github=_fake_gh(
+                merged_at="2026-08-10T00:00:00Z",
+                comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
+            ),
+            append_annotation=_capture,
+        ),
+    )
 
     assert summary["annotated"] == 1
     assert captured["labeler_version"] == labeler_versions.LABELER_POLICY_VERSION
@@ -1440,9 +1631,8 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
     (clone / "app.py").write_text("existing\nguarded = True\n")
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
     assert summary["errors"] == 0
     row = query_runs(archive_dir, "session_id = ?", ("s-local-tier",))[0]
@@ -1458,7 +1648,6 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
 async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """dry_run=True: in-memory linkage preview is applied but not persisted.
 
@@ -1474,18 +1663,13 @@ async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_l
     """
     _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-dry")
 
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(
+    github = _fake_gh(
             merged_at="2026-02-01T00:00:00+00:00",
             comments=_UNRESOLVED_FINDING,
             commit_pulls=_ORPHAN_COMMIT_PULLS,
-        ),
-    )
-
-    summary = await run_harvest(
-        HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c", dry_run=True)
-    )
+        )
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c", dry_run=True)
+    summary = await run_harvest(config, services=_services(config, github=github))
 
     # In-memory linkage drove build_annotation through the PR path:
     assert summary["would_annotate"] == 1
@@ -1518,8 +1702,8 @@ async def test_harvest_leaves_true_local_run_unlinked(
             return []  # no PR ever opened
         raise AssertionError(f"PR endpoints must not be hit for an unlinked local run ({endpoint})")
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_no_pr)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_no_pr))
     row = query_runs(archive_dir, "session_id = ?", ("s-local",))[0]
     assert row["pr_number"] is None
     assert summary["errors"] == 0
@@ -1527,12 +1711,11 @@ async def test_harvest_leaves_true_local_run_unlinked(
 
 async def test_re_harvest_is_idempotent(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
-    )
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
-    second = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
+    github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
+    first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
+    await run_harvest(first_config, services=_services(first_config, github=github))
+    second_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2")
+    second = await run_harvest(second_config, services=_services(second_config, github=github))
     assert len(label_observation_history(archive_dir, "s1")) == 1  # deduped
     assert second["skipped"] == 1 and second["annotated"] == 0
 
@@ -1543,20 +1726,18 @@ async def test_re_harvest_appends_on_version_bump(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
-    monkeypatch.setattr(
-        "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
-    )
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
+    first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
+    await run_harvest(first_config, services=_services(first_config, github=github))
     monkeypatch.setattr("daydream.training.labeler_versions.LABELER_POLICY_VERSION", "980-policy-bump")
-    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
+    second_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2")
+    await run_harvest(second_config, services=_services(second_config, github=github))
     assert len(label_observation_history(archive_dir, "s1")) == 2
 
 
 async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Two PR rows; PR 1 succeeds, PR 2 hits an exhausted rate-limit on every gh
     # call so the harvest loop must abort cleanly.
@@ -1568,32 +1749,83 @@ async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(
             raise git_ops.RateLimitError("exhausted")
         return merged(repo, endpoint, **kw)
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
     cache_dir = tmp_path / "c"
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
+    summary = await run_harvest(config, services=_services(config, github=_gh))
     assert summary["aborted"] == 1
     # The completed session is preserved for resume; the failed one is not:
     done = BackfillCache(cache_dir=cache_dir, inner=_gh).completed_sessions()
     assert "s1" in done and "s2" not in done
 
 
-def test_gh_api_backoff_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    slept = []
-    monkeypatch.setattr(harvest, "_rate_limit_sleep", lambda s: slept.append(s))
-    seq = [git_ops.RateLimitError("x"), git_ops.RateLimitError("x"), {"ok": True}]
+def test_github_retry_uses_explicit_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    sequence: list[Any] = [
+        git_ops.RateLimitError("x"),
+        git_ops.RateLimitError("x"),
+        {"ok": True},
+    ]
 
-    def _inner(*a: Any, **k: Any) -> Any:
-        v = seq.pop(0)
-        if isinstance(v, Exception):
-            raise v
-        return v
+    def _inner(*args: Any, **kwargs: Any) -> Any:
+        value = sequence.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
 
-    monkeypatch.setattr("daydream.git_ops.gh_api", _inner)
-    assert harvest._gh_api("o/r", "endpoint") == {"ok": True}
-    assert len(slept) == 2
+    monkeypatch.setattr(git_ops, "gh_api", _inner)
+    assert harvest._github_with_retry(
+        "o/r",
+        "endpoint",
+        auth=git_ops.INHERIT_GITHUB_AUTH,
+        backoff_sleep=slept.append,
+    ) == {"ok": True}
+    assert slept == [30.0, 30.0]
 
 
-# _resolve_repo_for_row
+def test_harvest_services_binds_explicit_github_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth = git_ops.StaticGitHubAuth({"GH_TOKEN": "test-token"})
+    seen_auth: list[git_ops.GitHubAuth] = []
+
+    def _github(*args: Any, **kwargs: Any) -> dict[str, bool]:
+        seen_auth.append(kwargs["auth"])
+        return {"ok": True}
+
+    monkeypatch.setattr(git_ops, "gh_api", _github)
+    config = HarvestConfig(archive_dir=tmp_path / "archive")
+    services = make_harvest_services(config, github_auth=auth)
+
+    assert services.github("o/r", "endpoint") == {"ok": True}
+    assert seen_auth == [auth]
+
+
+def _resolve_repo_with_services(
+    tmp_path: Path,
+    *,
+    clone_cache: Path,
+    source_path: Path | None = None,
+    remote_url: str | None = None,
+    repo_slug: str | None = None,
+) -> Path | None:
+    row = HarvestRow.from_mapping(
+        {
+            "session_id": "adapter-session",
+            "archive_path": str(tmp_path / "archive" / "runs" / "adapter-session"),
+            "source_path": str(source_path) if source_path is not None else None,
+            "remote_url": remote_url,
+            "repo_slug": repo_slug,
+        },
+        row_number=1,
+    )
+    services = make_harvest_services(
+        HarvestConfig(
+            archive_dir=tmp_path / "archive",
+            repo_clone_root=clone_cache,
+        )
+    )
+    return services.resolve_repo(row, console=create_console())
 
 
 def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path) -> None:
@@ -1601,12 +1833,20 @@ def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path) -> None:
     source = tmp_path / "source_repo"
     source.mkdir()
     (source / ".git").mkdir()
-    row = {"source_path": str(source), "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
-    result = _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
+    result = _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=tmp_path / "cache",
+        source_path=source,
+        remote_url="https://github.com/org/repo.git",
+        repo_slug="org/repo",
+    )
     assert result == source
 
 
-def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_repo_for_row_clones_when_source_path_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Falls through to clone when source_path is absent."""
     cache = tmp_path / "cache"
 
@@ -1614,48 +1854,68 @@ def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, mo
         target.mkdir(parents=True, exist_ok=True)
         (target / ".git").mkdir()
 
-    monkeypatch.setattr("daydream.training.harvest.git_ops.clone_with_token", fake_clone)
-    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
-    result = _resolve_repo_for_row(row, clone_cache=cache)
+    monkeypatch.setattr(git_ops, "clone_with_token", fake_clone)
+    result = _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=cache,
+        remote_url="https://github.com/org/repo.git",
+        repo_slug="org/repo",
+    )
     assert result == cache / "org" / "repo"
 
 
-def test_resolve_repo_for_row_fetches_existing_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_repo_for_row_fetches_existing_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When the cache clone already exists, fetch instead of clone."""
     cache = tmp_path / "cache"
     cached_repo = cache / "org" / "repo"
     cached_repo.mkdir(parents=True)
     (cached_repo / ".git").mkdir()
 
-    fetched = []
-    monkeypatch.setattr("daydream.training.harvest.git_ops.fetch", lambda repo, remote="origin": fetched.append(repo))
+    fetched: list[Path] = []
+    monkeypatch.setattr(git_ops, "fetch", lambda repo, remote="origin": fetched.append(repo))
     monkeypatch.setattr(
-        "daydream.training.harvest.git_ops.clone_with_token",
-        lambda *a, **k: pytest.fail("should not clone"),
+        git_ops,
+        "clone_with_token",
+        lambda *args, **kwargs: pytest.fail("should not clone"),
     )
-    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
-    result = _resolve_repo_for_row(row, clone_cache=cache)
+    result = _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=cache,
+        remote_url="https://github.com/org/repo.git",
+        repo_slug="org/repo",
+    )
     assert result == cached_repo
     assert fetched == [cached_repo]
 
 
 def test_resolve_repo_for_row_returns_none_when_no_remote(tmp_path: Path) -> None:
     """Returns None when neither source_path nor remote_url is available."""
-    row = {"source_path": None, "remote_url": None, "repo_slug": None}
-    result = _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
+    result = _resolve_repo_with_services(tmp_path, clone_cache=tmp_path / "cache")
     assert result is None
 
 
-def test_resolve_repo_for_row_clone_failure_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_repo_for_row_clone_failure_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Clone failure is swallowed and None is returned (no .git left on disk)."""
     cache = tmp_path / "cache"
-
     monkeypatch.setattr(
-        "daydream.training.harvest.git_ops.clone_with_token",
-        lambda url, target, token=None, **kwargs: (_ for _ in ()).throw(GitError("network error")),
+        git_ops,
+        "clone_with_token",
+        lambda url, target, token=None, **kwargs: (_ for _ in ()).throw(
+            GitError("network error")
+        ),
     )
-    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
-    result = _resolve_repo_for_row(row, clone_cache=cache)
+    result = _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=cache,
+        remote_url="https://github.com/org/repo.git",
+        repo_slug="org/repo",
+    )
     assert result is None
 
 
@@ -1670,11 +1930,16 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(
     (cached_repo / ".git").mkdir()
 
     monkeypatch.setattr(
-        "daydream.training.harvest.git_ops.fetch",
+        git_ops,
+        "fetch",
         lambda repo, remote="origin": (_ for _ in ()).throw(GitError("fetch failed")),
     )
-    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
-    result = _resolve_repo_for_row(row, clone_cache=cache)
+    result = _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=cache,
+        remote_url="https://github.com/org/repo.git",
+        repo_slug="org/repo",
+    )
     assert result == cached_repo
 
 
@@ -1701,7 +1966,6 @@ def test_pr_coverage_helper_counts_decisive(tmp_path: Path) -> None:
 async def test_harvest_propagates_transient_giterror_for_retry(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path: a transient GitError (HTTP 500) on /comments propagates, not degrades.
 
@@ -1723,8 +1987,11 @@ async def test_harvest_propagates_transient_giterror_for_retry(
             raise GitError("gh: Internal Server Error (HTTP 500)")
         return {}
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_500)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
+    summary = await run_harvest(
+        config,
+        services=_services(config, github=_gh_merge_ok_comments_500),
+    )
 
     assert summary["errors"] == 1  # transient 500 propagated, not degraded
     assert latest_label_observation(archive_dir, "s-transient-500") is None  # not annotated
@@ -1736,7 +2003,6 @@ async def test_harvest_propagates_transient_giterror_for_retry(
 async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path: a 404 on /comments after a confirmed merge propagates, not degrades.
 
@@ -1758,8 +2024,11 @@ async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
             raise GitError("gh: Not Found (HTTP 404)")
         return {}
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_404)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
+    summary = await run_harvest(
+        config,
+        services=_services(config, github=_gh_merge_ok_comments_404),
+    )
 
     assert summary["errors"] == 1  # benign comment 404 propagated, merge evidence not discarded
     assert latest_label_observation(archive_dir, "s-merge-comments-404") is None  # not annotated
@@ -1770,7 +2039,6 @@ async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
 async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path: a GitError on the ``/reviews`` lookup must not drop a labeled row.
 
@@ -1792,8 +2060,8 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
             return _finding_comments(_FP_A, reply="applied")
         return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_reviews_fail)
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh_reviews_fail))
 
     assert summary["errors"] == 0  # reviewer-lookup failure degraded, row not dropped
     obs = latest_label_observation(archive_dir, "s-reviews-err")
@@ -1806,7 +2074,6 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
 async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
     tmp_path: Path,
     archive_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # 10 PR rows: PRs 1..8 merged ("accepted"); PRs 9..10 raise a benign GitError
     # (e.g. fork-PR 404). The fix DEGRADES 9..10 to the local-branch posterior
@@ -1828,9 +2095,8 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
             raise GitError(f"gh: Not Found (HTTP 404) for PR {number}")
         return merged(repo, endpoint, **kw)
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
-
-    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
+    summary = await run_harvest(config, services=_services(config, github=_gh))
 
     assert summary["aborted"] == 0  # the GitError rows did NOT abort the sweep
     # All 10 annotate: 8 PR-path "accepted", 2 degraded to local-branch.
@@ -1863,67 +2129,71 @@ def _raise_git_error_with_url(*args: object, **kwargs: object) -> None:
 
 
 def test_repo_resolution_warning_is_value_free(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The harvest repo-resolution warning must never contain the remote URL (issue #981)."""
-    row = {
-        "source_path": None,
-        "remote_url": "https://user:ghp_canaryfake123@github.com/o/r",
-        "repo_slug": "o/r",
-    }
-    monkeypatch.setattr("daydream.training.harvest.git_ops.clone_with_token", _raise_git_error_with_url)
-    _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
+    monkeypatch.setattr(git_ops, "clone_with_token", _raise_git_error_with_url)
+    _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=tmp_path / "cache",
+        remote_url="https://user:ghp_canaryfake123@github.com/o/r",
+        repo_slug="o/r",
+    )
     out = capsys.readouterr().out
     assert "ghp_canaryfake123" not in out
-    assert "o/r" in out  # slug IS present
-
-
-# identity-based repo resolution (issue #981): never clone the archived raw URL
+    assert "o/r" in out
 
 
 def test_resolve_repo_never_clones_raw_archived_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[str] = []
 
-    def fake_clone(url: str, target: Path, token: str | None = None, **kw: object) -> None:
+    def fake_clone(url: str, target: Path, token: str | None = None, **kwargs: object) -> None:
         seen.append(url)
         target.mkdir(parents=True, exist_ok=True)
         (target / ".git").mkdir()
 
-    monkeypatch.setattr("daydream.training.harvest.git_ops.clone_with_token", fake_clone)
-    row = {
-        "source_path": None,
-        "remote_url": "https://user:ghp_canaryfake123@github.com/o/r",
-        "repo_slug": "o/r",
-    }
-    assert _resolve_repo_for_row(row, clone_cache=tmp_path / "cache") == tmp_path / "cache" / "o" / "r"
-    assert seen == ["https://github.com/o/r"]  # reconstructed identity, never raw
+    monkeypatch.setattr(git_ops, "clone_with_token", fake_clone)
+    assert _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=tmp_path / "cache",
+        remote_url="https://user:ghp_canaryfake123@github.com/o/r",
+        repo_slug="o/r",
+    ) == tmp_path / "cache" / "o" / "r"
+    assert seen == ["https://github.com/o/r"]
 
 
 def test_resolve_repo_fails_closed_on_untrusted_host(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(
-        "daydream.training.harvest.git_ops.clone_with_token",
-        lambda url, t, **kw: calls.append(url),
-    )
-    row = {"source_path": None, "remote_url": "https://evil.example.com/o/r", "repo_slug": "o/r"}
-    assert _resolve_repo_for_row(row, clone_cache=tmp_path / "cache") is None  # M7: no clone attempt
+    monkeypatch.setattr(git_ops, "clone_with_token", lambda url, target, **kwargs: calls.append(url))
+    assert _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=tmp_path / "cache",
+        remote_url="https://evil.example.com/o/r",
+        repo_slug="o/r",
+    ) is None
     assert calls == []
 
 
 def test_resolve_repo_fails_closed_on_file_scheme(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(
-        "daydream.training.harvest.git_ops.clone_with_token",
-        lambda url, t, **kw: calls.append(url),
-    )
-    row = {"source_path": None, "remote_url": "file:///tmp/evil", "repo_slug": "o/r"}
-    assert _resolve_repo_for_row(row, clone_cache=tmp_path / "cache") is None
+    monkeypatch.setattr(git_ops, "clone_with_token", lambda url, target, **kwargs: calls.append(url))
+    assert _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=tmp_path / "cache",
+        remote_url="file:///tmp/evil",
+        repo_slug="o/r",
+    ) is None
     assert calls == []
 
 
@@ -1935,19 +2205,19 @@ def test_token_never_in_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         seen.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", _recording_run)
-    _resolve_repo_for_row(
-        {"source_path": None, "remote_url": "https://github.com/o/r", "repo_slug": "o/r"},
+    monkeypatch.setattr(subprocess, "run", _recording_run)
+    _resolve_repo_with_services(
+        tmp_path,
         clone_cache=tmp_path / "cache",
+        remote_url="https://github.com/o/r",
+        repo_slug="o/r",
     )
     assert seen
-    # The base64 Authorization header is trivially recoverable, so the token's
-    # absence on argv must hold for both the raw token and its encoded form.
     basic = base64.b64encode(b"x-access-token:ghp_envtokfake123").decode()
-    for c in seen:
-        joined = " ".join(c)
-        assert "ghp_envtokfake123" not in joined  # raw token never on argv
-        assert basic not in joined  # recoverable base64 never on argv either (M8)
+    for command in seen:
+        joined = " ".join(command)
+        assert "ghp_envtokfake123" not in joined
+        assert basic not in joined
 
 
 def test_hub_import_rejects_unsanitized_affected_bundle(tmp_path: Path) -> None:
@@ -2037,6 +2307,69 @@ def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
     )
     restored = resolution_from_dict(resolution_to_dict(r))
     assert restored == r  # canonical dict is the one round-trip shape
+
+
+def test_harvest_row_preserves_absent_and_empty_fingerprints() -> None:
+    """The typed ingress retains the legacy distinction used by signal assembly."""
+    from daydream.training.harvest_types import HarvestRow
+
+    common = {"session_id": "s1", "archive_path": "/tmp/archive"}
+    absent = HarvestRow.from_mapping(common, row_number=1)
+    empty = HarvestRow.from_mapping({**common, "findings_fingerprints": []}, row_number=2)
+
+    assert "findings_fingerprints" not in absent.as_signal_row()
+    assert empty.as_signal_row()["findings_fingerprints"] == []
+
+
+def test_harvest_evidence_detaches_nested_signals_with_canonical_rubric() -> None:
+    """Acquired evidence owns nested records before the pure reducer receives it."""
+    from daydream.training.harvest_types import HarvestEvidence
+    from daydream.training.labeler_signals import (
+        CommentResolutionSignal,
+        FixAppliedSignal,
+        PerFindingResolution,
+        PRMergeSignal,
+        resolution_to_dict,
+    )
+    from daydream.training.reward import ScoringInputs
+    from daydream.training.rubric import Rubric
+
+    verdicts: list[dict[str, Any]] = [{"verdict": "consistent", "detail": {"source": "original"}}]
+    commits = ["a1"]
+    replies: list[dict[str, Any]] = [{"reply_id": 7, "context": {"state": "original"}}]
+    rubric = Rubric(
+        pr_merge=PRMergeSignal(True, "2026-02-01T00:00:00Z", "merged"),
+        fix_applied=FixAppliedSignal("applied", 1, 1, commits),
+        comment_resolution=CommentResolutionSignal(1, 1, 0),
+        local_commit_applied=None,
+        posterior_source="pr_review",
+        per_finding_resolutions=[
+            PerFindingResolution("f" * 64, 7, "accepted", replies, "d" * 32)
+        ],
+    )
+    expected = rubric.to_dict()
+    evidence = HarvestEvidence(
+        scoring_inputs=ScoringInputs(verdicts, 1.0, True, 12),
+        rubric=rubric,
+        reviewer_logins=("reviewer",),
+        pooled_prior=0.75,
+        prior_n=2,
+    )
+
+    verdicts[0]["detail"]["source"] = "mutated"
+    commits.append("b2")
+    replies[0]["context"]["state"] = "mutated"
+
+    stored_verdicts = evidence.scoring_inputs.verifier_verdicts
+    assert stored_verdicts is not None
+    assert stored_verdicts[0]["detail"]["source"] == "original"
+    assert list(evidence.rubric.fix_applied.window_commits) == ["a1"]
+    resolution = evidence.rubric.per_finding_resolutions
+    assert resolution is not None
+    assert resolution_to_dict(resolution[0])["evidence"] == [
+        {"reply_id": 7, "context": {"state": "original"}}
+    ]
+    assert evidence.rubric.to_dict() == expected
 
 def test_per_finding_resolution_from_dict_fails_closed() -> None:
     from daydream.training.labeler_signals import resolution_from_dict
