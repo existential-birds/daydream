@@ -225,7 +225,7 @@ def _holdout_gold_comment_ids(proj_dir: Path) -> list[str]:
 
 def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path)
-    cfg = PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out")
+    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     manifest = run_pipeline(cfg, dry_run=False)
 
     # Stage 0 runs to completion on the FROZEN split (not re-frozen at runtime).
@@ -267,14 +267,14 @@ def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
 
 def test_stage0_v2_gold_record_without_finding_text_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, omit_finding_text=True)
-    cfg = PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out")
+    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="finding_text"):
         run_pipeline(cfg, dry_run=False)
 
 
 def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, base_sha="abc123")
-    cfg = PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out")
+    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="base_sha"):
         run_pipeline(cfg, dry_run=False)
 
@@ -300,23 +300,20 @@ def cli_runner() -> Any:
     return _Runner()
 
 
-def test_cli_corpus_v2_wiring(tmp_path: Path, cli_runner: Any) -> None:
-    """``daydream train --corpus-v2 DIR --dry-run`` drives run_pipeline end-to-end."""
+def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
+    """``daydream train --projection DIR --dry-run`` drives run_pipeline end-to-end."""
     proj_dir = _build_projection(tmp_path)
     out = tmp_path / "cli-out"
-    res = cli_runner.invoke(["train", "--corpus-v2", str(proj_dir), "--out", str(out), "--dry-run"])
+    res = cli_runner.invoke(["train", "--projection", str(proj_dir), "--out", str(out), "--dry-run"])
     assert res.exit_code == 0, res
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
 
 
-def test_cli_corpus_and_corpus_v2_mutually_exclusive(tmp_path: Path, cli_runner: Any) -> None:
-    """Passing both inputs is refused, not silently preferring one."""
-    proj_dir = _build_projection(tmp_path)
-    res = cli_runner.invoke(
-        ["train", "--corpus", "x.jsonl", "--corpus-v2", str(proj_dir), "--out", str(tmp_path / "o")]
-    )
-    assert res.exit_code == 1
+def test_cli_legacy_corpus_flag_is_gone(tmp_path: Path, cli_runner: Any) -> None:
+    """#1093: the legacy `--corpus` flag no longer parses."""
+    res = cli_runner.invoke(["train", "--corpus", "x.jsonl", "--out", str(tmp_path / "o")])
+    assert res.exit_code != 0
 
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
@@ -347,7 +344,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     assert {"process-trace", "task-only"} <= record_types
 
     manifest = run_pipeline(
-        PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out"), dry_run=False
+        PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out"), dry_run=False
     )
     assert manifest["stages"]["stage0"]["status"] == "complete"
     sft_rows = [
@@ -393,17 +390,14 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     first = manifest["run_identity"]["corpus_digest"]
     assert first == projection.digest
     manifest2 = run_pipeline(
-        PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out2"), dry_run=False
+        PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out2"), dry_run=False
     )
     assert manifest2["run_identity"]["corpus_digest"] == first
 
 
-def test_corpus_and_corpus_v2_are_mutually_exclusive(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        PipelineConfig(
-            corpus=tmp_path / "corpus.jsonl",
-            corpus_v2=tmp_path / "proj",
-            out_dir=tmp_path / "out",
-        )
-    with pytest.raises(ValueError, match="exactly one"):
+def test_projection_is_the_only_input(tmp_path: Path) -> None:
+    """#1093: the legacy `corpus` kwarg is gone and `projection` is required."""
+    with pytest.raises(TypeError):
+        PipelineConfig(corpus=tmp_path / "corpus.jsonl", out_dir=tmp_path / "out")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="projection"):
         PipelineConfig(out_dir=tmp_path / "out")

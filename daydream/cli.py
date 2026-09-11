@@ -30,7 +30,7 @@ top-level ``TARGET`` positional):
       unresolved items grouped by disposition, record provenance-complete
       human observations, export the projector-shape rows (with ``--dry-run``
       validation), and report coverage / inter-rater / conflict strata
-- ``daydream train --corpus <path> --out <dir>`` — run the four-stage
+- ``daydream train --projection <dir> --out <dir>`` — run the four-stage
   training pipeline (stage0 offline gate → stage1 SFT → stage2 RFT →
   stage3 adapter) and write a stage manifest (``--dry-run`` is the GPU-free
   CI path)
@@ -2265,7 +2265,7 @@ class _TrainParser(argparse.ArgumentParser):
 
 
 def _build_train_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream train --corpus <path> --out <dir> [...]``.
+    """Build the parser for ``daydream train --projection <dir> --out <dir> [...]``.
 
     Dispatched manually from ``main()`` (verb-first) so its flags don't
     collide with the top-level ``TARGET`` positional.
@@ -2277,19 +2277,13 @@ def _build_train_parser() -> argparse.ArgumentParser:
             "stage2 RFT → stage3 adapter) and write a stage manifest."
         ),
     )
-    corpus_group = parser.add_mutually_exclusive_group(required=True)
-    corpus_group.add_argument(
-        "--corpus",
+    parser.add_argument(
+        "--projection",
         type=Path,
-        metavar="PATH",
-        help="Input JSONL training corpus (one record per line; C5/C8 fail-closed)",
-    )
-    corpus_group.add_argument(
-        "--corpus-v2",
-        type=Path,
-        dest="corpus_v2",
+        required=True,
+        dest="projection",
         metavar="DIR",
-        help="Frozen corpus-v2 projection directory; verifies _SUCCESS/lineage/"
+        help="Frozen projection directory; verifies _SUCCESS/lineage/"
              "split digests and re-applies C5/C8",
     )
     parser.add_argument(
@@ -2347,8 +2341,7 @@ def _handle_train_command(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     config = PipelineConfig(
-        corpus=args.corpus,
-        corpus_v2=args.corpus_v2,
+        projection=args.projection,
         out_dir=args.out,
         stages=tuple(args.stages) if args.stages else ("stage0", "stage1", "stage2", "stage3"),
         base_model=args.base_model,

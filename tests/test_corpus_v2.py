@@ -734,16 +734,10 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 10: additive v2 loader surface (stacks.py) + v1 untouched gate
+# Task 10: additive v2 loader surface (stacks.py)
 # ---------------------------------------------------------------------------
 
-from daydream.training.stacks import load_dataset, load_dataset_v2  # noqa: E402
-
-# sha256 of daydream/training/corpus.py pinned at task-10 start; proves v1
-# module bytes were never touched by the v2 work (Req 16).
-_V1_CORPUS_SHA_AT_PLAN_TIME = (
-    "09a523efbb42aefe52a042df9155a126f3fe4c0ba7b92305ef31b49181223040"
-)
+from daydream.training.stacks import load_dataset_v2  # noqa: E402
 
 
 def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
@@ -867,21 +861,6 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
     assert (out / "_SUCCESS").is_file()
 
 
-def test_v1_loader_and_v1_artifacts_unaffected(tmp_path: Path) -> None:
-    # v1 loader still loads a v1 record unchanged; v1 schema file untouched
-    v1_record = {"schema_version": "1", "session_id": "s", "repo_slug": "o/r",
-                 "pr_number": 1, "outcome_label": "accepted", "labeler_policy_version": "1"}
-    p = tmp_path / "v1.jsonl"
-    p.write_text(json.dumps(v1_record) + "\n")
-    assert load_dataset(p)[0]["schema_version"] == "1"
-    from daydream.training.schema import TRAINING_SCHEMA_VERSION
-    assert TRAINING_SCHEMA_VERSION == "1"  # never bumped in-place
-    import daydream.training.corpus  # v1 module importable, unmodified
-    v1_src = (Path(daydream.training.corpus.__file__)).read_bytes()
-    assert hashlib.sha256(v1_src).hexdigest() == _V1_CORPUS_SHA_AT_PLAN_TIME
-
-
-# ---------------------------------------------------------------------------
 # Task 11: CLI wiring — ``daydream corpus build-v2``
 # ---------------------------------------------------------------------------
 
