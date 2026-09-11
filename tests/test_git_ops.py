@@ -2550,34 +2550,80 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeyp
     assert not Path(captured["input_path"]).exists()
 
 
-def test_gh_api_input_data_preserves_tempfile_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("failure", "expected_type"),
+    [
+        ("http", GitError),
+        ("invalid-json", GitError),
+        ("timeout", git_ops.GitTimeoutError),
+        ("rate-limit", git_ops.RateLimitError),
+    ],
+)
+def test_gh_api_input_data_preserves_tempfile_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_type: type[GitError],
+) -> None:
     """Preserve failed API payloads and disclose their recovery path in the error."""
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
+    attempts: list[list[str]] = []
+
+    class RequestAuth:
+        calls = 0
+
+        def environment_for_request(self) -> dict[str, str]:
+            self.calls += 1
+            return {"OWNING_RUN": "payload-metadata-test"}
+
+    auth = RequestAuth()
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        attempts.append(cmd)
         idx = cmd.index("--input")
         captured["input_path"] = cmd[idx + 1]
+        assert kwargs["env"] == {"OWNING_RUN": "payload-metadata-test"}
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        if failure == "invalid-json":
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="not-json", stderr="")
+        if failure == "rate-limit":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr="HTTP 429: rate limit; retry-after: 7"
+            )
         return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="HTTP 422: Validation failed")
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "4")
 
-    with pytest.raises(GitError) as excinfo:
+    with pytest.raises(expected_type) as excinfo:
         git_ops.gh_api(
             repo,
             "repos/owner/repo/pulls/1/reviews",
             method="POST",
             input_data={"bad": "payload"},
+            auth=auth,
         )
 
-    msg = str(excinfo.value)
-    assert "payload preserved at" in msg
-    # The tempfile path mentioned in the error must still exist on disk.
     preserved = Path(captured["input_path"])
-    assert str(preserved) in msg
-    assert preserved.exists()
-    # Cleanup so the test doesn't leave debris behind.
-    preserved.unlink(missing_ok=True)
+    try:
+        assert type(excinfo.value) is expected_type
+        assert len(attempts) == 1
+        assert auth.calls == 1
+        msg = str(excinfo.value)
+        if failure == "timeout":
+            assert "timed out" in msg
+        else:
+            assert "payload preserved at" in msg
+            assert str(preserved) in msg
+        assert preserved.exists()
+        assert json.loads(preserved.read_text(encoding="utf-8")) == {"bad": "payload"}
+        assert excinfo.value.preserved_payload_path == preserved
+        if isinstance(excinfo.value, git_ops.RateLimitError):
+            assert excinfo.value.retry_after == 7
+    finally:
+        preserved.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize(
@@ -2895,6 +2941,7 @@ def test_gh_api_classifies_errors(
     with pytest.raises(expected_type) as exc:
         git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
     assert type(exc.value) is expected_type
+    assert exc.value.preserved_payload_path is None
 
 
 @pytest.mark.parametrize(

@@ -31,11 +31,11 @@ import logging
 import os
 import re
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import jsonschema
 
@@ -82,6 +82,20 @@ class PostStatus(Enum):
     FAILED = "failed"
 
 
+class ReviewEvent(StrEnum):
+    """GitHub review event authorized by the source-specific caller."""
+
+    COMMENT = "COMMENT"
+    APPROVE = "APPROVE"
+
+
+class SubmissionStatus(StrEnum):
+    """Whether the final classified review was posted."""
+
+    POSTED = "posted"
+    FAILED = "failed"
+
+
 @dataclass
 class ParsedIssue:
     """One issue to evaluate for PR posting.
@@ -123,6 +137,110 @@ class ParsedIssue:
     location_distrust: bool = False
     severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False
+
+
+@dataclass(frozen=True)
+class SubmissionFinding:
+    """Immutable finding value consumed by the shared submission operation."""
+
+    path: str
+    line: int | None
+    title: str
+    body: str
+    is_cross_stack: bool
+    confidence: str | None
+    severity: str | None
+    fingerprint: str | None
+    location_distrust: bool
+    severity_before_demotion: str | None
+    severity_off_vocabulary: bool
+
+    @classmethod
+    def from_parsed(cls, issue: ParsedIssue) -> SubmissionFinding:
+        """Snapshot one mutable classification finding."""
+        return cls(
+            path=issue.path,
+            line=issue.line,
+            title=issue.title,
+            body=issue.body,
+            is_cross_stack=issue.is_cross_stack,
+            confidence=issue.confidence,
+            severity=issue.severity,
+            fingerprint=issue.fingerprint,
+            location_distrust=issue.location_distrust,
+            severity_before_demotion=issue.severity_before_demotion,
+            severity_off_vocabulary=issue.severity_off_vocabulary,
+        )
+
+    def to_parsed(self) -> ParsedIssue:
+        """Create the renderer's mutable compatibility value."""
+        return ParsedIssue(
+            path=self.path,
+            line=self.line,
+            title=self.title,
+            body=self.body,
+            is_cross_stack=self.is_cross_stack,
+            confidence=self.confidence,
+            severity=self.severity,
+            fingerprint=self.fingerprint,
+            location_distrust=self.location_distrust,
+            severity_before_demotion=self.severity_before_demotion,
+            severity_off_vocabulary=self.severity_off_vocabulary,
+        )
+
+
+@dataclass(frozen=True)
+class InlineReviewComment:
+    """One immutable inline comment in a final GitHub review payload."""
+
+    path: str
+    line: int
+    side: Literal["RIGHT"]
+    body: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class FileCommentPayload:
+    """Payload for one top-level file review comment."""
+
+    commit_id: str
+    path: str
+    subject_type: Literal["file"] = "file"
+    body: str
+
+
+@dataclass(frozen=True)
+class ReviewPayload:
+    """Payload for the single final GitHub review."""
+
+    event: ReviewEvent
+    commit_id: str
+    body: str
+    comments: tuple[InlineReviewComment, ...]
+
+
+@dataclass(frozen=True)
+class ReviewPostResult:
+    """Transport-level result for the final review write."""
+
+    review_url: str | None
+    safe_error: str | None
+
+
+@dataclass(frozen=True)
+class ClassifiedReviewResult:
+    """Confirmed write results from the shared submitter.
+
+    ``final_review_posted=False`` means no successful response was confirmed;
+    it does not prove that an ambiguous failed request had no remote effect.
+    """
+
+    status: SubmissionStatus
+    review_url: str | None
+    posted_file_level: tuple[SubmissionFinding, ...]
+    folded_file_level: tuple[SubmissionFinding, ...]
+    final_review_posted: bool
+    safe_error: str | None
 
 
 @dataclass(frozen=True)
@@ -1288,6 +1406,150 @@ def resolve_review_renderers(registry: Registry) -> ReviewRenderers:
     )
 
 
+def _snapshot_inline_comment(raw: Mapping[str, Any]) -> InlineReviewComment:
+    """Copy one internal inline dictionary into its immutable payload value."""
+    path = raw.get("path")
+    line = raw.get("line")
+    side = raw.get("side")
+    body = raw.get("body")
+    if (
+        not isinstance(path, str)
+        or type(line) is not int
+        or side != "RIGHT"
+        or not isinstance(body, str)
+    ):
+        raise ValueError("classified inline comment has an invalid shape")
+    return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
+
+
+@dataclass(frozen=True)
+class ClassifiedReviewPlan:
+    """Immutable, authorized input to the shared review write operation."""
+
+    pr: PRInfo
+    inline: tuple[InlineReviewComment, ...]
+    inline_issues: tuple[SubmissionFinding, ...]
+    file_level: tuple[SubmissionFinding, ...]
+    body_only: tuple[SubmissionFinding, ...]
+    event: ReviewEvent
+    run_info: str
+    renderers: ReviewRenderers
+    diagram_blocks: str | None
+
+    @classmethod
+    def from_classified(
+        cls,
+        pr: PRInfo,
+        classified: _ClassifiedIssues,
+        *,
+        event: ReviewEvent,
+        run_info: str,
+        renderers: ReviewRenderers,
+        diagram_blocks: str | None = None,
+    ) -> ClassifiedReviewPlan:
+        """Snapshot a mutable classified review after the caller authorizes it."""
+        return cls(
+            pr=pr,
+            inline=tuple(_snapshot_inline_comment(comment) for comment in classified.inline),
+            inline_issues=tuple(
+                SubmissionFinding.from_parsed(issue)
+                for issue in classified.inline_issues
+            ),
+            file_level=tuple(
+                SubmissionFinding.from_parsed(issue) for issue in classified.file_level
+            ),
+            body_only=tuple(
+                SubmissionFinding.from_parsed(issue) for issue in classified.body_only
+            ),
+            event=event,
+            run_info=run_info,
+            renderers=renderers,
+            diagram_blocks=diagram_blocks,
+        )
+
+
+class ReviewTransport(Protocol):
+    """Explicit capability for the two kinds of GitHub review writes."""
+
+    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool: ...
+
+    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult: ...
+
+
+def _file_comment_payload_dict(payload: FileCommentPayload) -> dict[str, Any]:
+    return {
+        "commit_id": payload.commit_id,
+        "path": payload.path,
+        "subject_type": payload.subject_type,
+        "body": payload.body,
+    }
+
+
+def _review_payload_dict(payload: ReviewPayload) -> dict[str, Any]:
+    return {
+        "event": payload.event.value,
+        "commit_id": payload.commit_id,
+        "body": payload.body,
+        "comments": [
+            {
+                "path": comment.path,
+                "line": comment.line,
+                "side": comment.side,
+                "body": comment.body,
+            }
+            for comment in payload.comments
+        ],
+    }
+
+
+@dataclass(frozen=True)
+class GitHubReviewTransport:
+    """GitHub review writes bound to one repository checkout and auth source."""
+
+    target_dir: Path
+    auth: GitHubAuth = field(repr=False)
+
+    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool:
+        endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"
+        try:
+            git_ops.gh_api(
+                self.target_dir,
+                endpoint,
+                method="POST",
+                input_data=_file_comment_payload_dict(payload),
+                auth=self.auth,
+            )
+        except GitError:
+            return False
+        return True
+
+    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult:
+        endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
+        try:
+            data = git_ops.gh_api(
+                self.target_dir,
+                endpoint,
+                method="POST",
+                input_data=_review_payload_dict(payload),
+                auth=self.auth,
+            )
+        except GitError as exc:
+            safe_error = "GitHub review submission failed"
+            if exc.preserved_payload_path is not None:
+                safe_error += (
+                    " (request payload preserved at "
+                    f"{exc.preserved_payload_path})"
+                )
+            return ReviewPostResult(review_url=None, safe_error=safe_error)
+        if not isinstance(data, dict):
+            return ReviewPostResult(review_url=None, safe_error=None)
+        url = data.get("html_url")
+        return ReviewPostResult(
+            review_url=str(url) if url else None,
+            safe_error=None,
+        )
+
+
 def _render_summary(ctx: SummaryContext, renderers: ReviewRenderers) -> str:
     """Render the summary body through the registered ``"summary"`` renderer.
 
@@ -1443,16 +1705,16 @@ def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> b
     )
 
 
-def build_payload(
+def _build_payload_for_event(
     pr: PRInfo,
     classified: _ClassifiedIssues,
     *,
+    event: ReviewEvent,
     run_info: str,
     renderers: ReviewRenderers,
-    approve_on_clean: bool = False,
     diagram_blocks: str | None = None,
-) -> dict[str, Any]:
-    """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
+) -> ReviewPayload:
+    """Render a final review payload for a caller-authorized event.
 
     The review body uses collapsible sections so large reviews stay readable:
         **Code Review Summary**
@@ -1465,13 +1727,7 @@ def build_payload(
         run_info: Pre-rendered run-info markdown from the live provider or
             validated findings artifact.
         renderers: Explicit renderer functions and built-in fallback functions.
-        approve_on_clean: Opt-in approval (issue #343). When True AND the
-            classified review has no blocking severity findings (anything
-            other than ``"low"`` or omitted, fail-closed — see
-            ``_NON_BLOCKING_SEVERITIES``), the payload's event becomes
-            ``"APPROVE"`` with a prepended approval line; otherwise the event
-            stays ``"COMMENT"`` and the body is byte-identical to the
-            non-approve path.
+        event: Review event already authorized by the source-specific caller.
         diagram_blocks: Host-rendered grounded-diagram markdown (issue #1113),
             handed to the ``"summary"`` renderer as ``ctx.diagrams`` so it
             lands directly under the summary header. ``None`` (the default)
@@ -1479,7 +1735,7 @@ def build_payload(
     """
     all_issues_with_inline_meta = classified.all_issues()
 
-    clean = _is_clean_review(classified, approve_on_clean)
+    approved = event is ReviewEvent.APPROVE
 
     # Consolidated AI agent prompt (host-built; empty means "omit").
     agent_prompt = (
@@ -1531,7 +1787,7 @@ def build_payload(
     summary_body = _render_summary(summary_ctx, renderers)
 
     body_chunks: list[str] = []
-    if clean:
+    if approved:
         body_chunks.append("✅ **Deep review passed with no high/medium findings.**")
     body_chunks.append(summary_body)
     # DAYDREAM_FOOTER is the bottom-of-comment "🧙 Posted by daydream"
@@ -1539,13 +1795,106 @@ def build_payload(
     # inside the review-info block.
     body_chunks.append(DAYDREAM_FOOTER)
 
-    payload: dict[str, Any] = {
-        "event": "APPROVE" if clean else "COMMENT",
-        "commit_id": pr.head_sha,
-        "body": "\n\n".join(body_chunks),
-        "comments": classified.inline,
-    }
-    return payload
+    return ReviewPayload(
+        event=event,
+        commit_id=pr.head_sha,
+        body="\n\n".join(body_chunks),
+        comments=tuple(
+            _snapshot_inline_comment(comment) for comment in classified.inline
+        ),
+    )
+
+
+def build_payload(
+    pr: PRInfo,
+    classified: _ClassifiedIssues,
+    *,
+    run_info: str,
+    renderers: ReviewRenderers,
+    approve_on_clean: bool = False,
+    diagram_blocks: str | None = None,
+) -> dict[str, Any]:
+    """Build the legacy dictionary payload after applying the approval gate."""
+    event = (
+        ReviewEvent.APPROVE
+        if _is_clean_review(classified, approve_on_clean)
+        else ReviewEvent.COMMENT
+    )
+    return _review_payload_dict(
+        _build_payload_for_event(
+            pr,
+            classified,
+            event=event,
+            run_info=run_info,
+            renderers=renderers,
+            diagram_blocks=diagram_blocks,
+        )
+    )
+
+
+def post_classified_review(
+    plan: ClassifiedReviewPlan,
+    *,
+    transport: ReviewTransport,
+) -> ClassifiedReviewResult:
+    """Submit ordered file comments, fold failures, then post one final review."""
+    posted: list[SubmissionFinding] = []
+    folded: list[SubmissionFinding] = []
+    for finding in plan.file_level:
+        payload = FileCommentPayload(
+            commit_id=plan.pr.head_sha,
+            path=finding.path,
+            subject_type="file",
+            body=_format_file_level_body(finding.to_parsed(), plan.renderers),
+        )
+        if transport.post_file_comment(plan.pr, payload):
+            posted.append(finding)
+        else:
+            folded.append(finding)
+
+    final_classified = _ClassifiedIssues(
+        inline=[
+            {
+                "path": comment.path,
+                "line": comment.line,
+                "side": comment.side,
+                "body": comment.body,
+            }
+            for comment in plan.inline
+        ],
+        inline_issues=[finding.to_parsed() for finding in plan.inline_issues],
+        file_level=[finding.to_parsed() for finding in posted],
+        body_only=[
+            *(finding.to_parsed() for finding in plan.body_only),
+            *(finding.to_parsed() for finding in folded),
+        ],
+    )
+    review_payload = _build_payload_for_event(
+        plan.pr,
+        final_classified,
+        event=plan.event,
+        run_info=plan.run_info,
+        renderers=plan.renderers,
+        diagram_blocks=plan.diagram_blocks,
+    )
+    review_result = transport.post_review(plan.pr, review_payload)
+    if review_result.review_url is None:
+        return ClassifiedReviewResult(
+            status=SubmissionStatus.FAILED,
+            review_url=None,
+            posted_file_level=tuple(posted),
+            folded_file_level=tuple(folded),
+            final_review_posted=False,
+            safe_error=review_result.safe_error,
+        )
+    return ClassifiedReviewResult(
+        status=SubmissionStatus.POSTED,
+        review_url=review_result.review_url,
+        posted_file_level=tuple(posted),
+        folded_file_level=tuple(folded),
+        final_review_posted=True,
+        safe_error=None,
+    )
 
 
 # --- Core orchestration ---------------------------------------------------
@@ -1647,111 +1996,39 @@ async def _post(
         print_info(console, "Skipped posting to PR.")
         return PostStatus.NOTHING_TO_POST
 
-    # File-level comments post first: a failure here has to fall back into the
-    # review body, which is built below.
-    posted, failed = _submit_file_level_comments(
-        target_dir, pr, classified.file_level, auth=auth, renderers=renderers
+    plan = ClassifiedReviewPlan.from_classified(
+        pr,
+        classified,
+        event=ReviewEvent.APPROVE if clean else ReviewEvent.COMMENT,
+        run_info=run_info,
+        renderers=renderers,
+        diagram_blocks=diagram_blocks,
     )
-    if failed:
-        classified.file_level = posted
-        classified.body_only.extend(failed)
+    result = post_classified_review(
+        plan,
+        transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
+    )
+    if result.folded_file_level:
         print_warning(
             console,
-            f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
+            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            "folded into the review body.",
         )
 
-    payload = build_payload(
-        pr, classified, run_info=run_info, renderers=renderers,
-        approve_on_clean=approve_on_clean, diagram_blocks=diagram_blocks
-    )
-    review_url, error_msg = _submit_review(target_dir, pr, payload, auth=auth)
-    if review_url is None:
-        # ``error_msg`` carries the GitError text from git_ops, which includes
-        # the preserved tempfile path on failure (see git_ops.gh_api).
-        suffix = f" ({error_msg})" if error_msg else ""
+    if result.status is SubmissionStatus.FAILED:
+        suffix = f" ({result.safe_error})" if result.safe_error else ""
         # File-level comments post before the review, so some may already be
         # live on the PR — saying "no comments were posted" would be false.
         already = (
-            f" {len(classified.file_level)} file-level comment(s) were already posted."
-            if classified.file_level
+            f" {len(result.posted_file_level)} file-level comment(s) were already posted."
+            if result.posted_file_level
             else " No comments were posted."
         )
         print_warning(console, f"Failed to post PR review;{already}{suffix}")
         return PostStatus.FAILED
 
-    print_success(console, f"Posted review: {review_url}")
+    print_success(console, f"Posted review: {result.review_url}")
     return PostStatus.POSTED
-
-
-def _submit_file_level_comments(
-    target_dir: Path,
-    pr: PRInfo,
-    issues: list[ParsedIssue],
-    *,
-    renderers: ReviewRenderers,
-    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> tuple[list[ParsedIssue], list[ParsedIssue]]:
-    """POST each issue as a file-level review comment; return the ones that failed.
-
-    GitHub rejects ``subject_type`` inside a batch review payload (HTTP 422),
-    so file-level comments must be posted one at a time against
-    ``/pulls/{n}/comments``. Each one becomes a top-level, repliable thread on
-    that endpoint — the surface :func:`index_pr_review_comments` reads — which
-    is what makes these findings labelable at all.
-
-    Failures are returned rather than raised so the caller can fold them back
-    into the review body: a finding that cannot get its own thread must still
-    reach the maintainer.
-
-    Returns:
-        ``(posted, failed)`` partitioning ``issues`` in input order.
-    """
-    endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"
-    posted: list[ParsedIssue] = []
-    failed: list[ParsedIssue] = []
-    for issue in issues:
-        payload = {
-            "commit_id": pr.head_sha,
-            "path": issue.path,
-            "subject_type": "file",
-            "body": _format_file_level_body(issue, renderers),
-        }
-        try:
-            git_ops.gh_api(
-                target_dir, endpoint, method="POST", input_data=payload, auth=auth
-            )
-        except GitError:
-            failed.append(issue)
-        else:
-            posted.append(issue)
-    return posted, failed
-
-
-def _submit_review(
-    target_dir: Path,
-    pr: PRInfo,
-    payload: dict[str, Any],
-    *,
-    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> tuple[str | None, str | None]:
-    """POST the review payload via ``gh api``.
-
-    Returns:
-        ``(html_url, None)`` on success, ``(None, error_message)`` on failure.
-        The error message — when present — includes the preserved-payload path
-        produced by :func:`daydream.git_ops.gh_api` so callers can surface it.
-    """
-    endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
-    try:
-        data = git_ops.gh_api(
-            target_dir, endpoint, method="POST", input_data=payload, auth=auth
-        )
-    except GitError as exc:
-        return None, str(exc)
-    if not isinstance(data, dict):
-        return None, None
-    url = data.get("html_url")
-    return (str(url) if url else None), None
 
 
 def post_diagram_comment_to_pr(
@@ -2614,36 +2891,37 @@ def post_findings_from_artifact(
         )
         return 0
 
-    posted_files, failed_files = _submit_file_level_comments(
-        target_dir, pr, classified.file_level, auth=auth, renderers=renderers
-    )
-    if failed_files:
-        classified.file_level = posted_files
-        classified.body_only.extend(failed_files)
-        print_info(
-            console,
-            f"{len(failed_files)} file-level comment(s) failed to post; folded into the review body.",
-        )
-
-    payload = build_payload(
+    submission_plan = ClassifiedReviewPlan.from_classified(
         pr,
         classified,
-        run_info=artifact.run_info if artifact.run_info is not None else render_run_info(()),
+        event=ReviewEvent.APPROVE if can_approve else ReviewEvent.COMMENT,
+        run_info=(
+            artifact.run_info if artifact.run_info is not None else render_run_info(())
+        ),
         renderers=renderers,
-        approve_on_clean=can_approve,
         diagram_blocks=diagram_blocks,
     )
-    review_url, error_msg = _submit_review(target_dir, pr, payload, auth=auth)
-    if review_url is None:
-        suffix = f" ({error_msg})" if error_msg else ""
+    result = post_classified_review(
+        submission_plan,
+        transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
+    )
+    if result.folded_file_level:
+        print_info(
+            console,
+            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            "folded into the review body.",
+        )
+
+    if result.status is SubmissionStatus.FAILED:
+        suffix = f" ({result.safe_error})" if result.safe_error else ""
         already = (
-            f"{len(posted_files)} file-level comment(s) were already posted."
-            if posted_files
+            f"{len(result.posted_file_level)} file-level comment(s) were already posted."
+            if result.posted_file_level
             else "No comments were posted."
         )
         print_error(console, "PR Review Post Failed", f"{already}{suffix}")
         return 1
-    print_success(console, f"Posted review: {review_url}")
+    print_success(console, f"Posted review: {result.review_url}")
     return 0
 
 

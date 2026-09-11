@@ -231,7 +231,14 @@ def _redact_args(args: list[str]) -> list[str]:
 
 
 class GitError(Exception):
-    """Base class for all git/gh failures raised by :mod:`daydream.git_ops`."""
+    """Base class for all git/gh failures raised by :mod:`daydream.git_ops`.
+
+    ``preserved_payload_path`` is set by ``gh_api`` when its failed request
+    retains an input file. Callers can report that path without parsing or
+    exposing the exception's diagnostic text.
+    """
+
+    preserved_payload_path: Path | None = None
 
 
 class GitTimeoutError(GitError):
@@ -4299,6 +4306,9 @@ def gh_api(
         result = _parse_gh_json(proc.stdout, jq, endpoint, payload_note=payload_note)
         succeeded = True
         return result
+    except GitError as exc:
+        exc.preserved_payload_path = tmp_path
+        raise
     finally:
         if succeeded:
             tmp_path.unlink(missing_ok=True)

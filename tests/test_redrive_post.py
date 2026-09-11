@@ -123,3 +123,20 @@ def test_redrive_corrupt_merged_items_exits_nonzero(
     assert "Could not read merged-items.json" in (captured.out + captured.err)
     assert fake_gh.calls("POST") == []
     assert not (multi_stack_target / ".review-output.md").exists()
+
+
+def test_redrive_decline_posts_no_file_comments_or_review(
+    multi_stack_target: Path,
+    fake_gh: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _serve_pr_view(fake_gh, multi_stack_target)
+    _write_canonical(multi_stack_target)
+    monkeypatch.setattr("daydream.ui.messages._read_user_input", lambda *_args: "n")
+
+    _run_cli(str(multi_stack_target), "--pr", "7", monkeypatch=monkeypatch)
+
+    assert fake_gh.pr_view_calls()
+    assert fake_gh.calls("POST") == []
+    assert "Skipped posting to PR." in capsys.readouterr().out
