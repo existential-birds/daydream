@@ -140,6 +140,34 @@ def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
     assert list(dest.parent.glob("review.json*")) == [dest]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("candidate_id", "not-a-digest"), ("title", ""), ("body", "bad\x00body"),
+     ("severity", "critical"), ("path", "../escape"), ("start_line", 0)],
+)
+def test_assembled_candidate_finding_rejects_verifier_invalid_content(
+    field: str, value: object
+) -> None:
+    from daydream.benchmark.harbor import candidate
+    from daydream.benchmark.harbor import verifier_core as vc
+
+    finding: dict[str, object] = {
+        "candidate_id": "", "title": "Title", "body": "Body", "severity": "low",
+        "path": "src/a.py", "start_line": 1, "end_line": 1,
+    }
+    finding["candidate_id"] = vc.derive_candidate_id("case-key", finding, 0)
+    assert vc.validate_candidate_artifact({
+        "schema_version": 1, "case_id": "case-key", "base_ref": "base",
+        "head_ref": "head", "findings": [finding],
+    })
+    finding[field] = value
+    if field != "candidate_id":
+        finding["candidate_id"] = vc.derive_candidate_id("case-key", finding, 0)
+    with pytest.raises(candidate.CandidateError) as rejected:
+        candidate.build_candidate_artifact("case-key", [finding])
+    assert rejected.value.kind == "invalid_finding"
+
+
 def test_artifact_write_failure_raises(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import candidate
 
@@ -824,6 +852,7 @@ def test_local_harbor_task_with_fake_backend(
     documented, but the runnable gate is a genuine executed pass."""
     import asyncio
     import importlib
+    import importlib.util
     import os
 
     import pytest
@@ -949,6 +978,35 @@ def test_local_harbor_task_with_fake_backend(
     assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
     assert artifact["case_id"] == key
     assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+
+    # Validate both host-produced artifacts with the verifier copied into the
+    # compiled task, exercising the actual deployment boundary.
+    spec = importlib.util.spec_from_file_location(
+        "compiled_verifier", ws / "harbor" / key / "tests" / "verifier_core.py"
+    )
+    assert spec is not None and spec.loader is not None
+    copied = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, copied)
+    spec.loader.exec_module(copied)
+    case = ws / "harbor" / key
+    gold = json.loads((case / "tests" / "golden-review.json").read_text())
+    copied_candidates = copied.validate_candidate_artifact(artifact)
+    copied_gold = copied.validate_gold_set(gold, case_id=key)
+    assert [
+        (p.candidate_id, p.title, p.body, p.severity, p.path, p.start_line, p.end_line)
+        for p in copied_candidates
+    ] == [
+        (p.candidate_id, p.title, p.body, p.severity, p.path, p.start_line, p.end_line)
+        for p in parsed
+    ]
+    host_gold = vc.validate_gold_set(gold, case_id=key)
+    assert [
+        (f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line)
+        for f in copied_gold
+    ] == [
+        (f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line)
+        for f in host_gold
+    ]
 
 
 def test_agent_run_accepts_claude_and_invokes_entrypoint(

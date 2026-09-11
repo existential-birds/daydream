@@ -354,8 +354,8 @@ def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
 
     Returns the content fields ``{title, body, severity, path, start_line,
     end_line}``; ``path/start_line/end_line`` come from ``finding["location"]``
-    and are normalized by the verifier's own :func:`verifier_core._validate_location`
-    so the all-or-none location rule lives in exactly one place. A missing or
+    and are normalized by :func:`verifier_core.parse_finding_content`, so the
+    all-or-none location rule lives in exactly one place. A missing or
     ``None`` location (a locationless review finding that names a defect without
     a file or line) collapses to explicit null location fields -- a valid,
     provably locationless gold entry. A partially populated location (at least
@@ -366,25 +366,25 @@ def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
     location = finding.get("location")
     if not location:
         path = start_line = end_line = None
+    elif not isinstance(location, dict):
+        raise CompileError(f"finding {finding.get('finding_id')} has an invalid location")
     else:
         path = location.get("path")
         start_line = location.get("start_line")
         end_line = location.get("end_line")
     try:
-        path, start_line, end_line = vc._validate_location(path, start_line, end_line)
+        return vc.parse_finding_content({
+            "title": finding.get("title"),
+            "body": finding.get("body"),
+            "severity": finding.get("severity"),
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
+        })
     except vc.VerifierError as exc:
         raise CompileError(
-            f"finding {finding.get('finding_id')} has a partially populated location; "
-            "location must be all-null or fully populated"
+            f"finding {finding.get('finding_id')} is invalid: {exc}"
         ) from exc
-    return {
-        "title": finding.get("title"),
-        "body": finding.get("body"),
-        "severity": finding.get("severity"),
-        "path": path,
-        "start_line": start_line,
-        "end_line": end_line,
-    }
 
 
 def _gold_finding_ids(key: str, finding: dict[str, Any]) -> str:
@@ -412,11 +412,14 @@ def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[st
     its location fields; a partially populated location raises
     :class:`CompileError` from :func:`_flatten_finding`.
     """
-    if not findings:
-        return []
     flat = [(_flatten_finding(f), _gold_finding_ids(key, f)) for f in findings]
     flat.sort(key=lambda item: item[1])
-    return [{"finding_id": fid, **flattened} for flattened, fid in flat]
+    result = [{"finding_id": fid, **flattened} for flattened, fid in flat]
+    try:
+        vc.validate_gold_set(result, case_id=key)
+    except vc.VerifierError as exc:
+        raise CompileError(f"compiled gold findings are invalid: {exc}") from exc
+    return result
 
 
 def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -437,14 +440,6 @@ def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> di
     components so a locationless compiled artifact groups field-for-field with
     the verifier's own canonical tuple (``_canonical_tuple``).
     """
-    if not findings:
-        return {
-            "schema_version": 1,
-            "case_id": opaque_key,
-            "base_ref": "base",
-            "head_ref": "head",
-            "findings": [],
-        }
     flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
     flat.sort(key=lambda item: item[1])
     # Candidate ids are derived from canonical content + an occurrence ordinal
@@ -466,13 +461,18 @@ def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> di
         entry = dict(flattened)
         entry["candidate_id"] = vc.derive_candidate_id(opaque_key, entry, ordinal)
         entries.append(entry)
-    return {
+    result = {
         "schema_version": 1,
         "case_id": opaque_key,
         "base_ref": "base",
         "head_ref": "head",
         "findings": entries,
     }
+    try:
+        vc.validate_candidate_artifact(result)
+    except vc.VerifierError as exc:
+        raise CompileError(f"compiled Oracle artifact is invalid: {exc}") from exc
+    return result
 
 
 # Verifier/solution template assets copied byte-for-byte into each compiled case.

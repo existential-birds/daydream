@@ -28,6 +28,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 CANDIDATE_ARTIFACT_KEYS = {"schema_version", "case_id", "base_ref", "head_ref", "findings"}
 CANDIDATE_FINDING_KEYS = {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
 GOLD_FINDING_KEYS = {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
+_FINDING_CONTENT_KEYS = {"title", "body", "severity", "path", "start_line", "end_line"}
 
 
 class VerifierError(Exception):
@@ -117,24 +118,6 @@ def _validate_location(
     return (_validate_path(path), *_validate_lines(start_line, end_line))
 
 
-def _content_fields(raw: dict[str, object]) -> dict[str, object]:
-    """Validate the content fields shared by gold and candidate findings."""
-    try:
-        path, start_line, end_line = _validate_location(
-            raw["path"], raw["start_line"], raw["end_line"]
-        )
-        return {
-            "title": _validate_title(raw["title"]),
-            "body": _validate_body(raw["body"]),
-            "severity": _validate_severity(raw.get("severity")),
-            "path": path,
-            "start_line": start_line,
-            "end_line": end_line,
-        }
-    except KeyError as exc:
-        raise VerifierError(f"missing required field {exc.args[0]}") from exc
-
-
 @dataclass(frozen=True)
 class _FindingContent:
     """Content fields shared by gold and candidate findings."""
@@ -192,6 +175,29 @@ def validate_exact_keys(raw: object, allowed: set[str], context: str) -> None:
         raise VerifierError(f"{context} contains unknown field(s): {', '.join(extra)}")
 
 
+def parse_finding_content(raw: object) -> dict[str, object]:
+    """Validate and return the exact six content fields of a finding.
+
+    This is the public, stdlib-only parsing contract shared by host artifact
+    builders and the verifier source copied into compiled Harbor tasks. The
+    nullable ``severity`` field is still required as a key. Raises
+    :class:`VerifierError` when the shape, content, or location is invalid.
+    """
+    validate_exact_keys(raw, _FINDING_CONTENT_KEYS, "finding content")
+    assert isinstance(raw, dict)  # established by validate_exact_keys
+    path, start_line, end_line = _validate_location(
+        raw["path"], raw["start_line"], raw["end_line"]
+    )
+    return {
+        "title": _validate_title(raw["title"]),
+        "body": _validate_body(raw["body"]),
+        "severity": _validate_severity(raw["severity"]),
+        "path": path,
+        "start_line": start_line,
+        "end_line": end_line,
+    }
+
+
 def _finding_kwargs(
     raw: dict[str, object], *, side: str, id_key: str
 ) -> dict[str, object]:
@@ -207,7 +213,9 @@ def _finding_kwargs(
         ident = _validate_hex64(raw[id_key], id_key)
     except KeyError as exc:
         raise VerifierError(f"missing required field {exc.args[0]}") from exc
-    fields = _content_fields(raw)
+    fields = parse_finding_content(
+        {field: raw[field] for field in _FINDING_CONTENT_KEYS}
+    )
     fields[id_key] = ident
     return fields
 

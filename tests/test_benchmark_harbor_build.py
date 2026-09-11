@@ -499,6 +499,65 @@ def test_build_gold_list_rejects_partially_populated_location() -> None:
         }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("title", ""), ("body", "bad\x00body"), ("severity", "critical"),
+     ("location", {"path": "../escape", "start_line": 1, "end_line": 1})],
+)
+@pytest.mark.parametrize("oracle", [False, True])
+def test_build_gold_and_oracle_reject_invalid_finding_content(
+    field: str, value: object, oracle: bool
+) -> None:
+    from daydream.benchmark.harbor import build
+
+    finding: dict[str, Any] = {
+        "finding_id": "a" * 64, "title": "T", "body": "B", "severity": "low",
+        "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
+        "provenance": {"kind": "authored", "source_ids": []},
+    }
+    finding[field] = value
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    with pytest.raises(build.CompileError):
+        if oracle:
+            build.build_oracle_artifact(key, [finding])
+        else:
+            build.build_gold_list([finding], key=key)
+
+
+@pytest.mark.parametrize(("oracle", "count"), [(False, 51), (True, 101)])
+def test_build_gold_and_oracle_reject_over_cap(oracle: bool, count: int) -> None:
+    from daydream.benchmark.harbor import build
+
+    findings = [{
+        "finding_id": f"{i:064x}", "title": f"T{i}", "body": "B", "severity": "low",
+        "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
+        "provenance": {"kind": "authored", "source_ids": []},
+    } for i in range(count)]
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    with pytest.raises(build.CompileError):
+        if oracle:
+            build.build_oracle_artifact(key, findings)
+        else:
+            build.build_gold_list(findings, key=key)
+
+
+@pytest.mark.parametrize(("oracle", "count"), [(False, 50), (True, 100)])
+def test_build_gold_and_oracle_accept_at_cap(oracle: bool, count: int) -> None:
+    from daydream.benchmark.harbor import build
+
+    findings = [{
+        "finding_id": f"{i:064x}", "title": f"T{i}", "body": "B", "severity": "low",
+        "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
+        "provenance": {"kind": "authored", "source_ids": []},
+    } for i in range(count)]
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    if oracle:
+        artifact = build.build_oracle_artifact(key, findings)
+        assert len(artifact["findings"]) == count
+    else:
+        assert len(build.build_gold_list(findings, key=key)) == count
+
+
 def test_build_oracle_artifact_locationless_passes_validation() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor import verifier_core as vc
