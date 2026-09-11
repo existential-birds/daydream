@@ -49,7 +49,7 @@ def test_deterministic_given_seed(tmp_path: Path) -> None:
 
 
 def test_reads_production_export_shape(tmp_path: Path) -> None:
-    """Issue 2: gold admission reads the run_build_corpus export keys
+    """Issue 2: gold admission reads the v1 records export keys
     (outcome_label/review_output/session_id) as well as the fixture keys."""
     rows = []
     for i in range(12):

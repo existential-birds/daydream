@@ -1,50 +1,31 @@
-"""Pure build-corpus projection (gold layer) over the bitemporal archive.
+"""Shared projection helpers over the bitemporal training archive.
 
-This module owns ATIF-v1.7 trajectory → training-record conversion plus the
-filter/stratify pipeline that selects which archived runs become training
-records. It reads each run's label and reward from the ``as_of``-pinned silver
-annotation (``label_observations``) — *not* the denormalized
-``runs.outcome_labels`` cache — so a re-projection at a fixed ``as_of``
-reproduces the corpus byte-for-byte even after a re-harvest appends newer
-annotation generations.
+This module owns the reusable pieces of the ATIF-v1.7 trajectory →
+training-record pipeline: the span/record builders (``_build_spans``,
+``_build_record``), the archive query/filter/stratify pipeline
+(``CorpusFilters``, ``_build_query``, ``_query_index``, ``_stratify``),
+annotation decoding helpers, the temporal-leakage guard
+(:func:`_is_posterior_leak`), and the gold-admission gate
+(:func:`_is_admitted_outcome_gold`).
 
-A temporal-leakage guard (:func:`_is_posterior_leak`) protects the ``as_of``
-pin against posterior label leakage: an annotation may be *recorded* before
-``as_of`` yet describe an outcome whose valid time (``valid_at``, e.g. a PR
-merge timestamp) lands *after* the pin. When ``valid_at > as_of`` the
-posterior-derived ``outcome_label`` is dropped (the run is treated as
-unlabeled); the intrinsic, capture-time reward fields survive and may still
-admit the run via the ``min_reward`` path. The comparison is **chronological**
-(parsed datetimes), so any ISO-8601 spelling difference — ``Z`` vs ``+00:00``,
-sub-second precision, a non-UTC offset — can never mis-order the guard. When
-``as_of`` is ``None`` no valid-time exclusion applies.
+The temporal-leakage guard protects an ``as_of`` pin against posterior label
+leakage: an annotation may be *recorded* before ``as_of`` yet describe an
+outcome whose valid time (``valid_at``, e.g. a PR merge timestamp) lands
+*after* the pin. When ``valid_at > as_of`` the posterior-derived
+``outcome_label`` must be dropped (the run is treated as unlabeled); the
+intrinsic, capture-time reward fields survive. The comparison is
+**chronological** (parsed datetimes), so any ISO-8601 spelling difference —
+``Z`` vs ``+00:00``, sub-second precision, a non-UTC offset — can never
+mis-order the guard. When ``as_of`` is ``None`` no valid-time exclusion
+applies. Callers resolve the pin via
+:func:`daydream.archive.index.normalize_as_of` so the lexical ``observed_at
+<= as_of`` SQL pin and :func:`_is_posterior_leak` receive the same canonical
+string.
 
-``as_of`` is validated and canonicalized exactly once, at its entry boundary:
-:class:`BuildCorpusConfig` normalizes it via
-:func:`daydream.archive.index.normalize_as_of` (UTC-only input; canonical
-``+00:00`` spelling out), so both consumers — the lexical ``observed_at <=
-as_of`` SQL pin in :func:`daydream.archive.index.bulk_latest_label_observations`
-and :func:`_is_posterior_leak` — receive the same canonical string.
-
-Every snapshot writes a lineage manifest (``lineage.json``) beside the JSONL,
-pinning the snapshot's provenance: a content-addressed ``trajectory_set_hash``
-(``sha256`` of the sorted, newline-joined included ``session_id``s — Q3), the
-``labeler_version``/``reward_version`` observed on the included annotations (a
-scalar when uniform, the sorted distinct set when the corpus mixes versions),
-the ``as_of`` pin (echoed from config, or the resolved write-time when
-unpinned), and a wall-clock UTC ``created_at``. The manifest is written
-atomically (tempfile + ``os.replace``) and skipped on ``dry_run``; a completed
-non-dry-run build that emits zero records removes any prior ``lineage.json``
-(rather than writing an empty-set manifest).
-
-The projection is pure: no git, no network, no manifest write-back.
-``base_sha`` is *read* from the on-disk manifest (harvest materializes it);
-build-corpus never resolves it via ``git merge-base``.
-
-Builders (``_build_spans``, ``_build_record``) and the query pipeline
-(``CorpusFilters``, ``_build_query``, ``_query_index``) are private
-(underscore-prefixed): callers outside this package depend on
-``run_build_corpus``, not these helpers.
+All symbols are private (underscore-prefixed) shared infrastructure for the
+corpus projection packages — the canonical emitter is
+:mod:`daydream.training.corpus_v2`, which imports the builders, the leak
+guard, the trajectory-set hash, and the skill→stack decoder from here.
 """
 
 from __future__ import annotations
@@ -53,27 +34,19 @@ import hashlib
 import json
 import math
 import os
-import shutil
-import tempfile
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from daydream.archive import get_archive_dir
 from daydream.archive.git_safe import classify_remote_url
-from daydream.archive.index import bulk_latest_label_observations, count_runs, normalize_as_of, query_runs
-from daydream.json_utils import atomic_write_json
+from daydream.archive.index import query_runs
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.harvest import _read_review_output
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
-from daydream.ui import create_console, print_info, print_warning
-
-# Path to the on-disk JSON Schema describing emitted training records.
-# Resolves relative to ``__file__`` so the package works when installed.
-SCHEMA_V1_PATH: Path = Path(__file__).parent / "schema" / "v1.json"
+from daydream.ui import create_console, print_warning
 
 
 def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -283,12 +256,14 @@ def _build_record(
     ``composite_reward=None`` (``outcome_label=None``, ``composite_reward=None``,
     no ``reward`` key).
 
-    The temporal-leakage guard is applied by the caller: when the pinned
-    annotation's ``valid_at`` is posterior to ``as_of`` (see
-    :func:`_is_posterior_leak`) the caller passes ``label=None`` (the
-    posterior-derived label is excluded as future leakage) while the
-    intrinsic ``reward``/``composite_reward`` — capture-time fields — are
-    retained.
+        The temporal-leakage guard is applied by the caller: when the pinned
+        annotation's ``valid_at`` is posterior to ``as_of`` (see
+        :func:`_is_posterior_leak`) the caller passes ``label=None`` (the
+        posterior-derived label is excluded as future leakage) while the
+        intrinsic ``reward``/``composite_reward`` — capture-time fields — are
+        retained. The caller resolves ``as_of`` through
+        :func:`daydream.archive.index.normalize_as_of` before invoking the
+        guard.
 
     Optional surfaced fields (additive — omitted when absent, never written
     as ``None`` unless the schema models a nullable scalar):
@@ -467,9 +442,9 @@ class CorpusFilters:
     ``schema/copyleft.txt`` and is loaded by ``is_copyleft``).
 
     The label admission filter is **not** a SQL clause — it runs in Python
-    against the ``as_of``-pinned silver annotation (see ``run_build_corpus``),
-    never against the denormalized ``runs.outcome_labels`` cache. The
-    admission rule is C9 accepted-only **OR** intrinsic-reward ≥ ``min_reward``.
+    against the ``as_of``-pinned silver annotation, never against the
+    denormalized ``runs.outcome_labels`` cache. The admission rule is C9
+    accepted-only **OR** intrinsic-reward ≥ ``min_reward``.
 
     Attributes:
         repos: Optional whitelist of ``owner/repo`` slugs (IN-clause).
@@ -561,9 +536,9 @@ def _build_query(
     sort the result list in Python (see ``_query_index``).
 
     The label admission filter is deliberately **not** a SQL clause: labels
-    come from the ``as_of``-pinned silver annotation resolved per row in
-    ``run_build_corpus``, not from the denormalized ``runs.outcome_labels``
-    column. SQL only narrows on capture-time, label-independent columns.
+    come from the ``as_of``-pinned silver annotation resolved per row, not
+    from the denormalized ``runs.outcome_labels`` column. SQL only narrows on
+    capture-time, label-independent columns.
 
     Clauses, in fixed order:
 
@@ -729,63 +704,6 @@ def _stratify(records: list[dict[str, Any]], max_stack_share: float) -> list[dic
     return sorted(out, key=lambda r: r["session_id"])
 
 
-# End-to-end orchestration (Wave 6)
-
-
-@dataclass(frozen=True)
-class BuildCorpusConfig:
-    """Top-level config for :func:`run_build_corpus`.
-
-    ``filters`` is required (no default) — callers must construct a
-    :class:`CorpusFilters` explicitly so the C9 ``("accepted",)`` default is
-    a deliberate choice, not a silent fall-through.
-
-    Attributes:
-        out_path: Destination JSONL file. Written atomically via tempfile +
-            ``Path.replace``; ``schema.json`` is emitted next to it.
-        filters: Resolved post-exclusion filter knobs.
-        pipeline_status: Optional pipeline-outcome gate (succeeded/failed/
-            partial/cancelled) overlaid onto ``filters`` when set — the
-            authoritative ``pipeline_status`` column filter distinguishing
-            pipeline success from mere archive finalization.
-        archive_dir: Daydream archive root. ``None`` defers to
-            :func:`daydream.archive.get_archive_dir`.
-        stratify_by: ``"stack"`` to apply :func:`_stratify`; ``None`` to skip.
-        max_stack_share: Per-stack cap fraction passed to :func:`_stratify`.
-        dry_run: When ``True``, do not write the JSONL output; print a
-            summary table to stdout and return ``emitted=0``.
-        emit_schema_only: When ``True``, copy ``schema/v1.json`` next to
-            ``out_path`` and return immediately without querying the archive.
-        as_of: ISO-8601 transaction-time pin. Each run's annotation is resolved
-            via ``latest_label_observation(..., as_of=as_of)`` so the corpus is
-            reproducible: a re-projection at the same ``as_of`` reproduces the
-            prior corpus even after a re-harvest appends newer generations.
-            ``None`` resolves the latest annotation per run (no pin).
-            Validated and canonicalized here — the single entry boundary — via
-            :func:`daydream.archive.index.normalize_as_of`: input must be UTC
-            (``Z`` or ``+00:00``; naive or non-UTC offsets raise ``ValueError``)
-            and is stored in the canonical ``+00:00`` isoformat spelling that
-            the ``observed_at <= as_of`` SQL pin and :func:`_is_posterior_leak`
-            both consume.
-
-    Raises:
-        ValueError: When ``as_of`` is not a parseable UTC ISO-8601 timestamp.
-    """
-
-    out_path: Path
-    filters: CorpusFilters
-    pipeline_status: str | None = None
-    archive_dir: Path | None = None
-    stratify_by: str | None = None
-    max_stack_share: float = 0.6
-    dry_run: bool = False
-    emit_schema_only: bool = False
-    as_of: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.as_of is not None:
-            object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
-
 
 def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> bool:
     """Return ``True`` when the annotation's outcome only became true after ``as_of``.
@@ -801,10 +719,11 @@ def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> 
     :func:`datetime.fromisoformat` and compared as aware datetimes, so spelling
     differences — ``Z`` vs ``+00:00``, differing sub-second precision, or a
     non-UTC offset — can never mis-order the guard. In the production path both
-    strings are already canonical UTC (``as_of`` is normalized once at the
-    :class:`BuildCorpusConfig` boundary; ``valid_at`` is canonicalized at write
-    time by ``append_label_observation``), making the parse a semantic
-    statement rather than a compatibility shim.
+    strings are already canonical UTC (``as_of`` is normalized once at its
+    entry boundary via :func:`daydream.archive.index.normalize_as_of`;
+    ``valid_at`` is canonicalized at write time by
+    ``append_label_observation``), making the parse a semantic statement
+    rather than a compatibility shim.
 
     Args:
         annotation: The ``as_of``-pinned ``label_observations`` row, or ``None``.
@@ -972,7 +891,7 @@ def _collapse_versions(versions: list[str | None]) -> str | list[str] | None:
 
 
 def _summary(total: int, after_filters: int, after_stratify: int, emitted: int) -> dict[str, int]:
-    """Assemble the ``run_build_corpus`` summary dict."""
+    """Assemble the projection summary dict (count funnel shape)."""
     return {
         "total_runs_in_index": total,
         "after_filters": after_filters,
@@ -981,256 +900,3 @@ def _summary(total: int, after_filters: int, after_stratify: int, emitted: int) 
     }
 
 
-def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
-    """Top-level entry point for the build-corpus projection.
-
-    Pure projection — no git, no network, no manifest write-back. Pipeline:
-
-    1. ``emit_schema_only`` short-circuit — copy ``schema/v1.json`` next to
-       ``out_path`` and return.
-    2. Resolve archive dir (``config.archive_dir`` or :func:`get_archive_dir`).
-    3. Count the unfiltered index for the ``total_runs_in_index`` summary.
-    4. Apply :func:`_query_index` (label-independent SQL filters only).
-    5. For each row: resolve the ``as_of``-pinned silver annotation, apply the
-       temporal-leakage guard (:func:`_is_posterior_leak` — drop the
-       posterior-derived label when ``valid_at > as_of``), apply the Python
-       label/reward admission gate, then load manifest + trajectory and build a
-       record via :func:`_build_record`. Skip rows with missing/unreadable
-       files (with a warning).
-    6. Optionally stratify (when ``stratify_by == "stack"``).
-    7. Dry-run path prints a summary and returns ``emitted=0`` (no JSONL,
-       no lineage manifest).
-    8. Otherwise: write JSONL atomically (tempfile in same dir +
-       ``Path.replace``) and copy ``schema/v1.json`` alongside.
-    9. Write ``lineage.json`` beside the JSONL pinning the snapshot's
-       provenance (``trajectory_set_hash``, labeler/reward versions, ``as_of``,
-       ``created_at``) so the snapshot is reproducible from immutable inputs.
-       When the output is empty (zero records), any prior ``lineage.json`` from
-       an earlier build is removed rather than writing an empty-set manifest.
-
-    Returns:
-        Summary dict with keys ``total_runs_in_index``, ``after_filters``,
-        ``after_stratify``, ``emitted``. ``after_filters`` counts rows that
-        survive the SQL filters **and** the label/reward admission gate.
-        ``emitted`` is ``0`` for ``dry_run`` and ``emit_schema_only`` paths.
-    """
-    console = create_console()
-
-    # 1. Schema-only path — never touches the archive.
-    if config.emit_schema_only:
-        config.out_path.parent.mkdir(parents=True, exist_ok=True)
-        schema_dst = config.out_path.parent / "schema.json"
-        shutil.copyfile(SCHEMA_V1_PATH, schema_dst)
-        # Emits no records, so any prior lineage.json from an earlier build is
-        # removed to keep the manifest faithful to the (now empty) JSONL.
-        (config.out_path.parent / "lineage.json").unlink(missing_ok=True)
-        return _summary(0, 0, 0, 0)
-
-    # 2. Resolve archive dir.
-    archive_dir = config.archive_dir or get_archive_dir()
-
-    # 3. Unfiltered count for the summary.
-    total_in_index = count_runs(archive_dir)
-
-    # 4. Apply label-independent SQL filters. The config-level ``pipeline_status``
-    #    knob (when set) is overlaid onto the resolved filters so the authoritative
-    #    pipeline-outcome gate joins the status gate.
-    if config.pipeline_status is not None:
-        from dataclasses import replace
-
-        filters = replace(config.filters, pipeline_status=config.pipeline_status)
-    else:
-        filters = config.filters
-
-    # 3b. Surface the pipeline_status gate's exclusions. The CLI default
-    #     (``--pipeline-status succeeded``) is also the column default of
-    #     ``unknown`` for pre-existing legacy runs and non-review flows, so a
-    #     default build would otherwise silently drop them — give the count a
-    #     visible warning instead of an unqualified empty/excluded cohort.
-    effective_pipeline_status = filters.pipeline_status
-    if effective_pipeline_status is not None:
-        excluded_by_pipeline = count_runs(
-            archive_dir,
-            "pipeline_status != ? AND status = ?",
-            (effective_pipeline_status, filters.status),
-        )
-        if excluded_by_pipeline:
-            legacy_unknown = count_runs(
-                archive_dir,
-                "pipeline_status = ? AND status = ?",
-                ("unknown", filters.status),
-            )
-            print_warning(
-                console,
-                f"{excluded_by_pipeline} run(s) excluded by pipeline_status="
-                f"'{effective_pipeline_status}' (including {legacy_unknown} "
-                f"legacy run(s) with pipeline_status='unknown') are dropped from "
-                "the corpus",
-            )
-    rows = _query_index(archive_dir, filters)
-
-    # 5. Resolve the pinned annotation per row, apply the admission gate, build
-    #    records. Label/reward come from the silver annotation, never the
-    #    denormalized runs.outcome_labels cache. C3: pure per-row projection with
-    #    no cross-row reward aggregate, so labeled/unlabeled populations never mix.
-    records: list[dict[str, Any]] = []
-    # Map each emitted session to the labeler/reward versions on its pinned
-    # annotation so the lineage manifest reports the versions actually included.
-    session_versions: dict[str, tuple[str | None, str | None]] = {}
-    after_filters = 0
-    # Pre-fetch all annotations in a single query to avoid N+1 round-trips.
-    all_session_ids = [row["session_id"] for row in rows]
-    annotations_by_session = bulk_latest_label_observations(
-        archive_dir, all_session_ids, as_of=config.as_of
-    )
-    for row in rows:
-        session_id = row["session_id"]
-        annotation = annotations_by_session.get(session_id)
-        # Temporal-leakage guard: when the pinned annotation's outcome only
-        # became true after ``as_of`` (``valid_at > as_of``), drop the
-        # posterior-derived label — the run is treated as unlabeled. Intrinsic
-        # reward/composite_reward are capture-time fields and survive (they may
-        # still admit the run via the min_reward path).
-        posterior_leak = _is_posterior_leak(annotation, config.as_of)
-        if posterior_leak:
-            label: str | None = None
-        else:
-            labels = _annotation_labels(annotation, session_id)
-            label = _single_outcome_label(labels, session_id)
-        composite_reward = annotation.get("composite_reward") if annotation is not None else None
-        # A leaked posterior is not evidence at this pin, so it cannot admit on the label path.
-        has_posterior = bool(annotation.get("has_posterior")) and not posterior_leak if annotation else False
-        labeler_policy_version = annotation.get("labeler_policy_version") if annotation else None
-        decisive_mix = label == "contested"
-        decisive_only = _rubric_decisive_only(annotation)
-        if not _is_admitted(
-            label,
-            composite_reward,
-            config.filters,
-            has_posterior=has_posterior,
-            labeler_policy_version=labeler_policy_version,
-            decisive_mix=decisive_mix,
-            decisive_only=decisive_only,
-        ):
-            continue
-        # The intrinsic ``min_reward`` path admits a row on its composite score
-        # alone (C5/M16). That must not smuggle an outcome-gold label whose
-        # evidence fails the gold-admission guard into the corpus as gold: a
-        # legacy NULL-policy ``accepted``, a contested/ambiguous mix, or an
-        # unevidenced (local_branch) accept would otherwise re-enter the
-        # accepted/gold population through the back door. Such a row is still
-        # admitted (the intrinsic path is unchanged) but only as an unlabeled
-        # intrinsic row — its label is dropped. Current-policy, evidenced,
-        # decisive-only gold keeps its label.
-        if label in _OUTCOME_GOLD_LABELS and not _is_admitted_outcome_gold(
-            label, has_posterior, labeler_policy_version, decisive_mix, decisive_only
-        ):
-            label = None
-        after_filters += 1
-
-        archive_path = _resolve_projection_path(row)
-        if archive_path is None:
-            print_warning(
-                console,
-                f"Skipping {session_id}: credential-bearing bundle has no released "
-                "sanitized derivative; refusing to project raw inputs",
-            )
-            continue
-        traj_path = archive_path / "trajectory.json"
-        manifest_path = archive_path / "manifest.json"
-        if not traj_path.exists() or not manifest_path.exists():
-            print_warning(
-                console,
-                f"Skipping {session_id}: missing manifest.json or "
-                f"trajectory.json at {archive_path}",
-            )
-            continue
-        try:
-            trajectory = json.loads(traj_path.read_text(encoding="utf-8"))
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            print_warning(
-                console,
-                f"Skipping {session_id}: corrupt or unreadable manifest.json or "
-                f"trajectory.json at {archive_path}",
-            )
-            continue
-        reward, _ = _annotation_reward(annotation, session_id)
-        record = _build_record(
-            row, trajectory, row.get("stack"), manifest,
-            annotation=annotation, label=label,
-            reward=reward, composite_reward=composite_reward,
-        )
-        if record is not None:
-            records.append(record)
-        session_versions[session_id] = (
-            annotation.get("labeler_version") if annotation is not None else None,
-            annotation.get("reward_version") if annotation is not None else None,
-        )
-
-    # 6. Stratification (optional).
-    if config.stratify_by == "stack":
-        none_stack_count = sum(1 for r in records if r.get("stack") is None)
-        if none_stack_count:
-            print_warning(
-                console,
-                f"{none_stack_count} record(s) have stack=None (unmapped skills) "
-                "and will be grouped together during stratification.",
-            )
-        records = _stratify(records, config.max_stack_share)
-    after_stratify = len(records)
-
-    # 7. Dry-run path — print summary, write nothing.
-    if config.dry_run:
-        print_info(console, f"Dry run — total_runs_in_index: {total_in_index}")
-        print_info(console, f"Dry run — after_filters: {after_filters}")
-        print_info(console, f"Dry run — after_stratify: {after_stratify}")
-        print_info(console, f"Dry run — would emit: {len(records)} records")
-        return _summary(total_in_index, after_filters, after_stratify, 0)
-
-    # 8. Atomic write — tempfile in same dir + Path.replace.
-    config.out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=config.out_path.parent,
-            delete=False,
-            suffix=".jsonl.tmp",
-        ) as fh:
-            tmp_name = fh.name
-            for record in records:
-                fh.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
-        Path(tmp_name).replace(config.out_path)
-    except Exception:
-        if tmp_name is not None:
-            Path(tmp_name).unlink(missing_ok=True)
-        raise
-    shutil.copyfile(SCHEMA_V1_PATH, config.out_path.parent / "schema.json")
-
-    # 9. Lineage manifest beside the JSONL: the included set drives the
-    #    content-address; versions reflect the post-stratify annotations; as_of
-    #    falls back to write-time. Skipped when empty (an empty-set hash misleads).
-    #    When empty, any prior lineage.json from an earlier build is removed so a
-    #    stale manifest never survives.
-    if not records:
-        (config.out_path.parent / "lineage.json").unlink(missing_ok=True)
-        print_info(console, f"Wrote 0 records to {config.out_path} — skipping lineage manifest")
-        return _summary(total_in_index, after_filters, after_stratify, 0)
-    included_session_ids = [r["session_id"] for r in records]
-    included_versions = [session_versions.get(sid, (None, None)) for sid in included_session_ids]
-    resolved_as_of = config.as_of or datetime.now(timezone.utc).isoformat()
-    lineage = {
-        "trajectory_set_hash": _trajectory_set_hash(included_session_ids),
-        "labeler_version": _collapse_versions([lv for lv, _ in included_versions]),
-        "reward_version": _collapse_versions([rv for _, rv in included_versions]),
-        "as_of": resolved_as_of,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    atomic_write_json(
-        config.out_path.parent / "lineage.json", lineage, sort_keys=True, trailing_newline=True, fsync=False
-    )
-    print_info(console, f"Wrote {len(records)} records to {config.out_path}")
-
-    return _summary(total_in_index, after_filters, after_stratify, len(records))

@@ -8,10 +8,9 @@ filesystem.
 
 ``_query_index`` applies only the label-independent SQL filters (status, C5
 exclusion, repos, min_grounding) and the post-query C8 copyleft skip.
-Label admission (C9 accepted-only / min-reward) moved into
-``run_build_corpus`` because the label now comes from the ``as_of``-pinned
-silver annotation, not the denormalized ``runs.outcome_labels`` cache — so the
-label tests assert against the projection output, not ``_query_index``.
+Label admission (C9 accepted-only / min-reward) happens outside the SQL layer,
+against the ``as_of``-pinned silver annotation rather than the denormalized
+``runs.outcome_labels`` cache (#1093: the legacy emission driver is deleted).
 """
 from __future__ import annotations
 
@@ -21,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, _query_index, run_build_corpus
+from daydream.training.corpus import CorpusFilters, _query_index
 from tests.fixtures.training.build_archive import build_fixture_archive
 
 
@@ -50,11 +49,6 @@ def _ids(rows: list[dict[str, Any]]) -> list[str]:
     return [row["session_id"] for row in rows]
 
 
-def _emitted_ids(out_path: Path) -> list[str]:
-    assert out_path.exists(), f"Expected corpus output at {out_path}"
-    return [json.loads(line)["session_id"] for line in out_path.read_text(encoding="utf-8").splitlines()]
-
-
 def test_query_excludes_c5_repos_unconditionally(archive: Path) -> None:
     rows = _query_index(archive, CorpusFilters(include_all_labels=True))
     assert "ddd-on-exclusion" not in _ids(rows)
@@ -78,22 +72,6 @@ def test_query_min_grounding_filter(archive: Path) -> None:
     ids = _ids(rows)
     assert "aaa-python-accepted" in ids
     assert "ccc-python-low-grounding" not in ids
-
-
-def test_label_filter_defaults_to_accepted(archive: Path, tmp_path: Path) -> None:
-    """Accepted-only is the C9 default: the rejected row is not emitted."""
-    out = tmp_path / "out.jsonl"
-    run_build_corpus(BuildCorpusConfig(out_path=out, archive_dir=archive, filters=CorpusFilters()))
-    assert "bbb-react-rejected" not in _emitted_ids(out)
-
-
-def test_include_all_labels_overrides_default(archive: Path, tmp_path: Path) -> None:
-    """``include_all_labels`` admits the rejected row into the corpus."""
-    out = tmp_path / "out.jsonl"
-    run_build_corpus(
-        BuildCorpusConfig(out_path=out, archive_dir=archive, filters=CorpusFilters(include_all_labels=True))
-    )
-    assert "bbb-react-rejected" in _emitted_ids(out)
 
 
 def test_query_copyleft_skipped_by_default(archive: Path, copyleft_seeded: None) -> None:  # noqa

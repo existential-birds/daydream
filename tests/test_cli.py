@@ -670,29 +670,6 @@ def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
     assert config.model == "claude-opus-5"
 
 
-# corpus build exit-code regression guard (Task 11 / corpus-pipeline-architecture).
-# Tier-3 subprocess test driving the real CLI through `uv run` against an empty
-# archive: catches cleanup paths (signal handlers, atexit, warnings) leaking a
-# non-zero exit even when _handle_build_corpus_command returned 0.
-
-
-def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
-    """Production entrypoint must exit 0 on successful dry-run."""
-    out = tmp_path / "out.jsonl"
-    result = subprocess.run(  # noqa: S603 - args are not user-controlled
-        [  # noqa: S607 - hardcoded uv/daydream entrypoint
-            "uv", "run", "daydream", "corpus", "build",
-            "--out", str(out), "--include-all-labels", "--dry-run",
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "DAYDREAM_ARCHIVE_DIR": str(tmp_path / "empty-archive")},
-    )
-    assert result.returncode == 0, (
-        f"exit={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
-    )
-
-
 @pytest.mark.parametrize("backend_name", ["codex", "pi", "osprey"])
 def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(
     tmp_path: Path,

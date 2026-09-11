@@ -141,7 +141,8 @@ def normalize_as_of(value: str) -> str:
     """Validate and canonicalize a user-supplied ``as_of`` pin.
 
     The single entry-boundary normalizer for ``as_of``: call it once where the
-    pin enters the system (``BuildCorpusConfig``); downstream consumers — the
+    pin enters the system (each projection's config boundary); downstream
+    consumers — the
     ``observed_at <= as_of`` SQL cutoffs here and the valid-time leakage guard
     in ``daydream.training.corpus`` — receive the canonical spelling and never
     re-normalize.

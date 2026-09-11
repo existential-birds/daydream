@@ -1342,3 +1342,24 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     rejected = next(r for r in records if r["outcome_label"] == "rejected")
     assert "finding_text" not in rejected
     assert "finding_text_sha256" not in rejected
+
+
+# #1093: the legacy v1 records builder and its CLI verb are removed; the
+# canonical projection surface is corpus_v2 (renamed in a later task).
+def test_legacy_records_builder_gone() -> None:
+    """#1093: `run_build_corpus` (v1 records JSONL emission) is removed."""
+    import daydream.training.corpus as corpus_mod
+
+    assert not hasattr(corpus_mod, "run_build_corpus")
+
+
+def test_corpus_build_verb_gone() -> None:
+    """#1093: the legacy `daydream corpus build` verb no longer dispatches.
+
+    `build-v2` still dispatches here; the Task 4 rename retires that spelling
+    and makes `build` the canonical subverb.
+    """
+    from daydream.cli import _CORPUS_SUBVERBS
+
+    assert "build" not in _CORPUS_SUBVERBS
+    assert "build-v2" in _CORPUS_SUBVERBS

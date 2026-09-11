@@ -136,7 +136,7 @@ def _outcome_rows(
     """Extract gold outcome rows for the Stage-0 labels file from any shape.
 
     Accepts the committed fixture shape (``comment_id``/``text``/``label``),
-    production ``run_build_corpus`` exports (``session_id``/
+    v1 records exports (``session_id``/
     ``review_output``/``outcome_label``), and corpus-v2 records
     (``session_id``/``finding_text``/``outcome_label``). Gold-gate evidence
     fields (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
@@ -282,7 +282,7 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
 def _materialize_diff(rec: dict[str, Any]) -> str | None:
     """Materialize the RFT diff body from the archive for production records.
 
-    Production ``run_build_corpus`` exports carry only ``fix_diff_ref`` — a
+    v1 records exports carry only ``fix_diff_ref`` — a
     pointer to the archived reviewed-INPUT ``diff.patch`` — never a raw
     ``diff`` body (``schema/v1.json`` is ``additionalProperties: false``).
     The pointer is relative to the record's bronze run dir under the archive
@@ -346,7 +346,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     (unknown, never an invented zero).
 
     ``diff`` falls back to :func:`_materialize_diff` when the record carries
-    no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
+    no raw ``diff`` body: v1 records exports (schema v1,
     ``additionalProperties: false``) hold only the ``fix_diff_ref`` pointer
     to the archived ``diff.patch``, so the documented real-archive journey
     stays runnable through Stage 2.

@@ -74,10 +74,7 @@ def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert called["hit"]
 
 
-def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    out = tmp_path / "x.jsonl"
-    assert _run_main(["corpus", "build", "--out", str(out), "--dry-run"]) == 0
-
+def test_corpus_label_route(monkeypatch: pytest.MonkeyPatch) -> None:
     label_called = {}
 
     def _fake_label(argv: list[str]) -> int:
