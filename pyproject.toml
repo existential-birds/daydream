@@ -47,7 +47,7 @@ dev = [
     "ruff>=0.16.6",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20260815",
-    "types-requests>=2.32",
+    "types-requests>=2.33.0.20260906",
     "types-protobuf>=6.32",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
