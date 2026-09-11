@@ -114,6 +114,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
 | `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis |
+| `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `build_annotation(row, evidence)` reduces completed evidence without I/O |
 | `training/calibration.py` | Fail-closed corpus-v2 validation, deterministic calibration statistics, `calibration-artifact-v1` emission (`corpus calibrate-reward`) |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
