@@ -1047,16 +1047,19 @@ def test_read_only_paths_run_concurrent_with_a_writer(tmp_path: Path, fake_gh: F
 
 def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import Transaction
+    from tests.harness.transaction_faults import TransactionFaultDriver
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
     mutated = dict(raw)
     mutated["curation"] = dict(raw["curation"])
     mutated["curation"]["state"] = "excluded"          # an interrupted mutation left in flight
-    with Transaction(ws, op_id=f"curate-{case_id}", kind="curation:exclude-case") as tx:
+    faults = TransactionFaultDriver(
+        ws, op_id=f"curate-{case_id}", kind="curation:exclude-case"
+    )
+    with faults.transaction as tx:
         tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
-        tx.inject_crash("target-1")                    # target applied under 'committing', then halt
+        faults.halt_at("target-1")                     # target applied under 'committing', then halt
     assert load_yaml_strict(path)["curation"]["state"] == "excluded"
     cu.add_finding(ws, case_id, title="recovered", body="b", severity="low",
                    location={"path": "feature.py", "start_line": 1, "end_line": 1}, source_ids=[])
