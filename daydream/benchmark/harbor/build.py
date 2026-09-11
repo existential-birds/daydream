@@ -364,10 +364,10 @@ def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
     silent drop and never a fabricated path or line.
     """
     location = finding.get("location")
+    if location is not None and not isinstance(location, dict):
+        raise CompileError(f"finding {finding.get('finding_id')} has an invalid location")
     if not location:
         path = start_line = end_line = None
-    elif not isinstance(location, dict):
-        raise CompileError(f"finding {finding.get('finding_id')} has an invalid location")
     else:
         path = location.get("path")
         start_line = location.get("start_line")

@@ -502,7 +502,8 @@ def test_build_gold_list_rejects_partially_populated_location() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [("title", ""), ("body", "bad\x00body"), ("severity", "critical"),
-     ("location", {"path": "../escape", "start_line": 1, "end_line": 1})],
+     ("location", {"path": "../escape", "start_line": 1, "end_line": 1}),
+     ("location", []), ("location", ""), ("location", 0), ("location", False)],
 )
 @pytest.mark.parametrize("oracle", [False, True])
 def test_build_gold_and_oracle_reject_invalid_finding_content(
@@ -522,6 +523,25 @@ def test_build_gold_and_oracle_reject_invalid_finding_content(
             build.build_oracle_artifact(key, [finding])
         else:
             build.build_gold_list([finding], key=key)
+
+
+@pytest.mark.parametrize(
+    ("present", "location"),
+    [(False, None), (True, None), (True, {}), (True, {"path": None}),
+     (True, {"start_line": None, "end_line": None})],
+)
+def test_gold_and_oracle_preserve_locationless_inputs(present: bool, location: object) -> None:
+    from daydream.benchmark.harbor import build
+
+    finding: dict[str, Any] = {
+        "finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
+    }
+    if present:
+        finding["location"] = location
+    [gold] = build.build_gold_list([finding], key="case-locationless")
+    [oracle] = build.build_oracle_artifact("case-locationless", [finding])["findings"]
+    for parsed in (gold, oracle):
+        assert (parsed["path"], parsed["start_line"], parsed["end_line"]) == (None, None, None)
 
 
 @pytest.mark.parametrize(("oracle", "count"), [(False, 51), (True, 101)])
