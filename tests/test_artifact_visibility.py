@@ -36,6 +36,7 @@ from daydream.artifact_visibility import (
     OutputLabel,
     PrivateRootLocations,
     PrivateWorkspaceOwner,
+    TrajectoryOutputRoute,
     artifact_dir_for,
     artifact_session_active,
     bind_artifact_session,
@@ -3302,6 +3303,138 @@ async def test_child_trajectory_write_never_updates_external_root_destination(
     assert selected_path.read_bytes() == root_bytes
     assert untouched_path.read_bytes() == untouched_bytes
     assert (source / ".daydream" / "runs" / session_id / "children" / f"{child_id}.json").read_bytes() == child_bytes
+
+
+async def test_active_session_snapshots_latest_complete_direct_siblings_from_retained_bytes(
+    source: Path,
+) -> None:
+    """Live review input is complete-child-only, sorted, and detached from disk."""
+    session_id = "live-siblings"
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        route = session.register_trajectory_output(None)
+        root = TrajectoryDocumentSnapshot(
+            session_id,
+            cast(Path, route.full.requested),
+            _payload(session_id, session_id, marker="root"),
+        )
+        session.write_trajectory_document(route, root, "complete")
+        partial = TrajectoryDocumentSnapshot(
+            "partial",
+            route.run_dir / "trajectories" / "partial.json",
+            _payload(session_id, "partial", marker="partial"),
+        )
+        session.write_trajectory_document(route, partial, "partial")
+        zed = TrajectoryDocumentSnapshot(
+            "zed",
+            route.run_dir / "trajectories" / "zed.json",
+            _payload(session_id, "zed", marker="first"),
+        )
+        alpha = TrajectoryDocumentSnapshot(
+            "alpha",
+            route.run_dir / "trajectories" / "alpha.json",
+            _payload(session_id, "alpha", marker="first"),
+        )
+        session.write_trajectory_document(route, zed, "complete")
+        session.write_trajectory_document(route, alpha, "partial")
+        assert session.snapshot_completed_sibling_trajectories(session_id=session_id) == (zed,)
+        session.write_trajectory_document(route, alpha, "complete")
+        alpha.path.write_bytes(b"on-disk mutation is not live review evidence")
+
+        snapshot = session.snapshot_completed_sibling_trajectories(session_id=session_id)
+
+        assert [(item.trajectory_id, item.json_bytes) for item in snapshot] == [
+            ("alpha", _payload(session_id, "alpha", marker="first")),
+            ("zed", _payload(session_id, "zed", marker="first")),
+        ]
+        alpha_latest = TrajectoryDocumentSnapshot(
+            "alpha",
+            alpha.path,
+            _payload(session_id, "alpha", marker="latest"),
+        )
+        session.write_trajectory_document(route, alpha_latest, "complete")
+        session.write_trajectory_document(
+            route,
+            TrajectoryDocumentSnapshot("alpha", alpha.path, _payload(session_id, "alpha", marker="partial")),
+            "partial",
+        )
+
+        latest = session.snapshot_completed_sibling_trajectories(session_id=session_id)
+
+        assert [(item.trajectory_id, item.json_bytes) for item in latest] == [
+            ("alpha", _payload(session_id, "alpha", marker="latest")),
+            ("zed", _payload(session_id, "zed", marker="first")),
+        ]
+
+
+async def test_live_sibling_snapshot_rejects_wrong_session_and_frozen_session(source: Path) -> None:
+    session_id = "snapshot-lifetime"
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        with pytest.raises(ArtifactVisibilityError, match="not registered"):
+            session.snapshot_completed_sibling_trajectories(session_id=session_id)
+        route = session.register_trajectory_output(None)
+        root = TrajectoryDocumentSnapshot(
+            session_id,
+            cast(Path, route.full.requested),
+            _payload(session_id),
+        )
+        session.write_trajectory_document(route, root, "complete")
+        with pytest.raises(ArtifactVisibilityError, match="session"):
+            session.snapshot_completed_sibling_trajectories(session_id="other-session")
+        session.freeze(_snapshot(session_id, (root,)))
+        with pytest.raises(ArtifactVisibilityError, match="frozen"):
+            session.snapshot_completed_sibling_trajectories(session_id=session_id)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        lambda route: route.run_dir / "trajectories" / "nested" / "child.json",
+        lambda route: route.run_dir / "trajectories" / "not-json.txt",
+    ],
+)
+async def test_live_sibling_snapshot_rejects_writer_accepted_unsafe_child_paths(
+    source: Path,
+    path: Callable[[TrajectoryOutputRoute], Path],
+) -> None:
+    """The read seam is stricter than the legacy writer without changing its policy."""
+    session_id = "snapshot-path-validation"
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        route = session.register_trajectory_output(None)
+        child = TrajectoryDocumentSnapshot("child", path(route), _payload(session_id, "child"))
+        session.write_trajectory_document(route, child, "complete")
+
+        with pytest.raises(ArtifactVisibilityError, match="sibling"):
+            session.snapshot_completed_sibling_trajectories(session_id=session_id)
+
+
+@pytest.mark.parametrize(
+    "retained",
+    [
+        lambda route, session_id: {
+            "wrong-key": TrajectoryDocumentSnapshot(
+                "child", route.run_dir / "trajectories" / "child.json", _payload(session_id, "child")
+            )
+        },
+        lambda route, session_id: {
+            "child": TrajectoryDocumentSnapshot(
+                "child",
+                route.run_dir / "trajectories" / "child.json",
+                cast(Any, "not-bytes"),
+            )
+        },
+    ],
+)
+async def test_live_sibling_snapshot_revalidates_retained_entries(
+    source: Path,
+    retained: Callable[[TrajectoryOutputRoute, str], dict[str, TrajectoryDocumentSnapshot]],
+) -> None:
+    session_id = "snapshot-retained-validation"
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        route = session.register_trajectory_output(None)
+        session._completed_sibling_trajectories = retained(route, session_id)
+
+        with pytest.raises(ArtifactVisibilityError, match="sibling"):
+            session.snapshot_completed_sibling_trajectories(session_id=session_id)
 
 
 @pytest.mark.parametrize("disposition", ["complete", "partial_evidence", "rollback"])

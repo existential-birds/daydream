@@ -1330,3 +1330,33 @@ def test_post_findings_matched_high_blocks_approval(
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
     assert "no high/medium findings" not in posts[0].payload["body"]
+
+
+@pytest.mark.parametrize("run_info", ["Artifact-owned run details", None])
+def test_artifact_post_never_acquires_live_trajectory_details(
+    fake_gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    run_info: str | None,
+) -> None:
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=3, placement="inline", title="Finding")],
+    )
+    document = json.loads(artifact.read_text())
+    document["run_info"] = run_info
+    artifact.write_text(json.dumps(document))
+    attempts: list[str] = []
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        attempts.append("live acquisition")
+        raise AssertionError("artifact posting attempted live trajectory acquisition")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("daydream.trajectory.get_current_recorder", forbidden)
+        patch.setattr("daydream.pr_run_info.render_live_run_info", forbidden)
+        patch.setattr("daydream.pr_comment_renderer.render_run_info_block", forbidden)
+        patch.setattr("tempfile.TemporaryDirectory", forbidden)
+        assert cli_main(_post_argv(artifact)) == 0
+    assert attempts == []
+    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
+    assert (run_info if run_info is not None else "*run details unavailable*") in body
+    assert body.count("- **Reviewed commit:**") == 1

@@ -18,6 +18,7 @@ agent step. No production code is modified by this file.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from collections.abc import Callable
@@ -32,6 +33,36 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
 FIXTURE_MODEL_ID = "fixture-model-id"
+_PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
+
+
+def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
+    """Exercise the real session sink from the fake external backend boundary."""
+    from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
+
+    recorder = get_current_recorder()
+    assert recorder is not None
+    while recorder.parent is not None:
+        recorder = recorder.parent
+    if not recorder.steps:
+        return None
+    assert recorder.artifact_run_dir is not None
+    assert recorder.document_writer is not None
+    trajectory_id = f"{recorder.session_id}-live-post-canary"
+    path = recorder.artifact_run_dir / "trajectories" / "live-post-canary.json"
+    trajectory = recorder.build_trajectory().to_json_dict()
+    trajectory["trajectory_id"] = trajectory_id
+    trajectory["agent"]["model_name"] = _PARTIAL_MODEL
+    json_bytes = (
+        b"private-prompt-canary: malformed trajectory"
+        if malformed
+        else json.dumps(trajectory).encode("utf-8")
+    )
+    recorder.document_writer(
+        TrajectoryDocumentSnapshot(trajectory_id, path, json_bytes),
+        "complete" if malformed else "partial",
+    )
+    return path
 
 
 # Fake SDK message types (real-shape: AssistantMessage carries .model, no .usage;
@@ -739,6 +770,18 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
 
+    partial_paths: list[Path] = []
+
+    class PartialSiblingSDK(_FakeSDKClient):
+        async def query(self, prompt: str) -> None:
+            await super().query(prompt)
+            if not partial_paths:
+                path = _write_live_sibling_canary(malformed=False)
+                if path is not None:
+                    partial_paths.append(path)
+
+    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", PartialSiblingSDK)
+
     config = RunConfig(
         target=str(deep_target_multi),
         cleanup=False,
@@ -754,6 +797,9 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
     payload = captured_post.payloads[-1]
     body = payload["body"]
     assert isinstance(body, str)
+
+    assert len(partial_paths) == 1
+    assert _PARTIAL_MODEL not in body
 
     # Print rendered markdown so a future failure trace shows what we observed.
     print("\n=== RENDERED PR COMMENT BODY ===")
@@ -830,3 +876,44 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
         f"BUG: Exploration row Tools='0' but the forks issued tool calls.\n"
         f"  row: {exploration_row!r}"
     )
+    assert tools_cell == "3"
+    assert cost_cell == "$0.36"
+
+
+async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
+    deep_target_multi: Path,
+    patch_sdk: None,
+    captured_post: _CapturedPost,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bad retained document degrades run details, not the authorized post."""
+    from daydream.runner import RunConfig, run
+
+    _silence_ui(monkeypatch)
+    _answer_prompts(monkeypatch)
+    malformed_paths: list[Path] = []
+
+    class MalformedSiblingSDK(_FakeSDKClient):
+        async def query(self, prompt: str) -> None:
+            await super().query(prompt)
+            # Merge follows the sweep's trajectory reads. Inject here so only
+            # live post acquisition encounters the malformed completed child.
+            if not malformed_paths and "cross-stack merge agent" in prompt.lower():
+                path = _write_live_sibling_canary(malformed=True)
+                if path is not None:
+                    malformed_paths.append(path)
+
+    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", MalformedSiblingSDK)
+    exit_code = await run(RunConfig(target=str(deep_target_multi), cleanup=False, archive=False))
+
+    assert exit_code == 0
+    assert len(malformed_paths) == 1
+    assert len(captured_post.payloads) == 1
+    body = captured_post.payloads[0]["body"]
+    assert "*run details unavailable*" in body
+    assert "- **Reviewed commit:** [`0000000`]" in body
+    output = capsys.readouterr().out
+    assert "run info: trajectory document invalid" in output
+    assert "private-prompt-canary" not in body + output
+    assert str(malformed_paths[0]) not in body + output

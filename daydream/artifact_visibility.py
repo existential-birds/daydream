@@ -3583,6 +3583,7 @@ class ArtifactSession:
         self._destinations: list[RoutedDestination] = []
         self._routed: list[_RoutedRecord] = []
         self._trajectory_route: TrajectoryOutputRoute | None = None
+        self._completed_sibling_trajectories: dict[str, TrajectoryDocumentSnapshot] = {}
         self._frozen_snapshot: ArtifactTreeSnapshot | None = None
         self._name_exchange: _AtomicNameExchange | None = None
         self._external_capabilities: dict[Path, tuple[int, int]] = {}
@@ -4142,6 +4143,8 @@ class ArtifactSession:
             raise ArtifactVisibilityError("trajectory document bytes are malformed")
         _atomic_bytes(private_path, document.json_bytes)
         if document.trajectory_id != self.layout.session_id:
+            if status == "complete":
+                self._completed_sibling_trajectories[document.trajectory_id] = document
             return
         if selected.delivery is not DestinationDelivery.LIVE_EXTERNAL:
             return
@@ -4162,6 +4165,42 @@ class ArtifactSession:
             capability=capability,
         )
         self._persist_records()
+
+    def snapshot_completed_sibling_trajectories(
+        self, *, session_id: str
+    ) -> tuple[TrajectoryDocumentSnapshot, ...]:
+        """Return retained complete direct-child trajectories for the active session."""
+        self._require_active()
+        if session_id != self.layout.session_id:
+            raise ArtifactVisibilityError("trajectory session does not match active artifact session")
+        route = self._trajectory_route
+        if route is None:
+            raise ArtifactVisibilityError("trajectory output is not registered")
+
+        from daydream.trajectory import TrajectoryDocumentSnapshot
+
+        trajectories_dir = route.run_dir / "trajectories"
+        snapshots: list[TrajectoryDocumentSnapshot] = []
+        for trajectory_id, document in self._completed_sibling_trajectories.items():
+            if (
+                type(trajectory_id) is not str
+                or not trajectory_id
+                or not isinstance(document, TrajectoryDocumentSnapshot)
+                or document.trajectory_id != trajectory_id
+                or trajectory_id == self.layout.session_id
+                or not isinstance(document.path, Path)
+                or type(document.json_bytes) is not bytes
+            ):
+                raise ArtifactVisibilityError("retained sibling trajectory is malformed")
+            try:
+                relative = document.path.relative_to(trajectories_dir)
+            except ValueError as exc:
+                raise ArtifactVisibilityError("retained sibling trajectory path is unsafe") from exc
+            if len(relative.parts) != 1 or relative.suffix != ".json":
+                raise ArtifactVisibilityError("retained sibling trajectory path is unsafe")
+            _validate_relative_name(relative.as_posix())
+            snapshots.append(document)
+        return tuple(sorted(snapshots, key=lambda document: document.trajectory_id))
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
         self._require_active()

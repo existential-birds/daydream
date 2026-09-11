@@ -25,6 +25,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.pr_review import ReviewRenderers
 from daydream.run_context import RunContext
 from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
@@ -1510,6 +1511,8 @@ async def test_run_comment_full_flow(
         merged_items_path: Path,
         *,
         console: Any,
+        run_info: str,
+        renderers: ReviewRenderers,
         post: Any,
         approve_on_clean: Any=False,
         pr_number: int | None = None,
