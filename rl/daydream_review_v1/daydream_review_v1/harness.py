@@ -171,12 +171,16 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             # The image bakes both trees agent-owned at build time
             # (repo.Dockerfile's combined chown layer covers /work/repo and
             # /srv/mirror.git), so launch issues no ownership command at all.
-            # Instead, a constant-size writability preflight runs before the
-            # privilege drop and fails closed if the image was not built with
-            # the ownership layer — a non-agent-writable tree is a rebuild
-            # signal, never a runtime repair.
+            # Instead, a constant-size writability preflight runs through the
+            # same run-as-agent privilege drop the launch will use, so it probes
+            # the agent's actual write access — running it as the container root
+            # would vacuously succeed on a root-owned tree (CAP_DAC_OVERRIDE)
+            # and never catch a missing ownership layer. It fails closed if the
+            # image was not built with the ownership layer — a non-agent-
+            # writable tree is a rebuild signal, never a runtime repair.
             preflight = await runtime.run(
-                ["sh", "-c", f"test -w {self.config.repo_path} && test -w /srv/mirror.git"], env
+                ["run-as-agent", "sh", "-c", f"test -w {self.config.repo_path} && test -w /srv/mirror.git"],
+                env,
             )
             if preflight.exit_code != 0:
                 raise RuntimeError(

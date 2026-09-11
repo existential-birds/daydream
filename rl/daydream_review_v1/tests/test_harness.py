@@ -347,7 +347,9 @@ async def test_docker_launch_preflights_writability_before_run_as_agent(
             "a docker rollout must never issue a recursive ownership command; "
             "the image bakes ownership at build time"
         )
-    preflight = next(argv for argv in runtime.commands if argv[0] == "sh")
+    preflight = next(
+        argv for argv in runtime.commands if f"test -w {harness.config.repo_path}" in " ".join(argv)
+    )
     assert f"test -w {harness.config.repo_path}" in " ".join(preflight)
     assert "test -w /srv/mirror.git" in " ".join(preflight)
     (argv, _), = runtime.programs
@@ -365,7 +367,15 @@ async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
     point, and no run-as-agent launch attempt follows."""
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
-    runtime = _OrderingDockerRuntime(exit_code=1, failed_argv=["sh"])
+    runtime = _OrderingDockerRuntime(
+        exit_code=1,
+        failed_argv=[
+            "run-as-agent",
+            "sh",
+            "-c",
+            f"test -w {harness.config.repo_path} && test -w /srv/mirror.git",
+        ],
+    )
 
     with pytest.raises(RuntimeError) as excinfo:
         await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())

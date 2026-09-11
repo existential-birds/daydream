@@ -19,6 +19,7 @@ cached layers.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ import pytest
 from conftest import PROJECT_ROOT, assert_docstring_guards, docker_daemon_is_available
 
 from daydream_review_v1.fixture import FIXTURE_PR2_HEAD_SHA, FIXTURE_SLUG, build_fixture_repo
+from daydream_review_v1.taskset import load_manifest
 from images import build_images
 
 DOCKER_REQUIRED = pytest.mark.skipif(
@@ -220,43 +222,88 @@ def test_main_uses_immutable_base_for_repository_builds(
     assert build_images.BASE_LATEST not in received
 
 
-def test_main_acquires_upstream_mirror_once_per_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_acquires_upstream_mirror_once_per_slug(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Two same-slug PR snapshots in one main() invocation acquire the upstream
-    mirror exactly once; each build still gets its own isolated context (its
-    own copy) and its own tag."""
+    mirror exactly once — the second PR hits the per-slug mirror cache instead
+    of re-cloning."""
     clones: list[str] = []
 
     def _fake_stream(cmd: list[str], *, cwd: Path | None = None) -> None:
         del cwd  # the real helper only uses cwd for subprocess logging
+        # acquire_mirror emits ``git clone --mirror <url> <dest>``, so the
+        # clone source is cmd[3], not cmd[2] (the ``--mirror`` flag).
         if cmd[:2] == ["git", "clone"] and "--mirror" in cmd:
-            clones.append(cmd[2])
-
-    contexts: list[str] = []
-    real_temporary_directory = tempfile.TemporaryDirectory
-
-    def _tracking_tmp(prefix: str) -> Any:
-        handle = real_temporary_directory(prefix)
-        contexts.append(str(handle.name))
-        return handle
-
-    tags: list[str] = []
+            clones.append(cmd[3])
 
     def _record(
         entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
         mirror: Path,
     ) -> str:
         del base_sha, base_image, red, mirror  # the tag only depends on these two
-        tags.append(f"{entry.image}:{head_sha[:12]}")
-        return tags[-1]
+        return f"{entry.image}:{head_sha[:12]}"
+
+    # Two PRs of a REAL upstream slug: the fixture slug's acquire_mirror branch
+    # clones from a local fixture build (a temp path, never the network), so
+    # only a network clone_url can pin the once-per-slug mirror cache. The SHAs
+    # are synthetic — _stream and build_repo_image are faked, so no checkout
+    # ever happens.
+    corpus = tmp_path / "corpus-two-pr-network"
+    corpus.mkdir()
+    (corpus / "index.json").write_text(
+        json.dumps(
+            {
+                "repo": REFERENCE_SLUG,
+                "bot": "daydream-review[bot]",
+                "n_prs_with_bot_activity": 2,
+                "prs": [
+                    {
+                        "pr_number": 2,
+                        "title": "synthetic PR 2",
+                        "state": "closed",
+                        "merged": True,
+                        "base_ref": "main",
+                        "base_sha": "1" * 40,
+                        "review_commit_id": "2" * 40,
+                        "n_inline_comments": 1,
+                        "n_review_summaries": 0,
+                        "n_resolved_threads": 0,
+                        "threads_complete": True,
+                    },
+                    {
+                        "pr_number": 1,
+                        "title": "synthetic PR 1",
+                        "state": "closed",
+                        "merged": True,
+                        "base_ref": "main",
+                        "base_sha": "3" * 40,
+                        "review_commit_id": "4" * 40,
+                        "n_inline_comments": 1,
+                        "n_review_summaries": 0,
+                        "n_resolved_threads": 0,
+                        "threads_complete": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(build_images, "_build_base", lambda: (0, "daydream-rl/base:v1.2.3"))
     monkeypatch.setattr(build_images, "_stream", _fake_stream)
     monkeypatch.setattr(build_images, "build_repo_image", _record)
 
-    status = build_images.main(["--only", FIXTURE_SLUG])
+    status = build_images.main(["--corpus", str(corpus), "--only", REFERENCE_SLUG])
     assert status == 0
-    upstream = [url for url in clones if url != str(build_images.FIXTURE_CLONE_URL)]
-    assert len(upstream) == 1, f"expected one upstream mirror acquisition, got {clones}"
+    # The manifest's network clone_url must be acquired exactly once for both
+    # PRs; a regression that re-clones the upstream slug per PR fails here.
+    upstream_clone_url = load_manifest(build_images.DEFAULT_MANIFEST)[
+        REFERENCE_SLUG
+    ].clone_url
+    assert clones == [upstream_clone_url], (
+        f"expected one upstream mirror acquisition ({upstream_clone_url}), got {clones}"
+    )
 
 
 def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
