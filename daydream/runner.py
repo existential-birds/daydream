@@ -60,11 +60,19 @@ from daydream.backends import (
     BackendExecutionInput,
     create_backend,
 )
-from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS, REVIEW_OUTPUT_FILE
+from daydream.config import (
+    DEFAULT_PI_MODEL,
+    EFFORT_TIERS,
+    PHASE_DEFAULT_EFFORT,
+    PHASE_DEFAULT_MODELS,
+    REVIEW_OUTPUT_FILE,
+)
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
 from daydream.extensions import (
     ExtensionError,
+    Registry,
+    UnresolvedExtensionError,
     build_registry,
     get_registry,
     set_registry,
@@ -86,6 +94,7 @@ from daydream.phases import (
 )
 from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
+from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities, RunProfileIdentity
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
@@ -428,6 +437,7 @@ class _RunWriteCapture:
     partial: RunWriteSnapshot | None = None
     final: RunWriteSnapshot | None = None
     validation_error: _RunSnapshotCaptureError | None = None
+    manifest_identity: ManifestRunIdentity | None = None
 
     def retain(self, recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
         try:
@@ -483,6 +493,7 @@ class _RunArtifacts:
     trajectory: TrajectoryOutputRoute
     capture: _RunWriteCapture
     dump: RoutedDestination | None
+    execution_input: BackendExecutionInput | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def write_trajectory_document(
         self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
@@ -541,10 +552,15 @@ def _open_recorder(
         if run_artifacts.trajectory.full.write_path is None:
             raise ArtifactVisibilityError("trajectory route has no writable destination")
         trajectory_path = run_artifacts.trajectory.full.write_path
-    # Backend identity is resolved in exactly one place,
-    # ``_recorder_backend_names`` — see its docstring for the authoritative
-    # per-flow phase mapping. Keep the mapping prose there so it cannot drift
-    # between call sites (runner, archive manifest).
+        if run_artifacts.capture.manifest_identity is not None:
+            raise ArtifactVisibilityError("manifest run identity was already captured")
+        _resolve_review_profile(config)
+        run_artifacts.capture.manifest_identity = capture_manifest_run_identity(
+            config, flow_kind, get_registry(), work.repo,
+            execution_input=run_artifacts.execution_input,
+        )
+    # Trajectory labels retain their representative per-flow phase mapping;
+    # manifest identity separately records the general default and capabilities.
     names = _recorder_backend_names(config, flow_kind)
     recorder = TrajectoryRecorder(
         path=trajectory_path,
@@ -665,19 +681,16 @@ class RecorderBackendNames(NamedTuple):
 def _recorder_backend_names(
     config: RunConfig, flow_kind: DaydreamRunFlow
 ) -> RecorderBackendNames:
-    """Resolve the backend identities for the run's trajectory and manifest.
+    """Resolve the representative backend identities for the run's trajectory.
 
-    Single authoritative source for the per-flow backend mapping, shared by
-    :func:`_open_recorder` and ``archive.manifest.build_manifest_from_snapshot`` so the
-    trajectory and manifest never diverge on which backend produced the run.
     The representative backend resolves through the phase that actually governs
     the flow: deep-flow runs (DEEP/NORMAL/TTT) fan out on ``per_stack_review``;
     improve runs on its advisory phases with ``recon`` first; DIAGRAM runs on
-    ``diagram``, the only agent phase its two-step flow executes (issue #1113);
+    ``diagram``, the only agent phase its flow executes (issue #1113);
     other flows fall back to ``review``. Per-phase fix/test are recorded only
     for flows that statically run those phases: improve/TTT/DIAGRAM never run
     fix/test; PR runs fix but never test; CUSTOM composition is fork-defined and
-    unknowable at recorder-open time, so labeling it unconditionally would
+    independent of this static trajectory mapping, so labeling it unconditionally would
     mislabel review-only forks. A flow that skips a phase yields an empty name
     (the key is omitted on serialization) rather than a misleading label.
     """
@@ -767,6 +780,99 @@ def _resolved_model(config: RunConfig, phase: str) -> str | None:
         or file_config.phase_model(phase)
         or file_config.model
         or PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
+    )
+
+
+def capture_manifest_run_identity(
+    config: RunConfig, flow_kind: DaydreamRunFlow, registry: Registry, cwd: Path,
+    *, execution_input: BackendExecutionInput | None = None,
+) -> ManifestRunIdentity:
+    """Freeze manifest identity from resolved runner policy before model execution.
+
+    The registry is the run's resolved registry, including built-in overrides.
+    Mode and resume exceptions preserve the historical archive capabilities;
+    these labels do not evaluate each step's runtime predicate. Backend/model
+    precedence stays owned by the same helpers used to construct backends.
+    """
+    runtime_flow_name: str | None
+    if flow_kind is DaydreamRunFlow.IMPROVE:
+        runtime_flow_name = "improve"
+    elif flow_kind is DaydreamRunFlow.DIAGRAM:
+        runtime_flow_name = "diagram"
+    elif flow_kind is DaydreamRunFlow.CUSTOM:
+        runtime_flow_name = config.flow_name
+    else:
+        runtime_flow_name = "deep"
+    step_names: set[str] = set()
+    if runtime_flow_name:
+        try:
+            entries = registry.flow(runtime_flow_name)
+        except UnresolvedExtensionError:
+            entries = []
+        for entry in entries:
+            if isinstance(entry, str):
+                step_names.add(entry)
+            else:
+                step_names.update(entry.steps)
+
+    if flow_kind is DaydreamRunFlow.TTT:
+        runs_fix, runs_test = False, False
+    elif flow_kind is DaydreamRunFlow.PR:
+        runs_fix, runs_test = True, False
+    else:
+        runs_fix, runs_test = "fix" in step_names, "test" in step_names
+    if flow_kind in (DaydreamRunFlow.PR, DaydreamRunFlow.IMPROVE, DaydreamRunFlow.DIAGRAM):
+        runs_merge = False
+    elif flow_kind is DaydreamRunFlow.CUSTOM:
+        runs_merge = any("merge" in step for step in step_names)
+    else:
+        runs_merge = True
+    runs_per_stack_review = (
+        (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
+        and config.start_at not in ("merge", "fix")
+        and flow_kind is not DaydreamRunFlow.DIAGRAM
+    )
+    phases = RunPhaseCapabilities(
+        per_stack_review=runs_per_stack_review,
+        merge=runs_merge and config.start_at != "fix",
+        fix=runs_fix,
+        test=runs_test,
+        push=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "commit" in step_names,
+        remote_ci=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "remote-ci" in step_names,
+    )
+    per_stack_backend: str | None = None
+    per_stack_model: str | None = None
+    if phases.per_stack_review:
+        per_stack_backend = _resolved_backend_name(config, "per_stack_review")
+        per_stack_model = _resolved_model(config, "per_stack_review")
+        if per_stack_model is None and per_stack_backend == "pi":
+            from daydream.backends.pi import _configured_pi_model
+
+            configured_model = (
+                _configured_pi_model(cwd) if execution_input is None
+                else _configured_pi_model(cwd, agent_dir=execution_input.pi_agent_dir)
+            )
+            per_stack_model = configured_model or DEFAULT_PI_MODEL
+    profile = config.review_profile
+    return ManifestRunIdentity(
+        flow_name=config.flow_name,
+        skill=config.stack,
+        model=None,
+        backend=_default_backend_name(config),
+        review_backend=_resolved_review_backend_name(config),
+        fix_backend=_resolved_backend_name(config, "fix") if phases.fix else None,
+        test_backend=_resolved_backend_name(config, "test") if phases.test else None,
+        per_stack_review_backend=per_stack_backend,
+        per_stack_review_model=per_stack_model,
+        review_only=config.output_mode == "review",
+        deep=not config.shallow,
+        profile=None if profile is None else RunProfileIdentity(
+            schema_version=profile.profile.schema_version,
+            name=profile.name,
+            source_kind=profile.source_kind,
+            digest=profile.digest,
+        ),
+        phases=phases,
     )
 
 
@@ -1083,6 +1189,7 @@ async def run(
         return await _run_with_context(
             config, private_roots=private_roots, run_context=run_context,
             backend_factory=backend_factory,
+            backend_execution=None if execution is None else execution.backend,
             github_execution=None if execution is None else execution.github,
         )
 
@@ -1091,6 +1198,7 @@ async def _run_with_context(
     config: RunConfig, *, private_roots: PrivateRootLocations | None,
     run_context: RunContext,
     backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
     github_execution: github_app.GitHubExecutionInput | None = None,
 ) -> int:
     """Execute with the runner's immutable policy bound before any output."""
@@ -1179,6 +1287,7 @@ async def _run_with_context(
                 config, target_dir, skip_tests=skip_tests, private_owner=private_owner,
                 run_context=run_context, github_execution=session.execution,
                 backend_factory=backend_factory,
+                backend_execution=backend_execution,
             )
             observed.finish(result)
             return result
@@ -1205,6 +1314,9 @@ def _finalize_run_artifacts(
 
     if run_artifacts.capture.run_flow is None:
         raise ArtifactVisibilityError("run flow provenance was not retained")
+    identity = run_artifacts.capture.manifest_identity
+    if identity is None:
+        raise ArtifactVisibilityError("manifest run identity was not captured")
     snapshot = run_artifacts.session.freeze(selected)
     recorder_provenance = archive_recorder_provenance_from_snapshot(
         write_snapshot=selected, run_flow=run_artifacts.capture.run_flow
@@ -1217,9 +1329,9 @@ def _finalize_run_artifacts(
     archive_error: Exception | None = None
     try:
         finalize_archive_run(
-            recorder_provenance=recorder_provenance, artifacts=snapshot,
+            run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
             artifact_provenance=run_artifacts.session.provenance, config=config,
-            write_snapshot=selected, work=work, upload=successful, dump_path=dump_path,
+            work=work, upload=successful, dump_path=dump_path,
         )
     except ArchiveFinalizationError as exc:
         archive_error = exc
@@ -1247,6 +1359,7 @@ async def _run_workspace(
     private_owner: PrivateWorkspaceOwner, run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Keep workspace errors inside the run span so returned failures are recorded."""
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
@@ -1275,7 +1388,10 @@ async def _run_workspace(
                 findings = _route(config.findings_out, OutputLabel.FINDINGS_OUTPUT)
                 dump = _route(config.dump_artifacts, OutputLabel.DUMP_DIRECTORY)
                 capture = _RunWriteCapture(session_id=session_id)
-                run_artifacts = _RunArtifacts(artifacts, private_owner, trajectory, capture, dump)
+                run_artifacts = _RunArtifacts(
+                    artifacts, private_owner, trajectory, capture, dump,
+                    execution_input=backend_execution,
+                )
                 dispatch_config = (
                     config if findings is None else replace(config, findings_out=str(findings.write_path))
                 )
