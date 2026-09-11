@@ -34,7 +34,7 @@ COPY mirror.git /srv/mirror.git
 # token is ever mounted into a rollout, and no rollout can reach the real repo.
 #
 # cat-file -e proves the base commit is present before the suite ever runs. The
-# harness passes `--base ${BASE_SHA}` (harness.py:105-117), so a base missing
+# harness passes `--base ${BASE_SHA}` (harness.py:163-168), so a base missing
 # from the mirror would surface as an empty diff at rollout time instead of as a
 # build failure here.
 RUN git clone /srv/mirror.git /work/repo \
@@ -52,13 +52,15 @@ RUN cd /work/repo && sh /tmp/setup.sh
 # fails and no image is produced — that is the enforcement, not a warning.
 RUN cd /work/repo && ${TEST_COMMAND}
 
-# The image clones as root (no USER directive), so hand the whole cloned tree
-# to the agent identity at build time — the deep flow's first write
-# (.daydream/, patch, git add/commit/push) runs as the agent uid. This sits
-# after the root-run setup.sh/TEST_COMMAND layers so their outputs (e.g. .venv
-# from uv sync) are agent-owned too. Defense-in-depth: the harness re-chowns
-# the checkout and mirror at launch (harness.py:155-157), and this layer is
-# idempotent against that handoff.
-RUN chown -R agent:agent /work/repo
+# The image clones as root (no USER directive), so hand both trees — the cloned
+# checkout and the in-container mirror — to the agent identity at build time:
+# the deep flow's first writes (.daydream/, patch, git add/commit/push) run as
+# the agent uid and touch both paths. This sits after the root-run
+# setup.sh/TEST_COMMAND layers so their outputs (e.g. .venv from uv sync) are
+# agent-owned too. There is no launch-time ownership handoff: harness.py only
+# fail-closed-checks writability with a constant-size `test -w` preflight before
+# the privilege drop (harness.py:174-188) — a non-agent-writable tree is a
+# rebuild signal (images/build_images.py), never a runtime repair.
+RUN chown -R agent:agent /work/repo /srv/mirror.git
 
 WORKDIR /work/repo
