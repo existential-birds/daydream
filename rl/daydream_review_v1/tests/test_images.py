@@ -227,6 +227,7 @@ def test_main_acquires_upstream_mirror_once_per_slug(monkeypatch: pytest.MonkeyP
     clones: list[str] = []
 
     def _fake_stream(cmd: list[str], *, cwd: Path | None = None) -> None:
+        del cwd  # the real helper only uses cwd for subprocess logging
         if cmd[:2] == ["git", "clone"] and "--mirror" in cmd:
             clones.append(cmd[2])
 
@@ -244,6 +245,7 @@ def test_main_acquires_upstream_mirror_once_per_slug(monkeypatch: pytest.MonkeyP
         entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
         mirror: Path,
     ) -> str:
+        del base_sha, base_image, red, mirror  # the tag only depends on these two
         tags.append(f"{entry.image}:{head_sha[:12]}")
         return tags[-1]
 
@@ -465,13 +467,16 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     agent uid after the harness handoff, and the write reaches the in-container
     origin mirror.
 
-    repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
-    against the launch-time handoff), so the baked checkout is already
-    agent-owned. The in-container origin mirror /srv/mirror.git is baked into
-    the image at build time (COPY mirror.git /srv/mirror.git), but no build
-    layer chowns it; the harness re-chowns the checkout plus the mirror at
-    launch (harness.py:148-162), covering the mirror. This drives that exact
-    handoff then the deep flow's
+    repo.Dockerfile bakes agent ownership of both trees at build time (one
+    combined chown -R agent:agent /work/repo /srv/mirror.git layer after the
+    setup/green-baseline layers), so both trees are agent-owned at build time
+    and the baked
+    in-container origin mirror /srv/mirror.git (COPY mirror.git /srv/mirror.git,
+    chowned in that same layer) is too. The harness performs no ownership
+    repair at launch — only the fail-closed `test -w` preflight on both paths
+    before the privilege drop (harness.py:174-188). The probe below therefore
+    carries no chown of its own: it is a pure probe of the baked ownership,
+    driving the deep flow's
     terminal write sequence (.daydream/ mkdir, git apply a fix patch,
     git add/commit, git push HEAD:main) as the agent uid inside the real image,
     and asserts the push reached /srv/mirror.git. When a docker daemon is
@@ -501,8 +506,8 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     )
 
     script = (
-        # The harness handoff (harness.py:148-162): hand checkout + mirror to agent.
-        "chown -R agent:agent /work/repo /srv/mirror.git && "
+        # No chown: the image's combined build-time layer already made both
+        # trees agent-owned; this probe proves that baked ownership directly.
         # The deep flow's fix-pipeline write, run as the agent uid. The fix patch
         # arrives on stdin (docker run -i) and is applied via `git apply -`, so
         # no base64/coreutils dependency is introduced into the image contract.
@@ -540,15 +545,21 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     )
 
 
-def test_real_docker_write_docstring_describes_build_chown_and_rechown() -> None:
+def test_real_docker_write_docstring_describes_baked_ownership() -> None:
     """The real-docker-write docstring must describe the CURRENT design: the image
-    chowns the checkout at build time AND the harness re-chowns the checkout plus
-    the mirror at launch. The stale 'no chown (this issue forbids re-adding one)'
-    and 'runtime-created mirror' claims are gone."""
+    bakes agent ownership of both the checkout and the mirror at build time (one
+    combined chown layer) and the probe drops its own leading chown — it is a pure
+    probe of the baked ownership, with the harness doing only the fail-closed
+    `test -w` preflight. The stale launch-time re-chown claims are gone."""
     assert_docstring_guards(
         test_real_docker_deep_flow_fix_pipeline_write_as_agent,
-        gone=("no chown", "forbids re-adding one", "runtime-created"),
-        present=("chowns /work/repo at build time", "/srv/mirror.git", "baked"),
+        gone=("re-chowns", "harness re-chown"),
+        present=(
+            "baked",
+            "/srv/mirror.git",
+            "agent-owned at build time",
+            "test -w",
+        ),
     )
 
 
