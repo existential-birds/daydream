@@ -167,7 +167,7 @@ async def test_merge_salvage_applies_dedup_prefilter(
     }
     stub.merge_emit_str = "no item list"
     assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(merged_items_path(dd).read_text())
     # The dead ``partial: true`` root flag (unread by any consumer) is not
     # written; recoverability comes from the ``__merge__`` failure record +
@@ -214,6 +214,7 @@ def _merge_args(tmp_path: Path) -> dict[str, Any]:
         "intent_path": inputs["intent"],
         "alternatives_path": inputs["alts"],
         "dedup_candidates_path": inputs["dedup"],
+        "allow_standalone": True,
     }
 
 
@@ -276,7 +277,7 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work: Callabl
         make_work(tmp_path),
         **args,
     )
-    items = json.loads(merged_items_path(deep_dir(tmp_path)).read_text())
+    items = json.loads(merged_items_path(deep_dir(tmp_path, allow_standalone=True)).read_text())
     assert [i["file"] for i in items["items"]] == ["api.py"]
     assert items.get("partial") is not True
 
@@ -322,7 +323,7 @@ async def test_merge_accepts_bare_list_end_to_end(multi_stack_target: Path, monk
         _merge_item(2, "cli/main.py", "medium", desc="unused arg"),
     ]
     assert await _run_deep(multi_stack_target) == 0
-    items = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())
+    items = json.loads(merged_items_path(deep_dir(multi_stack_target, allow_standalone=True)).read_text())
     # Structural findings are appended after the merge independent of this branch,
     # so scope the assertion to the per-stack merge items (R7(i)): the bare-list
     # result is normalized + merged rather than rejected or silently lost.
@@ -358,7 +359,7 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     stub.parse_severity = "high"
     stub.merge_emit_str = merge_str
     assert await _run_deep(multi_stack_target) != 0  # controlled Stop(1), not a crash
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(merged_items_path(dd).read_text())
     # The ``partial: true`` root flag is dead metadata (no consumer reads it -
     # issue #361 follow-up); the salvage is recoverable via the ``__merge__``
@@ -426,7 +427,7 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     # Read the expectation off the salvaged artifact rather than hard-coding one
     # stub description: which findings survive the salvage is decided by the
     # D-27 pre-filter and the evidence gate, not by this test.
-    salvaged = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())["items"]
+    salvaged = json.loads(merged_items_path(deep_dir(multi_stack_target, allow_standalone=True)).read_text())["items"]
     assert salvaged, "salvage wrote no items to consume"
     fix_calls = [
         c["prompt"]
@@ -519,7 +520,7 @@ async def test_merge_salvage_keeps_a_side_when_three_stacks_share_id_and_file(
     }
     stub.merge_emit_str = "no item list"
     assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(merged_items_path(dd).read_text())["items"]
     per_stack = [i for i in items if i.get("lens") == "per-stack"]
     # The regression: on the old ``(id, file)`` key this list is EMPTY -- every
@@ -657,7 +658,7 @@ async def test_merge_salvage_partial_items_carry_source_uids(
 
     assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
 
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(merged_items_path(dd).read_text())["items"]
     provenance = {str(i["description"]): i["source_uids"] for i in items}
     assert provenance == {

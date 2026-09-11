@@ -46,7 +46,10 @@ async def trace_probe(ctx):
         phase=DaydreamPhase.REVIEW,
         output_schema={"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]},
     )
-    (artifact_dir_for(ctx.work.repo) / "observability-result.json").write_text(json.dumps(output))
+    result_path = artifact_dir_for(
+        ctx.work.repo, session=ctx.artifacts, allow_standalone=False
+    ) / "observability-result.json"
+    result_path.write_text(json.dumps(output))
 
 def register(r):
     r.register_phase(FlowStep(name="trace-probe", run=trace_probe))

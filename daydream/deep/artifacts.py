@@ -1,7 +1,8 @@
 """Deep-review artifact path helpers + predecessor-check guard.
 
-All deep-mode artifacts live under `target / ".daydream" / "deep"` per D-41.
-The final merged report writes to `target / REVIEW_OUTPUT_FILE` per D-24/D-42.
+Deep artifacts use the explicit session's private `.daydream/deep` route.
+Intentional standalone callers opt into `target / ".daydream" / "deep"`.
+The session publishes the merged report to `target / REVIEW_OUTPUT_FILE`.
 
 The check_deep_artifacts() helper mirrors check_review_file_exists()
 (daydream/phases.py:611-629) -- same exception type, same actionable message format.
@@ -12,7 +13,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from daydream.artifact_visibility import artifact_dir_for
+from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 
 # Stage prerequisites -- single source of truth.
 # Value is a list of file names (relative to deep_dir) that must exist before the
@@ -33,9 +34,11 @@ _EARLIER_STAGE: dict[str, str] = {
 }
 
 
-def deep_dir(target: Path) -> Path:
+def deep_dir(
+    target: Path, *, session: ArtifactSession | None = None, allow_standalone: bool = False,
+) -> Path:
     """Return the `.daydream/deep/` directory for `target`, creating it if absent."""
-    d = artifact_dir_for(target) / "deep"
+    d = artifact_dir_for(target, session=session, allow_standalone=allow_standalone) / "deep"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -563,12 +563,13 @@ Working contracts for extension steps:
   their full contents.
 - Private storage is cwd-rooted discovery isolation, not an OS sandbox; no
   transport grants access to an entire runtime directory.
-- Intentional standalone phase calls without an active artifact session keep
-  the legacy paths and provide no isolation guarantee. Production runner and
+- Intentional standalone phase calls pass `allow_standalone=True` to keep
+  the legacy paths without an active artifact session. Production runner and
   custom-flow calls bind a session and cannot opt out of the model-cwd check.
 
-This is additive: it does not bump `EXTENSION_API_VERSION`, rename stable keys,
-or alter verifier routing headings.
+API v6 retains `ctx.artifacts`, the stable data keys, and verifier routing
+headings. Extensions using implicit artifact lookup must update their calls
+as shown below.
 
 A complete example — write a private note, prepare it as a sanctioned input,
 and dispatch one read-only agent turn:
@@ -584,7 +585,10 @@ from daydream.trajectory import DaydreamPhase
 DAYDREAM_EXT_API = 6
 
 async def explain_note(ctx: FlowContext) -> None:
-    note = artifact_dir_for(ctx.work.repo) / "extension-note.txt"
+    assert ctx.artifacts is not None
+    note = artifact_dir_for(
+        ctx.work.repo, session=ctx.artifacts, allow_standalone=False,
+    ) / "runs" / ctx.artifacts.layout.session_id / "extension-note.txt"
     note.parent.mkdir(parents=True, exist_ok=True)
     note.write_text("Review this repository's error-handling conventions.", encoding="utf-8")
     backend = ctx.backend_for("review")
@@ -606,15 +610,42 @@ def register(registry: Registry) -> None:
     registry.set_flow("explain-note", ["explain-note"])
 ```
 
-Inside the runner, `artifact_dir_for(ctx.work.repo)` routes to the active
-session's private directory while the session is live, so the note is
+Inside the runner, pass `session=ctx.artifacts, allow_standalone=False` to
+`artifact_dir_for(ctx.work.repo, ...)`. It routes to the owning session's
+private directory while the session is live, so the note is
 invisible to the model's cwd and to git during the run. At finalization the
 whole `.daydream/` subtree is published back into the checkout (the same
 contract as `review_output_path_for`: private while the session is active,
 published under the checkout's untracked `.daydream/` at finalization).
-`review_output_path_for(ctx.work.repo)` routes the review-output file the same
-way: private while the session is active, published as `.review-output.md` at
-finalization.
+`review_output_path_for(ctx.work.repo, session=ctx.artifacts,
+allow_standalone=False)` routes the review-output file the same way: private
+while the session is active, published as `.review-output.md` at finalization.
+
+Both accessors require an explicit session by default, even when a session is
+bound to the current task. Intentional standalone callers pass
+`allow_standalone=True`; this compatibility mode may use a bound session or,
+without one, the repository's public artifact path. Direct `run_deep` callers
+without runner-owned artifacts also opt in with `allow_standalone=True`, and
+must have no active artifact session. The recorder factory has the same
+restriction. Active flows must pass their owning artifacts to these entry
+points and to handoff helpers so writable and durable paths share one owner.
+Direct flow contexts carry that choice in `allow_standalone_artifacts`; its
+default is false. Pass `artifact_session=ctx.artifacts` and
+`allow_standalone=ctx.allow_standalone_artifacts` to built-in phases that use
+generated paths. Keep these runtime choices outside `ctx.data`.
+
+For durable handoff references, use
+`ctx.artifacts.durable_path_for(live_path, repo=ctx.work.repo)`; use
+`ctx.artifacts.live_path_for(public_path, repo=ctx.work.repo)` for the writable destination.
+These methods validate the owning session, repository, registered route, and
+path ancestry. They reject unrelated paths and destinations without a live
+write route, including finalization-only artifact dumps.
+
+Place extension artifacts under the current `runs/<session_id>/` directory.
+Legacy adoption accepts only registered top-level artifact names; an unknown
+sibling is rejected even when the tree also contains a recognized directory.
+Previously published custom paths can reopen when their complete subtree
+matches the validated canonical recovery copy.
 
 ### Interaction and output policy
 

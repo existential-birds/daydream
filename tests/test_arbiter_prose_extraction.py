@@ -126,6 +126,7 @@ async def test_arbiter_extracts_findings_from_prose_wrapped_message(
         diff_path=diff_path,
         intent_path=intent_path,
         alternatives_path=alternatives_path,
+        allow_standalone=True,
     )
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
@@ -149,6 +150,7 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(
             diff_path=diff_path,
             intent_path=intent_path,
             alternatives_path=alternatives_path,
+            allow_standalone=True,
         )
 
 
@@ -249,6 +251,7 @@ async def test_arbiter_captures_structured_output_in_log_mode(
         intent_path=intent_path,
         alternatives_path=alternatives_path,
         run_context=RunContext(InteractionPolicy(log_mode=True)),
+        allow_standalone=True,
     )
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True

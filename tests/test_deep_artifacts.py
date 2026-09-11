@@ -12,9 +12,9 @@ def test_deep_dir_uses_active_artifact_route(
     from daydream.deep import artifacts
 
     routed = tmp_path / "private" / ".daydream"
-    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target: routed)
+    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target, **_kwargs: routed)
 
-    assert artifacts.deep_dir(tmp_path / "model-cwd") == routed / "deep"
+    assert artifacts.deep_dir(tmp_path / "model-cwd", allow_standalone=True) == routed / "deep"
     assert (routed / "deep").is_dir()
 
 
@@ -233,7 +233,7 @@ def test_diagram_artifact_paths_live_in_the_deep_dir(tmp_path: Path) -> None:
     other deep artifacts, under the same deep dir the run already owns."""
     from daydream.deep.artifacts import deep_dir, diagram_markdown_path, diagram_path
 
-    dd = deep_dir(tmp_path)
+    dd = deep_dir(tmp_path, allow_standalone=True)
     assert diagram_path(dd) == dd / "diagram.json"
     assert diagram_markdown_path(dd) == dd / "diagram.md"
     assert diagram_path(dd).parent == diagram_markdown_path(dd).parent == dd

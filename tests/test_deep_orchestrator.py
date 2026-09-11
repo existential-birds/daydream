@@ -4459,7 +4459,7 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
 
     assert await _run_deep(multi_stack_target) == 0
 
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
 
     # (1) The arbiter saw the twin -- both sides, and nothing else. The other two
     # stacks are medium and uncontested, so they stay below the default
@@ -4515,7 +4515,7 @@ async def test_whole_file_structural_twin_is_arbitrated_and_reported_once(
 
     assert await _run_deep(multi_stack_target) == 0
 
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
 
     arbiter_input = json.loads(arbiter_input_path(dd).read_text())
     assert sorted((e["file"], e["line"]) for e in arbiter_input) == [
@@ -4585,7 +4585,7 @@ async def test_precision_mode_suppression_never_sees_structural_records(
 
     assert await _run_deep(multi_stack_target, precision_mode=True) == 0
 
-    items = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())["items"]
+    items = json.loads(merged_items_path(deep_dir(multi_stack_target, allow_standalone=True)).read_text())["items"]
     descriptions = [i["description"] for i in items]
     # The borderline LANGUAGE finding is suppressed (that is the pass working).
     assert not any("Borderline python nit" in d for d in descriptions), descriptions
@@ -4616,7 +4616,7 @@ async def test_distinct_structural_finding_survives_the_fold(
 
     assert await _run_deep(multi_stack_target) == 0
 
-    dd = deep_dir(multi_stack_target)
+    dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(merged_items_path(dd).read_text())["items"]
     api_items = sorted(
         i["description"] for i in items if i["file"] == "api.py"
@@ -6723,13 +6723,13 @@ async def test_environmental_failure_aborts_heal_loop(
         pytest.param("default", "clean", id="default-clean"),
         pytest.param("custom-public", "clean", id="custom-public-clean"),
         pytest.param("external", "clean", id="external-clean"),
-        pytest.param("default", "known-leaf", id="default-known-leaf-normalized"),
+        pytest.param("default", "known-leaf", id="default-known-leaf-private-fallback"),
         pytest.param(
             "custom-public",
             "known-leaf",
-            id="custom-public-known-leaf-normalized",
+            id="custom-public-known-leaf-private-fallback",
         ),
-        pytest.param("external", "known-leaf", id="external-known-leaf-normalized"),
+        pytest.param("external", "known-leaf", id="external-known-leaf-preserved"),
         pytest.param("default", "unknown-private", id="unknown-private-fallback"),
     ],
 )
@@ -6858,13 +6858,19 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     if response_kind == "clean":
         assert body == observation["model_body"]
     elif response_kind == "known-leaf":
-        assert body == observation["model_body"].replace(private_partial, str(expected_partial))
+        if trajectory_mode == "external":
+            assert body == observation["model_body"]
+        else:
+            assert "HANDOFF_STRUCTURED_SUCCESS" not in body
+            assert "Tests did not report success" in body
+            assert "1 failed" in body
+            assert private_partial not in body
         assert expected_partial.is_file()
         assert expected_partial.read_bytes() == private_partial_payloads[0]
     else:
         assert "HANDOFF_STRUCTURED_SUCCESS" not in body
         assert "Tests did not report success" in body
-        assert "[TRANSIENT_PATH]/.daydream/unreported.log" in body
+        assert ".daydream/unreported.log" not in body
     if trajectory_mode != "external":
         assert private_partial not in body
     assert observation["cwd"] not in body
@@ -7556,7 +7562,7 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
         "    from daydream.artifact_visibility import artifact_dir_for\n"
         "    from daydream.trajectory import DaydreamPhase, phase_scope\n"
         "    async with phase_scope(DaydreamPhase.MERGE, stage='host-only-fixture'):\n"
-        "        deep = artifact_dir_for(ctx.work.repo) / 'deep'\n"
+        "        deep = artifact_dir_for(ctx.work.repo, session=ctx.artifacts, allow_standalone=False) / 'deep'\n"
         "        deep.mkdir(parents=True, exist_ok=True)\n"
         f"        (deep / 'merged-items.json').write_bytes({expected_items!r})\n"
         "\n"
@@ -10488,7 +10494,7 @@ async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
 
     assert await _run_deep(multi_stack_target) == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     items = _merged_items(deep)
     pool = _run_uid_pool(deep)
     assert pool == {"generic:1", "python:1", "react:1", "structure:1"}, pool
@@ -10561,7 +10567,7 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     by_description = _source_uids_by_description(deep)
     # The real uid survives; the invention beside it is gone.
     assert by_description["Partly attributed finding"] == ["python:1"]
@@ -10614,7 +10620,7 @@ async def test_unattributable_merge_source_uids_degrade_to_empty_list(
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     by_description = _source_uids_by_description(deep)
     for description in (
         "Explicit null provenance",
@@ -10664,7 +10670,7 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
     assert [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()] == [], (
         "the single-stack bypass must not invoke the merge agent"
     )
-    deep = deep_dir(tiny_diff_target)
+    deep = deep_dir(tiny_diff_target, allow_standalone=True)
     assert _run_uid_pool(deep) == {"generic:1", "structure:1"}
     by_description = _source_uids_by_description(deep)
     assert by_description["Sample issue"] == ["generic:1"]
@@ -10713,7 +10719,7 @@ async def test_structural_fold_survivor_inherits_both_provenances(
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     twins = [item for item in _merged_items(deep) if item["description"] == _TWIN_DESCRIPTION]
     assert len(twins) == 1, f"the structural twin did not fold: {twins}"
     # The base item survived (it is the evidenced side) and now stands for both
@@ -10771,7 +10777,7 @@ async def test_structural_fold_provenance_when_structural_side_survives(
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     twins = [item for item in _merged_items(deep) if item["description"] == _TWIN_DESCRIPTION]
     assert len(twins) == 1, f"the corroborated defect did not ship exactly once: {twins}"
     # The STRUCTURAL side survived this time, so its own provenance leads.
@@ -10820,7 +10826,7 @@ async def test_dropped_speculative_sidecar_records_item_provenance(
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     by_description = _source_uids_by_description(deep)
     assert "Speculative unfounded finding" not in by_description, by_description
     assert by_description["Grounded finding"] == ["python:1"]
@@ -10929,7 +10935,7 @@ async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run
 
     assert await _run_deep(multi_stack_target) == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     items = _merged_items(deep)
     assert len(items) > 1, f"fixture must ship several items or uniqueness proves nothing: {items}"
 
@@ -10979,7 +10985,7 @@ async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
 
     assert await _run_deep(multi_stack_target) == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     items = _merged_items(deep)
     # The display ordinal is dense and 1-based over the SHIPPED list -- the
     # evidence gate deletes items after the merge agent numbered them, so this
@@ -11030,7 +11036,7 @@ async def test_item_uid_is_never_reported_as_record_provenance(
 
     assert await _run_deep(multi_stack_target) == 0
 
-    deep = deep_dir(multi_stack_target)
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
     pool = _run_uid_pool(deep)
     for item in _merged_items(deep):
         provenance = item["source_uids"]
@@ -11185,6 +11191,7 @@ def _direct_fix_context(
             run_id="session-current",
         ),
         registry=Registry(),
+        allow_standalone_artifacts=True,
         data={
             "dd": dd,
             "items_file": items_file,

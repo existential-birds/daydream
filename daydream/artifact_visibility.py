@@ -40,7 +40,13 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
-_LEGACY_ANCHORS = frozenset(("runs", "deep", "exploration", "partial-fixes", "diff.patch", "hunk-index.json"))
+_LEGACY_DIRECTORY_ANCHORS = frozenset(
+    ("runs", "deep", "exploration", "partial-fixes", "improve")
+)
+_LEGACY_FILE_ANCHORS = frozenset(
+    ("diff.patch", "hunk-index.json", "recommended.patch")
+)
+_LEGACY_ANCHORS = _LEGACY_DIRECTORY_ANCHORS | _LEGACY_FILE_ANCHORS
 _OPERATIONAL_NAMES = frozenset(("worktrees", "audit"))
 
 
@@ -353,6 +359,59 @@ def private_root_locations(*, base: Path | None = None) -> PrivateRootLocations:
 
 def _absolute_lexical(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
+
+
+def _projection_path(path: Path) -> Path:
+    """Admit one absolute lexical path without resolving absent components."""
+    if (
+        not isinstance(path, Path)
+        or not path.is_absolute()
+        or "\0" in os.fspath(path)
+        or _absolute_lexical(path) != path
+    ):
+        raise ArtifactVisibilityError("artifact projection path is unsafe")
+    return path
+
+
+def _validate_projection_ancestry(
+    path: Path,
+    *,
+    expected_kind: Literal["file", "directory", "either"],
+) -> None:
+    """Validate existing projection components without requiring the leaf."""
+    for index, component in enumerate((path, *path.parents)):
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ArtifactVisibilityError(
+                "artifact projection path could not be inspected"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ArtifactVisibilityError(
+                "artifact projection ancestry contains a symlink"
+            )
+        if index == 0:
+            valid_leaf = (
+                expected_kind == "directory"
+                and stat.S_ISDIR(metadata.st_mode)
+                or expected_kind == "file"
+                and stat.S_ISREG(metadata.st_mode)
+                or expected_kind == "either"
+                and (
+                    stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_ISREG(metadata.st_mode)
+                )
+            )
+            if not valid_leaf:
+                raise ArtifactVisibilityError(
+                    "artifact projection has the wrong filesystem type"
+                )
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise ArtifactVisibilityError(
+                "artifact projection ancestry is not a directory"
+            )
 
 
 def _declared_directory_metadata(path: Path, *, label: str) -> tuple[Path, os.stat_result]:
@@ -2556,7 +2615,24 @@ def _validate_owner(path: Path, expected: dict[str, object]) -> None:
         raise ArtifactVisibilityError("artifact owner metadata does not match the source")
 
 
-def _validate_legacy_public(source: Path) -> None:
+def _validated_canonical_entries(
+    state_root: Path,
+) -> tuple[ArtifactManifestEntry, ...] | None:
+    """Return an attested prior public tree, if this workspace has one."""
+    canonical = state_root / "canonical"
+    if not canonical.exists() and not canonical.is_symlink():
+        return None
+    entries = _parse_manifest(state_root / "canonical-manifest.json")
+    if _manifest(canonical) != entries:
+        raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
+    return entries
+
+
+def _validate_legacy_public(
+    source: Path,
+    *,
+    canonical_entries: tuple[ArtifactManifestEntry, ...] | None,
+) -> tuple[ArtifactManifestEntry, ...]:
     daydream = source / _DAYDREAM
     if daydream.exists() or daydream.is_symlink():
         try:
@@ -2588,13 +2664,76 @@ def _validate_legacy_public(source: Path) -> None:
             if occupied:
                 raise ArtifactVisibilityError("legacy operational workspace blocks artifact detach")
             anchor_children.discard(name)
-        if anchor_children and not anchor_children.intersection(_LEGACY_ANCHORS):
-            raise ArtifactVisibilityError("legacy .daydream tree has no recognized artifact anchor")
+        for name in sorted(anchor_children & _LEGACY_ANCHORS):
+            anchor = daydream / name
+            try:
+                anchor_metadata = anchor.lstat()
+            except OSError as exc:
+                raise ArtifactVisibilityError(
+                    "legacy artifact anchor could not be inspected"
+                ) from exc
+            expected_directory = name in _LEGACY_DIRECTORY_ANCHORS
+            if stat.S_ISLNK(anchor_metadata.st_mode) or (
+                expected_directory != stat.S_ISDIR(anchor_metadata.st_mode)
+                or not (
+                    stat.S_ISDIR(anchor_metadata.st_mode)
+                    or stat.S_ISREG(anchor_metadata.st_mode)
+                )
+            ):
+                raise ArtifactVisibilityError(
+                    "legacy artifact anchor has the wrong filesystem type"
+                )
     review = source / _REVIEW_OUTPUT
     if review.exists() or review.is_symlink():
         metadata = review.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
+    public_entries = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
+    daydream_entry = _entry_at(public_entries, _DAYDREAM)
+    if daydream_entry is not None and daydream_entry.kind != "directory":
+        raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
+    review_entry = _entry_at(public_entries, _REVIEW_OUTPUT)
+    if review_entry is not None and review_entry.kind != "file":
+        raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
+    daydream_prefix = f"{_DAYDREAM}/"
+    manifested_children = {
+        entry.path.removeprefix(daydream_prefix): entry
+        for entry in public_entries
+        if entry.path.startswith(daydream_prefix)
+        and "/" not in entry.path.removeprefix(daydream_prefix)
+    }
+    for name in sorted(manifested_children.keys() & _OPERATIONAL_NAMES):
+        relative = f"{_DAYDREAM}/{name}"
+        if manifested_children[name].kind != "directory" or any(
+            entry.path.startswith(f"{relative}/") for entry in public_entries
+        ):
+            raise ArtifactVisibilityError("legacy operational workspace blocks artifact detach")
+    anchor_children = manifested_children.keys() - _OPERATIONAL_NAMES
+    for name in sorted(anchor_children & _LEGACY_ANCHORS):
+        expected_kind = "directory" if name in _LEGACY_DIRECTORY_ANCHORS else "file"
+        if manifested_children[name].kind != expected_kind:
+            raise ArtifactVisibilityError(
+                "legacy artifact anchor has the wrong filesystem type"
+            )
+    nonstatic_children = anchor_children - _LEGACY_ANCHORS
+    for name in sorted(nonstatic_children):
+        relative = f"{_DAYDREAM}/{name}"
+        prefix = f"{relative}/"
+        actual = tuple(
+            entry
+            for entry in public_entries
+            if entry.path == relative or entry.path.startswith(prefix)
+        )
+        expected = tuple(
+            entry
+            for entry in canonical_entries or ()
+            if entry.path == relative or entry.path.startswith(prefix)
+        )
+        if not expected or actual != expected:
+            raise ArtifactVisibilityError(
+                "legacy .daydream tree contains an unregistered artifact anchor"
+            )
+    return public_entries
 
 
 def _manifest_is_subset(
@@ -3466,6 +3605,102 @@ class ArtifactSession:
             live_root=self.layout.live_root,
         )
 
+    @staticmethod
+    def _projection_kind(route: RoutedDestination) -> Literal["file", "directory"]:
+        return (
+            "directory"
+            if route.label in (OutputLabel.PUBLIC_DAYDREAM, OutputLabel.DUMP_DIRECTORY)
+            else "file"
+        )
+
+    def _projection_routes(self) -> tuple[RoutedDestination, ...]:
+        trajectory = self._trajectory_route
+        paired = () if trajectory is None else (trajectory.full, trajectory.partial)
+        return (*paired, *self._destinations)
+
+    def durable_path_for(self, path: Path, *, repo: Path) -> Path:
+        """Project one registered live write path to its durable destination."""
+        self._route_repo(repo)
+        declared = _projection_path(path)
+
+        # Exact explicit routes precede the public .daydream subtree. A custom
+        # trajectory may deliberately publish somewhere inside that subtree
+        # while writing at the session's canonical trajectory path.
+        for route in self._projection_routes():
+            if route.label is OutputLabel.PUBLIC_DAYDREAM or route.write_path is None:
+                continue
+            if declared == route.write_path:
+                kind = self._projection_kind(route)
+                _validate_projection_ancestry(declared, expected_kind=kind)
+                _validate_projection_ancestry(route.requested, expected_kind=kind)
+                return route.requested
+
+        for route in self._destinations:
+            if route.label is not OutputLabel.PUBLIC_DAYDREAM:
+                continue
+            live_root = route.write_path
+            if live_root is None:
+                raise ArtifactVisibilityError(
+                    "registered artifact destination has no writable path"
+                )
+            if declared == live_root or live_root in declared.parents:
+                relative = declared.relative_to(live_root)
+                durable = route.requested / relative
+                leaf_kind: Literal["directory", "either"] = (
+                    "directory" if not relative.parts else "either"
+                )
+                _validate_projection_ancestry(
+                    declared, expected_kind=leaf_kind
+                )
+                _validate_projection_ancestry(durable, expected_kind=leaf_kind)
+                return durable
+
+        raise ArtifactVisibilityError(
+            "path is not owned by a registered artifact destination"
+        )
+
+    def live_path_for(self, path: Path, *, repo: Path) -> Path:
+        """Project one registered durable destination to its live write path."""
+        self._route_repo(repo)
+        declared = _projection_path(path)
+
+        for route in self._projection_routes():
+            if route.label is OutputLabel.PUBLIC_DAYDREAM:
+                continue
+            if declared == route.requested:
+                kind = self._projection_kind(route)
+                _validate_projection_ancestry(declared, expected_kind=kind)
+                if route.write_path is None:
+                    raise ArtifactVisibilityError(
+                        "registered artifact destination has no writable path"
+                    )
+                _validate_projection_ancestry(route.write_path, expected_kind=kind)
+                return route.write_path
+
+        for route in self._destinations:
+            if route.label is not OutputLabel.PUBLIC_DAYDREAM:
+                continue
+            live_root = route.write_path
+            if live_root is None:
+                raise ArtifactVisibilityError(
+                    "registered artifact destination has no writable path"
+                )
+            if declared == route.requested or route.requested in declared.parents:
+                relative = declared.relative_to(route.requested)
+                live = live_root / relative
+                leaf_kind: Literal["directory", "either"] = (
+                    "directory" if not relative.parts else "either"
+                )
+                _validate_projection_ancestry(
+                    declared, expected_kind=leaf_kind
+                )
+                _validate_projection_ancestry(live, expected_kind=leaf_kind)
+                return live
+
+        raise ArtifactVisibilityError(
+            "path is not owned by a registered artifact destination"
+        )
+
     def _require_active(self) -> None:
         if self._state is not _SessionState.ACTIVE:
             raise ArtifactVisibilityError("artifact session is frozen and no longer writable")
@@ -4234,27 +4469,31 @@ class ArtifactSession:
         os.close(self._repo_fd)
 
 
-def artifact_dir_for(repo: Path, *, session: ArtifactSession | None = None, allow_standalone: bool = True) -> Path:
-    """Routed ``.daydream`` path for *repo* (one explicit-or-bound session).
+def artifact_dir_for(
+    repo: Path,
+    *,
+    session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
+) -> Path:
+    """Routed ``.daydream`` path for *repo*.
 
-    Resolution order (#1162): an explicitly passed ``session`` wins and is
-    routed with the usual fail-closed repo identity checks; otherwise the
-    bound channel (``_SESSION``, the documented extension contract) is used;
-    otherwise the legacy ``repo/.daydream`` path is returned only when
-    ``allow_standalone`` is set — intentional standalone phase calls keep
-    working (docs/extensions.md), while strict callers can pass
-    ``allow_standalone=False`` to fail closed instead of silently writing the
-    public tree when no session is bound.
+    Production callers pass an explicit session. Intentional standalone and
+    legacy extension callers must affirmatively allow compatibility routing;
+    only that path may consult the bound session before falling back to the
+    public ``repo/.daydream`` location.
     """
-    resolved = session if session is not None else _SESSION.get()
-    if resolved is None:
-        if not allow_standalone:
-            raise ArtifactVisibilityError(
-                "no artifact session is bound and standalone artifact routing is not allowed"
-            )
-        return repo / _DAYDREAM
-    resolved._route_repo(repo)
-    return resolved.daydream_dir
+    if session is not None:
+        session._route_repo(repo)
+        return session.daydream_dir
+    if not allow_standalone:
+        raise ArtifactVisibilityError(
+            "an explicit artifact session is required for strict artifact routing"
+        )
+    bound = _SESSION.get()
+    if bound is not None:
+        bound._route_repo(repo)
+        return bound.daydream_dir
+    return repo / _DAYDREAM
 
 
 def artifact_session_active() -> bool:
@@ -4266,18 +4505,21 @@ def review_output_path_for(
     repo: Path,
     *,
     session: ArtifactSession | None = None,
-    allow_standalone: bool = True,
+    allow_standalone: bool = False,
 ) -> Path:
     """Routed ``.review-output.md`` path for *repo* (see :func:`artifact_dir_for`)."""
-    resolved = session if session is not None else _SESSION.get()
-    if resolved is None:
-        if not allow_standalone:
-            raise ArtifactVisibilityError(
-                "no artifact session is bound and standalone artifact routing is not allowed"
-            )
-        return repo / _REVIEW_OUTPUT
-    resolved._route_repo(repo)
-    return resolved.review_output
+    if session is not None:
+        session._route_repo(repo)
+        return session.review_output
+    if not allow_standalone:
+        raise ArtifactVisibilityError(
+            "an explicit artifact session is required for strict artifact routing"
+        )
+    bound = _SESSION.get()
+    if bound is not None:
+        bound._route_repo(repo)
+        return bound.review_output
+    return repo / _REVIEW_OUTPUT
 
 
 def assert_model_cwd_clean(cwd: Path) -> None:
@@ -4400,7 +4642,11 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         transaction: Path | None = None
         try:
             _recover_transactions(state_root, source)
-            _validate_legacy_public(source)
+            validated_canonical_entries = _validated_canonical_entries(state_root)
+            validated_public_entries = _validate_legacy_public(
+                source,
+                canonical_entries=validated_canonical_entries,
+            )
             runs = state_root / "runs"
             transactions = state_root / "transactions"
             _create_private_directory(runs)
@@ -4411,6 +4657,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             run_root.mkdir(mode=0o700)
 
             public_entries = _manifest(source, (_DAYDREAM, _REVIEW_OUTPUT))
+            if public_entries != validated_public_entries:
+                raise ArtifactVisibilityError("public artifacts changed during session open")
             transaction_id = f"detach-{session_id}-{secrets.token_hex(8)}"
             transaction = transactions / transaction_id
             transaction.mkdir(mode=0o700)
@@ -4436,6 +4684,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             canonical_present = canonical.exists()
             if canonical_present:
                 canonical_entries = _parse_manifest(canonical_manifest)
+                if _manifest(canonical) != canonical_entries:
+                    raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
                 if public_entries != canonical_entries:
                     _rebaseline_canonical_from_public(
                         state_root, source, public_entries, transaction=transaction

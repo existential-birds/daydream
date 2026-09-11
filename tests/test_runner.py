@@ -2298,6 +2298,7 @@ def test_open_recorder_resolves_backend_identity(tmp_path: Path) -> None:
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
     )
     assert recorder.backend_name == "codex"
@@ -2324,6 +2325,7 @@ def test_open_recorder_resolves_backend_via_per_stack_review(tmp_path: Path) -> 
         file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
     )
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
     )
     assert recorder.backend_name == "pi"
@@ -2340,6 +2342,7 @@ def test_open_recorder_improve_omits_fix_test_backend(tmp_path: Path) -> None:
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), backend="codex", run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.IMPROVE,
     )
     assert recorder.backend_name == "codex"
@@ -2359,6 +2362,7 @@ def test_open_recorder_review_only_omits_fix_test_backend(tmp_path: Path) -> Non
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), backend="codex", run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.TTT,
     )
     assert recorder.backend_name == "codex"
@@ -2380,6 +2384,7 @@ def test_open_recorder_custom_omits_fix_test_backend(tmp_path: Path) -> None:
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.CUSTOM,
     )
     assert recorder.backend_name == "codex"
@@ -2400,6 +2405,7 @@ def test_open_recorder_diagram_omits_fix_test_backend(tmp_path: Path) -> None:
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.DIAGRAM,
     )
     assert recorder.backend_name == "codex"
@@ -2423,6 +2429,7 @@ def test_open_recorder_diagram_resolves_backend_via_the_diagram_phase(tmp_path: 
         file_config=DaydreamFileConfig(phases={"diagram": {"backend": "pi"}}),
     )
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.DIAGRAM,
     )
     assert recorder.backend_name == "pi"
@@ -2450,6 +2457,7 @@ def test_open_recorder_improve_resolves_backend_via_recon(tmp_path: Path) -> Non
         file_config=DaydreamFileConfig(phases={"recon": {"backend": "pi"}}),
     )
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.IMPROVE,
     )
     assert recorder.backend_name == "pi"
@@ -2465,6 +2473,7 @@ def test_open_recorder_pr_flow_resolves_fix_omits_test(tmp_path: Path) -> None:
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), review_backend="codex", run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.PR,
     )
     assert recorder.backend_name == "codex"
@@ -2479,6 +2488,7 @@ def test_open_recorder_backend_falls_back_to_claude(tmp_path: Path) -> None:
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), run_eval=False)
     recorder = _open_recorder(
+        allow_standalone=True,
         config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
     )
     assert recorder.backend_name == "claude"

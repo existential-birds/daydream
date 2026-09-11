@@ -27,7 +27,12 @@ import anyio
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, run_agent
-from daydream.artifact_visibility import artifact_dir_for, review_output_path_for
+from daydream.artifact_visibility import (
+    ArtifactVisibilityError,
+    artifact_dir_for,
+    artifact_session_active,
+    review_output_path_for,
+)
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_DEEP_SHARD_ENABLED,
@@ -1060,7 +1065,11 @@ async def _step_exploration(ctx: FlowContext) -> None:
 
     config = ctx.config
     target_dir = ctx.work.repo
-    daydream_dir = artifact_dir_for(target_dir)
+    daydream_dir = artifact_dir_for(
+        target_dir,
+        session=ctx.artifacts,
+        allow_standalone=ctx.allow_standalone_artifacts,
+    )
     # Issue #644 — the pre-scan must be grounded in the FULL diff, never the
     # bounded in-memory ``ctx.data["diff"]``: ``detect_affected_files`` seeds a
     # specialist per affected file, so a dropped-block file would otherwise get
@@ -1349,6 +1358,8 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 # sharding; #740 updates the evidence gate and bounds).
                 write_coverage_receipts=True,
                 run_context=ctx.run_context,
+                artifact_session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -2138,6 +2149,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     intent_authoritative=ctx.data.get("intent_authoritative", False),
                     strategy=ctx.strategy("arbitration"),
                     run_context=ctx.run_context,
+                    artifact_session=ctx.artifacts,
+                    allow_standalone=ctx.allow_standalone_artifacts,
                 )
                 # Identity gate: only resume when merge runs on the very same
                 # backend instance. A per-phase override that resolves a
@@ -2200,6 +2213,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         exploration_dir=ctx.data["exploration_dir"],
                         strategy=ctx.strategy("suppression"),
                         run_context=ctx.run_context,
+                        artifact_session=ctx.artifacts,
+                        allow_standalone=ctx.allow_standalone_artifacts,
                     )
                 adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
                     adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
@@ -2432,6 +2447,8 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 continuation=ctx.data.get("arbiter_continuation"),
                 strategy=ctx.strategy("merge"),
                 run_context=ctx.run_context,
+                artifact_session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
             )
         except CrossStackMergeError as exc:
             phase.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
@@ -2492,6 +2509,8 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
         records,
         ctx.data["structural_records_path"],
         failed_stacks=ctx.data.get("failed_stacks") or None,
+        artifact_session=ctx.artifacts,
+        allow_standalone=ctx.allow_standalone_artifacts,
     )
 
     # Record the failure for resume. Never drop existing per-stack entries.
@@ -2524,6 +2543,8 @@ async def _step_single_stack_merge(ctx: FlowContext) -> None:
             ctx.data["records"],
             ctx.data["structural_records_path"],
             failed_stacks=failed_stacks or None,
+            artifact_session=ctx.artifacts,
+            allow_standalone=ctx.allow_standalone_artifacts,
         )
 
 
@@ -2533,7 +2554,11 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     dd = ctx.data["dd"]
 
     print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
-    merged_report = review_output_path_for(target_dir)
+    merged_report = review_output_path_for(
+        target_dir,
+        session=ctx.artifacts,
+        allow_standalone=ctx.allow_standalone_artifacts,
+    )
 
     # merged-items.json is the canonical source of truth; review-output.md is
     # render-only. The missing-input guard keys on the JSON so a --start-at fix
@@ -2716,6 +2741,8 @@ async def _step_supervise(ctx: FlowContext) -> None:
                 exploration_dir=ctx.data["exploration_dir"],
                 strategy=ctx.strategy("supervision"),
                 run_context=ctx.run_context,
+                artifact_session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
             )
     kept, held, events = apply_findings_verdicts(items, verdicts)
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
@@ -3246,7 +3273,15 @@ async def _run_diagram_step(
     from daydream.services import enumerate_services
 
     changed_files = sorted(str(path) for path in ctx.data["changed_files"])
-    hunk_ranges = head_side_ranges_by_file(load_hunk_index(artifact_dir_for(target_dir)))
+    hunk_ranges = head_side_ranges_by_file(
+        load_hunk_index(
+            artifact_dir_for(
+                target_dir,
+                session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
+            )
+        )
+    )
     file_config = _file_config_or_empty(ctx.config)
     eligibility = decide_eligibility(
         repo_root=target_dir,
@@ -3473,7 +3508,11 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         fix_failures_path(dd),
         fix_leftover_untracked_path(dd),
         stabilization_failed_path(dd),
-        artifact_dir_for(ctx.work.repo) / "recommended.patch",
+        artifact_dir_for(
+            ctx.work.repo,
+            session=ctx.artifacts,
+            allow_standalone=ctx.allow_standalone_artifacts,
+        ) / "recommended.patch",
     )
     try:
         for stale in stale_paths:
@@ -4436,7 +4475,13 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
     }
     if quality_enabled:
         quality_before, quality_unavailable = await _capture_quality_before(
-            artifact_dir_for(ctx.work.repo), ctx.work.repo, reviewed_python
+            artifact_dir_for(
+                ctx.work.repo,
+                session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
+            ),
+            ctx.work.repo,
+            reviewed_python,
         )
     else:
         quality_before, quality_unavailable = None, None
@@ -4566,7 +4611,11 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
             verbosity_absolute_threshold=_quality_gate_threshold(
                 config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
             ),
-            daydream_dir=artifact_dir_for(ctx.work.repo),
+            daydream_dir=artifact_dir_for(
+                ctx.work.repo,
+                session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
+            ),
             code_workspace=ctx.work.repo,
             dd=ctx.data["dd"],
             candidates={path for path in snapshot.paths if path.endswith(".py")}
@@ -4923,7 +4972,11 @@ async def finalize_retained_tree_after_test(
             )
 
         try:
-            patch_path = artifact_dir_for(ctx.work.repo) / "recommended.patch"
+            patch_path = artifact_dir_for(
+                ctx.work.repo,
+                session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
+            ) / "recommended.patch"
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_bytes(snapshot.recommended_patch)
             atomic_write_json(
@@ -4969,6 +5022,8 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
                 footprint=state.footprint,
                 run_context=ctx.run_context,
+                artifact_session=ctx.artifacts,
+                allow_standalone=ctx.allow_standalone_artifacts,
             )
             if not isinstance(result, TestAndHealResult):
                 raise TypeError("phase_test_and_heal returned an invalid evidence result")
@@ -5371,7 +5426,11 @@ async def _perform_cleanup(ctx: FlowContext) -> None:
 
     if not enabled:
         return
-    review_output_path = review_output_path_for(target_dir)
+    review_output_path = review_output_path_for(
+        target_dir,
+        session=ctx.artifacts,
+        allow_standalone=ctx.allow_standalone_artifacts,
+    )
     if review_output_path.exists():
         review_output_path.unlink()
         print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
@@ -5572,6 +5631,7 @@ async def run_deep(
     run_context: RunContext | None = None,
     github_execution: GitHubExecutionInput | None = None,
     backend_factory: BackendFactory | None = None,
+    allow_standalone: bool = False,
 ) -> int:
     """Execute the deep-review pipeline (D-07) across every PR-process mode.
 
@@ -5592,11 +5652,18 @@ async def run_deep(
         work: Resolved working environment for the run.
         run_artifacts: The composition root's artifact session and its
             pre-registered output routes, or ``None`` for a standalone caller.
+        allow_standalone: Intentional direct callers without ``run_artifacts``
+            must pass ``True`` and have no active artifact session.
+            Runner-managed calls always keep this false.
 
     Returns:
         Exit code (0 on success, 1 on failure).
     """
     run_context = resolve_run_context(run_context)
+    if run_artifacts is None and not allow_standalone:
+        raise ArtifactVisibilityError("standalone deep flow requires allow_standalone=True")
+    if run_artifacts is None and artifact_session_active():
+        raise ArtifactVisibilityError("standalone deep flow cannot run inside an active artifact session")
     execution = github_execution or GitHubExecutionInput()
     return await _run_review_spine(
         config,
@@ -5606,6 +5673,7 @@ async def run_deep(
         run_context=run_context,
         github_execution=execution,
         backend_factory=backend_factory,
+        allow_standalone=allow_standalone,
     )
 
 
@@ -5675,8 +5743,10 @@ async def _run_review_spine(
     run_context: RunContext | None = None,
     github_execution: GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
+    allow_standalone: bool = False,
 ) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
+    artifact_session = None if run_artifacts is None else run_artifacts.session
     run_context = resolve_run_context(run_context)
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
@@ -5717,7 +5787,11 @@ async def _run_review_spine(
         print_warning(console, f"No diff found -- nothing to {subject}")
         return 0
 
-    daydream_dir = artifact_dir_for(target_dir)
+    daydream_dir = artifact_dir_for(
+        target_dir,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
@@ -5728,7 +5802,11 @@ async def _run_review_spine(
     # Diff is immutable from here on; compute the tiering verdict once and reuse
     # it at both the exploration step's gate and the alternatives step's gate.
     tier = select_tier(count_changed_files(diff))
-    dd = deep_dir(target_dir)
+    dd = deep_dir(
+        target_dir,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    )
     current_diff_sha = diff_key(diff)
     # Issue #1113: a diagram-only run must NEVER clear ``.daydream/deep/``. It
     # produces none of the artifacts ``diff-key`` attests, and wiping the
@@ -5747,6 +5825,7 @@ async def _run_review_spine(
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
         run_artifacts=run_artifacts,
+        allow_standalone=allow_standalone,
     ):
         # Composition-root re-entry: resolution already happened in
         # ``_run_loop_deep`` before this recorder existed; this no-op resolve
@@ -5956,6 +6035,7 @@ async def _run_review_spine(
                 "failed_stacks": {},
             },
             _backend_cache=backend_cache,
+            allow_standalone_artifacts=allow_standalone,
         )
 
         # Nothing is torn down after the flow. .daydream/exploration/ is a

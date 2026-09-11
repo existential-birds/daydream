@@ -109,6 +109,7 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(
             diff_path=diff,
             intent_path=intent,
             alternatives_path=alts,
+            allow_standalone=True,
         )
 
     assert set(results) == {"python", "react", "generic"}
@@ -134,6 +135,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     assert set(results.keys()) == {"python", "react", "generic"}
@@ -154,7 +156,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_records_path
 
-    deep_dir_path = _deep_dir(tmp_path)
+    deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
     declared: dict[str, list[Any]] = {"issues": [], "verdicts": []}
     for name in results:
         records = per_stack_records_path(deep_dir_path, name)
@@ -215,6 +217,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     assert len(structural_calls) == 1
@@ -263,6 +266,7 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
             diff_path=diff,
             intent_path=intent,
             alternatives_path=alts,
+            allow_standalone=True,
         )
 
     assert "python" in results
@@ -317,6 +321,7 @@ async def test_per_stack_prompts_are_skill_free(
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     assert failures == {}
@@ -365,6 +370,7 @@ async def test_fanout_default_concurrency(
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     assert 4 in captured
@@ -395,6 +401,7 @@ async def test_fanout_low_concurrency(
         diff_path=diff,
         intent_path=intent,
         alternatives_path=alts,
+        allow_standalone=True,
     )
 
     assert captured == [2]

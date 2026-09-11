@@ -243,6 +243,7 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+        allow_standalone=True,
     )
 
     assert violations == ["migrations/0001_init.sql"]
@@ -273,6 +274,7 @@ def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+        allow_standalone=True,
     )
 
     assert violations == ["client.py"]
@@ -297,6 +299,7 @@ def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=None, snapshot_captured=False, pre_untracked=set(),
+        allow_standalone=True,
     )
 
     assert violations == []
@@ -327,6 +330,7 @@ def test_test_healing_guard_uses_unique_recovery_patch_names(
 
     _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+        allow_standalone=True,
     )
 
     patches = list((tmp_path / ".daydream" / "partial-fixes").glob("*.patch"))
@@ -359,6 +363,7 @@ def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+        allow_standalone=True,
     )
 
     assert violations == []
@@ -391,6 +396,7 @@ def test_test_healing_guard_reports_restoration_failure(
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+        allow_standalone=True,
     )
 
     assert violations is None
@@ -425,6 +431,7 @@ def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(
         snapshot_captured=True,
         pre_untracked=pre_untracked,
         pre_untracked_contents=pre_untracked_contents,
+        allow_standalone=True,
     )
 
     assert violations == ["migrations/0000_local_draft.sql"]
@@ -458,6 +465,7 @@ def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(
         snapshot_captured=True,
         pre_untracked=pre_untracked,
         pre_untracked_contents=pre_untracked_contents,
+        allow_standalone=True,
     )
 
     assert violations == []
@@ -1081,6 +1089,7 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
             test_command="true",
             file_config=DaydreamFileConfig(test_command="true", test_command_wall_s=1234.0),
         ),
+        allow_standalone=True,
     )
     assert success is True
     assert retries == 0
@@ -1092,6 +1101,7 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
         config=SimpleNamespace(
             test_command="true", file_config=DaydreamFileConfig(test_command="true"),
         ),
+        allow_standalone=True,
     )
     assert captured[-1]["wall_budget_s"] == TEST_WALL_BUDGET_S
 
@@ -1124,7 +1134,12 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(
         {"id": 2, "description": "Missing import", "file": "src/utils.py", "line": 1},
     ]
 
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), feedback_items=feedback_items)
+    success, retries, _ = await phase_test_and_heal(
+        backend,
+        make_work(tmp_path),
+        feedback_items=feedback_items,
+        allow_standalone=True,
+    )
 
     assert success is True
     assert retries == 1
@@ -1158,7 +1173,7 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
         lambda *args, **kwargs: None,
     )
 
-    result = await phase_test_and_heal(backend, make_work(tmp_path))
+    result = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert (result.passed, result.retries, result.proceed) == (False, 1, False)
     assert backend.call_count == 2
@@ -1200,6 +1215,7 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
 
     success, retries, _ = await phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=feedback_items,
+        allow_standalone=True,
     )
 
     assert success is True
@@ -1228,8 +1244,27 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Verdict\n\nReady: Yes\n")
 
     # Default script = a bare ResultEvent: a schema miss with no structured output, no text.
-    result = await phase_parse_feedback(ScriptedBackend(), make_work(tmp_path))
+    result = await phase_parse_feedback(
+        ScriptedBackend(), make_work(tmp_path), allow_standalone=True
+    )
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_phase_parse_feedback_requires_explicit_session_or_standalone_opt_in(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """Direct callers must affirmatively select legacy public-path routing."""
+    from daydream.artifact_visibility import ArtifactVisibilityError
+    from daydream.phases import phase_parse_feedback
+
+    silence_console("daydream.phases")
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Review\n", encoding="utf-8")
+
+    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+        await phase_parse_feedback(ScriptedBackend(), make_work(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -1257,7 +1292,7 @@ async def test_phase_parse_feedback_json_fallback(
         _RESULT,
     ])
 
-    result = await phase_parse_feedback(backend, make_work(tmp_path))
+    result = await phase_parse_feedback(backend, make_work(tmp_path), allow_standalone=True)
     assert len(result) == 1
     assert result[0]["file"] == "foo.py"
 
@@ -1306,7 +1341,7 @@ async def test_phase_parse_feedback_default_path_drops_speculative(
         ]
     }))
 
-    result = await phase_parse_feedback(backend, make_work(tmp_path))
+    result = await phase_parse_feedback(backend, make_work(tmp_path), allow_standalone=True)
     assert [i["description"] for i in result] == ["grounded"], (
         f"speculative finding leaked past the shallow-path gate: {result}"
     )
@@ -1518,7 +1553,7 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
     backend = _inline_or_exact_backend(repo, inline=inline)
 
     async with _private_session(tmp_path, work, f"phase-fix-{inline}"):
-        deep = artifact_dir_for(repo) / "deep"
+        deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
         intent = deep / "intent.md"
         affected = deep / "exploration" / "affected_files.md"
         affected.parent.mkdir(parents=True)
@@ -2177,6 +2212,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
         intent_path=intent,
         alternatives_path=alts,
         exploration_dir=exploration_dir,
+        allow_standalone=True,
     )
 
     assert failures == {}
@@ -3468,6 +3504,7 @@ async def test_approved_investigator_command_runs_once_host_side(
 
     passed, retries, proceed = await phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=None,
+        allow_standalone=True,
     )
 
     assert passed is True
@@ -3520,6 +3557,7 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
 
     passed, retries, proceed = await phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=None,
+        allow_standalone=True,
     )
 
     assert passed is True
@@ -3557,6 +3595,7 @@ async def test_phase_test_and_heal_spawn_error_routes_through_failure_gate(
     passed, retries, proceed = await phase_test_and_heal(
         _HealBackend(script=[]), make_work(tmp_path),
         feedback_items=None, config=config,
+        allow_standalone=True,
     )
 
     assert passed is False
@@ -3591,7 +3630,7 @@ async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     assert retries == 1
@@ -3640,7 +3679,7 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
 
     monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
 
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     assert retries == 0
@@ -3682,7 +3721,7 @@ async def test_phase_test_and_heal_prompts_require_foreground_run_and_summary_li
         _fake_passed_run,
     )
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     generic_prompt, investigator_prompt = backend.prompts[0], backend.prompts[1]
@@ -3718,7 +3757,7 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
     # Select the investigator, then decline its replacement command.
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "n")
 
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     assert retries == 1
@@ -3756,7 +3795,7 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     assert retries == 1
@@ -3810,7 +3849,7 @@ async def test_summarizer_invoked_read_only_normal_calls_mutating(
     backend = _HealBackend(script=[_FAIL_TURN, _handoff_turn("# H")])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
 
-    await phase_test_and_heal(backend, make_work(tmp_path))
+    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     # First call = the failing test run (mutating allowed); second = summarizer (read-only).
     assert backend.read_only_calls == [False, True]
@@ -3872,7 +3911,7 @@ async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     assert retries == 0
@@ -3910,7 +3949,7 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
     # Abort at the menu, then approve copying the handoff.
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "4" if "Choice" in a[1] else "y")
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     assert copied == ["BODY"]
@@ -3959,7 +3998,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
         _handoff_turn("BODY"),
     ])
 
-    await phase_test_and_heal(backend, make_work(tmp_path))
+    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert any("clipboard unavailable" in m for m in infos)
     # Only the menu "Choice" prompt fires — no clipboard confirmation prompt.
@@ -3991,7 +4030,7 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert success is False
 
     fallback_dir = tmp_path / ".daydream"
@@ -4029,7 +4068,7 @@ async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
@@ -4065,7 +4104,7 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
@@ -4090,7 +4129,7 @@ async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
     backend = _HealBackend(script=[_FAIL_TURN, _handoff_turn("# H\nbody")])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
 
-    await phase_test_and_heal(backend, make_work(tmp_path))
+    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     # The code we own is the prompt sent to the summarizer (agent output mocked).
     summarizer_prompt = backend.prompts[-1]
@@ -4122,7 +4161,7 @@ async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
     backend = _HealBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
 
-    await phase_test_and_heal(backend, make_work(tmp_path))
+    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(
         encoding="utf-8",
@@ -4138,6 +4177,68 @@ async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
 
 
 # _resolve_handoff_paths — ephemeral worktree + archive routing
+
+
+@pytest.mark.asyncio
+async def test_recorderless_standalone_ephemeral_handoff_survives_worktree_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A standalone handoff without a recorder still belongs to the source checkout."""
+    from daydream.phases import _run_failure_summarizer
+
+    source = tmp_path / "source"
+    init_repo(source)
+    (source / "tracked.py").write_text("value = 1\n", encoding="utf-8")
+    git(source, "add", "tracked.py")
+    head = git_commit(source, "base")
+    worktree = tmp_path / "ephemeral-worktree"
+    git(source, "worktree", "add", "--detach", str(worktree), head)
+    work = WorkContext(
+        repo=worktree,
+        source=source,
+        base_branch="main",
+        base_sha=head,
+        head_branch=None,
+        head_sha=head,
+        is_ephemeral=True,
+        run_id="20260101000000-deadbeef",
+    )
+    backend = ScriptedBackend(events=_handoff_turn("DURABLE_HANDOFF_BODY"))
+
+    try:
+        body, handoff_path, written = await _run_failure_summarizer(
+            backend,
+            work,
+            "1 failed, 0 passed",
+            allow_standalone=True,
+        )
+        git(source, "worktree", "remove", "--force", str(worktree))
+
+        assert written is True
+        assert handoff_path.parent == source / ".daydream"
+        assert handoff_path.read_text(encoding="utf-8") == "DURABLE_HANDOFF_BODY"
+        assert body == "DURABLE_HANDOFF_BODY"
+        assert str(worktree) not in body
+    finally:
+        if worktree.exists():
+            git(source, "worktree", "remove", "--force", str(worktree))
+
+
+@pytest.mark.asyncio
+async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_ownership(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """Compatibility routing cannot borrow a private session for a durable handoff."""
+    from daydream.artifact_visibility import ArtifactVisibilityError
+    from daydream.phases import _resolve_handoff_paths
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    work = make_work(repo)
+    async with _private_session(tmp_path, work, "missing-handoff-session"):
+        with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+            _resolve_handoff_paths(None, work, allow_standalone=True)
 
 
 def _make_ephemeral_workcontext(source: Path, repo: Path) -> Any:
@@ -4189,6 +4290,7 @@ def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
 
     handoff, trajectory, traj_dir, diff, manifest, deep = _resolve_handoff_paths(
         cast(TrajectoryRecorder, _Recorder()), work,
+        allow_standalone=True,
     )
 
     archive_run_dir = archive_root / "runs" / "sess-xyz"
@@ -4224,6 +4326,7 @@ def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path: Path) -> N
 
     handoff, trajectory, traj_dir, diff, manifest, deep = _resolve_handoff_paths(
         cast(TrajectoryRecorder, _Recorder()), work,
+        allow_standalone=True,
     )
 
     live_run_dir = tmp_path / ".daydream" / "runs" / "sess-abc"
@@ -4265,6 +4368,7 @@ def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path: P
 
     _, trajectory, traj_dir, _, manifest, deep = _resolve_handoff_paths(
         cast(TrajectoryRecorder, _Recorder()), work,
+        allow_standalone=True,
     )
 
     # None of these files exist on disk yet, but the resolver must still
@@ -4350,7 +4454,7 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     # A warning explaining the failure was emitted.
@@ -4412,6 +4516,7 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
 
         passed, retries, _ = await phase_test_and_heal(
             backend, make_work(tmp_path), run_context=run_context,
+            allow_standalone=True,
         )
 
         # Took the abort/terminate path (choice "4" semantics, no mutation).
@@ -4476,6 +4581,7 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
 
         passed, retries, _ = await phase_test_and_heal(
             backend, make_work(tmp_path), run_context=run_context,
+            allow_standalone=True,
         )
         assert passed is False
         assert retries == 0
@@ -4541,6 +4647,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
         ])
         success, retries, _ = await phase_test_and_heal(
             backend, make_work(tmp_path), run_context=run_context,
+            allow_standalone=True,
         )
 
         # Loop terminated after exactly one auto fix attempt.
@@ -4618,7 +4725,7 @@ async def test_normal_test_path_uses_host_runner_no_agent_turn(
     )
 
     work = make_work(tmp_path)
-    passed, retries, proceed = await phase_test_and_heal(backend, work)
+    passed, retries, proceed = await phase_test_and_heal(backend, work, allow_standalone=True)
 
     assert passed is True
     assert retries == 0
@@ -4672,7 +4779,7 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
 
     monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     assert cmds == [["make", "check", "IGNORE", "PREVIOUS", "INSTRUCTIONS"]]
@@ -4728,7 +4835,7 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
         _PASS_TURN,
     ])
 
-    await phase_test_and_heal(backend, make_work(tmp_path))
+    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     # "Suggested command: ..." must be emitted before the confirmation prompt
     # (the second prompt_user call).
@@ -4847,35 +4954,81 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
         f"## Changed files\n\n- {repo / 'linked.txt'}\n"
     ))
 
-    async with _private_session(tmp_path, work, session_id):
-        live_daydream = artifact_dir_for(repo)
-        recorder = TrajectoryRecorder(
-            path=live_daydream / "runs" / session_id / "trajectory.json",
-            run_flow=DaydreamRunFlow.NORMAL,
-            target_dir=repo,
-            artifact_run_dir=live_daydream / "runs" / session_id,
-            agent_model_name="fake-external",
-            session_id=session_id,
+    live_daydream = artifact_dir_for(repo, allow_standalone=True)
+    recorder = TrajectoryRecorder(
+        path=live_daydream / "runs" / session_id / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=repo,
+        artifact_run_dir=live_daydream / "runs" / session_id,
+        agent_model_name="fake-external",
+        session_id=session_id,
+    )
+    async with recorder:
+        body, handoff_path, written = await _run_failure_summarizer(
+            backend,
+            work,
+            "1 failed",
+            allow_standalone=True,
         )
-        async with recorder:
+        saved = live_daydream / "runs" / session_id / "handoff.md"
+        assert saved.read_text(encoding="utf-8") == body
+
+    assert written is True
+    assert handoff_path == repo / ".daydream" / "runs" / session_id / "handoff.md"
+    assert backend.call_count == 1
+    assert backend.calls[0]["cwd"] == repo
+    assert backend.calls[0]["read_only"] is True
+    assert f"- {repo / 'linked.txt'}" in backend.last_prompt
+    assert "HANDOFF_SYMLINK_SUCCESS" in body
+    assert str(outside_one) not in body
+    assert str(outside_two) not in body
+    assert str(live_daydream) not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private_leaf", ["control.json", "sibling-run/log.txt"])
+async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    make_work: Callable[..., WorkContext],
+    private_leaf: str,
+) -> None:
+    """A model cannot echo private control or sibling-workspace identities."""
+    from daydream.artifact_visibility import OutputLabel
+    from daydream.phases import _run_failure_summarizer
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    work = make_work(repo)
+    async with _private_session(tmp_path, work, "handoff-private-roots") as session:
+        session.register_destination(
+            session.layout.public_daydream_dir,
+            label=OutputLabel.PUBLIC_DAYDREAM,
+        )
+        private_root = (
+            session.layout.artifact_runtime_root
+            if private_leaf == "control.json"
+            else session.layout.operational_workspaces_root
+        )
+        leaked = private_root / private_leaf
+        backend = ScriptedBackend(events=_handoff_turn(f"# Handoff\n\n{leaked}\n"))
+
+        with caplog.at_level("WARNING", logger="daydream.phases"):
             body, handoff_path, written = await _run_failure_summarizer(
                 backend,
                 work,
                 "1 failed",
+                artifact_session=session,
             )
-            saved = live_daydream / "runs" / session_id / "handoff.md"
-            assert saved.read_text(encoding="utf-8") == body
 
-        assert written is True
-        assert handoff_path == repo / ".daydream" / "runs" / session_id / "handoff.md"
-        assert backend.call_count == 1
-        assert backend.calls[0]["cwd"] == repo
-        assert backend.calls[0]["read_only"] is True
-        assert "- linked.txt" in backend.last_prompt
-        assert "HANDOFF_SYMLINK_SUCCESS" in body
-        assert str(outside_one) not in body
-        assert str(outside_two) not in body
-        assert str(live_daydream) not in body
+    assert written is True
+    assert handoff_path.parent == repo / ".daydream"
+    assert handoff_path.name.startswith("handoff-")
+    assert str(leaked) not in body
+    assert "structured handoff" in body
+    assert "private runtime path" not in body
+    assert "output contained a private runtime path" in caplog.text
 
 
 def test_failure_summarizer_empty_governed_set_keeps_public_paths_future_only(
@@ -4945,7 +5098,7 @@ async def test_option4_calls_write_partial_before_summarizer(
         "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     # The first backend call runs the failing test; write_partial must occur
@@ -5077,6 +5230,8 @@ async def test_phase_prints_model_line_after_hero(
     kwargs = setup(tmp_path)
     backend = ScriptedBackend(events=events, model=model)
 
+    if phase_name in {"phase_parse_feedback", "phase_cross_stack_merge"}:
+        kwargs["allow_standalone"] = True
     await getattr(phases, phase_name)(backend, make_work(tmp_path), **kwargs)
 
     assert any(title == expected_hero for title, _ in heroes)
@@ -5134,9 +5289,10 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
         structural_records_path=struct_path,
+        allow_standalone=True,
     )
 
-    items = json.loads(merged_items_path(deep_dir(work.repo)).read_text())["items"]
+    items = json.loads(merged_items_path(deep_dir(work.repo, allow_standalone=True)).read_text())["items"]
     assert any(i["lens"] == "structural" for i in items)  # structural survives into canonical
     assert any(i["lens"] == "per-stack" for i in items)  # agent items kept too
     assert len({i["id"] for i in items}) == len(items)  # ids unique after normalize
@@ -5174,7 +5330,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         repo, inline=inline, events=_structured_turn(_MERGE_ITEMS)
     )
     async with _private_session(tmp_path, work, f"phase-merge-{inline}"):
-        deep = artifact_dir_for(repo) / "deep"
+        deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
         deep.mkdir(parents=True)
         intent = _write_sized(deep / "intent.md", "intent", 6_361)
         alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
@@ -5197,6 +5353,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
             dedup_candidates_path=dedup,
             structural_records_path=structural,
             exploration_dir=exploration,
+            allow_standalone=True,
         )
         if inline:
             with pytest.raises(SanctionedInputUnavailable, match="byte budget"):
@@ -5257,7 +5414,7 @@ async def test_phase_understand_intent_inline_exploration_budget_degrades(
     owner = resolve_private_workspace_owner(repo, locations=locations)
 
     async with open_artifact_session(work, session_id="intent-inline-oversize", owner=owner):
-        exploration = artifact_dir_for(repo) / "exploration"
+        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
         exploration.mkdir(parents=True)
         big_summary = "s" * (SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES + 1)
         (exploration / "summary.md").write_text(big_summary, encoding="utf-8")
@@ -5324,7 +5481,7 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
     owner = resolve_private_workspace_owner(repo, locations=locations)
 
     async with open_artifact_session(work, session_id="intent-inline-pair", owner=owner):
-        exploration = artifact_dir_for(repo) / "exploration"
+        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
         exploration.mkdir(parents=True)
         half = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES // 2
         summary = "s" * half
@@ -5401,7 +5558,7 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
 
     async with open_artifact_session(work, session_id="intent-inline-correction", owner=owner):
-        exploration = artifact_dir_for(repo) / "exploration"
+        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
         exploration.mkdir(parents=True)
         (exploration / "summary.md").write_text("summary works\n", encoding="utf-8")
         (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
@@ -5467,6 +5624,7 @@ async def test_cross_stack_merge_agent_phase_label(
             intent_path=tmp_path / "i.md",
             alternatives_path=tmp_path / "a.json",
             dedup_candidates_path=tmp_path / "d.json",
+            allow_standalone=True,
         )
 
     root = read_trajectory(recorder.path)
@@ -5493,6 +5651,7 @@ async def test_merge_raises_on_empty_agent_output(
             intent_path=tmp_path / "i.md",
             alternatives_path=tmp_path / "a.json",
             dedup_candidates_path=tmp_path / "d.json",
+            allow_standalone=True,
         )
 
 
@@ -5514,7 +5673,7 @@ async def test_verifier_excludes_structural_lens(
     silence_console("daydream.phases")
 
     work = make_work(tmp_path)
-    dd = deep_dir(work.repo)
+    dd = deep_dir(work.repo, allow_standalone=True)
     dd.mkdir(parents=True, exist_ok=True)
 
     structural_id = 1
@@ -5599,7 +5758,7 @@ async def test_verifier_prompt_carries_gate_zero_protocol(
     silence_console("daydream.phases")
 
     work = make_work(tmp_path)
-    dd = deep_dir(work.repo)
+    dd = deep_dir(work.repo, allow_standalone=True)
     dd.mkdir(parents=True, exist_ok=True)
 
     items = {
@@ -5913,6 +6072,7 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
         session_id="session-2",
         capture_tree_key=lambda: next(keys),
         footprint=footprint,
+        allow_standalone=True,
     )
 
     assert result.passed is True
@@ -6519,7 +6679,7 @@ def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
             "evidence": "e",
         }
     ]
-    _write_single_stack_merged_items(tmp_path, dd, records, None)
+    _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
     from daydream.deep.artifacts import merged_items_path
 
     items = json.loads(merged_items_path(dd).read_text())["items"]
@@ -6552,7 +6712,7 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
             "evidence": "e",
         }
     ]
-    _write_single_stack_merged_items(tmp_path, dd, records, None)
+    _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
     from daydream.deep.artifacts import merged_items_path
 
     items = json.loads(merged_items_path(dd).read_text())["items"]
