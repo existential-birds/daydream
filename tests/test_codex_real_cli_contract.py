@@ -276,7 +276,7 @@ async def test_generic_tool_transport_capture_maps_only_public_error_sentinel() 
         "coverage": "incomplete",
         "reason": "uncorrelated_public_error_item",
         "occurrences": 2,
-        "contract": "codex-cli-0.153.4-json-code-mode-v1",
+        "contract": "codex-cli-0.153.4-json-code-mode",
     }
     assert not [event for event in events if isinstance(event, (ToolStartEvent, ToolResultEvent))]
 

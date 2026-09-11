@@ -42,7 +42,7 @@ from daydream.training.reward import REWARD_VERSION
 __all__ = ["CalibrationConfig", "CalibrationError", "assign_split", "run_calibration"]
 
 #: Artifact schema version for calibration output.
-ARTIFACT_SCHEMA_VERSION = "calibration-artifact-v1"
+ARTIFACT_SCHEMA_VERSION = "calibration-artifact"
 
 
 def _tool_version() -> str:

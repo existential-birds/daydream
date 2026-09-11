@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Mapping
 
 from daydream.artifact_visibility import ArtifactVisibilityError
-from daydream.backends import AUDIT_ROOT_ISOLATION_V1
+from daydream.backends import AUDIT_ROOT_ISOLATION
 
 # Upper bound for inlined diff text. Above this bound, prompts retain an
 # on-disk diff pointer rather than embedding the diff.
@@ -218,7 +218,7 @@ def _sanctioned_transport(backend: object, canonical_cwd: Path, *, read_only: bo
     "Can this backend read this host path" is not on the ``Backend`` protocol,
     so it is read off the three concrete backends that declare it.
     """
-    strict_audit = getattr(backend, "audit_root_isolation", None) == AUDIT_ROOT_ISOLATION_V1
+    strict_audit = getattr(backend, "audit_root_isolation", None) == AUDIT_ROOT_ISOLATION
     if strict_audit:
         audit_root = getattr(backend, "audit_root", None)
         try:

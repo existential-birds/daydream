@@ -186,7 +186,9 @@ class BackendExecutionInput:
         """Return a fresh complete environment for one native transport."""
         return dict(self._environment)
 
-AUDIT_ROOT_ISOLATION_V1 = "claude-pretooluse-v1"
+# external contract: "claude-pretooluse" names Anthropic's PreToolUse hook
+# capability, not a project-owned generation; do not version it.
+AUDIT_ROOT_ISOLATION = "claude-pretooluse"
 AuditIsolationReason = Literal[
     "unsupported_backend",
     "missing_capability",
@@ -1212,7 +1214,7 @@ class Backend(Protocol):
     ``audit_root`` when they mediate every filesystem-capable tool against one
     exact improve audit snapshot. This tool-layer capability is separate from
     ``read_only_disposable_clone`` and does not claim an OS/container sandbox.
-    Callers must compare the capability to :data:`AUDIT_ROOT_ISOLATION_V1` and
+    Callers must compare the capability to :data:`AUDIT_ROOT_ISOLATION` and
     the bound root by canonical identity; missing or different values fail
     closed.
 
@@ -1401,7 +1403,7 @@ from daydream.backends.osprey import OspreyBackend  # noqa: E402
 from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
-    "AUDIT_ROOT_ISOLATION_V1",
+    "AUDIT_ROOT_ISOLATION",
     "AgentEvent",
     "AgentEventStream",
     "AssistantChoicePart",

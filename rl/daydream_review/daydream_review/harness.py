@@ -17,6 +17,7 @@ import logging
 import shlex
 from typing import Any
 
+# external contract: verifiers.v1 is the vendored third-party API module name, not a project-owned name
 import verifiers.v1 as vf
 from pydantic import field_validator
 
@@ -124,7 +125,7 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             binaries = (*binaries, "run-as-agent")
         checks = " && ".join(f"command -v {binary} >/dev/null" for binary in binaries)
         result = await runtime.run(
-            ["sh", "-c", f"{checks} && test -d {self.config.repo_path}"], self.config.resolved_env
+            ["sh", "-c", f"{checks} && test -d {shlex.quote(self.config.repo_path)}"], self.config.resolved_env
         )
         if result.exit_code != 0:
             raise RuntimeError(
@@ -140,8 +141,7 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         runtime: vf.Runtime,
         endpoint: str,
         secret: str,
-        mcp_urls: dict[str, str],  # noqa: F841 — tool-server wiring lands in 0.3.2
-        task_data: vf.TaskData,  # noqa: F841 — reserved by verifiers 0.3.1's launch contract
+        mcp_urls: dict[str, str],  # noqa: F841 — tool-server wiring lands in a later verifiers
     ) -> vf.ProgramResult:
         data: DaydreamReviewData = trace.task.data
         strategy = self.strategy

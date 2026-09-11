@@ -43,15 +43,15 @@ def test_issue_body_preserves_complete_plan_markdown() -> None:
 
 def test_issue_body_embeds_stable_member_aliases_before_the_complete_plan() -> None:
     plan = "# Plan\n\nDelete duplicate code.\n"
-    aliases = ("member-v1:aaa", "member-v1:bbb")
+    aliases = ("member:aaa", "member:bbb")
 
     body = issue_body("reuse-handler", plan, member_aliases=aliases)
 
     marker_block, embedded_plan = body.split("\n\n", 1)
     assert marker_block.splitlines() == [
         package_marker("reuse-handler"),
-        member_marker("member-v1:aaa"),
-        member_marker("member-v1:bbb"),
+        member_marker("member:aaa"),
+        member_marker("member:bbb"),
     ]
     assert embedded_plan == plan
 
@@ -149,7 +149,7 @@ def test_all_member_aliases_reconcile_a_regrouped_package(
     existing["body"] = issue_body(
         "older-package",
         "old plan",
-        member_aliases=("member-v1:aaa", "member-v1:bbb"),
+        member_aliases=("member:aaa", "member:bbb"),
     )
     monkeypatch.setattr(
         git_ops,
@@ -167,7 +167,7 @@ def test_all_member_aliases_reconcile_a_regrouped_package(
         package_id="regrouped-package",
         title="Reuse the existing handler",
         plan_path=plan_path,
-        member_aliases=("member-v1:aaa", "member-v1:bbb"),
+        member_aliases=("member:aaa", "member:bbb"),
     )
 
     assert result.disposition == "existing"
@@ -183,7 +183,7 @@ def test_partial_member_alias_overlap_fails_instead_of_creating_duplicate_work(
     existing["body"] = issue_body(
         "older-package",
         "old plan",
-        member_aliases=("member-v1:shared",),
+        member_aliases=("member:shared",),
     )
     monkeypatch.setattr(
         git_ops,
@@ -202,7 +202,7 @@ def test_partial_member_alias_overlap_fails_instead_of_creating_duplicate_work(
             package_id="expanded-package",
             title="Expand reuse cleanup",
             plan_path=plan_path,
-            member_aliases=("member-v1:shared", "member-v1:new"),
+            member_aliases=("member:shared", "member:new"),
         )
 
 
@@ -216,7 +216,7 @@ def test_matching_package_marker_cannot_hide_stale_member_coverage(
     existing["body"] = issue_body(
         "same-package",
         "old plan",
-        member_aliases=("member-v1:old",),
+        member_aliases=("member:old",),
     )
     monkeypatch.setattr(
         git_ops,
@@ -235,7 +235,7 @@ def test_matching_package_marker_cannot_hide_stale_member_coverage(
             package_id="same-package",
             title="Expanded cleanup",
             plan_path=plan_path,
-            member_aliases=("member-v1:old", "member-v1:new"),
+            member_aliases=("member:old", "member:new"),
         )
 
 
@@ -249,7 +249,7 @@ def test_colliding_member_aliases_require_every_raw_fingerprint(
     existing["body"] = issue_body(
         "same-package",
         "one cleanup",
-        member_aliases=("member-v1:shared",),
+        member_aliases=("member:shared",),
         member_fingerprints=("raw-first",),
     )
     monkeypatch.setattr(
@@ -269,7 +269,7 @@ def test_colliding_member_aliases_require_every_raw_fingerprint(
             package_id="same-package",
             title="Two distinct cleanups",
             plan_path=plan_path,
-            member_aliases=("member-v1:shared", "member-v1:shared"),
+            member_aliases=("member:shared", "member:shared"),
             member_fingerprints=("raw-first", "raw-second"),
         )
 

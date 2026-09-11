@@ -60,7 +60,9 @@ _PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 # item. If Codex omits a tool and emits no public marker, Daydream cannot infer
 # the invisible call and must not fabricate a ToolStart/ToolResult or an
 # invocation-wide coverage diagnostic.
-_TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode-v1"
+# external contract: "codex-cli-0.153.4-json-code-mode" names the external Codex
+# CLI release and its wire mode, not a project-owned generation; do not version it.
+_TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
 
 _logger = logging.getLogger(__name__)
 

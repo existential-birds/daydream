@@ -39,7 +39,7 @@ from claude_agent_sdk.types import (
 )
 
 from daydream.backends import (
-    AUDIT_ROOT_ISOLATION_V1,
+    AUDIT_ROOT_ISOLATION,
     AgentEvent,
     BackendExecutionInput,
     ClaudeRequestConfig,
@@ -946,7 +946,7 @@ class ClaudeBackend:
         self._execution_input = execution_input
         self.audit_root = audit_root.resolve(strict=True) if audit_root is not None else None
         self.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION_V1 if self.audit_root is not None else None
+            AUDIT_ROOT_ISOLATION if self.audit_root is not None else None
         )
         lexical_links = frozenset(
             Path(os.path.abspath(path)) for path in audit_outward_symlinks

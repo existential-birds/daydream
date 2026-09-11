@@ -53,11 +53,11 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> su
         "--no-rich",
         "-o",
         str(paths["out"]),
-        "--env.agent.harness.repo-path",
+        "--harness.repo-path",
         str(paths["repo"]),
-        "--env.agent.harness.archive-root",
+        "--harness.archive-root",
         str(paths["archive"]),
-        "--env.agent.harness.home",
+        "--harness.home",
         str(paths["home"]),
     ]
     if base_url is not None:
@@ -66,7 +66,7 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> su
 
 
 def _sole_trace(paths: dict[str, Path]) -> dict[str, Any]:
-    # verifiers 0.3.1 groups runs: traces land at output_dir/run.dir/traces.jsonl
+    # verifiers 0.2.1 appends one full trace per line (no Episode wrapper)
     out = paths["out"]
     traces = sorted(out.rglob("traces.jsonl"))
     assert traces, f"no traces.jsonl under {out}"
@@ -84,10 +84,11 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
 
     episode = _sole_trace(paths)
-    # 0.3.1 wraps traces in an Episode: episode.ok, episode.errors, one trace inside
-    assert episode["ok"] is True, episode.get("errors")
+    # 0.2.1 writes the raw trace per line: a completed, error-free rollout is
+    # `is_completed` with no `errors` entries.
+    assert episode["is_completed"] is True, episode.get("errors")
     assert episode["errors"] == []
-    trace = episode["traces"][0]
+    trace = episode
     # Sampled assistant nodes exist only when a model turn went through the
     # interception server AND the dialect parsed the reply. A harness that
     # reached a provider directly records nothing; a stub whose payload fails the

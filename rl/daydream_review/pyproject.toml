@@ -6,7 +6,10 @@ description = "verifiers v1 environment: the daydream deep review-fix-test loop 
 # upper bound is verifiers 0.2.1's (">=3.11,<3.14").
 requires-python = ">=3.12.13,<3.14"
 dependencies = [
-    "verifiers==0.3.1",
+    # The vendored-verifiers skew (README "Vendored-verifiers skew (AC10)"):
+    # prime-rl v0.7.0 vendors verifiers 0.2.0 and shadows the venv's copy at
+    # runtime, so the pin must stay on the 0.2.x line — never 0.3.1.
+    "verifiers==0.2.1",
     "daydream",
 ]
 

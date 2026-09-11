@@ -18,7 +18,7 @@ num_tasks = 1
 num_rollouts = 1
 push = false
 
-[env.taskset]
+[taskset]
 id = "daydream-review"
 manifest_path = "images/manifest.toml"
 # M4: the taskset refuses to load without a passed Stage-0 gate report. The
@@ -26,7 +26,7 @@ manifest_path = "images/manifest.toml"
 # own gate artifact.
 gate_report_path = "tests/fixtures/stage0-gate.json"
 
-[env.agent.harness]
+[harness]
 id = "daydream-review"
 backend = "claude"
 runtime = { type = "docker" }

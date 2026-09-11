@@ -159,7 +159,7 @@ def test_load_builds_tasks_from_the_committed_manifest(
     assert pr1.image == f"daydream-rl/fixture:{FIXTURE_PR1_HEAD_SHA[:12]}"
     assert pr1.name == f"{FIXTURE_SLUG}#1"
     assert pr1.prompt is not None and "#1" in pr1.prompt
-    assert pr1.timeout.agent == 5400
+    assert pr1.timeout.harness == 5400
     assert [c.path for c in pr1.golden_comments] == ["calc.py"]
     assert "ZeroDivisionError" in pr1.golden_comments[0].comment
     assert pr1.golden_comments[0].resolved is True
@@ -553,7 +553,7 @@ def test_loader_contract_resolves_package(
     fixture_manifest_path: Path, stage0_gate_report: Path
 ) -> None:
     """The real path the verifiers CLI/orchestrator takes (loaders.py:110-127)."""
-    from verifiers.v1.utils.loaders import load_taskset, taskset_config_type
+    from verifiers.v1.loaders import load_taskset, taskset_config_type
 
     config_type = taskset_config_type("daydream-review")
     assert config_type is DaydreamReviewConfig

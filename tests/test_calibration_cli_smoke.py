@@ -42,7 +42,7 @@ def test_fixture_run_produces_valid_replayable_artifact(tmp_path: Path) -> None:
     ]
     assert _run_main([*argv, str(out1)]) == 0
     art = json.loads((out1 / "calibration.json").read_text())
-    assert art["schema_version"] == "calibration-artifact-v1"
+    assert art["schema_version"] == "calibration-artifact"
     assert art["stage0_analysis"]["status"] in {"unavailable", "ok"}  # explicit, never missing
     assert _run_main([*argv, str(out2)]) == 0
     assert (out1 / "calibration.json").read_bytes() == (out2 / "calibration.json").read_bytes()  # AC 1

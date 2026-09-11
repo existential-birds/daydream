@@ -60,7 +60,7 @@ def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:
     """
     trace: vf.Trace = vf.Trace(
         task=vf.TraceTask(type=type(task).__name__, data=task.data),
-        agent=vf.AgentInfo(config=vf.AgentConfig()),
+        agent=vf.AgentInfo(model=MODEL),
     )
     for index in range(turns):
         parent = None if index == 0 else len(trace.nodes) - 1
@@ -72,7 +72,7 @@ def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:
 
 
 def _ctx() -> vf.ModelContext:
-    return vf.ModelContext(model=MODEL, client=None, sampling=vf.SamplingConfig())
+    return vf.ModelContext(model=MODEL, client=None, sampling=vf.Sampling())
 
 
 def _archive_with_trajectory(archive_root: str, *, final_metrics: object) -> dict[str, bytes]:
@@ -103,7 +103,7 @@ async def test_launch_passes_the_selected_backend_to_the_cli(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig(backend=backend, fanout_concurrency=3))
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     (argv, env), = runtime.programs
     assert "daydream" in argv
@@ -130,7 +130,7 @@ fixture_manifest_path: Path
     )
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     (argv, _), = runtime.programs
     assert argv[argv.index("--reasoning-effort") + 1] == "high"
@@ -144,7 +144,7 @@ fixture_manifest_path: Path
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     (argv, _), = runtime.programs
     assert argv[:10] == [
@@ -171,7 +171,7 @@ async def test_launch_clears_operator_observability_env(fixture_manifest_path: P
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     (argv, env), = runtime.programs
     assert env["DAYDREAM_TRACE_TO"] == ""
@@ -191,7 +191,7 @@ fixture_manifest_path: Path
         files=_archive_with_trajectory("/rollout/archive", final_metrics={"cost_usd": 1.0}),
     )
 
-    result = await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    result = await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     assert result.exit_code == 1
     assert trace.stop_condition == "daydream_completed_nonzero"
@@ -206,7 +206,7 @@ fixture_manifest_path: Path
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _ArchiveRuntime(exit_code=1, sessions=[])
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     assert trace.stop_condition is None
 
@@ -224,7 +224,7 @@ fixture_manifest_path: Path
         files=_archive_with_trajectory("/rollout/archive", final_metrics=None),
     )
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     assert trace.stop_condition is None
 
@@ -258,7 +258,7 @@ fixture_manifest_path: Path
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
 
     with pytest.raises(RuntimeError) as excinfo:
-        await harness.launch(_ctx(), trace, FakeRuntime(exit_code=0), ENDPOINT, SECRET, {}, vf.TaskData())
+        await harness.launch(_ctx(), trace, FakeRuntime(exit_code=0), ENDPOINT, SECRET, {})
     assert "no model calls" in str(excinfo.value)
     assert ENDPOINT in str(excinfo.value)
 
@@ -322,7 +322,7 @@ fixture_manifest_path: Path
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _DockerLikeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     (argv, _), = runtime.programs
     assert argv[0] == "run-as-agent"
@@ -356,7 +356,7 @@ fixture_manifest_path: Path
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _OrderingDockerRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     for argv in runtime.commands:
         assert "chown" not in argv, (
@@ -373,6 +373,20 @@ fixture_manifest_path: Path
     assert runtime.sequence.index(preflight) < runtime.sequence.index(argv), (
         "the writability preflight must run before the run-as-agent launch"
     )
+
+
+async def test_preflight_quotes_repo_path(fixture_manifest_path: Path) -> None:
+    """#705 fold-in: the binary-check preflight passes repo_path as one shell
+    argument, never an unquoted interpolation."""
+    harness = DaydreamReviewHarness(
+        DaydreamReviewHarnessConfig(repo_path="/data/repo with spaces & $dollar")
+    )
+    runtime = FakeRuntime(exit_code=0)
+
+    await harness.setup(runtime)
+
+    (argv,) = [argv for argv in runtime.commands if argv[:2] == ["sh", "-c"]]
+    assert "test -d '/data/repo with spaces & $dollar'" in argv[2]
 
 
 async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
@@ -394,7 +408,7 @@ fixture_manifest_path: Path
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+        await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     message = str(excinfo.value)
     assert str(harness.config.repo_path) in message
@@ -476,7 +490,7 @@ fixture_manifest_path: Path
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _ArchivingDockerRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     hardened = [cmd for cmd in runtime.commands if "chown -R root:root" in " ".join(cmd)]
     assert hardened, "seal_archived_run must re-chown the sealed run dir root-owned"
@@ -508,7 +522,7 @@ fixture_manifest_path: Path
     runtime = ExplodingGit(exit_code=0)
     trace = _trace(task)
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     assert trace.info["daydream_seal_ok"] is False
     marker = runtime.writes.get("/rollout/archive/runs/session-1/seal.json")

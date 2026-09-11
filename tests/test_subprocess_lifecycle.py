@@ -187,7 +187,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     grandchildren) and the fd count returns to the pre-run baseline.
     """
     from daydream import runner
-    from daydream.backends import AUDIT_ROOT_ISOLATION_V1
+    from daydream.backends import AUDIT_ROOT_ISOLATION
     from daydream.backends.codex import CodexBackend
 
     silence_console("daydream.runner")
@@ -234,7 +234,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
         setattr(
             backend,
             "audit_root_isolation",
-            AUDIT_ROOT_ISOLATION_V1 if isinstance(audit_root, Path) else None,
+            AUDIT_ROOT_ISOLATION if isinstance(audit_root, Path) else None,
         )
         return backend
 
