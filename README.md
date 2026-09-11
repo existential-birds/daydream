@@ -309,8 +309,8 @@ SFT is a cold-start stage only. Online RL is the center of gravity of the recipe
 
 The repository contains an RL recipe and a verifiers environment:
 
-- `rl/train/rl.toml` is a GRPO recipe. It uses prime-rl 0.7.0, LoRA rank 16, and batch size 128. The train and eval sets are two separate corpus directories. Training uses the `pi` backend only.
-- `rl/daydream_review_v1/` is a verifiers v1 environment. One rollout is one headless deep run. The reward combines the intrinsic composite and a non-regression metric over the test suite.
+- `rl/train/rl.toml` is a GRPO recipe. It uses prime-rl 0.7.0, LoRA rank 16, and batch size 128. The train and eval sets are two separate manifests of PR snapshots. Training uses the `pi` backend only.
+- `rl/daydream_review/` is a verifiers v1 environment. One rollout is one headless deep run. The reward combines the intrinsic composite and a non-regression metric over the test suite.
 
 The corpus paths and the base model in these files are placeholders. The real training set is tracked as issue #164. Daydream has scaffolded and validated the pipeline, but it has not yet harvested production data. The training pipeline itself is tracked as issue #91. The launch record — the measured corpora/split digests, base-model sizing rationale, hardware, wall time, and cost accounting from the validation runs — lives in [docs/training-launch.md](docs/training-launch.md).
 

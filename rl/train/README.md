@@ -2,7 +2,7 @@
 
 Three configs live here:
 
-- `rl.toml` — the Stage-2/3 GRPO recipe for the `daydream-review-v1` environment.
+- `rl.toml` — the Stage-2/3 GRPO recipe for the `daydream-review` environment.
 - `sft.toml` — the Stage-1 dataset-SFT recipe over the labeled corpus (separate
   `sft` entrypoint, not `rl @`).
 - `rft.toml` — the deterministic RFT replay reference parameters
@@ -35,7 +35,7 @@ done
 git submodule update --init --recursive
 
 uv sync --all-packages
-uv pip install -e /abs/path/to/daydream/rl/daydream_review_v1
+uv pip install -e /abs/path/to/daydream/rl/daydream_review
 ```
 
 The loader needs nothing more than an importable top-level module whose name is
@@ -111,7 +111,7 @@ uv pip install --python .venv-cfg/bin/python \
 uv pip install --python .venv-cfg/bin/python --no-deps -e packages/prime-rl-configs -e .
 uv pip install --python .venv-cfg/bin/python pynvml tomli-w loguru psutil
 uv pip install --python .venv-cfg/bin/python -e /abs/path/to/daydream
-uv pip install --python .venv-cfg/bin/python --no-deps -e /abs/path/to/daydream/rl/daydream_review_v1
+uv pip install --python .venv-cfg/bin/python --no-deps -e /abs/path/to/daydream/rl/daydream_review
 
 .venv-cfg/bin/python -c "
 import sys; sys.argv = ['rl', '@', '/abs/path/to/daydream/rl/train/rl.toml', '--dry-run']
@@ -126,14 +126,14 @@ every validator runs, only the GPU stack is absent.
 prime-rl v0.7.0 vendors verifiers at fork commit `6c64ce6`, which **predates the
 `0.2.1` this environment develops against**. Two different verifiers, one package.
 Before trusting any training claim, run the environment's own suite inside the
-prime-rl workspace venv, not just in `rl/daydream_review_v1`:
+prime-rl workspace venv, not just in `rl/daydream_review`:
 
 ```bash
 cd prime-rl
-uv run pytest /abs/path/to/daydream/rl/daydream_review_v1/tests
+uv run pytest /abs/path/to/daydream/rl/daydream_review/tests
 ```
 
-Nothing in `daydream_review_v1` may import verifiers internals beyond the
+Nothing in `daydream_review` may import verifiers internals beyond the
 documented v1 surface (`Taskset`, `Task`, `TaskData`, `TaskConfig`,
 `TasksetConfig`, `Harness`, `HarnessConfig`, `Runtime`, `Trace`, `reward`,
 `metric`, `ProgramResult`, `TaskTimeout`, `ModelContext`, `State`). If something
@@ -155,12 +155,13 @@ which would let a silently-degraded rollout train.
   separate entrypoint and must never be routed through the live-teacher
   `[orchestrator.algo] type = "sft"` variant.
 
-## Corpora
+## Manifests
 
 `[[orchestrator.train.env]]` and `[[orchestrator.eval.env]]` point at **two
-different corpus directories**. That is the whole train/eval split: there is no
-split flag, and the taskset refuses the five held-out benchmark repositories
-outright, in both corpora, with no bypass (SPEC C5).
+different manifest files** (`--taskset.manifest-path`). That is the whole
+train/eval split: there is no split flag, and the taskset refuses the five
+held-out benchmark repositories outright, in both manifests, with no bypass
+(SPEC C5).
 
 Effective upstream concurrency is roughly `pool.max_workers × fanout_concurrency`
 — each rollout runs its own parallel exploration and per-stack fan-out.

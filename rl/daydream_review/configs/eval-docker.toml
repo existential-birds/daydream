@@ -1,0 +1,33 @@
+# Docker-runtime eval: the real rollout shape.
+#
+# Each task runs in its own container built from the per-PR image the manifest
+# names, so the repository is already checked out at the head SHA and its suite
+# is already proven green there — which is what makes the suite_non_regression
+# metric a signal rather than noise.
+#
+#   uv run python images/build_images.py --only existential-birds/daydream-rl-fixture
+#   uv run eval @ configs/eval-docker.toml --client.base-url <your endpoint>
+#
+# Docker is `is_local`, so no tunnel is minted; on macOS verifiers rewrites the
+# host-bound interception URL to host.docker.internal automatically.
+
+# The eval CLI has its own default model id; naming one here keeps the config
+# self-describing. Override with -m for a real run.
+model = "stub/canned"
+num_tasks = 1
+num_rollouts = 1
+push = false
+
+[env.taskset]
+id = "daydream-review"
+manifest_path = "images/manifest.toml"
+# M4: the taskset refuses to load without a passed Stage-0 gate report. The
+# local eval path uses the checked-in fixture report; a real run points at its
+# own gate artifact.
+gate_report_path = "tests/fixtures/stage0-gate.json"
+
+[env.agent.harness]
+id = "daydream-review"
+backend = "claude"
+runtime = { type = "docker" }
+fanout_concurrency = 4

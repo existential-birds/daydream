@@ -133,7 +133,7 @@ select = ["E", "F", "I", "W"]
 "daydream/atif/**" = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
-# Bare `pytest` must not descend into rl/daydream_review_v1/, a standalone uv
+# Bare `pytest` must not descend into rl/daydream_review/, a standalone uv
 # project with its own verifiers-based suite and its own lockfile.
 testpaths = ["tests"]
 asyncio_mode = "auto"

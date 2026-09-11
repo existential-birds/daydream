@@ -32,16 +32,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import build_frozen_corpus
+from daydream.training.corpus_projection.splits import assign_split
 from tests.test_corpus_v2 import (
     _policy_file,
     _write_annotations_snapshot,
     _write_bundle,
     _write_sumsums,
 )
-
-from daydream.training.corpus_projection.identity import record_id
-from daydream.training.corpus_projection.projector import build_frozen_corpus
-from daydream.training.corpus_projection.splits import assign_split
 
 SALT = "issue-1081-fixture-salt"
 HOLDOUT_RATE = 0.2

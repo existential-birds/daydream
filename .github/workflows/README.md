@@ -88,7 +88,7 @@ reviewer-friendly PRs across three managed ecosystems:
 | Ecosystem | Directory | Notes |
 |---|---|---|
 | `uv` | `/` | Root workspace dependencies (`pyproject.toml` / `uv.lock`) |
-| `uv` | `/rl/daydream_review_v1` | The standalone RL package's own dependencies |
+| `uv` | `/rl/daydream_review` | The standalone RL package's own dependencies |
 | `npm` | `/.github/workflows` | Deliberately points at this folder's `package.json`, which tracks the single `@openai/codex` dependency used by CI — do not "fix" the directory to `/` |
 
 **Volume bounds.** All three ecosystems run weekly on Mondays (06:00,
