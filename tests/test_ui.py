@@ -102,10 +102,8 @@ def test_prompt_user_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> 
 
     from rich.console import Console
 
-    from daydream.agent import reset_state
     from daydream.ui import prompt_user
 
-    reset_state()
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
     # Issue #126 exact repro expectation:
     console = Console(file=StringIO(), record=True)
@@ -120,24 +118,22 @@ def test_prompt_user_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch
 
     from rich.console import Console
 
-    from daydream.agent import reset_state, set_non_interactive
+    from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
     from daydream.ui import prompt_user
 
-    set_non_interactive(True)
     sentinel = Mock(side_effect=AssertionError("input() must not be called"))
     monkeypatch.setattr("builtins.input", sentinel)
-    assert prompt_user(Console(), "Apply fixes now?", default="n") == "n"
+    context = RunContext(InteractionPolicy(interactive=False))
+    with bind_run_context(context):
+        assert prompt_user(Console(), "Apply fixes now?", default="n") == "n"
     sentinel.assert_not_called()
-    reset_state()
 
 
 def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.MonkeyPatch) -> None:
     from rich.console import Console
 
-    from daydream.agent import reset_state
     from daydream.ui import prompt_user
 
-    reset_state()
     monkeypatch.setattr("builtins.input", lambda: "y")
     assert prompt_user(Console(), "Confirm?", default="n") == "y"
 

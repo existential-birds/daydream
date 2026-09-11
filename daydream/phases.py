@@ -23,12 +23,8 @@ from daydream import review_profile as _rp
 from daydream.agent import (
     console,
     detect_test_success,
-    get_assume,
-    get_non_interactive,
-    get_quiet_mode,
     is_environmental_failure,
     resolve_gate,
-    resolve_or_prompt,
     run_agent,
 )
 from daydream.artifact_visibility import artifact_dir_for, artifact_session_active, review_output_path_for
@@ -39,6 +35,13 @@ from daydream.backends import (
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
+from daydream.config import (
+    DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    DEFAULT_GROUP_MAX_WALL_S,
+    DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_WALL_BUDGET_S,
+    TEST_WALL_BUDGET_S,
+)
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -72,6 +75,7 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
+from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.test_execution import (
     MissingTestCommandError,
@@ -89,17 +93,6 @@ from daydream.trajectory import (
     host_phase_scope,
     maybe_fork,
 )
-from daydream.workspace import WorkContext
-
-if TYPE_CHECKING:
-    from daydream.deep.detection import StackAssignment
-from daydream.config import (
-    DEFAULT_GROUP_MAX_SERIAL_ITEMS,
-    DEFAULT_GROUP_MAX_WALL_S,
-    DEFAULT_TOOL_CALL_BUDGET,
-    DEFAULT_WALL_BUDGET_S,
-    TEST_WALL_BUDGET_S,
-)
 from daydream.ui import (
     phase_subtitle,
     print_dim,
@@ -114,8 +107,11 @@ from daydream.ui import (
     print_phase_hero,
     print_success,
     print_warning,
-    prompt_user,
 )
+from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.deep.detection import StackAssignment
 
 _logger = logging.getLogger(__name__)
 
@@ -396,10 +392,13 @@ def _sanitize_suggested_command(raw: str) -> str:
     return " ".join(raw.replace("`", "").split())
 
 
+@bind_resolved_run_context
 async def _run_setup_investigator(
     backend: Backend,
     work: WorkContext,
     test_output: str,
+    *,
+    run_context: RunContext | None = None,
 ) -> dict[str, Any] | None:
     """Run the read-only setup-investigator subagent and return its verdict.
 
@@ -413,6 +412,7 @@ async def _run_setup_investigator(
         Parsed verdict dict with keys ``verdict``, ``suggested_command``,
         ``reason`` on success, or ``None`` on any failure.
     """
+    run_context = resolve_run_context(run_context)
     recorder = get_current_recorder()
     prompt = _build_setup_investigator_prompt(test_output)
 
@@ -425,6 +425,7 @@ async def _run_setup_investigator(
                 output_schema=SETUP_INVESTIGATOR_SCHEMA,
                 phase=DaydreamPhase.TEST,
                 read_only=True,
+                run_context=run_context,
             )
         except Exception:  # noqa: BLE001 - investigator failure is non-fatal
             _logger.debug("setup-investigator agent failed", exc_info=True)
@@ -878,10 +879,13 @@ def _replace_known_handoff_paths(text: str, mappings: list[tuple[Path, Path]]) -
     return text
 
 
+@bind_resolved_run_context
 async def _run_failure_summarizer(
     backend: Backend,
     work: WorkContext,
     test_output: str,
+    *,
+    run_context: RunContext | None = None,
 ) -> tuple[str, Path, bool]:
     """Run the read-only failure-summarizer and write ``handoff.md``.
 
@@ -897,6 +901,7 @@ async def _run_failure_summarizer(
         the body inline in that case so the user does not lose it. The
         body is what was written to disk on success.
     """
+    run_context = resolve_run_context(run_context)
     recorder = get_current_recorder()
     (
         handoff_path,
@@ -990,6 +995,7 @@ async def _run_failure_summarizer(
                 phase=DaydreamPhase.TEST,
                 read_only=True,
                 sanctioned_inputs=sanctioned_inputs,
+                run_context=run_context,
             )
         except Exception:  # noqa: BLE001 - summarizer failure is non-fatal
             _logger.debug("failure-summarizer agent failed", exc_info=True)
@@ -2029,6 +2035,7 @@ async def phase_parse_feedback(
     output_schema: dict[str, Any] | None = None,
     include_verdicts: Literal[False] = False,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> list[dict[str, Any]]: ...
 
 
@@ -2041,9 +2048,11 @@ async def phase_parse_feedback(
     output_schema: dict[str, Any] | None = None,
     include_verdicts: Literal[True],
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
 
+@bind_resolved_run_context
 async def phase_parse_feedback(
     backend: Backend,
     work: WorkContext,
@@ -2052,6 +2061,7 @@ async def phase_parse_feedback(
     output_schema: dict[str, Any] | None = None,
     include_verdicts: bool = False,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
@@ -2094,6 +2104,7 @@ async def phase_parse_feedback(
         and emits a warning rather than raising ``ValueError``.
 
     """
+    run_context = resolve_run_context(run_context)
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
     print_dim(console, f"Model: {backend.model}")
 
@@ -2148,6 +2159,7 @@ async def phase_parse_feedback(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
 
     # A truncated parse would silently drop the whole stack's findings, so it
@@ -2227,6 +2239,7 @@ def _coerce_verdicts_payload(value: Any) -> dict[str, Any]:
     return {"verdicts": [entry for entry in raw if isinstance(entry, dict)]}
 
 
+@bind_resolved_run_context
 async def phase_verify_recommendations(
     backend: Backend,
     work: WorkContext,
@@ -2234,6 +2247,7 @@ async def phase_verify_recommendations(
     merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Audit each non-structural item's recommendation against the codebase.
 
@@ -2273,6 +2287,7 @@ async def phase_verify_recommendations(
         written so downstream code does not need to handle a missing file.
 
     """
+    run_context = resolve_run_context(run_context)
     # Late imports avoid circular dependency with daydream.deep (which imports
     # from daydream.phases). Same pattern used by phase_per_stack_reviews and
     # phase_cross_stack_merge above.
@@ -2309,6 +2324,7 @@ async def phase_verify_recommendations(
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
         read_only=True,
+        run_context=run_context,
     )
 
     candidate: Any = result
@@ -2324,6 +2340,7 @@ async def phase_verify_recommendations(
     return output_path, payload
 
 
+@bind_resolved_run_context
 async def phase_fix_verify(
     backend: Backend,
     work: WorkContext,
@@ -2332,6 +2349,7 @@ async def phase_fix_verify(
     *,
     console_lock: anyio.Lock | None = None,
     round_number: int = 1,
+    run_context: RunContext | None = None,
 ) -> list[dict[str, Any]]:
     """Read-only verifier: one verdict per supplied canonical finding.
 
@@ -2375,6 +2393,7 @@ async def phase_fix_verify(
         each ``{"issue_id": int, "verdict": str, "reason": str, "path"?: str}``.
     """
     del console_lock  # interactive progress is not printed per finding here
+    run_context = resolve_run_context(run_context)
     if not items:
         return []
 
@@ -2394,6 +2413,7 @@ async def phase_fix_verify(
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
         read_only=True,
+        run_context=run_context,
     )
 
     candidate: Any = result
@@ -2791,6 +2811,7 @@ def _preflight_finding_file_refs(repo: Path, items: list[dict[str, Any]]) -> str
     return file_ref
 
 
+@bind_resolved_run_context
 async def phase_fix(
     backend: Backend,
     work: WorkContext,
@@ -2804,6 +2825,7 @@ async def phase_fix(
     intent_path: Path | None = None,
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
+    run_context: RunContext | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -2829,6 +2851,7 @@ async def phase_fix(
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
     """
+    run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
         raise TypeError("phase_fix requires explicit edit_scope and read_scope")
     description = item.get("description", "No description")
@@ -2883,6 +2906,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         # Verdict unknown at fix time (issue #744); the post-fix fix-verify
@@ -2890,6 +2914,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         print_fix_complete(console, item_num, total, outcome=None)
 
 
+@bind_resolved_run_context
 async def phase_fix_batched(
     backend: Backend,
     work: WorkContext,
@@ -2903,6 +2928,7 @@ async def phase_fix_batched(
     intent_path: Path | None = None,
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
+    run_context: RunContext | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -2934,6 +2960,7 @@ async def phase_fix_batched(
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
     """
+    run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
         raise TypeError("phase_fix_batched requires explicit edit_scope and read_scope")
     if len(items) == 1:
@@ -2943,6 +2970,7 @@ async def phase_fix_batched(
             console_lock=console_lock, intent_path=intent_path,
             exploration_dir=exploration_dir,
             test_map=test_map,
+            run_context=run_context,
         )
         return
 
@@ -3013,6 +3041,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         wall_budget_s=scaled_wall_budget,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
 
     if budget_reason is not None:
@@ -3048,6 +3077,7 @@ async def _restore_round_index_after_fanout(
         git_ops.restore_index(repo, index)
 
 
+@bind_resolved_run_context
 async def phase_fix_parallel(
     backend: Backend,
     work: WorkContext,
@@ -3061,6 +3091,7 @@ async def phase_fix_parallel(
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     exploration_dir: Path | None = None,
     test_map_path: Path | None = None,
+    run_context: RunContext | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -3114,6 +3145,7 @@ async def phase_fix_parallel(
         full success.
 
     """
+    run_context = resolve_run_context(run_context)
     if footprint is None or round_snapshot is None:
         raise TypeError("phase_fix_parallel requires footprint and round_snapshot")
     # Preflight confinement gate: validate EVERY item's file reference before
@@ -3200,6 +3232,7 @@ async def phase_fix_parallel(
                 intent_path=intent_path,
                 exploration_dir=exploration_dir,
                 test_map=test_map,
+                run_context=run_context,
             )
             budget.record_item()
             successful_groups.add(fkey)
@@ -3260,6 +3293,7 @@ async def phase_fix_parallel(
                                             intent_path=intent_path,
                                             exploration_dir=exploration_dir,
                                             test_map=test_map,
+                                            run_context=run_context,
                                         )
                                         budget.record_item()
                                         successful_groups.add(fkey)
@@ -3321,12 +3355,14 @@ async def phase_fix_parallel(
     return failures
 
 
+@bind_resolved_run_context
 async def _emit_failure_handoff(
     backend: Backend,
     work: WorkContext,
     output: str,
     *,
     offer_clipboard: bool,
+    run_context: RunContext | None = None,
 ) -> None:
     """Run the failure summarizer, display the handoff body, and optionally
     offer to copy it to the clipboard.
@@ -3339,8 +3375,9 @@ async def _emit_failure_handoff(
             the clipboard (interactive mode).  When ``False``, skip the prompt
             (non-interactive mode).
     """
+    run_context = resolve_run_context(run_context)
     body, handoff_path, handoff_written = await _run_failure_summarizer(
-        backend, work, output,
+        backend, work, output, run_context=run_context,
     )
     if handoff_written:
         preview_lines = body.splitlines()
@@ -3364,12 +3401,11 @@ async def _emit_failure_handoff(
 
     if offer_clipboard:
         if clipboard_available():
-            if resolve_or_prompt(
-                assume=get_assume(),
-                interactive=not get_non_interactive(),
+            if run_context.confirm(
                 safe_default=False,
                 question="Copy handoff to clipboard?",
                 default="y",
+                console=console,
             ):
                 if await anyio.to_thread.run_sync(copy_to_clipboard, body):
                     print_success(console, "Handoff copied to clipboard")
@@ -3612,6 +3648,7 @@ class TestAndHealResult:
         return iter((self.passed, self.retries, self.proceed))
 
 
+@bind_resolved_run_context
 async def phase_test_once(
     backend: Backend,
     work: WorkContext,
@@ -3621,6 +3658,7 @@ async def phase_test_once(
     capture_tree_key: Callable[[], str],
     continuation: ContinuationToken | None = None,
     command_override: list[str] | None = None,
+    run_context: RunContext | None = None,
 ) -> tuple[TestAttemptEvidence, ContinuationToken | None, str]:
     """Execute exactly one canonical test attempt and bind it to tree identity.
 
@@ -3628,6 +3666,7 @@ async def phase_test_once(
     the established TEST-agent/prose path is used. Both paths capture the same
     before/after identity projection supplied by the fix-cycle orchestrator.
     """
+    run_context = resolve_run_context(run_context)
     cmd = command_override if command_override is not None else _canonical_test_cmd(config)
     input_tree_key = capture_tree_key()
     next_continuation: ContinuationToken | None = None
@@ -3658,6 +3697,7 @@ async def phase_test_once(
             phase=DaydreamPhase.TEST,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=TEST_WALL_BUDGET_S,
+            run_context=run_context,
         )
         passed = detect_test_success(output)
         kind = "agent"
@@ -3677,6 +3717,7 @@ async def phase_test_once(
     )
 
 
+@bind_resolved_run_context
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
@@ -3686,6 +3727,7 @@ async def phase_test_and_heal(
     session_id: str | None = None,
     capture_tree_key: Callable[[], str] | None = None,
     footprint: AuthorizedFixFootprint | None = None,
+    run_context: RunContext | None = None,
 ) -> TestAndHealResult:
     """Phase 4: Run tests and prompt user on failure for action.
 
@@ -3710,6 +3752,7 @@ async def phase_test_and_heal(
         identity evidence for every actual host or agent test attempt.
 
     """
+    run_context = resolve_run_context(run_context)
     if session_id is None or capture_tree_key is None or footprint is None:
         raise TypeError(
             "phase_test_and_heal requires session_id, capture_tree_key, and footprint"
@@ -3752,6 +3795,7 @@ async def phase_test_and_heal(
             backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            run_context=run_context,
         )
         retries_used += 1
         continuation = None
@@ -3784,6 +3828,7 @@ async def phase_test_and_heal(
                 session_id=session_id,
                 capture_tree_key=capture_tree_key,
                 continuation=continuation,
+                run_context=run_context,
             )
             attempts.append(evidence)
             test_passed = evidence.passed
@@ -3813,15 +3858,17 @@ async def phase_test_and_heal(
         # to abort so the loop still terminates. Only an interactive run with no
         # assumption shows the menu.
         decision = resolve_gate(
-            assume=get_assume(),
-            interactive=not get_non_interactive(),
+            assume=run_context.policy.assume,
+            interactive=run_context.policy.interactive,
             safe_default=False,
         )
         if decision is False or (decision is True and retries_used > 0):
             print_error(
                 console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
-            await _emit_failure_handoff(backend, work, output, offer_clipboard=False)
+            await _emit_failure_handoff(
+                backend, work, output, offer_clipboard=False, run_context=run_context,
+            )
             return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
@@ -3838,10 +3885,19 @@ async def phase_test_and_heal(
             ("4", "Abort (exit with failure)"),
         ])
 
-        choice = prompt_user(console, "Choice", "2")
+        choice = run_context.choice(
+            "Choice",
+            default="2",
+            safe_default="4",
+            assume_yes="2",
+            assume_no="4",
+            console=console,
+        )
 
         if choice == "1":
-            verdict = await _run_setup_investigator(backend, work, output)
+            verdict = await _run_setup_investigator(
+                backend, work, output, run_context=run_context,
+            )
 
             if verdict is None:
                 print_warning(
@@ -3861,12 +3917,11 @@ async def phase_test_and_heal(
                     print_info(
                         console, f"Suggested command: {sanitized_preview}",
                     )
-                    if resolve_or_prompt(
-                        assume=get_assume(),
-                        interactive=not get_non_interactive(),
+                    if run_context.confirm(
                         safe_default=False,
                         question="Use suggested command instead?",
                         default="n",
+                        console=console,
                     ):
                         # Trust boundary: the approved command is executed
                         # host-side exactly once, as a real subprocess — it is
@@ -3897,6 +3952,7 @@ async def phase_test_and_heal(
                                 session_id=session_id,
                                 capture_tree_key=capture_tree_key,
                                 command_override=cmd,
+                                run_context=run_context,
                             )
                         except (OSError, ValueError) as exc:
                             print_warning(console, f"Approved test command could not be run: {exc}")
@@ -3928,7 +3984,9 @@ async def phase_test_and_heal(
 
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
-            await _emit_failure_handoff(backend, work, output, offer_clipboard=True)
+            await _emit_failure_handoff(
+                backend, work, output, offer_clipboard=True, run_context=run_context,
+            )
             return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
 
         else:
@@ -4160,6 +4218,7 @@ class PushAttemptError(GitError):
         self.receipt = receipt
 
 
+@bind_resolved_run_context
 async def _do_commit(
     backend: Backend,
     work: WorkContext,
@@ -4172,6 +4231,7 @@ async def _do_commit(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
+    run_context: RunContext | None = None,
 ) -> CommitPushResult:
     """Stage, commit, and optionally push — all host-side, no agent turn.
 
@@ -4219,6 +4279,7 @@ async def _do_commit(
 
     """
     del backend  # host-native commit: no agent turn (issue #726)
+    run_context = resolve_run_context(run_context)
 
     if interactive:
         # Commit/push gate across the two interaction axes. ``--yes`` commits
@@ -4226,12 +4287,11 @@ async def _do_commit(
         # (safe_default=False — the interactive default is decline); otherwise
         # prompt. Routed here (not at the caller) so every interactive commit
         # path honours both axes.
-        decision = resolve_or_prompt(
-            assume=get_assume(),
-            interactive=not get_non_interactive(),
+        decision = run_context.confirm(
             safe_default=False,
             question="Commit and push changes? [y/N]",
             default="n",
+            console=console,
         )
         if not decision:
             print_dim(console, "Skipping commit and push")
@@ -4431,6 +4491,7 @@ async def _do_commit(
     return CommitPushResult(committed=True, push=push_receipt)
 
 
+@bind_resolved_run_context
 async def phase_commit_push(
     backend: Backend,
     work: WorkContext,
@@ -4441,6 +4502,7 @@ async def phase_commit_push(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
+    run_context: RunContext | None = None,
 ) -> PushReceipt | None:
     """Prompt user to commit and push changes.
 
@@ -4459,6 +4521,7 @@ async def phase_commit_push(
         initial_index: Empty pre-dispatch index snapshot. Supplying these three
             selects strict stage-once and post-hook validation.
     """
+    run_context = resolve_run_context(run_context)
     console.print()
     print_info(console, "Committing and pushing changes...")
     result = await _do_commit(
@@ -4469,12 +4532,14 @@ async def phase_commit_push(
         retained_paths=retained_paths,
         retained_states=retained_states,
         initial_index=initial_index,
+        run_context=run_context,
     )
     if result.push is not None:
         print_success(console, "Changes pushed; verifying remote CI...")
     return result.push
 
 
+@bind_resolved_run_context
 async def phase_understand_intent(
     backend: Backend,
     work: WorkContext,
@@ -4486,6 +4551,7 @@ async def phase_understand_intent(
     pr_description: str | None = None,
     diff_text: str | None = None,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -4511,6 +4577,7 @@ async def phase_understand_intent(
         The confirmed intent summary string.
 
     """
+    run_context = resolve_run_context(run_context)
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
 
@@ -4590,6 +4657,7 @@ async def phase_understand_intent(
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
             read_only=True,
             sanctioned_inputs=sanctioned_inputs,
+            run_context=run_context,
         )
         if budget_reason is not None:
             raise RuntimeError(f"Intent analysis hit its budget: {budget_reason}")
@@ -4609,19 +4677,20 @@ async def phase_understand_intent(
         # a forced "no" in a non-interactive run also proceeds rather than
         # blocking on stdin.
         gate = resolve_gate(
-            assume=get_assume(),
-            interactive=not get_non_interactive(),
+            assume=run_context.policy.assume,
+            interactive=run_context.policy.interactive,
             safe_default=True,
         )
         if gate is True:
             return intent_text
-        if gate is False and get_non_interactive():
+        if gate is False and not run_context.policy.interactive:
             return intent_text
 
-        response = prompt_user(
-            console,
+        response = run_context.choice(
             "Is this understanding correct? [y/provide correction]",
-            "y",
+            default="y",
+            safe_default="y",
+            console=console,
         )
 
         if response.lower() in ("y", "yes"):
@@ -4663,6 +4732,7 @@ Commit log:
 """
 
 
+@bind_resolved_run_context
 async def phase_alternative_review(
     backend: Backend,
     work: WorkContext,
@@ -4672,6 +4742,7 @@ async def phase_alternative_review(
     exploration_dir: Path | None = None,
     diff_text: str | None = None,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
 
@@ -4683,6 +4754,7 @@ async def phase_alternative_review(
         List of issue dicts, each with id, title, description, recommendation,
         severity, and files keys.
     """
+    run_context = resolve_run_context(run_context)
     print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
     print_dim(console, f"Model: {backend.model}")
 
@@ -4722,6 +4794,7 @@ async def phase_alternative_review(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
 
     # A budget-truncated wonder pass is a run failure, not an empty lens: the
@@ -4737,7 +4810,7 @@ async def phase_alternative_review(
     else:
         # Only genuinely unusable model output degrades to an empty lens; the
         # budget case above already failed the run.
-        if not get_quiet_mode():
+        if not run_context.policy.quiet:
             print_warning(console, f"TTT review returned unexpected result type: {type(result).__name__}")
         issues = []
 
@@ -4753,6 +4826,7 @@ async def phase_alternative_review(
 # Deep-mode: per-stack fan-out
 
 
+@bind_resolved_run_context
 async def phase_per_stack_reviews(
     backend: Backend,
     work: WorkContext,
@@ -4767,6 +4841,7 @@ async def phase_per_stack_reviews(
     include_alternatives: bool = True,
     write_coverage_receipts: bool = False,
     strategies: dict[str, str] | None = None,
+    run_context: RunContext | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -4808,6 +4883,7 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
+    run_context = resolve_run_context(run_context)
     # Every ``daydream.deep.*`` import in this module is function-local, and must
     # stay that way: ``daydream.deep.__init__`` imports ``orchestrator``, which
     # imports this module, so a module-level import here closes an import cycle.
@@ -4981,6 +5057,7 @@ async def phase_per_stack_reviews(
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                                     sanctioned_inputs=task_inputs,
+                                    run_context=run_context,
                                 )
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             failures[stack_name] = f"{type(e).__name__}: {e}"
@@ -5128,6 +5205,7 @@ SUPERVISE_SCHEMA: dict[str, Any] = {
 }
 
 
+@bind_resolved_run_context
 async def phase_supervise_review(
     backend: Backend,
     work: WorkContext,
@@ -5138,8 +5216,10 @@ async def phase_supervise_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Adjudicate canonical merged findings in one batched LLM call."""
+    run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import deep_dir
 
     print_phase_hero(console, "SUPERVISE", phase_subtitle("SUPERVISE"))
@@ -5182,6 +5262,7 @@ async def phase_supervise_review(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
     if not isinstance(result, dict) or not isinstance(result.get("verdicts"), list):
         raise ValueError(f"Supervisor returned no verdicts list (got {type(result).__name__})")
@@ -5262,6 +5343,7 @@ def _rekey_verdicts(
     return verdicts
 
 
+@bind_resolved_run_context
 async def phase_arbiter_review(
     backend: Backend,
     work: WorkContext,
@@ -5273,6 +5355,7 @@ async def phase_arbiter_review(
     exploration_dir: Path | None = None,
     intent_authoritative: bool = False,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
     """Re-review high-severity / contested per-stack findings with the arbiter (#168).
 
@@ -5312,6 +5395,7 @@ async def phase_arbiter_review(
         merge can resume this conversation instead of paying for a cold prompt.
 
     """
+    run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import arbiter_input_path, deep_dir
 
     print_phase_hero(console, "ARBITRATE", phase_subtitle("ARBITRATE"))
@@ -5348,6 +5432,7 @@ async def phase_arbiter_review(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
@@ -5386,6 +5471,7 @@ SUPPRESSION_SCHEMA: dict[str, Any] = {
 }
 
 
+@bind_resolved_run_context
 async def phase_suppression_review(
     backend: Backend,
     work: WorkContext,
@@ -5396,6 +5482,7 @@ async def phase_suppression_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Skeptical precision-mode second opinion over borderline findings (#232).
 
@@ -5425,6 +5512,7 @@ async def phase_suppression_review(
         DROPPED (a borderline finding the reviewer never confirmed must not
         survive on precision runs).
     """
+    run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import deep_dir, suppression_input_path
 
     print_phase_hero(console, "SUPPRESS", phase_subtitle("SUPPRESS"))
@@ -5460,6 +5548,7 @@ async def phase_suppression_review(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
@@ -6071,6 +6160,7 @@ def _validate_agent_source_uids(
         )
 
 
+@bind_resolved_run_context
 async def phase_cross_stack_merge(
     backend: Backend,
     work: WorkContext,
@@ -6085,6 +6175,7 @@ async def phase_cross_stack_merge(
     intent_authoritative: bool = False,
     continuation: ContinuationToken | None = None,
     strategy: str | None = None,
+    run_context: RunContext | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
@@ -6138,6 +6229,7 @@ async def phase_cross_stack_merge(
             (no silent ``[]`` fallback that would mask a broken merge).
 
     """
+    run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
     from daydream.deep.records import stack_name_from_records_source
 
@@ -6193,6 +6285,7 @@ async def phase_cross_stack_merge(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
+        run_context=run_context,
     )
 
     # Fail loudly on empty/invalid output -- a silent [] would hide a broken

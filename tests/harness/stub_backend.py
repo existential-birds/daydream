@@ -1171,17 +1171,17 @@ class StubBackend:
 def silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
     """Silence noise-only UI helpers in deep orchestrator + phases.
 
-    ``prompts=False`` leaves the real ``prompt_user`` in place at both seams, for
+    ``prompts=False`` leaves the real interaction gateway input in place, for
     tests that drive a genuine gate.
     """
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
     if prompts:
-        monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-        # resolve_or_prompt routes through agent.prompt_user; patch it too so those
-        # gates don't block on stdin.
-        monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
+        def answer(_console: Any, message: str, default: str = "") -> str:
+            return "y" if "understanding correct" in message.lower() else "n"
+
+        monkeypatch.setattr("daydream.run_context._prompt_user", answer)
 
 
 def force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:

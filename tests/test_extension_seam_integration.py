@@ -22,6 +22,7 @@ from daydream.deep.orchestrator import _step_post_review
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.pr_review import ParsedIssue
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
@@ -77,6 +78,7 @@ def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
         ),
         registry=Registry(),
         data={"dd": dd, "items_file": items_file},
+        run_context=RunContext(InteractionPolicy()),
     )
 
 
@@ -152,12 +154,20 @@ async def test_post_review_uses_published_items_path(
     stable_items = tmp_path / "stable-merged-items.json"
     ctx = _post_context(dd=private_dir, items_file=stable_items)
     posted_paths: list[Path] = []
-    monkeypatch.setattr(
-        "daydream.pr_review.post_review_to_pr_from_report",
-        lambda repo, path, *, console, post, approve_on_clean=False, diagram_blocks=None: (
-            _record_path(posted_paths, path)
-        ),
-    )
+    async def _record_post(
+        repo: Path,
+        path: Path,
+        *,
+        console: Any,
+        post: bool,
+        approve_on_clean: bool = False,
+        diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
+    ) -> None:
+        assert run_context is ctx.run_context
+        await _record_path(posted_paths, path)
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
 
     await _step_post_review(ctx)
 
@@ -442,7 +452,9 @@ async def test_fork_disables_arbiter_in_deep(
         post: bool = False,
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
     ) -> None:
+        assert run_context is not None
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -789,7 +801,9 @@ async def test_custom_phase_full_stack(
         post: bool = False,
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
     ) -> None:
+        assert run_context is not None
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -825,7 +839,9 @@ async def test_flow_deep_routes_to_deep_helper(
         post: bool = False,
         approve_on_clean: bool = False,
         diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
     ) -> None:
+        assert run_context is not None
         return None
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 

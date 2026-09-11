@@ -50,14 +50,12 @@ import anyio
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.agent import (
-    console,
-    get_current_backends,
-)
+from daydream.agent import console
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.phases import UnconfinedFindingError
+from daydream.run_context import active_backends
 from daydream.runner import RunConfig, run
 from daydream.trajectory import flush_active_signal_recorders
 from daydream.ui import (
@@ -132,7 +130,7 @@ def _signal_handler(signum: int, _frame: object) -> None:
     set_shutdown_panel(panel)
     panel.start(f"Received {signal_name}, shutting down")
 
-    if get_current_backends():
+    if active_backends():
         panel.add_step("Terminating running agent(s)...")
 
     raise KeyboardInterrupt
