@@ -12,7 +12,11 @@ dependencies = [
     "httpx>=0.28",
     "PyJWT>=2.0",
     "jsonschema>=4.0",
-    "tree-sitter==0.26.0",
+    # Held at 0.25.2: 0.26.0 has a native Point-getter use-after-free that
+    # SIGSEGVs the process (py-tree-sitter#472). daydream/_tree_sitter_safety.py
+    # blocks 0.26.0 outright; the fix (py-tree-sitter#466) is merged upstream but
+    # not yet released. Loosen this pin once a fixed version ships on PyPI.
+    "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-typescript==0.23.2",
     "tree-sitter-go==0.25.0",
