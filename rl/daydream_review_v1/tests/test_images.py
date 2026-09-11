@@ -19,6 +19,7 @@ cached layers.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ import pytest
 from conftest import PROJECT_ROOT, assert_docstring_guards, docker_daemon_is_available
 
 from daydream_review_v1.fixture import FIXTURE_PR2_HEAD_SHA, FIXTURE_SLUG, build_fixture_repo
+from daydream_review_v1.taskset import load_manifest
 from images import build_images
 
 DOCKER_REQUIRED = pytest.mark.skipif(
@@ -196,7 +198,8 @@ def test_main_uses_immutable_base_for_repository_builds(
     received: list[str] = []
 
     def _record(
-        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool
+        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
+        mirror: Path,
     ) -> str:
         received.append(base_image)
         return f"{entry.image}:{head_sha[:12]}"
@@ -217,6 +220,90 @@ def test_main_uses_immutable_base_for_repository_builds(
 
     # The mutable alias is never selected for a snapshot build.
     assert build_images.BASE_LATEST not in received
+
+
+def test_main_acquires_upstream_mirror_once_per_slug(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two same-slug PR snapshots in one main() invocation acquire the upstream
+    mirror exactly once — the second PR hits the per-slug mirror cache instead
+    of re-cloning."""
+    clones: list[str] = []
+
+    def _fake_stream(cmd: list[str], *, cwd: Path | None = None) -> None:
+        del cwd  # the real helper only uses cwd for subprocess logging
+        # acquire_mirror emits ``git clone --mirror <url> <dest>``, so the
+        # clone source is cmd[3], not cmd[2] (the ``--mirror`` flag).
+        if cmd[:2] == ["git", "clone"] and "--mirror" in cmd:
+            clones.append(cmd[3])
+
+    def _record(
+        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
+        mirror: Path,
+    ) -> str:
+        del base_sha, base_image, red, mirror  # the tag only depends on these two
+        return f"{entry.image}:{head_sha[:12]}"
+
+    # Two PRs of a REAL upstream slug: the fixture slug's acquire_mirror branch
+    # clones from a local fixture build (a temp path, never the network), so
+    # only a network clone_url can pin the once-per-slug mirror cache. The SHAs
+    # are synthetic — _stream and build_repo_image are faked, so no checkout
+    # ever happens.
+    corpus = tmp_path / "corpus-two-pr-network"
+    corpus.mkdir()
+    (corpus / "index.json").write_text(
+        json.dumps(
+            {
+                "repo": REFERENCE_SLUG,
+                "bot": "daydream-review[bot]",
+                "n_prs_with_bot_activity": 2,
+                "prs": [
+                    {
+                        "pr_number": 2,
+                        "title": "synthetic PR 2",
+                        "state": "closed",
+                        "merged": True,
+                        "base_ref": "main",
+                        "base_sha": "1" * 40,
+                        "review_commit_id": "2" * 40,
+                        "n_inline_comments": 1,
+                        "n_review_summaries": 0,
+                        "n_resolved_threads": 0,
+                        "threads_complete": True,
+                    },
+                    {
+                        "pr_number": 1,
+                        "title": "synthetic PR 1",
+                        "state": "closed",
+                        "merged": True,
+                        "base_ref": "main",
+                        "base_sha": "3" * 40,
+                        "review_commit_id": "4" * 40,
+                        "n_inline_comments": 1,
+                        "n_review_summaries": 0,
+                        "n_resolved_threads": 0,
+                        "threads_complete": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(build_images, "_build_base", lambda: (0, "daydream-rl/base:v1.2.3"))
+    monkeypatch.setattr(build_images, "_stream", _fake_stream)
+    monkeypatch.setattr(build_images, "build_repo_image", _record)
+
+    status = build_images.main(["--corpus", str(corpus), "--only", REFERENCE_SLUG])
+    assert status == 0
+    # The manifest's network clone_url must be acquired exactly once for both
+    # PRs; a regression that re-clones the upstream slug per PR fails here.
+    upstream_clone_url = load_manifest(build_images.DEFAULT_MANIFEST)[
+        REFERENCE_SLUG
+    ].clone_url
+    assert clones == [upstream_clone_url], (
+        f"expected one upstream mirror acquisition ({upstream_clone_url}), got {clones}"
+    )
 
 
 def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
@@ -427,13 +514,16 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     agent uid after the harness handoff, and the write reaches the in-container
     origin mirror.
 
-    repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
-    against the launch-time handoff), so the baked checkout is already
-    agent-owned. The in-container origin mirror /srv/mirror.git is baked into
-    the image at build time (COPY mirror.git /srv/mirror.git), but no build
-    layer chowns it; the harness re-chowns the checkout plus the mirror at
-    launch (harness.py:148-162), covering the mirror. This drives that exact
-    handoff then the deep flow's
+    repo.Dockerfile bakes agent ownership of both trees at build time (one
+    combined chown -R agent:agent /work/repo /srv/mirror.git layer after the
+    setup/green-baseline layers), so both trees are agent-owned at build time
+    and the baked
+    in-container origin mirror /srv/mirror.git (COPY mirror.git /srv/mirror.git,
+    chowned in that same layer) is too. The harness performs no ownership
+    repair at launch — only the fail-closed `test -w` preflight on both paths
+    before the privilege drop (harness.py:174-188). The probe below therefore
+    carries no chown of its own: it is a pure probe of the baked ownership,
+    driving the deep flow's
     terminal write sequence (.daydream/ mkdir, git apply a fix patch,
     git add/commit, git push HEAD:main) as the agent uid inside the real image,
     and asserts the push reached /srv/mirror.git. When a docker daemon is
@@ -463,8 +553,8 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     )
 
     script = (
-        # The harness handoff (harness.py:148-162): hand checkout + mirror to agent.
-        "chown -R agent:agent /work/repo /srv/mirror.git && "
+        # No chown: the image's combined build-time layer already made both
+        # trees agent-owned; this probe proves that baked ownership directly.
         # The deep flow's fix-pipeline write, run as the agent uid. The fix patch
         # arrives on stdin (docker run -i) and is applied via `git apply -`, so
         # no base64/coreutils dependency is introduced into the image contract.
@@ -502,15 +592,21 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     )
 
 
-def test_real_docker_write_docstring_describes_build_chown_and_rechown() -> None:
+def test_real_docker_write_docstring_describes_baked_ownership() -> None:
     """The real-docker-write docstring must describe the CURRENT design: the image
-    chowns the checkout at build time AND the harness re-chowns the checkout plus
-    the mirror at launch. The stale 'no chown (this issue forbids re-adding one)'
-    and 'runtime-created mirror' claims are gone."""
+    bakes agent ownership of both the checkout and the mirror at build time (one
+    combined chown layer) and the probe drops its own leading chown — it is a pure
+    probe of the baked ownership, with the harness doing only the fail-closed
+    `test -w` preflight. The stale launch-time re-chown claims are gone."""
     assert_docstring_guards(
         test_real_docker_deep_flow_fix_pipeline_write_as_agent,
-        gone=("no chown", "forbids re-adding one", "runtime-created"),
-        present=("chowns /work/repo at build time", "/srv/mirror.git", "baked"),
+        gone=("re-chowns", "harness re-chown"),
+        present=(
+            "baked",
+            "/srv/mirror.git",
+            "agent-owned at build time",
+            "test -w",
+        ),
     )
 
 
@@ -817,21 +913,23 @@ def test_base_image_has_distinct_agent_identity() -> None:
 
 
 def test_repo_image_chowns_checkout_to_agent() -> None:
-    """repo.Dockerfile must hand the cloned /work/repo tree to the agent uid.
+    """repo.Dockerfile must hand both trees to the agent uid in one layer.
 
     The image clones /work/repo as root (no USER directive), so without a chown
-    layer an agent-uid process hits EACCES on its first write. The harness
-    re-chowns at launch (idempotent against this), but the image should be
-    self-sufficient defense-in-depth — root-owned by default is the failure the
-    issue describes.
+    layer an agent-uid process hits EACCES on its first write. The combined
+    layer covers /work/repo and /srv/mirror.git because the deep flow writes to
+    both (the checkout directly, the mirror via its terminal push to origin).
+    There is no launch-time re-chown to fall back on: the harness only runs a
+    fail-closed writability preflight, so root-owned-by-default is the failure
+    the issue describes.
     """
     dockerfile = (PROJECT_ROOT / "images" / "repo.Dockerfile").read_text(encoding="utf-8")
-    # Pin the anchored layer exactly (recursive, full /work/repo target, agent
-    # uid), and require it to sit after the root-run setup.sh/TEST_COMMAND
-    # layers so their outputs (e.g. .venv from uv sync) are agent-owned too.
-    # Bare substring checks let a dropped -R, a subpath target, a retargeted
-    # uid, or a chown moved before the setup layers pass green.
-    chown_layer = "RUN chown -R agent:agent /work/repo"
+    # Pin the anchored layer exactly (recursive, both full targets, agent uid),
+    # and require it to sit after the root-run setup.sh/TEST_COMMAND layers so
+    # their outputs (e.g. .venv from uv sync) are agent-owned too. Bare
+    # substring checks let a dropped -R, a subpath target, a retargeted uid, or
+    # a chown moved before the setup layers pass green.
+    chown_layer = "RUN chown -R agent:agent /work/repo /srv/mirror.git"
     assert chown_layer in dockerfile
     assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && sh /tmp/setup.sh")
     assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && ${TEST_COMMAND}")

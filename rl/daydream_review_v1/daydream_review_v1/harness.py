@@ -14,6 +14,7 @@ rollout agent is one config key: ``backend``.
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import Any
 
 import verifiers.v1 as vf
@@ -168,19 +169,54 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             self.config.repo_path,
         ]
         if runtime.type == "docker":
-            # The repo image clones the checkout as root (repo.Dockerfile), so
-            # hand the workspace — and the in-container origin mirror the deep
-            # flow pushes its fix to — to the agent identity before the
-            # privilege drop. Otherwise every deep-flow write (.daydream/,
-            # worktrees, fix edits, git add/commit, push) EACCESes as the
-            # agent uid and the rollout dies before any model turn.
-            handoff = await runtime.run(
-                ["chown", "-R", "agent:agent", self.config.repo_path, "/srv/mirror.git"], env
+            # The image bakes both trees agent-owned at build time
+            # (repo.Dockerfile's combined chown layer covers /work/repo and
+            # /srv/mirror.git), so launch issues no ownership command at all.
+            # Instead, a constant-size writability preflight runs through the
+            # same run-as-agent privilege drop the launch will use, so it probes
+            # the agent's actual write access — running it as the container root
+            # would vacuously succeed on a root-owned tree (CAP_DAC_OVERRIDE)
+            # and never catch a missing ownership layer. It fails closed if the
+            # image was not built with the ownership layer — a non-agent-
+            # writable tree is a rebuild signal, never a runtime repair.
+            preflight = await runtime.run(
+                [
+                    "run-as-agent",
+                    "sh",
+                    "-c",
+                    f"test -w {shlex.quote(self.config.repo_path)} && test -w /srv/mirror.git",
+                ],
+                env,
             )
-            if handoff.exit_code != 0:
+            # The two tree roots are not the deep flow's whole write surface:
+            # its git add/commit writes into <repo>/.git and the terminal push
+            # updates the mirror's refs, so the preflight probes those per-file
+            # surfaces too. A checkout whose .git or mirror refs stayed
+            # root-owned would pass the root probes yet EACCES on the agent's
+            # first commit or push — that partial-ownership state is a rebuild
+            # signal just like a missing layer, never a runtime repair. The
+            # path is shlex.quote()d because it is interpolated into the
+            # privileged `sh -c` string: an unbaked config value containing
+            # whitespace would word-split the probe onto the wrong paths, and
+            # shell metacharacters would execute as the sandbox agent uid with
+            # the rollout env.
+            surfaces = await runtime.run(
+                [
+                    "run-as-agent",
+                    "sh",
+                    "-c",
+                    f"test -w {shlex.quote(self.config.repo_path)}/.git && test -w /srv/mirror.git/refs",
+                ],
+                env,
+            )
+            if preflight.exit_code != 0 or surfaces.exit_code != 0:
                 raise RuntimeError(
-                    "could not hand the checkout to the agent identity: "
-                    f"{handoff.stdout}{handoff.stderr}"
+                    "repo and mirror are not agent-writable (tree roots plus the per-file "
+                    "write surfaces: the checkout's .git and the mirror's refs); the image "
+                    "was likely built without the ownership layer. Rebuild it with "
+                    "images/build_images.py, which bakes agent ownership for "
+                    f"{self.config.repo_path} and /srv/mirror.git: "
+                    f"{preflight.stdout}{preflight.stderr}{surfaces.stdout}{surfaces.stderr}"
                 )
             # Container launches drop from the container default user (root) to
             # the non-root agent identity through the image's root-owned

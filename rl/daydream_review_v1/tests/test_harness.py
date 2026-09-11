@@ -266,12 +266,15 @@ class _OrderingDockerRuntime(_DockerLikeRuntime):
     asserted from it. This records every argv in call order.
     """
 
-    def __init__(self, *, exit_code: int = 0) -> None:
+    def __init__(self, *, exit_code: int = 0, failed_argv: list[str] | None = None) -> None:
         super().__init__(exit_code=exit_code)
         self.sequence: list[list[str]] = []
+        self.failed_argv = failed_argv
 
     async def run(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
         self.sequence.append(argv)
+        if self.failed_argv is not None and argv[: len(self.failed_argv)] == self.failed_argv:
+            return vf.ProgramResult(exit_code=1, stdout="", stderr="failed")
         return await super().run(argv, env)
 
     async def run_program(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
@@ -323,60 +326,80 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
         assert "must be run as root" in dropped.stderr
 
 
-async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
+async def test_docker_launch_preflights_writability_before_run_as_agent(
     corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
-    """The docker deep flow's first write succeeds because the harness hands the
-    checkout + in-container mirror to the agent uid before the privilege drop.
-
-    repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
-    against the launch-time handoff), so the baked checkout is already
-    agent-owned. The in-container origin mirror /srv/mirror.git is baked into the
-    image at build time (COPY mirror.git /srv/mirror.git); no build layer chowns it,
-    so the launch-time handoff must cover it. The harness issues
-    `chown -R agent:agent <repo> /srv/mirror.git` before launching through
-    run-as-agent, re-chowning the checkout and covering the mirror; this pins
-    that the ownership handoff is actually issued under a docker-shaped runtime.
-    """
+    """The docker deep flow's first write succeeds because the image bakes both
+    trees agent-owned (repo.Dockerfile's combined chown layer covers /work/repo
+    and /srv/mirror.git). The harness therefore performs no recursive chown at
+    launch; instead a constant-size writability preflight runs before the
+    privilege drop and fails closed if the image was not built with the
+    ownership layer, naming the paths and the rebuild entry point
+    (images/build_images.py)."""
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _OrderingDockerRuntime(exit_code=0)
 
     await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
-    handoff = ["chown", "-R", "agent:agent", harness.config.repo_path, "/srv/mirror.git"]
-    assert handoff in runtime.commands, (
-        "the harness must hand the checkout + mirror to the agent identity "
-        "before the privilege drop, or the deep flow's first write EACCESes"
+    for argv in runtime.commands:
+        assert "chown" not in argv, (
+            "a docker rollout must never issue a recursive ownership command; "
+            "the image bakes ownership at build time"
+        )
+    preflight = next(
+        argv for argv in runtime.commands if f"test -w {harness.config.repo_path}" in " ".join(argv)
     )
+    assert f"test -w {harness.config.repo_path}" in " ".join(preflight)
+    assert "test -w /srv/mirror.git" in " ".join(preflight)
     (argv, _), = runtime.programs
     assert argv[0] == "run-as-agent"
-    # Ordering, not existence: the base FakeRuntime records run and run_program
-    # calls in separate lists with no shared sequence, so a membership check
-    # alone would let a harness that chowns *after* the launch pass — the exact
-    # regression this test pins. The shared sequence makes the handoff's
-    # position relative to the launch assertable.
-    assert runtime.sequence.index(handoff) < runtime.sequence.index(argv), (
-        "the handoff must be issued before the run-as-agent launch: an agent-uid "
-        "process chowned only after the launch still EACCESes on its first write"
+    assert runtime.sequence.index(preflight) < runtime.sequence.index(argv), (
+        "the writability preflight must run before the run-as-agent launch"
     )
 
 
-def test_docker_handoff_docstring_describes_build_chown_and_mirror() -> None:
-    """The docker-handoff docstring must describe the CURRENT ownership design:
-    build-time chown in repo.Dockerfile (defense-in-depth) plus the launch-time
-    handoff that covers the mirror — baked into the image at build time (COPY
-    mirror.git /srv/mirror.git) but chowned by no build layer. The stale 'no
-    layer chowns it' and 'created at launch' claims are gone."""
+async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """A non-agent-writable repo or mirror is a rebuild signal, never a runtime
+    repair: launch raises RuntimeError naming both paths and the rebuild entry
+    point, and no run-as-agent launch attempt follows."""
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
+    runtime = _OrderingDockerRuntime(
+        exit_code=1,
+        failed_argv=[
+            "run-as-agent",
+            "sh",
+            "-c",
+            f"test -w {harness.config.repo_path} && test -w /srv/mirror.git",
+        ],
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
+
+    message = str(excinfo.value)
+    assert str(harness.config.repo_path) in message
+    assert "/srv/mirror.git" in message
+    assert "images/build_images.py" in message
+    assert runtime.programs == [], "no launch attempt may follow a failed preflight"
+
+
+def test_docker_writability_preflight_docstring_describes_baked_ownership() -> None:
+    """The preflight docstring must describe the CURRENT design: the image bakes
+    both trees agent-owned at build time (one combined chown layer) and the
+    launch path only preflights writability, failing closed — no runtime chown
+    remains."""
     assert_docstring_guards(
-        test_docker_launch_hands_checkout_to_agent_before_run_as_agent,
-        gone=("no layer chowns it", "created at launch"),
+        test_docker_launch_preflights_writability_before_run_as_agent,
+        gone=("chown -R", "hand the checkout", "defense-in-depth"),
         present=(
-            "chowns /work/repo at build time",
-            "defense-in-depth",
             "/srv/mirror.git",
-            "baked",
-            "no build layer chowns it",
+            "bakes",
+            "fails closed",
+            "images/build_images.py",
         ),
     )
 

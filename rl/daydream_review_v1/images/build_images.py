@@ -41,7 +41,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.fixture import (
@@ -255,24 +255,73 @@ def write_setup_script(ctx: Path, setup_cmds: list[str]) -> None:
     (ctx / "setup.sh").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def materialize_mirror(entry: _ManifestEntry, ctx: Path, *, red: bool) -> dict[str, str]:
+def acquire_mirror(
+    entry: _ManifestEntry, cache: dict[str, tuple[tempfile.TemporaryDirectory[Any], Path]], *, red: bool
+) -> Path:
+    """Acquire one bare mirror per repo slug, exactly once per ``main`` invocation.
+
+    The cache is keyed by repo slug and maps to ``(handle, mirror)`` — the
+    handle is the ``TemporaryDirectory`` owning the mirror's parent, kept open
+    so every ``build_repo_image`` call that copies from the mirror outlives it.
+    ``main`` owns the cache and cleans the handles up after the PR loop.
+
+    A non-fixture slug network-clones ``entry.clone_url`` exactly once (a cache
+    hit skips the clone entirely). The fixture slug never touches the network:
+    it gets one local fixture build + local ``git clone --mirror`` per
+    invocation, and each PR snapshot still re-derives its own ``--red`` SHA
+    remap in :func:`materialize_mirror`. A failed acquisition raises through the
+    ``_stream`` path (``CalledProcessError``); nothing is cached and no fallback
+    mirror is ever substituted, so that slug's PRs fail per PR.
+    """
+    # Key by the repo slug the manifest/corpus use, never by a slug derived
+    # from the manifest clone_url: for the fixture sentinel ``_repo_slug``
+    # yields ``/daydream-rl-fixture``, not the manifest key ``FIXTURE_SLUG``.
+    if entry.clone_url == FIXTURE_CLONE_URL:
+        slug = FIXTURE_SLUG
+    else:
+        slug = _repo_slug(entry.clone_url)
+    if slug in cache:
+        return cache[slug][1]
+    handle = tempfile.TemporaryDirectory[Any](prefix="daydream-rl-mirror-")
+    mirror = Path(handle.name) / "mirror.git"
+    try:
+        if entry.clone_url == FIXTURE_CLONE_URL:
+            with tempfile.TemporaryDirectory(prefix="daydream-rl-fixture-") as tmp:
+                repo = build_fixture_repo(Path(tmp) / "repo", red=red)
+                _stream(["git", "clone", "--mirror", str(repo.path), str(mirror)])
+        else:
+            _stream(["git", "clone", "--mirror", entry.clone_url, str(mirror)])
+    except BaseException:
+        handle.cleanup()
+        raise
+    cache[slug] = (handle, mirror)
+    return mirror
+
+
+def materialize_mirror(entry: _ManifestEntry, ctx: Path, *, red: bool, mirror: Path) -> dict[str, str]:
     """Put a bare ``mirror.git`` in the build context *ctx*.
+
+    ``mirror`` is the invocation-scoped mirror acquired once per slug by
+    :func:`acquire_mirror`; every context gets a real copy (``shutil.copytree``,
+    never a symlink or hardlink) so a PR build cannot mutate the shared cache.
 
     Returns:
         A SHA translation map, empty for a real clone. It matters only under
         ``--red``: planting a failing assertion rewrites the fixture's head commit,
         so that commit's SHA changes and the SHA pinned in the corpus no longer
         exists. Without the remap the build would die at ``git checkout`` and prove
-        nothing about the green-baseline gate.
+        nothing about the green-baseline gate. The fixture's remap is re-derived
+        per PR (a fresh ``build_fixture_repo`` per call) even though the mirror
+        itself is shared, preserving the fixture semantics unchanged.
     """
-    mirror = ctx / "mirror.git"
+    target = ctx / "mirror.git"
     if entry.clone_url != FIXTURE_CLONE_URL:
-        _stream(["git", "clone", "--mirror", entry.clone_url, str(mirror)])
+        shutil.copytree(mirror, target)
         return {}
 
     with tempfile.TemporaryDirectory(prefix="daydream-rl-fixture-") as tmp:
         repo = build_fixture_repo(Path(tmp) / "repo", red=red)
-        _stream(["git", "clone", "--mirror", str(repo.path), str(mirror)])
+        shutil.copytree(mirror, target)
     return {
         FIXTURE_BASE_SHA: repo.base_sha,
         FIXTURE_PR1_HEAD_SHA: repo.pr1_head_sha,
@@ -305,8 +354,14 @@ def _validate_red_flags(*, red: bool, base_only: bool, manifest: dict[str, _Mani
     return None
 
 
-def build_repo_image(entry: _ManifestEntry, *, head_sha: str, base_sha: str, base_image: str, red: bool) -> str:
+def build_repo_image(
+    entry: _ManifestEntry, *, head_sha: str, base_sha: str, base_image: str, red: bool, mirror: Path
+) -> str:
     """Build one PR-snapshot image and return the tag it was given.
+
+    ``mirror`` is the invocation-scoped mirror for this entry's slug, acquired
+    once by ``main`` via :func:`acquire_mirror`; it is copied into this build's
+    isolated context rather than re-cloned.
 
     Raises:
         subprocess.CalledProcessError: If any layer fails — including the final
@@ -314,7 +369,7 @@ def build_repo_image(entry: _ManifestEntry, *, head_sha: str, base_sha: str, bas
     """
     with tempfile.TemporaryDirectory(prefix="daydream-rl-ctx-") as tmp:
         ctx = Path(tmp)
-        remap = materialize_mirror(entry, ctx, red=red)
+        remap = materialize_mirror(entry, ctx, red=red, mirror=mirror)
         write_setup_script(ctx, entry.setup_cmds)
 
         head = remap.get(head_sha, head_sha)
@@ -441,37 +496,50 @@ def main(argv: list[str] | None = None) -> int:
     # without duplicating the runtime guard in main.
     base_image = cast(str, base_image)
 
+    # One mirror per repo slug for this whole invocation: acquired lazily on
+    # the first PR that needs it, reused (copied per context) by every later PR
+    # of the same slug. The TemporaryDirectory handles must outlive every
+    # build_repo_image call, so main cleans them up after the loop.
+    mirror_cache: dict[str, tuple[tempfile.TemporaryDirectory[Any], Path]] = {}
     built: list[str] = []
     failed: list[str] = []
-    for pr in prs:
-        slug = _repo_slug(pr.clone_url)
-        entry = manifest.get(slug)
-        if entry is None:
-            # Same rule as the taskset: a corpus PR with no manifest entry is an
-            # error, never a silent skip.
-            print(f"FAILED {slug}#{pr.pr_number}: no entry in {args.manifest}", file=sys.stderr)
-            failed.append(f"{slug}#{pr.pr_number}")
-            continue
-        if not pr.base_sha:
-            print(f"FAILED {slug}#{pr.pr_number}: corpus record has no base_sha", file=sys.stderr)
-            failed.append(f"{slug}#{pr.pr_number}")
-            continue
-        try:
-            built.append(
-                build_repo_image(
-                    entry,
-                    head_sha=pr.head_sha,
-                    base_sha=pr.base_sha,
-                    base_image=base_image,
-                    red=args.red,
+    try:
+        for pr in prs:
+            slug = _repo_slug(pr.clone_url)
+            entry = manifest.get(slug)
+            if entry is None:
+                # Same rule as the taskset: a corpus PR with no manifest entry is an
+                # error, never a silent skip.
+                print(f"FAILED {slug}#{pr.pr_number}: no entry in {args.manifest}", file=sys.stderr)
+                failed.append(f"{slug}#{pr.pr_number}")
+                continue
+            if not pr.base_sha:
+                print(f"FAILED {slug}#{pr.pr_number}: corpus record has no base_sha", file=sys.stderr)
+                failed.append(f"{slug}#{pr.pr_number}")
+                continue
+            try:
+                mirror = acquire_mirror(entry, mirror_cache, red=args.red)
+                built.append(
+                    build_repo_image(
+                        entry,
+                        head_sha=pr.head_sha,
+                        base_sha=pr.base_sha,
+                        base_image=base_image,
+                        red=args.red,
+                        mirror=mirror,
+                    )
                 )
-            )
-        except subprocess.CalledProcessError as exc:
-            # Not swallowed: the log above is the real message and the exit code
-            # below is non-zero. The remaining PRs are still attempted so one red
-            # baseline does not hide the state of the rest of the corpus.
-            print(f"FAILED {slug}#{pr.pr_number}: exit {exc.returncode}", file=sys.stderr)
-            failed.append(f"{slug}#{pr.pr_number}")
+            except subprocess.CalledProcessError as exc:
+                # Not swallowed: the log above is the real message and the exit code
+                # below is non-zero. The remaining PRs are still attempted so one red
+                # baseline does not hide the state of the rest of the corpus. A failed
+                # upstream mirror acquisition lands here too, failing that slug's PRs
+                # without any fallback mirror being substituted.
+                print(f"FAILED {slug}#{pr.pr_number}: exit {exc.returncode}", file=sys.stderr)
+                failed.append(f"{slug}#{pr.pr_number}")
+    finally:
+        for handle, _mirror in mirror_cache.values():
+            handle.cleanup()
 
     for tag in built:
         print(f"built {tag}")
