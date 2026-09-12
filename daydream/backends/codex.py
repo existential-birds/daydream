@@ -822,10 +822,7 @@ class CodexBackend:
                         yield diagnostic
                     continue
 
-                if event_type == "thread.started":
-                    thread_id = event.get("thread_id")
-
-                elif event_type == "item.started":
+                if event_type in ("item.started", "item.updated", "item.completed"):
                     item = event.get("item", {})
                     if not isinstance(item, dict):
                         malformed_shapes["item_not_object"] += 1
@@ -838,6 +835,11 @@ class CodexBackend:
                         for diagnostic in _take_early_diagnostics():
                             yield diagnostic
                         continue
+
+                if event_type == "thread.started":
+                    thread_id = event.get("thread_id")
+
+                elif event_type == "item.started":
 
                     if item_type == "command_execution":
                         item_id = item.get("id")
@@ -893,18 +895,6 @@ class CodexBackend:
                     # (text is empty, we wait for item.completed)
 
                 elif event_type == "item.updated":
-                    item = event.get("item", {})
-                    if not isinstance(item, dict):
-                        malformed_shapes["item_not_object"] += 1
-                        for diagnostic in _take_early_diagnostics():
-                            yield diagnostic
-                        continue
-                    item_type = item.get("type", "")
-                    if isinstance(item_type, (dict, list)):
-                        malformed_shapes["item_type_not_scalar"] += 1
-                        for diagnostic in _take_early_diagnostics():
-                            yield diagnostic
-                        continue
                     item_id = item.get("id", "")
 
                     if item_type in ("agent_message", "reasoning"):
@@ -919,20 +909,8 @@ class CodexBackend:
                         )
 
                 elif event_type == "item.completed":
-                    item = event.get("item", {})
-                    if not isinstance(item, dict):
-                        malformed_shapes["item_not_object"] += 1
-                        for diagnostic in _take_early_diagnostics():
-                            yield diagnostic
-                        continue
-                    item_type = item.get("type", "")
-                    if isinstance(item_type, (dict, list)):
-                        malformed_shapes["item_type_not_scalar"] += 1
-                        for diagnostic in _take_early_diagnostics():
-                            yield diagnostic
-                        continue
 
-                    if item_type == "agent_message":
+                    if item_type in ("agent_message", "reasoning"):
                         text = self._extract_text(item)
                         # Fall back to text accumulated from item.updated deltas.
                         if not text:
@@ -940,19 +918,13 @@ class CodexBackend:
                             parts = updated_text.pop(item_id, [])
                             text = "".join(parts)
                         if text:
-                            last_agent_text = text
-                            yield TextEvent(text=text)
-                            # Codex has no per-message id; message_id stays empty (D-04).
-                            yield TurnEndEvent(message_id="")
-
-                    elif item_type == "reasoning":
-                        text = self._extract_text(item)
-                        if not text:
-                            item_id = item.get("id", "")
-                            parts = updated_text.pop(item_id, [])
-                            text = "".join(parts)
-                        if text:
-                            yield ThinkingEvent(text=text)
+                            if item_type == "agent_message":
+                                last_agent_text = text
+                                yield TextEvent(text=text)
+                                # Codex has no per-message id; message_id stays empty (D-04).
+                                yield TurnEndEvent(message_id="")
+                            else:
+                                yield ThinkingEvent(text=text)
 
                     elif item_type == "command_execution":
                         item_id = item.get("id")
