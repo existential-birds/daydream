@@ -407,6 +407,20 @@ def _finding_member_aliases(finding: dict[str, Any]) -> tuple[str, ...]:
     return _string_sequence(finding.get("member_aliases"))
 
 
+
+def _alias_format_matches_current(alias: str) -> bool:
+    """True when a persisted member alias uses the current alias format.
+
+    The current format is ``member:<sha256>`` (prioritize.member_alias).
+    Aliases persisted under a previous spelling (e.g. ``member-v1:<sha>``)
+    can never equal a freshly computed current-format alias, so they are
+    dead data at load — dropped rather than mapped, keeping the index
+    free of identifiers that cannot dedupe. Fingerprints and non-alias
+    strings pass through untouched.
+    """
+    return not alias.startswith("member-") or alias.startswith("member:")
+
+
 def _finding_member_identities(
     finding: dict[str, Any],
 ) -> tuple[frozenset[str], ...]:
@@ -519,7 +533,14 @@ def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
     member_fingerprints = _string_tuple(payload.get("member_fingerprints"))
     if not member_fingerprints:
         member_fingerprints = (fingerprint,)
-    member_aliases = _string_sequence(payload.get("member_aliases"))
+    # Stale-format member aliases (persisted before the alias-format change)
+    # can never match a freshly computed `member:<sha256>` alias — compare
+    # only same-format aliases and let republication refresh stale spellings.
+    member_aliases = tuple(
+        alias
+        for alias in _string_sequence(payload.get("member_aliases"))
+        if _alias_format_matches_current(alias)
+    )
     return PlanIndexEntry(
         number=number,
         slug=slug,
