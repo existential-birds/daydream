@@ -16,8 +16,8 @@ Contract points:
   Stage 3's directory is created, and the manifest is not written — a refused
   run leaves no partial-success artifact.
 - **Dry path (CI)**: ``dry_run=True`` executes everything that needs no GPU —
-  corpus load (fail-closed via :mod:`daydream.training.stacks`), Stage-0 gate
-  evaluation on cached model state, validation, manifest — and marks the wall-
+  projection load (fail-closed via :mod:`daydream.training.stacks`), Stage-0
+  gate evaluation on cached model state, validation, manifest — and marks the wall-
   clock GPU stages ``skipped_dry``. The Stage-3 adapter *handoff* (pure file
   assembly from Stage-0 state, no GPU) is still produced on the dry path so
   the declared adapter path is loadable-shape-validated in CI.
@@ -27,7 +27,7 @@ Contract points:
   after Stage 0 has computed it.
 - **Atomicity**: the manifest is written temp-then-rename, mirroring the
   corpus exporter's atomic-write discipline in
-  :func:`daydream.training.corpus.run_build_corpus`.
+  :func:`daydream.training.corpus_projection.build_frozen_corpus`.
 - **Adapter handoff**: the final stage's output is a LoRA adapter checkpoint
   in the ``save_adapter_separately`` shape (``adapter_config.json`` +
   ``adapter_state.json``), and the manifest's ``adapter_path`` points at it.
@@ -39,7 +39,6 @@ the run completed or was refused cleanly before Stage 3.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,13 +47,12 @@ from typing import Any, cast
 from daydream.archive import get_archive_dir
 from daydream.json_utils import atomic_write_json
 from daydream.training import gate as gate_mod
-from daydream.training import stacks
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
 from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
-from daydream.training.stacks_v2 import V2Projection, load_v2_projection, recompute_split_from_record_id
+from daydream.training.stacks import V2Projection, load_v2_projection, recompute_split_from_record_id
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
@@ -71,13 +69,12 @@ class PipelineConfig:
     changes the run's identity and invalidates a resume (M18).
 
     Attributes:
-        corpus: Path to the JSONL training corpus (one record per line) — the
-            v1 input. Exactly one of ``corpus`` and ``corpus_v2`` must be set;
-            they are mutually exclusive.
-        corpus_v2: Path to a frozen corpus-v2 projection directory (the
-            ``run_build_corpus_v2`` output). When set, the pipeline loads the
-            projection via :func:`daydream.training.stacks_v2.load_v2_projection`
-            and Stage 0 consumes the projector's frozen split.
+        projection: Path to a frozen projection directory (the
+            ``build_frozen_corpus`` output). The pipeline loads the projection
+            via :func:`daydream.training.stacks.load_v2_projection` and
+            Stage 0 consumes the projector's frozen split. This is the only
+            pipeline input — the legacy v1 ``corpus`` JSONL input was removed
+            (#1093).
         out_dir: Root directory for stage outputs and ``manifest.json``.
         stages: Ordered stage names to run.
         base_model: HuggingFace model id the LoRA adapter trains against.
@@ -96,8 +93,7 @@ class PipelineConfig:
     """
 
     out_dir: Path
-    corpus: Path | None = None
-    corpus_v2: Path | None = None
+    projection: Path | None = None
     stages: tuple[str, ...] = STAGES
     base_model: str = "Qwen/Qwen3-8B"
     tokenizer_renderer: str = "default"
@@ -123,23 +119,15 @@ class PipelineConfig:
             raise ValueError(
                 f"held_out_fraction must be in (0, 1) exclusive (got {self.held_out_fraction!r})"
             )
-        if self.corpus is not None and self.corpus_v2 is not None:
+        if self.projection is None:
             raise ValueError(
-                "corpus and corpus_v2 are mutually exclusive: a run consumes either "
-                "the v1 JSONL corpus or a frozen corpus-v2 projection directory, never both"
+                "no projection input: PipelineConfig requires projection=<frozen projection dir>"
             )
-        if self.corpus is None and self.corpus_v2 is None:
-            raise ValueError("exactly one of corpus or corpus_v2 must be set")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write JSON atomically via the shared crash-safe primitive."""
     atomic_write_json(path, payload, sort_keys=True)
-
-
-def _file_digest(path: Path) -> str:
-    """SHA-256 of a file's bytes — the corpus content address."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _outcome_rows(
@@ -148,8 +136,8 @@ def _outcome_rows(
     """Extract gold outcome rows for the Stage-0 labels file from any shape.
 
     Accepts the committed fixture shape (``comment_id``/``text``/``label``),
-    production ``run_build_corpus`` exports (``session_id``/
-    ``review_output``/``outcome_label``), and corpus-v2 records
+    v1 records exports (``session_id``/
+    ``review_output``/``outcome_label``), and projection records
     (``session_id``/``finding_text``/``outcome_label``). Gold-gate evidence
     fields (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
     ``decisive_only``) are carried through when the record provides them; an
@@ -161,7 +149,7 @@ def _outcome_rows(
 
     Args:
         records: Corpus records in any of the accepted shapes.
-        require_finding_text: When True (the corpus-v2 path), a gold-labeled
+        require_finding_text: When True (the projection path), a gold-labeled
             record with no readable text raises instead of being silently
             skipped — a v2 gold record without its localized finding text is
             a broken projection, never an empty-row row.
@@ -182,7 +170,7 @@ def _outcome_rows(
         if not (comment_id and text):
             if require_finding_text:
                 raise RuntimeError(
-                    f"stage0 refused: corpus-v2 gold record "
+                    f"stage0 refused: projection gold record "
                     f"{rec.get('record_id') or comment_id!r} has outcome_label "
                     f"{label!r} but no finding_text/text/review_output — a gold "
                     "record without its localized finding text is a broken "
@@ -213,18 +201,11 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     on rejected or silver traces. Rows are prompt/completion JSONL — the shape
     the prime-rl ``sft`` loader accepts (``messages`` column or both
     ``prompt``/``completion``). Gold vs silver counts are reported separately
-    (M9), matching the recipe's tier accounting. On corpus-v2 records the
+    (M9), matching the recipe's tier accounting. On projection records the
     completion is the localized ``finding_text`` of the gold-accepted
     finding; the completion field chain is
     ``completion`` → ``finding_text`` → ``text`` → ``review_output``.
 
-    Current-policy SFT prefers native-profile traces (M23): accepted rows are
-    partitioned by the ``legacy_policy`` tag ``stacks.load_dataset`` stamps
-    (set on records whose ``labeler_policy_version`` is absent or null);
-    native rows (``legacy_policy`` falsy) are selected first, and legacy rows
-    are only used to fill the dataset when the native-profile pool is empty.
-    The tag is a selection preference, never a drop — a legacy-only corpus
-    still trains.
 
     Returns:
         ``(rows, tier_counts)`` where ``tier_counts`` has ``gold`` and
@@ -232,8 +213,7 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
         never mixed into the gold-positive data).
     """
     silver = 0
-    native: list[dict[str, Any]] = []
-    legacy: list[dict[str, Any]] = []
+    gold: list[dict[str, Any]] = []
     for rec in records:
         label = rec.get("label") or rec.get("outcome_label")
         completion = (
@@ -249,18 +229,16 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
                 "prompt": rec.get("prompt") or _sft_prompt(rec),
                 "completion": completion,
             }
-            (legacy if rec.get("legacy_policy") else native).append(row)
+            gold.append(row)
         elif rec.get("tier") == "silver":
             silver += 1
-    # M23: prefer native-profile rows; legacy rows only when the native pool is empty.
-    gold = native or legacy
     return gold, {"gold": len(gold), "silver": silver}
 
 
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Deterministic SFT prompt built from a record's frozen review context.
 
-    On corpus-v2 records the repo slug and task SHAs live under
+    On projection records the repo slug and task SHAs live under
     ``task_identity`` (the repo slug also under ``lineage``); they are read
     v2-first with the v1 top-level / ``code_context`` fallback (Pattern A, the
     same order :func:`_rft_rows` uses), so a v2 prompt carries the record's
@@ -294,9 +272,9 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
 def _materialize_diff(rec: dict[str, Any]) -> str | None:
     """Materialize the RFT diff body from the archive for production records.
 
-    Production ``run_build_corpus`` exports carry only ``fix_diff_ref`` — a
+    v1 records exports carry only ``fix_diff_ref`` — a
     pointer to the archived reviewed-INPUT ``diff.patch`` — never a raw
-    ``diff`` body (``schema/v1.json`` is ``additionalProperties: false``).
+    ``diff`` body (the training record schema is ``additionalProperties: false``).
     The pointer is relative to the record's bronze run dir under the archive
     root; an unavailable, missing, or unreadable patch returns ``None`` so
     the caller's fail-closed identity check refuses the record rather than
@@ -347,7 +325,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     a v1 row without one is refused at Stage 2 exactly where the replay
     would refuse it.
 
-    On corpus-v2 records the intrinsic scoring signals are derived from the
+    On projection records the intrinsic scoring signals are derived from the
     record itself: the frozen projection record is admission/shape/drift-
     validated, so ``format_valid`` is True (the v1 bronze-parse failure floor
     cannot apply), and the record's adjudicated outcome is mapped onto the
@@ -358,7 +336,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     (unknown, never an invented zero).
 
     ``diff`` falls back to :func:`_materialize_diff` when the record carries
-    no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
+    no raw ``diff`` body: v1 records exports (schema v1,
     ``additionalProperties: false``) hold only the ``fix_diff_ref`` pointer
     to the archived ``diff.patch``, so the documented real-archive journey
     stays runnable through Stage 2.
@@ -407,7 +385,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
         if identity:
-            # Corpus-v2 records carry no archived verifier-verdicts file; the
+            # Projection records carry no archived verifier-verdicts file; the
             # record's own adjudicated outcome is its capture-time judgment.
             # Map it onto the shared verdict vocabulary (the labels
             # score_trajectory's verdict_map consumes) so the replay reads a
@@ -459,7 +437,7 @@ def _frozen_split_from_projection(
     """Build the Stage-0 :class:`FrozenSplit` from the projector's frozen
     boundary instead of re-freezing at runtime.
 
-    The corpus-v2 projection was split deterministically at build time
+    The projection was split deterministically at build time
     (``lineage.split`` per record, drift-gated by the loader). Stage 0 maps
     that three-way boundary onto its two-way partition — train+validation
     rows train, holdout rows evaluate — and verifies the boundary fail-closed:
@@ -488,7 +466,7 @@ def _frozen_split_from_projection(
     held_out = _outcome_rows(projection.by_split["holdout"], require_finding_text=True)
     if not held_out:
         raise RuntimeError(
-            "stage0 refused: the corpus-v2 frozen split has no gold outcome rows in "
+            "stage0 refused: the projection frozen split has no gold outcome rows in "
             "its holdout split; the gate would evaluate against nothing and refuses closed"
         )
     salt = str(projection.lineage["salt"])
@@ -505,7 +483,7 @@ def _frozen_split_from_projection(
         )
         if recorded != recomputed:
             raise RuntimeError(
-                f"stage0 refused: corpus-v2 record {rec.get('record_id')!r} boundary "
+                f"stage0 refused: projection record {rec.get('record_id')!r} boundary "
                 f"drift — recorded split {recorded!r} != recomputed {recomputed!r}; "
                 "the frozen split is not trusted over recomputation"
             )
@@ -541,7 +519,7 @@ def _run_stage0(
 
     All CPU-bound; runs identically on the dry path (the gate evaluates on
     cached model state — the small classifier is trained in-process, no GPU).
-    On corpus-v2 input the split is not re-frozen: the projector's frozen
+    On projection input the split is not re-frozen: the projector's frozen
     boundary is consumed via :func:`_frozen_split_from_projection`.
     """
     rows = _outcome_rows(records, require_finding_text=projection is not None)
@@ -573,7 +551,7 @@ def _run_stage0(
 
     _atomic_write_json(stage_dir / "model-state.json", model.state_dict())
     # The gate report on disk is the artifact a Stage-3 run points
-    # --taskset.gate-report-path at (rl/daydream_review_v1 gate_refusal).
+    # --taskset.gate-report-path at (rl/daydream_review gate_refusal).
     # Its schema is the bare ``GateReport.to_dict()`` payload — top-level
     # ``passed``/``evidence_digest`` — so the boundary consumer reads it
     # unmodified. Split evidence lives beside it as its own artifact.
@@ -679,9 +657,9 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     """Run the configured stages in order and write the stage manifest.
 
     Args:
-        config: The pipeline configuration (corpus or corpus_v2 input, output
+        config: The pipeline configuration (projection input, output
             root, stages).
-        dry_run: When true, execute only what needs no GPU (corpus load,
+        dry_run: When true, execute only what needs no GPU (projection load,
             Stage-0 gate, validation, manifest) and mark the GPU stages
             ``skipped_dry`` — the CI path.
 
@@ -690,27 +668,21 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         ``<out_dir>/manifest.json``).
 
     Raises:
-        ValueError: On a fail-closed corpus load (C5/C8), an unknown stage,
+        ValueError: On a fail-closed projection load (C5/C8), an unknown stage,
             or a resumed run whose locked run-identity drifted (ResumeAborted).
         RuntimeError: When Stage 3 is requested without a passed Stage-0 gate,
             or the corpus carries no gold outcome rows for Stage 0.
     """
-    projection: V2Projection | None = None
-    if config.corpus_v2 is not None:
-        # Frozen corpus-v2 directory: the v2 loader re-applies the C5/C8 and
-        # split-drift gates, and the directory-level digest replaces the
-        # single-file corpus digest in the run identity.
-        v2_path = config.corpus_v2
-        corpus_path = Path(v2_path)
-        projection = load_v2_projection(v2_path, allow_copyleft=config.allow_copyleft)
-        records = list(projection.records)
-        corpus_digest = projection.digest
-    else:
-        v1_path = config.corpus
-        assert v1_path is not None  # PipelineConfig.__post_init__ enforces exactly-one
-        corpus_path = Path(v1_path)
-        records = stacks.load_dataset(corpus_path, allow_copyleft=config.allow_copyleft)
-        corpus_digest = _file_digest(corpus_path)
+    if config.projection is None:  # unreachable: PipelineConfig.__post_init__ enforces the input
+        raise ValueError("no projection input: PipelineConfig requires projection=<frozen projection dir>")
+    # Frozen projection directory: the v2 loader re-applies the C5/C8 and
+    # split-drift gates, and the directory-level digest replaces the
+    # single-file corpus digest in the run identity.
+    projection_path = config.projection
+    corpus_path = Path(projection_path)
+    projection = load_v2_projection(projection_path, allow_copyleft=config.allow_copyleft)
+    records = list(projection.records)
+    corpus_digest = projection.digest
 
     out_dir = Path(config.out_dir)
     stage_entries: dict[str, dict[str, Any]] = {}

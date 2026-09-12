@@ -31,7 +31,7 @@ from daydream.archive.hydrate_rules import (
     ADMISSION_POLICY_VERSION,
     HYDRATION_INDEX_SCHEMA_VERSION,
     SANITIZER_VERSION,
-    derive_curation_id,
+    derive_pre_identity_curation_id,
 )
 from daydream.archive.manifest import Manifest
 from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY, FIXTURE_SESSIONS
@@ -152,7 +152,7 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
     # Bronze companion content: hydration must never touch it (M10).
     files["bronze/manifest.json"] = b'{"bronze": true}\n'
     # Remote resume ledger, seeded empty: the Hub is the canonical resume state.
-    curation_id = derive_curation_id(
+    curation_id = derive_pre_identity_curation_id(
         SNAPSHOT_REVISION,
         SANITIZER_VERSION,
         HYDRATION_INDEX_SCHEMA_VERSION,

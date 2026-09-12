@@ -115,7 +115,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
 | `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis |
 | `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `build_annotation(row, evidence)` reduces completed evidence without I/O |
-| `training/calibration.py` | Fail-closed corpus-v2 validation, deterministic calibration statistics, `calibration-artifact-v1` emission (`corpus calibrate-reward`) |
+| `training/calibration.py` | Fail-closed projection validation, deterministic calibration statistics, `calibration-artifact` emission (`corpus calibrate-reward`) |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
 Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.py`, `github_app.py`,
@@ -283,7 +283,7 @@ Full contract: `docs/extensions.md`.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
   `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review_v1`.
+- **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
   4-space Python, 2-space YAML, 4-space TOML, Makefile tabs, `*.md` trailing-whitespace

@@ -1,0 +1,213 @@
+{
+  "copyleft_opt_ins": [],
+  "decisions": {
+    "sess-a": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-e808f6",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-amb-a": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-49cf57",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-amb-b": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-6ab1f6",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-00": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-759e1c",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-01": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-fa34db",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-02": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-883372",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-03": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-f160ac",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-04": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-31318c",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-05": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-4f53ae",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-06": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-9fd9e7",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-07": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-90b283",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-08": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-c750fe",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-09": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-2390b7",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-10": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-819c75",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-11": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-db9484",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-12": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-a19582",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-13": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-06a713",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-14": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-b1645a",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-15": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-92b793",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-16": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-099577",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-17": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-e322b7",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-18": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-2567cd",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-19": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-2c9843",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-20": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-99b340",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-21": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-c6887b",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    }
+  },
+  "distribution": {
+    "admitted": 25
+  },
+  "exclusion_list_digest": "ad950b01ca14a1c4d0e3c817e04b6da99adfae46159b345eeb95678c2efd87fa",
+  "policy": {
+    "digest": "f3eab72f388aa8c7b7011f2c4683b37ec8672e366962a585a7a25e3227a98eda",
+    "policy_version": "1"
+  }
+}

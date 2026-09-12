@@ -681,7 +681,7 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
         tmp_path: Path, capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch, legacy_stage: bool) -> None:
     from daydream.training.adjudication import cli as adjudication_cli
-    from daydream.training.corpus_v2.identity import record_id
+    from daydream.training.corpus_projection.identity import record_id
 
     hub = AnnotationsHub(repo_id="org/private-annotations")
     # Route the CLI's only external boundary at the revision-aware fixture so

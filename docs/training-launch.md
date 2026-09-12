@@ -2,66 +2,67 @@
 
 This is the launch record for the four-stage training pipeline (reward gate →
 dataset SFT → deterministic RFT → online GRPO). Every number below comes from
-an artifact produced by a validation run (the stage manifest of the 50-record
-fixture run) or from a measured environment — nothing is a placeholder. Where
-a value is a plan rather than a measurement, the source is named as such.
+an artifact produced by a fixture-scale validation run (the stage manifest of
+the 50-record projection-fixture run) or from a measured environment — nothing
+is a placeholder. No production training run has completed; where a value is a
+plan rather than a measurement, the source is named as such.
 
 ## Corpus
 
-The validated run trains on the committed 50-record corpus fixture at
-`tests/fixtures/training/records-50/records.jsonl` (35 accepted / 15 rejected,
-0.7 accepted ratio, `pi` backend), produced by the Task-12 fixture harness. Its
-identity digests, as recorded in the stage manifest of the validation run:
+The training pipeline's input is a frozen-corpus projection directory produced
+by `daydream corpus build` (a deterministic per-finding projection over a
+curated bundle plus its pinned annotation bundle). The validated run trained on
+the committed 50-record projection fixture produced by
+`tests/fixtures/training/build_projection_50.py` (both gold classes present on
+the frozen holdout side, silver `process-trace` and `task-only` records
+included). Its identity digests, as recorded in the stage manifest of that
+fixture-scale validation run:
 
 | Field | Value |
 |---|---|
-| `run_identity.corpus_digest` | `80cfdda8293d5854216ed1845c6228e6d8ada013152a54d924309813704854ce` |
-| `run_identity.split_digest` | `fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` |
-| `run_identity.reward_version` | `2026.05.28-2` |
+| `run_identity.corpus_digest` | `f8f254b73fee23de638619b33d84467a8912bd7b9d1f597ef8986d1625e20132` |
+| `run_identity.split_digest` | `903de487711c6be182d582cee898570c5635c75e2c6c3dbcdf622af1236b33ee` |
+| `run_identity.reward_version` | `2026.09.04-1` |
 
-Corpus-side loading goes through `daydream.training.stacks.load_dataset`,
+Corpus-side loading goes through `daydream.training.stacks.load_v2_projection`,
 which fail-closes on the C5 exclusion list and C8 copyleft opt-in before any
-record is returned.
+record is returned, and re-verifies the projection's `_SUCCESS` marker,
+split-digest lineage, and split drift on every load.
 
-The planned real-archive runs use the same loader over `run_build_corpus`
-exports of the private PR archive (`--include-all-labels`, both label classes
-exported). The committed fixture is a CI-scale stand-in — not byte-identical to
-an export: it carries the Stage-0 gold outcome fields
-(`comment_id`/`text`/`label`) plus the M16 lineage field set, and the
-coordinator normalizes both the fixture shape and the exporter's
-(`session_id`/`review_output`/`outcome_label`) shape before Stage 0. Stage-2's
-RFT task identity (`base_sha`/`head_sha`/`diff`) is rebuilt from the frozen
-record; since the schema-v1 export carries no raw `diff` body, the coordinator
-materializes it from the record's `fix_diff_ref` pointer to the archived
-`diff.patch` (the reviewed-INPUT diff), so the same exporter shape is runnable
-through Stage 2 — no bespoke `diff` column is required.
+The planned real-corpus runs use the same loader over a frozen projection built
+from the private PR archive's curated bundle. The committed fixture is a
+CI-scale stand-in for that projection. Each projected record carries the full
+RFT task identity (`base_sha`/`head_sha`/`diff`) — the projector embeds the raw
+diff body on every record from the bundle's `batches/<session>/diff.patch`, so
+Stage 2 replays tasks from the frozen record itself with no archive
+materialization.
 
 ### Splits
 
-Stage 0 freezes the split before training (M16): 40 train / 10 held-out rows
-(`held_out_fraction` 0.2, seed 0), frozen to
-`labels.jsonl.gate-split.json` with digest
-`fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` —
-identical to `run_identity.split_digest`, which is how resume validation
-(`validate_resume`) detects a stale or drifted split (AC4).
+Stage 0 freezes the split before training: splits are assigned deterministically
+at projection time under the lineage's pinned salt and holdout/validation rates
+(the fixture uses `holdout` 0.2 / `validation` 0.2, salt
+`issue-1081-fixture-salt`), written to the per-split JSONL manifests and pinned
+in `lineage.json` with digests. The loader recomputes each record's split from
+its record id and refuses any drift, so the Stage-0 gate consumes the frozen
+split as-is — it is never re-frozen, and resume validation
+(`validate_resume`) detects a stale or drifted split.
 
-## Corpus v2: real-corpus training from a frozen projection
+## Frozen-corpus projection: real-corpus training
 
-For real-corpus training, the input is a frozen corpus-v2 projection directory
-produced by the projector, not the v1 JSONL export. The real-corpus command
-sequence is:
+For real-corpus training, the input is a frozen-corpus projection directory
+produced by the projector. The real-corpus command sequence is:
 
 ```bash
-daydream corpus build-v2 --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus-v2.jsonl
+daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
 ```
 
 ```bash
-daydream train --corpus-v2 PROJECTION_DIR --out OUT_DIR --dry-run
+daydream train --projection PROJECTION_DIR --out OUT_DIR --dry-run
 ```
 
-(Drop `--dry-run` for the real run. `--corpus-v2` is mutually exclusive with
-`--corpus` on the train parser; the v1 `--corpus` path below remains valid and
-unchanged.)
+(Drop `--dry-run` for the real run. `--projection` is the pipeline's only
+training input: the legacy `--corpus` path is gone.)
 
 The projection directory is the immutable input contract for the run:
 
@@ -71,12 +72,11 @@ The projection directory is the immutable input contract for the run:
   provenance digests the loader re-checks.
 - **Split digests** — per-split JSONL sha256s plus a deterministic
   directory-level digest over the sorted `(relpath, sha256(file_bytes))`
-  pairs; the directory digest replaces the v1 single-file corpus digest in
-  `run_identity.corpus_digest`.
+  pairs; the directory digest is the frozen `run_identity.corpus_digest`.
 - **`base_sha` / `head_sha`** — the per-record task-identity git SHAs, used by
   Stage-2 RFT to rebuild replay tasks; full-SHA values are validated before
   any task rebuild.
-- **C5/C8 re-application** — the v2 loader re-applies the C5 exclusion list
+- **C5/C8 re-application** — the projection loader re-applies the C5 exclusion list
   and the C8 copyleft opt-in gate fail-closed on every load; the projector's
   decision is never trusted on its own.
 - **Fail-closed drift** — the split recorded on each record's `lineage.split`
@@ -89,18 +89,6 @@ Because the directory-level digest is a pure function of the directory bytes,
 the same projection always yields the same run identity — a re-run over a
 modified directory aborts at the resume guard instead of training on drifted
 data.
-
-## Legacy traces
-
-Legacy rows — runs admitted under the reply-count / merge-presence gold policy
-before the reply-classifier policy version existed — are tagged explicitly at
-load time: `stacks.load_dataset` sets `legacy_policy=True` on every record
-whose `labeler_policy_version` is absent or null (M23). The tag is metadata,
-never a drop; the loader's only refusals are the C5/C8 fail-closed gates.
-Current-policy SFT prefers native-profile traces: selection filters on
-`legacy_policy=False` first and falls back to legacy rows only when the
-native-profile pool is empty (no accepted rows at all). No skill-era contract
-appears in the corpus or this pipeline.
 
 ## Model
 
@@ -129,7 +117,7 @@ measurably lose thread-level localization on the held-out split.
 The offline stages (Stage-0 gate, all dry-path validation, CI) ran on the
 development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU** — the dry path
 imports no pynvml and never initializes CUDA (asserted by
-`tests/training/test_coordinator_fixture_ci.py::test_ci_dry_path_has_no_gpu_imports`).
+`tests/training/test_stage1_sft_config.py::test_dry_run_passes_without_gpu`).
 
 GPU stages (Stage-1 dataset SFT, Stage-2 deterministic RFT replay, Stage-3
 online GRPO) are planned for a single-GPU 80 GB node (H100 or A100 80 GB);
@@ -181,3 +169,5 @@ From the stage manifest's `stages.stage0.gate`:
 
 The 0.1 / 0.5 thresholds are documented config values (`GateConfig`); their
 final numeric pinning is the calibration run's result, not this document's.
+All numbers in this document come from fixture-scale validation runs; no
+production training run has completed.

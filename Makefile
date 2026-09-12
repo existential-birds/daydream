@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report
+.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
 
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
@@ -17,7 +17,7 @@ typecheck:
 # package symbols alive. Exit 0 == clean.
 deadcode:
 	uv run vulture --config pyproject.toml daydream tests
-	cd rl/daydream_review_v1 && uv run vulture --config pyproject.toml daydream_review_v1 tests
+	cd rl/daydream_review && uv run vulture --config pyproject.toml daydream_review tests
 
 # Coverage flags live here (not in global addopts) so targeted runs like
 # `uv run pytest tests/foo.py` stay plain and never trip the 87% floor (#336).
@@ -64,11 +64,11 @@ rl-check: export GIT_COMMITTER_NAME = daydream CI
 rl-check: export GIT_COMMITTER_EMAIL = ci@daydream.invalid
 
 rl-check:
-	cd rl/daydream_review_v1 && uv lock --check
-	cd rl/daydream_review_v1 && uv sync
-	cd rl/daydream_review_v1 && uv run ruff check .
-	cd rl/daydream_review_v1 && uv run mypy daydream_review_v1 tests
-	cd rl/daydream_review_v1 && uv run pytest
+	cd rl/daydream_review && uv lock --check
+	cd rl/daydream_review && uv sync
+	cd rl/daydream_review && uv run ruff check .
+	cd rl/daydream_review && uv run mypy daydream_review tests
+	cd rl/daydream_review && uv run pytest
 
 # Fail if uv.lock has drifted from pyproject.toml (e.g. a release bumped the
 # version but forgot `uv lock`). Read-only: `--check` never heals the lock, and
@@ -85,8 +85,15 @@ lockcheck:
 # — present on a developer machine, absent on that runner, where the test's own
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you
-# change rl/daydream_review_v1; its vulture scan still runs here via `deadcode`.
-check: lockcheck install lint deadcode typecheck test actionlint coverage-report
+# change rl/daydream_review; its vulture scan still runs here via `deadcode`.
+check: lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
+
+# Naming grep-gate (#1093): fails when a project-owned versioned identifier
+# reappears anywhere in tracked files. External tool-protocol version strings
+# are allowlisted inline in the script. Runs as part of `make check` so the
+# local and CI gates both enforce the neutral-naming decision.
+check-naming:
+	bash scripts/check-naming.sh
 
 # Install git hooks
 hooks:

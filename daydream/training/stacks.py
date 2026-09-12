@@ -1,29 +1,40 @@
-"""Corpus-side dataset loaders for the training pipeline (M17, M22).
+"""Frozen-corpus projection loaders for the training pipeline.
 
-Thin loading layer over the exported JSONL corpus records. The C5 exclusion
-gate and the C8 copyleft opt-in gate run **before any records are returned**:
-the whole file is scanned and every offending slug is named on the first
-violation class encountered. The loader never skip-and-warns — a corpus that
-touches an excluded or unopted-copyleft repo fails closed.
+:func:`load_v2_projection` loads a ``build_frozen_corpus`` projection
+directory into a :class:`V2Projection` and refuses anything that is not a
+complete, gate-clean projection:
+
+- per-split record loading over the frozen ``train``/``validation``/
+  ``holdout`` manifests (:func:`load_dataset_v2`), refusing any record not
+  stamped ``schema_version == "2"``. Every record must also carry its repo
+  identity and immutable license decision under ``lineage`` (structurally
+  required — an absent field is itself the failure, never a bypass);
+- the ``_SUCCESS`` completeness marker (written last by the projector,
+  mirroring the bundle's own gate) is required: a partial projection left
+  by a mid-write failure is refused, never consumed;
+- the C5/C8 license gates re-run fail-closed over every loaded record: an
+  excluded repo is refused unconditionally, and a copyleft-class record is
+  refused unless its exact slug was passed via ``allow_copyleft``;
+- per-split record access derived from each record's ``lineage.split``;
+- the projection's ``lineage.json`` (salt, rates, provenance pins);
+- per-file sha256 digests and a deterministic directory-level digest over
+  the sorted ``(relpath, sha256(file_bytes))`` pairs — a pure function of
+  the directory bytes, so the same projection always yields the same digest;
+- a **split-drift gate**: the split is recomputed from every record's id via
+  :func:`daydream.training.corpus_projection.splits.assign_split` under the lineage's
+  pinned salt/rates, and any disagreement with the record's recorded
+  ``lineage.split`` refuses the whole load (``ValueError`` naming the
+  offending record id) — never a silent accept.
 
 The lists themselves are owned exclusively by :mod:`daydream.training.exclusion`;
 this module re-implements no parsing.
-
-Corpus v2 adds :func:`load_dataset_v2`, an additive sibling that loads the
-frozen per-split manifests of a ``run_build_corpus_v2`` projection directory
-and refuses any record not stamped ``schema_version == "2"``. Every v2
-record must also carry its repo identity and immutable license decision
-under ``lineage`` (structurally required — an absent field is itself the
-failure, never a bypass), and the C5/C8 gates are re-run fail-closed over
-every loaded record: an excluded repo is refused unconditionally, and a
-copyleft-class record is refused unless its exact slug was passed via
-``allow_copyleft``. The v1 surface (``load_dataset``, its ``legacy_policy``
-stamping, and its error messages) is untouched.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -31,90 +42,148 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_C5_EXCLUDED_REPO,
     REASON_CODE_C8_COPYLEFT_UNOPTED,
 )
+from daydream.training.corpus_projection.splits import Split, assign_split
 from daydream.training.exclusion import (
     is_copyleft,
     load_copyleft_list,
     load_exclusion_list,
 )
 
-__all__ = ["load_dataset", "load_dataset_v2"]
+__all__ = [
+    "V2Projection",
+    "load_dataset_v2",
+    "load_v2_projection",
+    "recompute_split_from_record_id",
+]
+
+_SPLIT_FILENAMES = {
+    "train": "train.jsonl",
+    "validation": "validation.jsonl",
+    "holdout": "holdout.jsonl",
+}
 
 
-def load_dataset(
-    path: str | Path,
-    *,
-    allow_copyleft: frozenset[str] | set[str] = frozenset(),
-) -> list[dict[str, object]]:
-    """Load a JSONL corpus file, enforcing C5 and C8 fail-closed.
+@dataclass(frozen=True)
+class V2Projection:
+    """A loaded projection directory.
 
-    Args:
-        path: Path to the JSONL corpus (one JSON object per line).
-        allow_copyleft: ``owner/repo`` slugs the caller has explicitly opted
-            in. Empty by default, so copyleft repos are always refused unless
-            explicitly admitted.
-
-    Returns:
-        The full list of corpus record dicts. Records without a ``pr_number``
-        (pre-PR runs) load identically to PR records (M22).
-
-    Raises:
-        ValueError: When any record's repo is on the exclusion list (C5) or
-            on the copyleft list without being in ``allow_copyleft`` (C8).
-            All offending slugs are named; no records are returned.
+    Attributes:
+        records: All v2 records, in split-file order (train, validation,
+            holdout), exactly as :func:`load_dataset_v2` returns them.
+        by_split: Records grouped by their recorded ``lineage.split``; all
+            three keys are always present.
+        lineage: The parsed ``lineage.json`` dict.
+        split_digests: sha256 of each split JSONL file's bytes, keyed by
+            filename.
+        digest: Deterministic directory-level digest: sha256 over the sorted
+            ``(relpath, sha256(file_bytes))`` pairs of every file in the
+            projection directory. A pure function of the directory bytes.
     """
-    records: list[dict[str, object]] = []
-    with Path(path).open("r", encoding="utf-8") as fh:
-        for line in fh:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            record = json.loads(stripped)
-            # M23 legacy tagging: a row whose labeler policy version is absent
-            # (or null) was admitted under the legacy reply-count/merge-presence
-            # gold policy. Tag it explicitly — current-policy SFT prefers
-            # native-profile traces, and this flag is how downstream selection
-            # tells the two classes apart. Tagging is metadata, never a drop:
-            # the loader's only refusals are the C5/C8 fail-closed gates above.
-            policy_version = record.get("labeler_policy_version")
-            record["legacy_policy"] = not (isinstance(policy_version, str) and policy_version)
-            records.append(record)
 
-    _enforce_license_gates(records, path, allow_copyleft)
-    return records
+    records: list[dict[str, object]]
+    by_split: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    lineage: dict[str, object] = field(default_factory=dict)
+    split_digests: dict[str, str] = field(default_factory=dict)
+    digest: str = ""
 
 
-def _enforce_license_gates(
-    records: list[dict[str, object]],
-    path: str | Path,
-    allow_copyleft: frozenset[str] | set[str],
-) -> None:
-    """Shared C5/C8 fail-closed gates (see module docstring). The lists are
-    owned by :mod:`daydream.training.exclusion`; this module never parses them."""
-    excluded = {slug.casefold() for slug in load_exclusion_list()}
-    excluded_offenders = sorted(
-        {slug for rec in records if (slug := str(rec.get("repo_slug", "")).casefold()) in excluded}
+def recompute_split_from_record_id(
+    record_id: str,
+    *,
+    salt: str,
+    holdout_rate: float,
+    val_rate: float,
+) -> Split:
+    """Recompute the frozen content-derived split for one record id.
+
+    Thin named wrapper over :func:`assign_split` so the drift gate and its
+    tests share one call site for the recompute side of the comparison.
+    """
+    return assign_split(
+        record_id, salt=salt, holdout_rate=holdout_rate, val_rate=val_rate
     )
-    if excluded_offenders:
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _directory_digest(projection_dir: Path) -> str:
+    """sha256 over sorted ``(relpath, sha256(file_bytes))`` pairs — the same
+    directory always yields the same digest."""
+    pairs: list[str] = []
+    for path in sorted(projection_dir.rglob("*")):
+        if path.is_file():
+            rel = path.relative_to(projection_dir).as_posix()
+            pairs.append(f"{rel}\x1f{_sha256_file(path)}")
+    return hashlib.sha256("\x1e".join(pairs).encode("utf-8")).hexdigest()
+
+
+def _load_lineage(projection_dir: Path) -> dict[str, object]:
+    lineage_path = projection_dir / "lineage.json"
+    if not lineage_path.is_file():
         raise ValueError(
-            f"C5 violation: excluded repo(s) in corpus {path}: {', '.join(excluded_offenders)}. "
-            "These repositories are the held-out benchmark and must never appear in a "
-            "training dataset, regardless of any flag."
+            f"projection {projection_dir}: missing lineage.json — "
+            "refusing a projection without its pinned split parameters"
         )
-
-    copyleft = {slug.casefold() for slug in load_copyleft_list()}
-    allowed = {slug.casefold() for slug in allow_copyleft}
-    copyleft_offenders = sorted(
-        {
-            slug
-            for rec in records
-            if (slug := str(rec.get("repo_slug", "")).casefold()) in copyleft
-            and slug not in allowed
-        }
-    )
-    if copyleft_offenders:
+    try:
+        lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
         raise ValueError(
-            f"C8 violation: copyleft repo(s) in corpus {path} without explicit opt-in: "
-            f"{', '.join(copyleft_offenders)}. Pass these slugs via allow_copyleft to admit them."
+            f"projection {projection_dir}: lineage.json is not valid "
+            f"JSON: {exc}"
+        ) from exc
+    if not isinstance(lineage, dict):
+        raise ValueError(
+            f"projection {projection_dir}: lineage.json is not a JSON object"
+        )
+    for key in ("salt", "holdout_rate", "val_rate"):
+        if lineage.get(key) is None:
+            raise ValueError(
+                f"projection {projection_dir}: lineage.json missing "
+                f"{key!r} — refusing to recompute splits without the pinned "
+                "assignment parameters"
+            )
+    return lineage
+
+
+def _enforce_split_consistency(
+    records: list[dict[str, object]],
+    lineage: dict[str, object],
+    projection_dir: Path,
+) -> None:
+    """Split-drift gate: recompute each record's split from its record id and
+    refuse the load when it disagrees with the recorded ``lineage.split``."""
+    salt = str(lineage["salt"])
+    holdout_rate_obj = lineage["holdout_rate"]
+    val_rate_obj = lineage["val_rate"]
+    if not isinstance(holdout_rate_obj, (int, float)) or not isinstance(
+        val_rate_obj, (int, float)
+    ):
+        raise ValueError(
+            f"projection {projection_dir}: lineage.json holdout_rate/"
+            "val_rate must be numeric"
+        )
+    holdout_rate = float(holdout_rate_obj)
+    val_rate = float(val_rate_obj)
+    offenders: list[str] = []
+    for record in records:
+        record_id = str(record.get("record_id", ""))
+        recorded = None
+        lineage_obj = record.get("lineage")
+        if isinstance(lineage_obj, dict):
+            recorded = lineage_obj.get("split")
+        expected = recompute_split_from_record_id(
+            record_id, salt=salt, holdout_rate=holdout_rate, val_rate=val_rate
+        )
+        if recorded != expected:
+            offenders.append(f"{record_id} (recorded {recorded!r}, recomputed {expected!r})")
+    if offenders:
+        raise ValueError(
+            f"projection {projection_dir}: split drift detected for "
+            f"{len(offenders)} record(s): {', '.join(offenders)}. The recorded "
+            "lineage.split disagrees with the split recomputed from the record "
+            "id under the pinned salt/rates — refusing a drifted projection."
         )
 
 
@@ -123,8 +192,8 @@ def load_dataset_v2(
     *,
     allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Load a projected corpus v2 directory (the frozen train/validation/
-    holdout JSONL manifests from ``run_build_corpus_v2``), enforcing repo
+    """Load a projected projection directory (the frozen train/validation/
+    holdout JSONL manifests from ``build_frozen_corpus``), enforcing repo
     identity, the license-decision stamp, and C5/C8 fail-closed.
 
     ``holdout.jsonl``. A ``_SUCCESS`` completeness marker (written last by
@@ -168,7 +237,7 @@ def load_dataset_v2(
     projection_dir = Path(path)
     if not (projection_dir / "_SUCCESS").is_file():
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: missing _SUCCESS marker — "
+            f"projection {projection_dir}: missing _SUCCESS marker — "
             "refusing a partial or incomplete projection"
         )
     records: list[dict[str, object]] = []
@@ -182,7 +251,7 @@ def load_dataset_v2(
                 schema_version = record.get("schema_version")
                 if schema_version != "2":
                     raise ValueError(
-                        f"corpus v2 record {record.get('record_id')!r} in "
+                        f"projection record {record.get('record_id')!r} in "
                         f"{projection_dir / filename}: schema_version {schema_version!r} "
                         "!= '2' — refusing a record not projected by the v2 schema"
                     )
@@ -218,7 +287,7 @@ def _enforce_v2_identity_and_gates(
         repo_slug = lineage.get("repo_slug") if lineage else None
         if not isinstance(repo_slug, str) or not repo_slug:
             raise ValueError(
-                f"corpus v2 record {record_id!r} in {path}: lineage.repo_slug "
+                f"projection record {record_id!r} in {path}: lineage.repo_slug "
                 "missing or empty — refusing a record without repo identity"
             )
         decision_obj = lineage.get("license_decision") if lineage else None
@@ -231,7 +300,7 @@ def _enforce_v2_identity_and_gates(
             or not decision_slug
         ):
             raise ValueError(
-                f"corpus v2 record {record_id!r} in {path}: lineage.license_decision "
+                f"projection record {record_id!r} in {path}: lineage.license_decision "
                 "missing, malformed, or not a resolved admitted/rejected decision — "
                 "refusing a record without an immutable license decision"
             )
@@ -247,7 +316,7 @@ def _enforce_v2_identity_and_gates(
     if excluded_offenders:
         raise ValueError(
             f"C5 violation ({REASON_CODE_C5_EXCLUDED_REPO}): excluded repo(s) in "
-            f"corpus v2 projection {path}: {', '.join(excluded_offenders)}. These "
+            f"projection {path}: {', '.join(excluded_offenders)}. These "
             "repositories are the held-out benchmark and must never appear in a "
             "training dataset, regardless of any flag."
         )
@@ -273,7 +342,72 @@ def _enforce_v2_identity_and_gates(
     if copyleft_offenders:
         raise ValueError(
             f"C8 violation ({REASON_CODE_C8_COPYLEFT_UNOPTED}): copyleft repo(s) "
-            f"in corpus v2 projection {path} without explicit opt-in: "
+            f"in projection {path} without explicit opt-in: "
             f"{', '.join(copyleft_offenders)}. Pass these slugs via "
             "allow_copyleft to admit them."
         )
+
+
+def load_v2_projection(
+    path: str | Path,
+    *,
+    allow_copyleft: frozenset[str] | set[str] = frozenset(),
+) -> V2Projection:
+    """Load a projection directory into a :class:`V2Projection`.
+
+    Reuses :func:`load_dataset_v2` for the existing
+    fail-closed gates (missing ``_SUCCESS``, non-``"2"`` ``schema_version``,
+    repo identity, license decisions, C5/C8), then parses ``lineage.json``,
+    recomputes every record's split from its id, and refuses any drift.
+
+    Args:
+        path: The projection output directory written by
+            ``build_frozen_corpus``.
+        allow_copyleft: Passed through to the underlying v2 loader.
+
+    Returns:
+        The :class:`V2Projection` for the directory.
+
+    Raises:
+        ValueError: On any existing-gate failure, on a missing split file
+            or a missing/malformed ``lineage.json``, or on split drift (the
+            offending record ids and both splits are named).
+    """
+    projection_dir = Path(path)
+    try:
+        records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"projection {projection_dir}: missing split file "
+            f"{exc.filename!r} — refusing an incomplete projection"
+        ) from exc
+    lineage = _load_lineage(projection_dir)
+    _enforce_split_consistency(records, lineage, projection_dir)
+
+    by_split: dict[str, list[dict[str, object]]] = {name: [] for name in _SPLIT_FILENAMES}
+    for record in records:
+        lineage_obj = record.get("lineage")
+        split = lineage_obj.get("split") if isinstance(lineage_obj, dict) else None
+        if split not in by_split:
+            raise ValueError(
+                f"projection {projection_dir}: record "
+                f"{record.get('record_id')!r} carries unknown split {split!r}"
+            )
+        by_split[cast(str, split)].append(record)
+
+    split_digests: dict[str, str] = {}
+    for filename in _SPLIT_FILENAMES.values():
+        split_path = projection_dir / filename
+        if not split_path.is_file():
+            raise ValueError(
+                f"projection {projection_dir}: missing split file "
+                f"{filename!r} — refusing an incomplete projection"
+            )
+        split_digests[filename] = _sha256_file(split_path)
+    return V2Projection(
+        records=records,
+        by_split=by_split,
+        lineage=lineage,
+        split_digests=split_digests,
+        digest=_directory_digest(projection_dir),
+    )

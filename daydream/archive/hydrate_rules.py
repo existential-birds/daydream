@@ -1,7 +1,7 @@
 """Version constants and stable reason-code registry for hub hydration (#982).
 
 Expanded by later hydrate tasks; Task 2 lands only the constants the frozen
-curation-manifest-v1 schema (the #983 contract) references.
+curation-manifest schema (the #983 contract) references.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 REASON_CODE_PATH_TRAVERSAL = "path_traversal"
 
-# License/repo-identity reason codes (issue #1080 corpus-v2 gates; extended
+# License/repo-identity reason codes (issue #1080 projection gates; extended
 # by issue #1094 with ``repo_commit_unresolved``). Five stable strings (KD5);
 REASON_CODE_C5_EXCLUDED_REPO = "c5_excluded_repo"
 REASON_CODE_C8_COPYLEFT_UNOPTED = "c8_copyleft_unopted"
@@ -55,7 +55,7 @@ REASON_CODE_IMPORT_UNREDACTABLE_METADATA = "import_unredactable_metadata"
 CURATION_ID_RE = re.compile(r"cur-[0-9a-f]{16}")
 
 
-def derive_curation_id(
+def derive_pre_identity_curation_id(
     source_commit: str,
     sanitizer_version: str,
     index_schema_version: str,
@@ -71,7 +71,7 @@ def derive_curation_id(
     return "cur-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def derive_curation_id_v2(
+def derive_curation_id(
     source_commit: str,
     policy_digest: str,
     policy_version: str,
@@ -82,8 +82,8 @@ def derive_curation_id_v2(
 ) -> str:
     """Curation identity v2 (issue #1094): binds the license-policy inputs.
 
-    Same canonical-string hashing discipline as ``derive_curation_id`` (v1,
-    kept untouched for historical prefixes), extended with the six bound
+    Same canonical-string hashing discipline as ``derive_pre_identity_curation_id`` (the
+    historical derivation, kept untouched for historical prefixes), extended with the six bound
     fields: policy digest/version, exact-slug copyleft opt-ins (sorted
     casefolded so set iteration order never leaks into identity), exclusions
     digest, resolved per-repo decisions digest, and license distribution

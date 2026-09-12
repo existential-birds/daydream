@@ -257,7 +257,7 @@ def member_alias(finding: dict[str, Any]) -> str:
     line = finding.get("line")
     canonical = json.dumps(
         {
-            "kind": "daydream-improve-member-v1",
+            "kind": "daydream-improve-member",
             "path": _finding_path(finding),
             "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
             "category": str(finding.get("category") or ""),
@@ -266,7 +266,7 @@ def member_alias(finding: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"member-v1:{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return f"member:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _reuse_target_key(finding: dict[str, Any]) -> str:

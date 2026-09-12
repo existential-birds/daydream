@@ -1,6 +1,6 @@
 """Task-1 tests: fail-closed validation matrix (M2) for ``calibrate-reward``.
 
-``fixture_corpus`` builds a minimal synthetic corpus-v2 bundle in ``tmp_path``;
+``fixture_corpus`` builds a minimal synthetic projected-corpus bundle in ``tmp_path``;
 corruption variants are injected through ``CalibrationConfig.corruptions`` so
 every gate is exercised against otherwise-identical inputs.
 """
@@ -86,7 +86,7 @@ def _build_fixture(tmp_path: Path) -> Path:
     (corpus_dir / "lineage.json").write_text(
         json.dumps(
             {
-                "schema_version": "corpus-v2",
+                "schema_version": "lineage",
                 "salt": SALT,
                 "holdout_rate": 0.1,
                 "val_rate": 0.1,
@@ -179,7 +179,7 @@ def test_clean_corpus_passes_gates(tmp_path: Path, fixture_corpus: Path) -> None
     assert result["record_count"] == 4
     artifact = tmp_path / "out" / "calibration.json"
     assert artifact.exists()
-    assert json.loads(artifact.read_text())["schema_version"] == "calibration-artifact-v1"
+    assert json.loads(artifact.read_text())["schema_version"] == "calibration-artifact"
 
 
 def test_statistics_are_exact_and_deterministic(fixture_corpus: Path, tmp_path: Path) -> None:
@@ -320,7 +320,7 @@ def test_stage0_missing_score_for_corpus_record_is_refused(
 def test_artifact_schema_and_byte_replay(fixture_corpus: Path, tmp_path: Path) -> None:
     run_calibration(_config(fixture_corpus, tmp_path, seed=7))
     art = json.loads((tmp_path / "out" / "calibration.json").read_text())
-    assert art["schema_version"] == "calibration-artifact-v1"
+    assert art["schema_version"] == "calibration-artifact"
     assert art["tool_version"] and art["resampling_seed"] == 7
     assert art["input_digests"]["corpus.jsonl"].startswith("sha256:")
     assert art["corpus_digest"] and art["split_digest"]  # S1
@@ -372,7 +372,7 @@ def test_committed_fixture_calibrates_clean(committed_fixture: Path, tmp_path: P
     assert result["record_count"] == 12
     assert result["metrics"]["class_balance"] == {"accepted": 6, "rejected": 6}
     artifact = json.loads((tmp_path / "out" / "calibration.json").read_text())
-    assert artifact["schema_version"] == "calibration-artifact-v1"
+    assert artifact["schema_version"] == "calibration-artifact"
 
 
 def test_committed_fixture_contains_both_classes_and_c5_repo(committed_fixture: Path) -> None:

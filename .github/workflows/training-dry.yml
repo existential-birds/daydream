@@ -1,8 +1,9 @@
 name: Training dry path
 
 # GPU-free validation of the training pipeline (M20, M24): the coordinator's
-# dry run over the committed 50-record fixture, plus the standalone RL checks
-# and the root suite. No pynvml, no CUDA — every step is CPU-only.
+# dry run over the committed 50-record frozen-projection fixture, plus the
+# standalone RL checks and the root suite. No pynvml, no CUDA — every step is
+# CPU-only.
 
 permissions:
   contents: read
@@ -39,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Training coordinator dry run over the 50-record fixture
+      - name: Training coordinator dry run over the committed projection fixture
         run: |
           uv run python - <<'PY'
           import json
@@ -48,10 +49,13 @@ jobs:
 
           from daydream.training.coordinator import PipelineConfig, run_pipeline
 
-          fixture = Path("tests/fixtures/training/records-50/records.jsonl")
           with tempfile.TemporaryDirectory() as out:
               manifest = run_pipeline(
-                  PipelineConfig(corpus=fixture, out_dir=Path(out)), dry_run=True
+                  PipelineConfig(
+                      projection=Path("tests/fixtures/training/projection-50"),
+                      out_dir=Path(out),
+                  ),
+                  dry_run=True,
               )
               assert manifest["stages"]["stage0"]["status"] == "complete"
               assert manifest["stages"]["stage0"]["gate"]["passed"] is True

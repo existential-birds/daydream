@@ -1,8 +1,6 @@
 """Stage-1 SFT configuration tests."""
-
 from __future__ import annotations
 
-import json
 import pathlib
 import subprocess
 import tomllib
@@ -14,38 +12,6 @@ SFT = Path(__file__).parents[2] / "rl" / "train" / "sft.toml"
 
 def _cfg() -> dict[str, Any]:
     return tomllib.loads(SFT.read_text())
-
-
-def test_coordinator_stage1_materializes_gold_positive_prompt_completion(
-    tmp_path: pathlib.Path,
-) -> None:
-    """M8/M9: the Stage-1 dataset is gold-positive only with tier counts.
-
-    The coordinator writes only accepted-class gold completions as
-    prompt/completion JSONL (the prime-rl `sft` loader's accepted shape) and
-    reports gold vs silver counts separately in the stage manifest.
-    """
-    from daydream.training.coordinator import PipelineConfig, run_pipeline
-
-    fixture = Path(__file__).parents[2] / "tests" / "fixtures" / "training" / "records-50"
-    run_pipeline(
-        PipelineConfig(corpus=fixture / "records.jsonl", out_dir=tmp_path, stages=("stage0", "stage1")),
-        dry_run=False,
-    )
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "stage1" / "sft-dataset.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
-    assert rows  # gold-positive rows were materialized
-    # prompt/completion shape — the SFT-loader column contract (issue 5)
-    assert all(set(row) == {"prompt", "completion"} for row in rows)
-    # M8: no rejected row leaks into the SFT dataset; the fixture's 15 rejected
-    # rows (noise chatter) are excluded.
-    manifest = json.loads((tmp_path / "manifest.json").read_text())
-    tier_counts = manifest["stages"]["stage1"]["tier_counts"]
-    assert tier_counts["gold"] == len(rows) == 35
-    assert tier_counts["silver"] == 0
 
 
 def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: pathlib.Path) -> None:

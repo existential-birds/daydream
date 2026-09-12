@@ -1,7 +1,7 @@
 """Single source of truth for adjudication disposition classification (issue #1078).
 
 Re-export shim: the source of truth now lives at ``daydream.training.dispositions``
-so the corpus v2 tier classifier can consume it without triggering this package's
+so the projection tier classifier can consume it without triggering this package's
 eager import chain. Kept for backward-compatible imports.
 """
 

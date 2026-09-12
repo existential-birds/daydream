@@ -12,7 +12,7 @@ import pytest
 
 from daydream import git_ops, runner
 from daydream.artifact_visibility import private_root_locations
-from daydream.backends import AUDIT_ROOT_ISOLATION_V1, BackendExecutionInput
+from daydream.backends import AUDIT_ROOT_ISOLATION, BackendExecutionInput
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
 from tests.conftest import ExtDir
@@ -100,7 +100,7 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
             assert audit_root is not None and audit_root != repo
             backend: Any = ImproveStubBackend(repo, n_findings=0)
             backend.audit_root = audit_root
-            backend.audit_root_isolation = AUDIT_ROOT_ISOLATION_V1
+            backend.audit_root_isolation = AUDIT_ROOT_ISOLATION
             backend.audit_outward_symlinks = audit_outward_symlinks
         else:
             assert audit_root is None

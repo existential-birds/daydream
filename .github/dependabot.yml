@@ -2,7 +2,7 @@
 #
 # Three bounded ecosystems, each opening at most 5 pull requests at a time:
 #   - uv @ "/"                  — root workspace dependencies (pyproject.toml / uv.lock)
-#   - uv @ "/rl/daydream_review_v1" — the standalone RL package's own dependencies
+#   - uv @ "/rl/daydream_review" — the standalone RL package's own dependencies
 #   - npm @ "/.github/workflows" — the tracking package.json in the workflows folder
 #     (that is where the manifest lives — do not "fix" this directory to "/");
 #     it tracks the single @openai/codex dependency used by CI.
@@ -43,7 +43,7 @@ updates:
 
   # Standalone RL package uv dependencies.
   - package-ecosystem: uv
-    directory: /rl/daydream_review_v1
+    directory: /rl/daydream_review
     schedule:
       interval: weekly
       day: monday

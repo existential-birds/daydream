@@ -1835,7 +1835,7 @@ async def test_parser_coverage_is_bounded_redacted_and_precedes_result(
         "coverage": "incomplete",
         "reason": "uncorrelated_public_error_item",
         "occurrences": 1,
-        "contract": "codex-cli-0.153.4-json-code-mode-v1",
+        "contract": "codex-cli-0.153.4-json-code-mode",
     }
 
     assert diagnostics[1].metadata["unknown_event_types"]["total"] == 1

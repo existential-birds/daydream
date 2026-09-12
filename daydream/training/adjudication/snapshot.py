@@ -14,8 +14,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from daydream.training._immutable_json import thaw_json
-from daydream.training.corpus_v2.identity import record_id
-from daydream.training.corpus_v2.provenance import extract_provenance
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     ANNOTATION_SNAPSHOT_SCHEMA_VERSION,
@@ -72,7 +72,7 @@ def build_canonical_record(
 ) -> dict[str, Any]:
     """Build the canonical per-finding annotation record for one resolution.
 
-    ``record_id`` is always recomputed via ``corpus_v2.identity.record_id`` —
+    ``record_id`` is always recomputed via ``corpus_projection.identity.record_id`` —
     never trusted from any stored copy. Missing required fields fail closed
     with ``ValueError`` naming the offending field (no fallback coercion).
     """

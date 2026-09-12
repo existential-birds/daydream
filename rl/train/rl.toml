@@ -1,4 +1,4 @@
-# GRPO over the daydream-review-v1 environment. prime-rl v0.7.0.
+# GRPO over the daydream-review environment. prime-rl v0.7.0.
 #
 # Run from inside a prime-rl workspace checkout (see README.md — a `prime-rl @
 # git+...` dependency does not resolve, because prime-rl takes verifiers from an
@@ -72,13 +72,14 @@ max_completion_tokens = 8192
 
 [[orchestrator.train.env]]
 name = "daydream-review-train"
-# The two corpus paths below and the manifest path are PLACEHOLDERS naming a
-# layout, not a shipped dataset: harvest your own corpora (README) and point at
-# them, or override on the CLI. Expanding the training-repo set is tracked as a
-# numbered task on issue #164.
+# The manifest path below (and the eval env's) is a PLACEHOLDER naming a
+# layout, not a shipped dataset: author your own manifest of harvested PR
+# snapshots (rl/daydream_review/README) and point at it, or override on the
+# CLI. Expanding the training-repo set is tracked as a numbered task on issue
+# #164.
 # Generic taskset/harness configs are narrowed to our own subclasses by id before
 # validation, so the plugin keys below validate.
-taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml", gate_report_path = "/data/daydream-rl/stage0-gate.json", outcome_model_path = "/data/daydream-rl/outcome-model.json" }
+taskset = { id = "daydream-review", manifest_path = "/data/daydream-rl/manifest.toml", gate_report_path = "/data/daydream-rl/stage0-gate.json", outcome_model_path = "/data/daydream-rl/outcome-model.json" }
 # `backend` is NOT free to change here. At training time verifiers renders
 # messages to token ids client-side with an HF chat template and calls vLLM's
 # /inference/v1/generate — that is how token_ids and logprobs reach the trace —
@@ -87,7 +88,7 @@ taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-tr
 # speaks Chat Completions; codex (Responses) and claude (Anthropic Messages)
 # cannot train at these pins. Changing this word without changing that fact
 # breaks the run, not the throughput.
-harness = { id = "daydream-review-v1", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
+harness = { id = "daydream-review", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
 # A deep rollout is minutes, not seconds: setup pulls an image, the harness runs
 # the whole review-fix-test loop, and scoring re-runs the repository's suite.
 timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
@@ -103,11 +104,11 @@ max_completion_tokens = 8192
 
 [[orchestrator.eval.env]]
 name = "daydream-review-eval"
-# A SEPARATE corpus directory, never a split of the training one, and never the
-# five held-out benchmark repositories — the taskset refuses those outright
-# (SPEC C5). Train and eval differ by corpus, not by flag.
-taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-eval", manifest_path = "/data/daydream-rl/manifest.toml", gate_report_path = "/data/daydream-rl/stage0-gate.json", outcome_model_path = "/data/daydream-rl/outcome-model.json" }
-harness = { id = "daydream-review-v1", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
+# A SEPARATE manifest, never a split of the training one, and never the five
+# held-out benchmark repositories — the taskset refuses those outright (SPEC
+# C5). Train and eval differ by manifest, not by flag.
+taskset = { id = "daydream-review", manifest_path = "/data/daydream-rl/manifest-eval.toml", gate_report_path = "/data/daydream-rl/stage0-gate.json", outcome_model_path = "/data/daydream-rl/outcome-model.json" }
+harness = { id = "daydream-review", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
 timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
 pool = { type = "elastic", max_workers = 8 }
 num_examples = 32

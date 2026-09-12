@@ -82,7 +82,7 @@ def _inline_or_exact_backend(
     """
     if inline:
         return ScriptedBackend(
-            events=events, audit_root_isolation="claude-pretooluse-v1", audit_root=repo.resolve()
+            events=events, audit_root_isolation="claude-pretooluse", audit_root=repo.resolve()
         )
     return ScriptedBackend(events=events)
 
@@ -5425,7 +5425,7 @@ async def test_phase_understand_intent_inline_exploration_budget_degrades(
                 TextEvent(text="This PR adds a login page."),
                 _RESULT,
             ],
-            audit_root_isolation="claude-pretooluse-v1",
+            audit_root_isolation="claude-pretooluse",
             audit_root=repo.resolve(),
         )
         diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
@@ -5493,7 +5493,7 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
                 TextEvent(text="This PR adds a login page."),
                 _RESULT,
             ],
-            audit_root_isolation="claude-pretooluse-v1",
+            audit_root_isolation="claude-pretooluse",
             audit_root=repo.resolve(),
         )
         diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
@@ -5574,7 +5574,7 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
                     _RESULT,
                 ],
             ],
-            audit_root_isolation="claude-pretooluse-v1",
+            audit_root_isolation="claude-pretooluse",
             audit_root=repo.resolve(),
         )
         diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"

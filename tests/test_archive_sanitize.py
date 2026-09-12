@@ -207,37 +207,67 @@ def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path)
     assert "x-access-token" in (run_dir / "trajectory.json").read_text()
 
 
-def test_corpus_projection_reads_only_sanitized_paths(tmp_path: Path) -> None:
-    from daydream.training.corpus import _build_record
+def _quarantined_bundle_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """A bronze bundle with a blocking secret URL is quarantined (never
+    imported raw) by ``sanitize.import_bundle``; only the sanitized
+    derivative is releasable. Returns (archive_dir, run_dir)."""
+    from daydream.archive import sanitize
 
-    # M17: a projection row pointed at a bronze run_dir containing a dirty URL
-    # resolves its inputs from the sanitized derivative when one exists.
     archive_dir = tmp_path / "archive"
     run_dir = _seed_bronze_bundle(
-        archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r"
+        archive_dir, "s1", "https://user:***@github.com/o/r"
     )
-    # The canary must flow into the projected record were the raw bundle read
-    # (review-output.md is read for content at projection), so the security half
-    # is observable: only the sanitized derivative keeps it out.
-    (run_dir / "review-output.md").write_text(
-        "clone https://x-access-token=ghp_canaryfake123@github.com/o/r.git\n"
+    result = sanitize.import_bundle(run_dir, archive_dir)
+    assert result.quarantined is True
+    assert result.imported is False
+    # The bundle was moved to quarantine/<name> — never read raw.
+    assert not run_dir.exists()
+    assert (archive_dir / "quarantine" / "s1" / "manifest.json").exists()
+    return archive_dir, run_dir
+
+
+def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
+    """M17 successor: the projection layer's admission boundary refuses a
+    bundle whose batch rows are not all ``admitted`` — a quarantined
+    (secret-carrying) batch can never reach a projected record."""
+    from daydream.training.corpus_projection.bundle import (
+        BundleError,
+        load_curated_bundle,
     )
-    sanitize.sanitize_bundle(run_dir, archive_dir)
-    row = {"archive_path": str(run_dir), "session_id": "s1"}
-    projected = _build_record(row, {}, None)  # existing corpus entrypoint
-    assert projected is not None
-    assert "ghp_canaryfake123" not in json.dumps(projected)
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "_SUCCESS").write_text("ok\n")
+    (bundle_dir / "curation-manifest.json").write_text(
+        json.dumps({
+            "schema_version": "1",
+            "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+            "curation_id": "cur-0123456789abcdef",
+            "sanitizer_version": "1",
+            "hydration_index_schema_version": "1",
+            "admission_policy_version": "1",
+            "publication_prefix": "curated/cur-0123456789abcdef/",
+            "batches": [
+                {
+                    "session_id": "s1",
+                    "content_digest": "1" * 64,
+                    "status": "quarantined",
+                    "reason_code": "secrets_scan_dirty",
+                    "artifact_relpath": "batches/s1",
+                    "artifact_digest": None,
+                    "manifest_relpath": None,
+                },
+            ],
+        })
+    )
+    with pytest.raises(BundleError):
+        load_curated_bundle(bundle_dir)
 
 
-def test_corpus_projection_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
-    from daydream.training.corpus import _build_record
-
-    # M17 fail-closed: affected bundle with no released derivative is skipped,
-    # never read raw.
-    archive_dir = tmp_path / "archive"
-    _seed_bronze_bundle(archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r")
-    row = {"archive_path": str(archive_dir / "runs" / "s1"), "session_id": "s1"}
-    assert _build_record(row, {}, None) is None
+def test_import_bundle_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
+    """M17 successor (fail-closed): an affected bronze bundle with no
+    released derivative is quarantined at ingest — never imported raw."""
+    _quarantined_bundle_fixture(tmp_path)
 
 
 def test_inventory_counts_by_category_without_values(

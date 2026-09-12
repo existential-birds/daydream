@@ -104,8 +104,8 @@ def test_build_canonical_record_pins_identity_and_provenance() -> None:
     record = build_canonical_record(
         session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00"
     )
-    # identity via corpus_v2.identity.record_id — recompute and compare, never trust a stored copy
-    from daydream.training.corpus_v2.identity import record_id
+    # identity via corpus_projection.identity.record_id — recompute and compare, never trust a stored copy
+    from daydream.training.corpus_projection.identity import record_id
 
     assert record["record_id"] == record_id("s1", "s1-t", "s1-seg", "fp-1")
     assert record["evidence_digest"] == "d" * 32

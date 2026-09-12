@@ -1,47 +1,22 @@
-"""Temporal-leakage guard tests for the build-corpus projection.
+"""Unit tests for the corpus projection's temporal-leakage guard.
 
-These exercise the valid-time exclusion: an annotation whose outcome only
-became true *after* the ``as_of`` pin must not leak its posterior-derived
-``outcome_label`` into a corpus pinned to that ``as_of``. The guard compares
-parsed datetimes chronologically, so ``Z``/``+00:00`` spellings, sub-second
-precision, and non-UTC offsets can never mis-order it; ``as_of`` itself is
-validated and canonicalized once at the :class:`BuildCorpusConfig` boundary.
+Exercises the ``_is_posterior_leak`` boundary semantics in isolation: an
+annotation whose outcome only became true *after* the ``as_of`` pin must not
+leak its posterior-derived ``outcome_label`` into a corpus pinned to that
+``as_of``. The guard compares parsed datetimes chronologically, so ``Z``/
+``+00:00`` spellings, sub-second precision, and non-UTC offsets can never
+mis-order it.
 
-Drives :func:`run_build_corpus` against a real SQLite index built with the
-production ``upsert_run`` + ``append_label_observation`` helpers — reusing the
-``_seed_run_with_annotation`` helper and ``archive_dir`` fixture established in
-``tests/test_training_corpus.py``.
+(#1093: the legacy emission path these guards fed is deleted; the guard
+itself is canonical shared infrastructure for the corpus projection.)
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream.training.corpus import (
-    BuildCorpusConfig,
-    CorpusFilters,
-    _is_posterior_leak,
-    run_build_corpus,
-)
-from tests.test_training_corpus import _seed_run_with_annotation
-
-
-def test_posterior_dated_after_pin_is_excluded(tmp_path: Path, archive_dir: Any) -> None:
-    # annotation recorded before the pin, but its outcome became true AFTER it
-    _seed_run_with_annotation(archive_dir, "s1", label="accepted",
-                              observed_at="2026-03-01T00:00:00+00:00",
-                              valid_at="2026-09-01T00:00:00+00:00")  # valid_at > as_of
-    out = tmp_path / "c.jsonl"
-    run_build_corpus(BuildCorpusConfig(out_path=out, archive_dir=archive_dir,
-                                       filters=CorpusFilters(include_all_labels=True),
-                                       as_of="2026-04-01T00:00:00+00:00"))
-    recs = [json.loads(line) for line in out.read_text().splitlines()]
-    assert len(recs) == 1
-    assert recs[0]["outcome_label"] is None
-
+from daydream.training.corpus import _is_posterior_leak
 
 # _is_posterior_leak boundary semantics (unit): valid_at == as_of is in-time,
 # strictly greater is a leak, and no ISO-8601 spelling difference mis-orders it.
@@ -110,53 +85,3 @@ def test_leak_guard_subsecond_precision_compares_chronologically() -> None:
     # Half a second after the pin is a leak; half a second before is not.
     assert _is_posterior_leak(_ann("2026-04-01T00:00:00.500000+00:00"), "2026-04-01T00:00:00Z") is True
     assert _is_posterior_leak(_ann("2026-04-01T00:00:00Z"), "2026-04-01T00:00:00.500000+00:00") is False
-
-
-# as_of entry boundary: BuildCorpusConfig validates and canonicalizes ONCE,
-# before the pin reaches the SQL cutoff or the leak guard.
-
-
-def _cfg(tmp_path: Path, as_of: str) -> BuildCorpusConfig:
-    return BuildCorpusConfig(out_path=tmp_path / "c.jsonl", filters=CorpusFilters(), as_of=as_of)
-
-
-@pytest.mark.parametrize(
-    ("as_of", "expected"),
-    [
-        pytest.param("2026-04-01T00:00:00Z", AS_OF, id="z-spelling"),
-        pytest.param(AS_OF, AS_OF, id="already-canonical"),
-    ],
-)
-def test_config_boundary_canonicalizes_timestamp(tmp_path: Path, as_of: str, expected: str) -> None:
-    """Normalize accepted as-of timestamps to canonical UTC spelling."""
-    assert _cfg(tmp_path, as_of).as_of == expected
-
-
-@pytest.mark.parametrize(
-    ("as_of", "error"),
-    [
-        pytest.param(
-            "2026-04-01T05:00:00+05:00",
-            "must be a UTC timestamp",
-            id="non-utc-offset",
-        ),
-        pytest.param(
-            "2026-04-01T00:00:00",
-            "must be a UTC timestamp",
-            id="naive",
-        ),
-        pytest.param(
-            "yesterday-ish",
-            "not a valid ISO-8601",
-            id="unparseable",
-        ),
-    ],
-)
-def test_config_boundary_rejects_invalid_timestamp(
-    tmp_path: Path,
-    as_of: str,
-    error: str,
-) -> None:
-    """Reject naive, non-UTC, and malformed as-of timestamps at the config boundary."""
-    with pytest.raises(ValueError, match=error):
-        _cfg(tmp_path, as_of)

@@ -18,6 +18,7 @@ values before trajectory data is persisted.
 
 from __future__ import annotations
 
+# external contract: "ATIF v1.7" names the Harbor trajectory-format version, not a project-owned name
 import hashlib
 import json
 import math

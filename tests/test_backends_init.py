@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from daydream.backends import (
-    AUDIT_ROOT_ISOLATION_V1,
+    AUDIT_ROOT_ISOLATION,
     AuditIsolationError,
     ClaudeBackend,
     ContinuationToken,
@@ -131,7 +131,7 @@ def test_create_backend_binds_claude_to_exact_audit_root(tmp_path: Path) -> None
     )
 
     assert isinstance(backend, ClaudeBackend)
-    assert backend.audit_root_isolation == AUDIT_ROOT_ISOLATION_V1
+    assert backend.audit_root_isolation == AUDIT_ROOT_ISOLATION
     assert backend.audit_root == root.resolve(strict=True)
     assert backend.audit_outward_symlinks == outward
 

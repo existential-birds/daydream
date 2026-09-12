@@ -363,7 +363,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **corpus:** Upload run trajectories to a private HuggingFace dataset repo (opt-in) ([#346](https://github.com/existential-birds/daydream/pull/346))
 
   Trajectories from runs can now be uploaded to a private HuggingFace dataset,
-  feeding the SFT/RL corpus pipeline from real production runs.
+  feeding the SFT/RL corpus pipeline. No production training run has completed
+  yet — the pipeline is validated at fixture scale only.
 
 - **pi-backend:** Default to the Nous provider + deepseek-v4-flash-0731 ([#340](https://github.com/existential-birds/daydream/pull/340))
 

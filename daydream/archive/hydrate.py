@@ -711,7 +711,7 @@ def _manifest_repo_slug(data: dict[str, Any]) -> str | None:
 def _manifest_license_evidence(data: dict[str, Any]) -> dict[str, str] | None:
     """Declared license evidence (``spdx_id`` + ``source``) from a session manifest.
 
-    Schema-shaped: only the two string fields the frozen curation-manifest-v1
+    Schema-shaped: only the two string fields the frozen curation-manifest
     schema allows are carried; anything else (missing, blank, non-dict) is ``None``.
     """
     raw = data.get("license_evidence")
@@ -793,7 +793,7 @@ def apply_license_gate(
     Runs after the existing gates (ingest -> dedupe -> fixture exclusion): each
     admitted session's ``repo_slug`` + declared license evidence are resolved
     into an immutable per-repo decision via
-    :func:`daydream.training.corpus_v2.license.resolve_repo_decision` (C5
+    :func:`daydream.training.corpus_projection.license.resolve_repo_decision` (C5
     exclusion list first, then policy + opt-in). A ``rejected`` decision moves
     the derivative to ``stage/excluded/<sid>/`` exactly like the fixture
     exclusion path and records a stable-code exclusion in the dedupe ledger, so
@@ -815,7 +815,7 @@ def apply_license_gate(
             "license admission gate requires license_policy_path (fail-closed): "
             "no license policy file was provided"
         )
-    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
+    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
         load_license_policy,
         resolve_repo_decision,
     )
@@ -1016,12 +1016,12 @@ def _curated_dir(stage: Path, source_commit: str, binding: dict[str, Any] | None
     :func:`resolve_curation_identity`) the curation id is the v2 derivation,
     which binds the policy digest/version, exact copyleft opt-ins, the
     exclusions digest, the resolved per-repo decisions digest, and the license
-    distribution digest. Without a binding the historical v1 derivation (four
+    distribution digest. Without a binding the historical derivation (four
     inputs) is kept for pre-identity staging and historical prefixes only —
     publications are always keyed by the v2 id.
     """
     if binding is not None:
-        cid = hydrate_rules.derive_curation_id_v2(
+        cid = hydrate_rules.derive_curation_id(
             source_commit,
             str(binding["policy_digest"]),
             str(binding["policy_version"]),
@@ -1031,7 +1031,7 @@ def _curated_dir(stage: Path, source_commit: str, binding: dict[str, Any] | None
             str(binding["distribution_digest"]),
         )
     else:
-        cid = hydrate_rules.derive_curation_id(
+        cid = hydrate_rules.derive_pre_identity_curation_id(
             source_commit,
             hydrate_rules.SANITIZER_VERSION,
             hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
@@ -1089,9 +1089,9 @@ def _policy_binding(
       license-distribution lines.
 
     The binding carries the policy digest/version and the exact copyleft
-    opt-ins so ``derive_curation_id_v2`` can bind all of them.
+    opt-ins so ``derive_curation_id`` can bind all of them.
     """
-    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle
+    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle
         resolve_repo_decision,
     )
 
@@ -1198,7 +1198,7 @@ def resolve_curation_identity(
             "curation identity requires license_policy_path (fail-closed): "
             "no license policy file was provided"
         )
-    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle
+    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle
         load_license_policy,
     )
 
@@ -1817,7 +1817,7 @@ def _policy_binding_record(binding: dict[str, Any]) -> str:
     comparison against the remote record is bytewise, so the record must never
     depend on dict ordering or whitespace. Carries the full binding: policy
     digest/version, sorted casefolded copyleft opt-ins (matching
-    :func:`hydrate_rules.derive_curation_id_v2`'s canonicalization, so a
+    :func:`hydrate_rules.derive_curation_id`'s canonicalization, so a
     differently-cased spelling of the same logical opt-in yields byte-identical
     records), exclusions digest, resolved per-repo decisions digest, license
     distribution digest.
@@ -2556,7 +2556,7 @@ def verify_publication(
     # 2. Curation manifest: schema-valid and consistent with the pinned inputs.
     from jsonschema import Draft202012Validator  # noqa: PLC0415  # lazy: verify-time only
 
-    schema_path = Path(__file__).parent.parent / "training" / "schema" / "curation-manifest-v1.json"
+    schema_path = Path(__file__).parent.parent / "training" / "schema" / "curation-manifest.json"
     doc = json.loads(_download("curation-manifest.json").decode("utf-8"))
     errors = sorted(Draft202012Validator(json.loads(schema_path.read_text())).iter_errors(doc), key=str)
     if errors:

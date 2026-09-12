@@ -696,7 +696,7 @@ def test_publish_and_resume_refuse_public_repository(tmp_path: Path) -> None:
 
 
 def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
-    from daydream.archive.hydrate_rules import derive_curation_id_v2
+    from daydream.archive.hydrate_rules import derive_curation_id
 
     source = "a" * 40
     binding: dict[str, Any] = {
@@ -708,7 +708,7 @@ def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
         "resolved_decisions_digest": "3" * 64,
         "distribution_digest": "4" * 64,
     }
-    curation_id = derive_curation_id_v2(
+    curation_id = derive_curation_id(
         source,
         binding["policy_digest"],
         binding["policy_version"],

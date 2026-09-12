@@ -30,7 +30,7 @@ import anyio
 import pytest
 
 from daydream.backends import (
-    AUDIT_ROOT_ISOLATION_V1,
+    AUDIT_ROOT_ISOLATION,
     AgentEvent,
     ResultEvent,
     TextEvent,
@@ -1216,7 +1216,7 @@ def install_improve_stub(
             "audit_outward_symlinks", frozenset()
         )
         stub.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION_V1 if audit_root is not None else None
+            AUDIT_ROOT_ISOLATION if audit_root is not None else None
         )
         return stub
 
@@ -1237,7 +1237,7 @@ def install_capable_improve_backend(
             "audit_outward_symlinks", frozenset()
         )
         backend.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION_V1 if audit_root is not None else None
+            AUDIT_ROOT_ISOLATION if audit_root is not None else None
         )
         return backend
 
@@ -1275,7 +1275,7 @@ def install_per_phase_improve_stubs(
         stub.audit_root = audit_root
         stub.audit_outward_symlinks = audit_outward_symlinks
         stub.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION_V1 if audit_root is not None else None
+            AUDIT_ROOT_ISOLATION if audit_root is not None else None
         )
         return stub
 

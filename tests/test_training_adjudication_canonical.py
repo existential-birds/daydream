@@ -235,7 +235,7 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
     archive = tmp_path / "archive"
     _seed_archive(archive)
     run_materialize(root, tmp_path / "mat", pin=_PIN)
-    from daydream.training.corpus_v2.identity import record_id
+    from daydream.training.corpus_projection.identity import record_id
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
     obs.write_text(json.dumps({
@@ -433,7 +433,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     archive = tmp_path / "archive"
     _seed_archive(archive)
     run_materialize(root, tmp_path / "mat", pin=_PIN)
-    from daydream.training.corpus_v2.identity import record_id
+    from daydream.training.corpus_projection.identity import record_id
 
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
@@ -636,7 +636,7 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
     conflict: the precedence merge clears the ``conflicting`` flag so the
     resolution is not suppressed to non-gold, and the archive row projects the
     decisive label (issue #336 item 7 -- a human override is never ignored)."""
-    from daydream.training.corpus_v2.identity import record_id
+    from daydream.training.corpus_projection.identity import record_id
 
     root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
     mat = tmp_path / "mat"
@@ -673,13 +673,13 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
 
 
 def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
-    """The non-gold guarantee extends to the corpus-v2 projection: a
+    """The non-gold guarantee extends to the projection projection: a
     conflicted session's annotations.jsonl row (full record, ``conflicting``
     flag intact) must never classify gold with ``outcome_label`` set even
     with a decisive disposition + evidence -- the same gate canonical.py
     applies to the archive labels column, enforced where ``classify_tier``
     flows into the projected record."""
-    from daydream.training.corpus_v2.projector import project_findings
+    from daydream.training.corpus_projection.projector import project_findings
 
     root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
     mat = tmp_path / "mat"
@@ -694,8 +694,8 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     ]
     # the flag rides through the harvest into the projection input verbatim
     assert any(row.get("conflicting") is True for row in rows)
-    # run_build_corpus_v2's snapshot assembly (session-scoped resolutions) --
-    # the boundary classify_tier reaches the corpus-v2 gold label through.
+    # build_frozen_corpus's snapshot assembly (session-scoped resolutions) --
+    # the boundary classify_tier reaches the projection gold label through.
     session = {
         "session_id": "s1",
         "trajectory_id": "s1",

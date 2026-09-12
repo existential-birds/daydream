@@ -2,7 +2,7 @@
 
 Trains a small two-class classifier on **gold accepted/rejected** evidence and
 scores a finished comment to a ``[0, 1]`` outcome term for the Stage-0 rubric
-(:mod:`daydream.training.rubric_v2`). This is the *learned* outcome term —
+(:mod:`daydream.training.rubric`). This is the *learned* outcome term —
 a sibling of the intrinsic composite in :mod:`daydream.training.reward`, never
 a rewrite of it.
 
@@ -156,7 +156,7 @@ def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
     ``decisive_mix``, ``decisive_only``). Labels may be written as
     ``label``/``text``/``comment_id`` (the coordinator's Stage-0 labels
     emission) or ``outcome_label``/``review_output``/``session_id`` (the
-    production ``run_build_corpus`` export shape). An absent
+    v1 records export shape). An absent
     ``labeler_policy_version`` refuses the row — a legacy row is refused,
     never silently given a fallback version; the guard is working, never a
     silent admission. Any *explicit* failing value is honored and refuses.

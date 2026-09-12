@@ -1,4 +1,4 @@
-"""Build the synthetic corpus-v2 calibration fixture (issue #999, M8).
+"""Build the synthetic projected-corpus calibration fixture (issue #999, M8).
 
 Regenerates every file under ``tests/fixtures/training/calibration/``
 byte-for-byte deterministically (no timestamps, sorted keys, fixed seed-free
@@ -117,7 +117,7 @@ def _stage0_scores(aligned: bool) -> dict[str, dict[str, Any]]:
 
 def _lineage() -> dict[str, Any]:
     return {
-        "schema_version": "corpus-v2",
+        "schema_version": "lineage",
         "salt": SALT,
         "holdout_rate": 0.2,
         "val_rate": 0.2,
@@ -136,7 +136,7 @@ def _manifest(records: list[dict[str, Any]]) -> dict[str, Any]:
         else "clean corpus repo slugs are synthetic and absent from the exclusion list"
     )
     return {
-        "description": "Synthetic corpus-v2 bundle for calibrate-reward fixtures (issue #999)",
+        "description": "Synthetic projected-corpus bundle for calibrate-reward fixtures (issue #999)",
         "record_count": RECORD_COUNT,
         "accepted_count": sum(1 for v in gold.values() if v["accepted"]),
         "rejected_count": sum(1 for v in gold.values() if not v["accepted"]),

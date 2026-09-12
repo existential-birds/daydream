@@ -54,7 +54,7 @@ from daydream.artifact_visibility import (
     resolve_private_workspace_owner,
 )
 from daydream.backends import (
-    AUDIT_ROOT_ISOLATION_V1,
+    AUDIT_ROOT_ISOLATION,
     AuditIsolationError,
     Backend,
     BackendExecutionInput,
@@ -1031,7 +1031,7 @@ def _preflight_improve_backends(ctx: FlowContext) -> None:
                 "missing_capability",
                 phase=phase,
             )
-        if capability != AUDIT_ROOT_ISOLATION_V1:
+        if capability != AUDIT_ROOT_ISOLATION:
             raise AuditIsolationError(
                 backend_name,
                 "wrong_capability",

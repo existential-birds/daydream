@@ -27,7 +27,7 @@ from daydream.archive.manifest import (
     build_manifest_from_snapshot,
 )
 from daydream.backends import (
-    AUDIT_ROOT_ISOLATION_V1,
+    AUDIT_ROOT_ISOLATION,
     AgentEvent,
     AuditIsolationError,
     Backend,
@@ -1551,7 +1551,7 @@ class TestResolveBackendPhaseModel:
     [
         (None, "expected", "missing_capability"),
         ("wrong-token", "expected", "wrong_capability"),
-        (AUDIT_ROOT_ISOLATION_V1, "other", "wrong_root"),
+        (AUDIT_ROOT_ISOLATION, "other", "wrong_root"),
     ],
 )
 def test_improve_backend_preflight_fails_closed(

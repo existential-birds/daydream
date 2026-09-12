@@ -18,8 +18,6 @@ top-level ``TARGET`` positional):
 - ``daydream corpus <sub-verb>`` — the data-pipeline namespace:
     - ``corpus harvest`` — walk the archive and append one bitemporal
       annotation (outcome label + intrinsic reward) per indexed run
-    - ``corpus build --out <path>`` — project the as-of-pinned annotations
-      into a JSONL training corpus plus a lineage manifest
     - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
       — record an authoritative human outcome label that overrides automated ones
     - ``corpus hydrate-hub`` — turn a pinned private-Hub trajectory snapshot into a
@@ -30,7 +28,7 @@ top-level ``TARGET`` positional):
       unresolved items grouped by disposition, record provenance-complete
       human observations, export the projector-shape rows (with ``--dry-run``
       validation), and report coverage / inter-rater / conflict strata
-- ``daydream train --corpus <path> --out <dir>`` — run the four-stage
+- ``daydream train --projection <dir> --out <dir>`` — run the four-stage
   training pipeline (stage0 offline gate → stage1 SFT → stage2 RFT →
   stage3 adapter) and write a stage manifest (``--dry-run`` is the GPU-free
   CI path)
@@ -381,203 +379,15 @@ def _run_summarize(args: argparse.Namespace) -> int:
 
 
 def _build_build_corpus_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream corpus build --out <path> [...]``.
+    """Build the parser for ``daydream corpus build [...]``.
 
-    The ``corpus build`` sub-verb is dispatched manually from ``main()`` (via
-    :func:`_handle_corpus_command`) before the main parser runs so its options
-    don't collide with the top-level ``TARGET`` positional.
+    Dispatches to the
+    deterministic per-finding corpus projection projector over a curated bundle.
     """
     parser = argparse.ArgumentParser(
         prog="daydream corpus build",
-        description="Project as-of-pinned annotations into JSONL training records (one object per run).",
-    )
-
-    parser.add_argument(
-        "--out",
-        type=Path,
-        required=True,
-        metavar="PATH",
-        help="Output .jsonl path",
-    )
-
-    # Filters (post-applied AFTER exclusion list)
-    parser.add_argument(
-        "--repo",
-        action="append",
-        default=[],
-        help="Repeatable; restrict to these repo slugs",
-    )
-    parser.add_argument(
-        "--label",
-        action="append",
-        default=None,
-        help="Repeatable; default is just 'accepted' unless --include-all-labels is set",
-    )
-    parser.add_argument(
-        "--min-grounding",
-        type=float,
-        default=None,
-        dest="min_grounding",
-        help="Drop runs below this grounding_rate",
-    )
-    parser.add_argument(
-        "--min-reward",
-        type=float,
-        default=None,
-        dest="min_reward",
-        help="Alternative admission path: admit runs whose pinned annotation has "
-             "composite_reward >= this threshold, even if not 'accepted'",
-    )
-    parser.add_argument(
-        "--status",
-        type=str,
-        default="complete",
-        help="Match manifest.status exactly (default: 'complete')",
-    )
-    parser.add_argument(
-        "--pipeline-status",
-        type=str,
-        default="succeeded",
-        dest="pipeline_status",
-        help="Match pipeline_status exactly (succeeded/failed/partial/cancelled/"
-             "unknown; default: 'succeeded' — excludes failed/partial runs that "
-             "archived as complete)",
-    )
-
-    # Stratification
-    parser.add_argument(
-        "--stratify-by",
-        type=str,
-        choices=["stack"],
-        default=None,
-        dest="stratify_by",
-        help="Stratify the corpus; currently only 'stack' is supported",
-    )
-    parser.add_argument(
-        "--max-stack-share",
-        type=float,
-        default=0.6,
-        dest="max_stack_share",
-        help="Per-stack cap fraction in (0, 1] (default: 0.6)",
-    )
-
-    # Opt-ins
-    parser.add_argument(
-        "--allow-copyleft",
-        action="append",
-        default=[],
-        dest="allow_copyleft",
-        help="Repeatable; permit specific GPL/AGPL repos",
-    )
-    parser.add_argument(
-        "--include-all-labels",
-        action="store_true",
-        dest="include_all_labels",
-        help="Disable the C9 default of accepted-only label filtering",
-    )
-
-    # Diagnostic
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Print summary table, write nothing",
-    )
-    parser.add_argument(
-        "--emit-schema-only",
-        action="store_true",
-        dest="emit_schema_only",
-        help="Write schema.json next to --out, skip records",
-    )
-
-    # Bitemporal pin
-    parser.add_argument(
-        "--as-of",
-        type=str,
-        default=None,
-        dest="as_of",
-        metavar="ISO_TS",
-        help="ISO-8601 transaction-time pin; resolve each run's annotation "
-             "as of this instant for reproducible corpora (default: latest)",
-    )
-
-    return parser
-
-
-def _handle_build_corpus_command(argv: list[str]) -> int:
-    """Handle ``daydream corpus build --out <path> [...]``.
-
-    Drives :func:`daydream.training.corpus.run_build_corpus` synchronously
-    (``corpus build`` does no agent work — just SQLite reads and a JSONL +
-    lineage-manifest write). Returns an exit code rather than calling
-    :func:`sys.exit`; ``main()`` is responsible for translating the code into a
-    process exit. This keeps the handler easy to drive from tests.
-
-    Returns:
-        ``0`` on success; ``1`` on a validation error.
-    """
-    from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
-    from daydream.ui import create_console, print_error
-
-    parser = _build_build_corpus_parser()
-    args = parser.parse_args(argv)
-
-    if not (0.0 < args.max_stack_share <= 1.0):
-        print_error(create_console(), "Invalid --max-stack-share", "Must be in (0, 1].")
-        return 1
-
-    if args.min_grounding is not None and not (0.0 <= args.min_grounding <= 1.0):
-        print_error(create_console(), "Invalid --min-grounding", "Must be in [0, 1].")
-        return 1
-
-    if args.include_all_labels and args.label:
-        print_error(create_console(), "Conflicting flags", "--include-all-labels and --label cannot be used together.")
-        return 1
-
-    if args.include_all_labels:
-        labels: tuple[str, ...] = ()
-    else:
-        labels = tuple(args.label) if args.label else ("accepted",)
-
-    filters = CorpusFilters(
-        repos=tuple(args.repo),
-        labels=labels,
-        min_grounding=args.min_grounding,
-        status=args.status,
-        include_all_labels=args.include_all_labels,
-        allow_copyleft=frozenset(args.allow_copyleft),
-        min_reward=args.min_reward,
-    )
-    try:
-        # BuildCorpusConfig is the single validation boundary for --as-of
-        # (UTC-only, canonical +00:00 spelling out).
-        config = BuildCorpusConfig(
-            out_path=args.out,
-            filters=filters,
-            pipeline_status=args.pipeline_status,
-            stratify_by=args.stratify_by,
-            max_stack_share=args.max_stack_share,
-            dry_run=args.dry_run,
-            emit_schema_only=args.emit_schema_only,
-            as_of=args.as_of,
-        )
-    except ValueError as exc:
-        print_error(create_console(), "Invalid --as-of", str(exc))
-        return 1
-    run_build_corpus(config)
-    return 0
-
-
-def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream corpus build-v2 [...]``.
-
-    Mirrors the v1 ``corpus build`` parser in style; dispatches to the
-    deterministic per-finding corpus v2 projector over a curated bundle.
-    """
-    parser = argparse.ArgumentParser(
-        prog="daydream corpus build-v2",
         description="Project curated-bundle per-finding resolutions into deterministic, "
-        "frozen-split corpus-v2 training records.",
+        "frozen-split projection training records.",
     )
 
     parser.add_argument(
@@ -637,7 +447,7 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="PATH",
-        help="Output path; corpus-v2.jsonl, the split manifests, and lineage.json "
+        help="Output path; corpus.jsonl, the split manifests, and lineage.json "
         "are written beside it (its parent directory)",
     )
 
@@ -685,12 +495,12 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _handle_build_corpus_v2_command(argv: list[str]) -> int:
-    """Handle ``daydream corpus build-v2 --bundle-root <dir> [...]``.
+def _handle_build_corpus_command(argv: list[str]) -> int:
+    """Handle ``daydream corpus build --bundle-root <dir> [...]``.
 
-    Drives :func:`daydream.training.corpus_v2.run_build_corpus_v2` synchronously
+    Drives :func:`daydream.training.corpus_projection.build_frozen_corpus` synchronously
     (no agent work, no network — a pure projection over the curated bundle plus
-    the annotation bundle). Mirrors :func:`_handle_build_corpus_command`'s
+    the annotation bundle). Mirrors the other corpus handlers'
     structure: returns an exit code; ``main()`` translates it into a process
     exit. Errors are fail-closed: a refused build exits non-zero with the
     exception message and writes nothing.
@@ -698,10 +508,10 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     import tempfile
     from dataclasses import replace
 
-    from daydream.training.corpus_v2 import BuildCorpusV2Config, run_build_corpus_v2
+    from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
     from daydream.ui import create_console, print_error, print_success
 
-    parser = _build_build_corpus_v2_parser()
+    parser = _build_build_corpus_parser()
     args = parser.parse_args(argv)
 
     for flag, value in (
@@ -725,7 +535,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         print_error(
             create_console(),
             "Missing --annotation-bundle-root",
-            "A corpus v2 build requires a pinned annotation bundle "
+            "A corpus build requires a pinned annotation bundle "
             "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
         )
         return 1
@@ -742,14 +552,14 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         print_error(
             create_console(),
             "Missing --license-policy",
-            "A corpus v2 build requires a pinned license policy file; per-repo "
+            "A corpus build requires a pinned license policy file; per-repo "
             "license decisions are resolved from it (fail-closed).",
         )
         return 1
 
     # Validate the policy file before any build work (M10): a malformed or
     # unknown-version policy must refuse without creating the output directory.
-    from daydream.training.corpus_v2.license import load_license_policy
+    from daydream.training.corpus_projection.license import load_license_policy
 
     try:
         load_license_policy(args.license_policy)
@@ -758,15 +568,15 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
-    # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
+    # (corpus.jsonl, split manifests, lineage.json) into that
     # directory, finishing with _SUCCESS — so the whole set, twin included, is
     # covered by the fail-closed completeness gate.
     out_dir = args.out.parent
     try:
-        # BuildCorpusV2Config is the single validation boundary for --as-of
+        # BuildFrozenCorpusConfig is the single validation boundary for --as-of
         # (UTC-only, canonical +00:00 spelling out) — normalize_as_of runs in
         # __post_init__, so an unparseable pin refuses here, not as a traceback.
-        config = BuildCorpusV2Config(
+        config = BuildFrozenCorpusConfig(
             out_dir=out_dir,
             bundle_dir=args.bundle_root,
             annotation_bundle_dir=args.annotation_bundle_dir,
@@ -783,15 +593,15 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     try:
         if args.dry_run:
             with tempfile.TemporaryDirectory() as td:
-                summary = run_build_corpus_v2(replace(config, out_dir=Path(td)))
+                summary = build_frozen_corpus(replace(config, out_dir=Path(td)))
         else:
-            summary = run_build_corpus_v2(config)
+            summary = build_frozen_corpus(config)
     except (OSError, ValueError, TypeError) as exc:
-        print_error(create_console(), "Corpus v2 build refused", str(exc))
+        print_error(create_console(), "Corpus build refused", str(exc))
         return 1
     print_success(
         create_console(),
-        f"Corpus v2 build complete: {summary['emitted']} records "
+        f"Corpus build complete: {summary['emitted']} records "
         f"({summary['adjudication']} to adjudication) in {out_dir}",
     )
     return 0
@@ -1858,7 +1668,7 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
     # Issue #1094: a non-dry hydrate-hub publication requires a pinned license
     # policy; refuse before any Hub access or staging work. A dry-run may omit
-    # it (planning affordance). Mirrors build-v2's policy-required pattern.
+    # it (planning affordance). Mirrors build's policy-required pattern.
     if args.license_policy is None and not args.dry_run:
         print_error(
             console,
@@ -1888,9 +1698,9 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     # Pre-validate the license policy up front so a malformed or missing
     # --license-policy is named by this handler (and redaction-processed) instead
     # of escaping as an unredacted generic "Fatal Error" from main(). Mirrors the
-    # build-v2 handler's fail-closed validation.
+    # build handler's fail-closed validation.
     if args.license_policy is not None:
-        from daydream.training.corpus_v2.license import load_license_policy
+        from daydream.training.corpus_projection.license import load_license_policy
 
         try:
             load_license_policy(args.license_policy)
@@ -2256,7 +2066,7 @@ class _TrainParser(argparse.ArgumentParser):
 
 
 def _build_train_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream train --corpus <path> --out <dir> [...]``.
+    """Build the parser for ``daydream train --projection <dir> --out <dir> [...]``.
 
     Dispatched manually from ``main()`` (verb-first) so its flags don't
     collide with the top-level ``TARGET`` positional.
@@ -2268,19 +2078,13 @@ def _build_train_parser() -> argparse.ArgumentParser:
             "stage2 RFT → stage3 adapter) and write a stage manifest."
         ),
     )
-    corpus_group = parser.add_mutually_exclusive_group(required=True)
-    corpus_group.add_argument(
-        "--corpus",
+    parser.add_argument(
+        "--projection",
         type=Path,
-        metavar="PATH",
-        help="Input JSONL training corpus (one record per line; C5/C8 fail-closed)",
-    )
-    corpus_group.add_argument(
-        "--corpus-v2",
-        type=Path,
-        dest="corpus_v2",
+        required=True,
+        dest="projection",
         metavar="DIR",
-        help="Frozen corpus-v2 projection directory; verifies _SUCCESS/lineage/"
+        help="Frozen projection directory; verifies _SUCCESS/lineage/"
              "split digests and re-applies C5/C8",
     )
     parser.add_argument(
@@ -2338,8 +2142,7 @@ def _handle_train_command(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     config = PipelineConfig(
-        corpus=args.corpus,
-        corpus_v2=args.corpus_v2,
+        projection=args.projection,
         out_dir=args.out,
         stages=tuple(args.stages) if args.stages else ("stage0", "stage1", "stage2", "stage3"),
         base_model=args.base_model,
@@ -2372,7 +2175,6 @@ def _handle_adjudicate_command(argv: list[str]) -> int:
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
-    "build-v2": _handle_build_corpus_v2_command,
     "label": _handle_label_command,
     "hydrate-hub": _handle_hydrate_hub_command,
     "calibrate-reward": _handle_calibrate_reward_command,
@@ -2381,12 +2183,11 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
+    "usage: daydream corpus {harvest,build,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
-    "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-    "  build-v2  project curated-bundle resolutions into corpus-v2 records (pinned --license-policy required)\n"
+    "  build  project curated-bundle resolutions into projection records (pinned --license-policy required)\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
     "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"

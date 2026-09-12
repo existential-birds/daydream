@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.hydrate_rules import derive_curation_id_v2
+from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.final_bundle import (
@@ -34,7 +34,7 @@ _POLICY_BINDING: dict[str, Any] = {
     "resolved_decisions_digest": "3" * 64,
     "distribution_digest": "4" * 64,
 }
-_CURATION_ID = derive_curation_id_v2(
+_CURATION_ID = derive_curation_id(
     _SOURCE,
     _POLICY_BINDING["policy_digest"],
     _POLICY_BINDING["policy_version"],
@@ -133,7 +133,7 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     # The human adjudication state the final bundle's report must see: alice
     # accepts the s1 finding (the same shape the CLI `label` verb records).
-    from daydream.training.corpus_v2.identity import record_id
+    from daydream.training.corpus_projection.identity import record_id
 
     obs_path = tmp_path / "observations.jsonl"
     obs_path.write_text(json.dumps({
@@ -407,8 +407,8 @@ def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: 
 
 
 def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Path) -> None:
-    from daydream.training.corpus_v2.bundle import load_curated_bundle
-    from daydream.training.corpus_v2.projector import _verify_annotation_bundle
+    from daydream.training.corpus_projection.bundle import load_curated_bundle
+    from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 
     index_root, out = _built_final_bundle(tmp_path)
     sums = "".join(

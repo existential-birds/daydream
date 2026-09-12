@@ -4176,7 +4176,7 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(
         {
             "package_fingerprint": "pkg-parser-cleanup",
             "member_fingerprints": ["fp-local-parser", "fp-parser-tests"],
-            "member_aliases": ["member-v1:local", "member-v1:tests"],
+            "member_aliases": ["member:local", "member:tests"],
             "maintenance_signals": ["dead_code", "reuse_existing"],
             "change_shape": "reuse",
             "reuse_target": "repo:src/http.py#parse_headers",
@@ -4196,7 +4196,7 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(
         "fp-local-parser",
         "fp-parser-tests",
     ]
-    assert entry["member_aliases"] == ["member-v1:local", "member-v1:tests"]
+    assert entry["member_aliases"] == ["member:local", "member:tests"]
     assert entry["maintenance_signals"] == ["dead_code", "reuse_existing"]
     assert entry["change_shape"] == "reuse"
     assert entry["reuse_target"] == "repo:src/http.py#parse_headers"
@@ -4204,8 +4204,8 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(
         "pkg-parser-cleanup",
         "fp-local-parser",
         "fp-parser-tests",
-        "member-v1:local",
-        "member-v1:tests",
+        "member:local",
+        "member:tests",
     }
 
 
@@ -4256,7 +4256,7 @@ def test_stable_member_alias_reuses_complete_plan_with_stored_package_id(
         {
             "package_fingerprint": "pkg-original",
             "member_fingerprints": ["fp-old-wording"],
-            "member_aliases": ["member-v1:stable-concern"],
+            "member_aliases": ["member:stable-concern"],
         }
     )
     _write_plans(
@@ -4269,7 +4269,7 @@ def test_stable_member_alias_reuses_complete_plan_with_stored_package_id(
         {
             "package_fingerprint": "pkg-current",
             "member_fingerprints": ["fp-new-wording"],
-            "member_aliases": ["member-v1:stable-concern"],
+            "member_aliases": ["member:stable-concern"],
         }
     )
 
@@ -4284,7 +4284,7 @@ def test_stable_member_alias_reuses_complete_plan_with_stored_package_id(
     assert result["skipped"][0]["path"] == "001-batch-catalog-queries.md"
     assert result["skipped"][0]["package_fingerprint"] == "pkg-original"
     assert result["skipped"][0]["member_fingerprints"] == ["fp-old-wording"]
-    assert result["skipped"][0]["member_aliases"] == ["member-v1:stable-concern"]
+    assert result["skipped"][0]["member_aliases"] == ["member:stable-concern"]
     assert result["skipped"][0]["finding"]["package_fingerprint"] == "pkg-current"
 
 

@@ -7,7 +7,7 @@ hydrated staging archive with no ``sessions.jsonl`` is served through the
 same read-only SQLite adapter materialize uses (never the read-write
 ``_get_connection``); preview never mutates the index. The ledger
 pins per-finding evidence digests (delta on
-``corpus_v2.bundle``'s bundle-digest SHA256SUMS verification and
+``corpus_projection.bundle``'s bundle-digest SHA256SUMS verification and
 the projector's two-bundle verification), and a re-preview against an
 existing ledger reports any ``record_id`` whose evidence digest changed —
 drift is surfaced, never silently merged.

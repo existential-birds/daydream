@@ -6,7 +6,7 @@ observation store under three-tier precedence, and writes the
 ``adjudication.jsonl`` export atomically. Digest drift raises
 :class:`AdjudicationDriftError` before anything is written — the export is
 never produced in a drifted state (delta on
-``corpus_v2.projector.run_build_corpus_v2``'s digest-pinned snapshot flow:
+``corpus_projection.projector.build_frozen_corpus``'s digest-pinned snapshot flow:
 harvest verifies the *preview ledger's* digests rather than re-pinning its
 own, so preview identities and digests are stable into the export by
 construction).
@@ -23,7 +23,7 @@ from daydream.training.adjudication.observations import load_observations
 from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
-from daydream.training.corpus_v2.tiers import classify_tier
+from daydream.training.corpus_projection.tiers import classify_tier
 
 __all__ = ["AdjudicationDriftError", "build_export_entries", "run_harvest"]
 
@@ -191,7 +191,7 @@ def run_harvest(
       three-tier precedence only when their pinned digest matches the fresh
       evidence and the resolution is gold-eligible (no rater conflict, no
       review-required flag); the final tier is classified by
-      ``corpus_v2.tiers.classify_tier`` so the gold gate has one
+      ``corpus_projection.tiers.classify_tier`` so the gold gate has one
       implementation. Conflicted/review-required decisive judgments stay out
       of the gold tier.
     - ``posterior_eligible`` is true only for gold-tier findings with

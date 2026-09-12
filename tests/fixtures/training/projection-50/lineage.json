@@ -1,0 +1,280 @@
+{
+  "adjudication_count": 2,
+  "annotation_bundle": {
+    "annotations_digest": "5363602c8e1b0c8b07962f930a8c70794d2dbb5f05b3b9b0640a0b23ac4ef6b3",
+    "as_of": null,
+    "curation_id": "cur-0123456789abcdef",
+    "sanitized_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+    "snapshot_id": "cur-0123456789abcdef-annotations",
+    "unpinned_as_of": true
+  },
+  "as_of": null,
+  "caps": {
+    "applied": {},
+    "configured": {}
+  },
+  "content_digests": {
+    "annotations.jsonl": "5363602c8e1b0c8b07962f930a8c70794d2dbb5f05b3b9b0640a0b23ac4ef6b3",
+    "sess-a": "1111111111111111111111111111111111111111111111111111111111111111",
+    "sess-amb-a": "49cf5757680e9cf3c1c6dfc396ac6828507f555bfdec76748b256733b940dd5f",
+    "sess-amb-b": "6ab1f6eb918f9e08f1f5f76ac9d5a79f624269ce62b5dfdd2abe164e56c1ee0b",
+    "sess-gold-00": "759e1ca804f53f4f044c56d00644f3ee14ccc628f794aa250594c5a7e4153e54",
+    "sess-gold-01": "fa34db664d635549f24428232d063d2c2f763066b9fa6ccc41d52e4a60fd3888",
+    "sess-gold-02": "8833729fad2a74eb80b846ad492a8f31e09c369c04ddeb59169192fc43c716d3",
+    "sess-gold-03": "f160ac3b28c392419078c94a1a648d69e15d3b407c26da42349f4e708857cedd",
+    "sess-gold-04": "31318c377ade107bb783f880498759155d1b487ad85aadc01f38fccbdafeb08b",
+    "sess-gold-05": "4f53ae7a66098fd768ca447bda8eec030abe291a74552294181a3f077ca4143a",
+    "sess-gold-06": "9fd9e73f52b2c3b66e7a648207899e063eba3feaecb9d42d14e9172e83037397",
+    "sess-gold-07": "90b2835469a5830343762dd72efab5fbf0a75973e3db5847056c6810a66f58ee",
+    "sess-gold-08": "c750fec203ae8449de28b368328f84a30b9b67c959964ee517ebce15cb4aeaa2",
+    "sess-gold-09": "2390b76e589b1300c9255ad62feabd577e5e358ab07fcd4e1ed9f5c61d224654",
+    "sess-gold-10": "819c75112973d3173752444a58740d51af14ec78aeb267ba7e9544f3d10fa663",
+    "sess-gold-11": "db9484715b369f9b84dba38f901faaee02ba5ebab5253289f6b762ccbc8fb4c5",
+    "sess-gold-12": "a1958283fcb6895bfa4bf5d52d33f30c9175477f139684dc991c5c39eea289f5",
+    "sess-gold-13": "06a7138c5c19446cb4671c79d30616b1b46aa74a7e0d5214a5fce940b2b49da9",
+    "sess-gold-14": "b1645a9c83fd69d462a2a7de33a8eb3de18fb78d4433efeeb72ca923b22c8a31",
+    "sess-gold-15": "92b793d3e7ea7169bec7b7e9ad9f74a8065ff8491d4a262a834471189eff5187",
+    "sess-gold-16": "0995770efdf5ea01b495998ba201e3666c3eb976791f821b362579d8dc34944e",
+    "sess-gold-17": "e322b708f04eeb8a7a7768b5ed61d4803dfb1311e38dec4fbb494ee56be33dd1",
+    "sess-gold-18": "2567cd6f376489f5d5b33153f91332fa7e7468253d169b23aa4a1ef9f197b272",
+    "sess-gold-19": "2c9843a90e4b9ff563138dee032a1ab78f3e381027bd199bdb4ae3c50a02ae3e",
+    "sess-gold-20": "99b340f90ef073c8a3fe2b017d855792382f2e0f798cc6549e433639d88136ca",
+    "sess-gold-21": "c6887b3c27039f5d5e2e7ac47987214623307e6f09189cad0a71236e30fb4f7a"
+  },
+  "copyleft_opt_ins": [],
+  "curation_id": "cur-0123456789abcdef",
+  "exclusion_list_digest": "ad950b01ca14a1c4d0e3c817e04b6da99adfae46159b345eeb95678c2efd87fa",
+  "exclusions_by_reason": {
+    "non-decisive-adjudication": 0
+  },
+  "holdout_rate": 0.2,
+  "hub_commit": "0123456789abcdef0123456789abcdef01234567",
+  "labeler_policy_version": "1",
+  "license_decision_distribution": {
+    "admitted": 25
+  },
+  "license_decisions": {
+    "sess-a": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-e808f6",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-amb-a": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-49cf57",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-amb-b": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-6ab1f6",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-00": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-759e1c",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-01": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-fa34db",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-02": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-883372",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-03": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-f160ac",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-04": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-31318c",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-05": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-4f53ae",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-06": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-9fd9e7",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-07": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-90b283",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-08": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-c750fe",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-09": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-2390b7",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-10": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-819c75",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-11": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-db9484",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-12": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-a19582",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-13": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-06a713",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-14": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-b1645a",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-15": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-92b793",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-16": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-099577",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-17": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-e322b7",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-18": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-2567cd",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-19": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-2c9843",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-20": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-99b340",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-21": {
+      "evidence_ref": "manifest",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-c6887b",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    }
+  },
+  "license_policy": {
+    "path_digest": "f3eab72f388aa8c7b7011f2c4683b37ec8672e366962a585a7a25e3227a98eda",
+    "policy_version": "1"
+  },
+  "reply_classifier_version": "1",
+  "rubric_schema_version": "per-finding-resolutions-v1",
+  "salt": "issue-1081-fixture-salt",
+  "schema_version": "lineage",
+  "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+  "split_assignment": {
+    "holdout": 10,
+    "train": 32,
+    "validation": 8
+  },
+  "split_counts": {
+    "holdout": 10,
+    "train": 32,
+    "validation": 8
+  },
+  "trajectory_set_hash": "251daaccd3e785886f2987f6e50144fc5c3ee2a3d2cf72f6811a2af044f5741f",
+  "val_rate": 0.2,
+  "valid_at": "2026-01-01T00:00:00+00:00"
+}

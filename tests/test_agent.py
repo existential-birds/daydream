@@ -40,7 +40,7 @@ from tests.harness.trajectory import make_recorder, read_trajectory
 
 def _strict_backend(audit_root: Path) -> ScriptedBackend:
     """A backend whose strict PreToolUse isolation forces the inline transport."""
-    return ScriptedBackend(audit_root_isolation="claude-pretooluse-v1", audit_root=audit_root)
+    return ScriptedBackend(audit_root_isolation="claude-pretooluse", audit_root=audit_root)
 
 
 def _count_prompt_budget_reads(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:

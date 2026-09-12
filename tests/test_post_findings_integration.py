@@ -392,10 +392,10 @@ def artifact_on_disk(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def artifact_on_disk_v2(tmp_path: Path) -> Path:
+def artifact_on_disk_second(tmp_path: Path) -> Path:
     """A later run: the prior ``a``-finding is gone, one new finding appears."""
     return _write_artifact(
-        tmp_path / "findings_v2.json",
+        tmp_path / "findings_second.json",
         [
             _finding(
                 "c" * 64, path="c.py", line=5, placement="inline", title="New finding"
@@ -482,12 +482,12 @@ def test_fresh_post_then_idempotent_repost(
 
 
 def test_stale_finding_resolved_new_finding_posted(
-    fake_gh: FakeGh, artifact_on_disk_v2: Path
+    fake_gh: FakeGh, artifact_on_disk_second: Path
 ) -> None:
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
     )
-    assert cli_main(_post_argv(artifact_on_disk_v2)) == 0
+    assert cli_main(_post_argv(artifact_on_disk_second)) == 0
     # Task 0 spike: resolveReviewThread is FORBIDDEN for the least-privilege
     # installation token; stale findings are minimized via minimizeComment.
     assert any(

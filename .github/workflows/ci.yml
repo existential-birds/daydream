@@ -50,6 +50,9 @@ jobs:
       - name: Type check with mypy
         run: uv run mypy daydream tests
 
+      - name: Naming grep-gate
+        run: bash scripts/check-naming.sh
+
       - name: Lint workflows with actionlint
         run: docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml
 
@@ -76,7 +79,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: rl/daydream_review_v1
+        working-directory: rl/daydream_review
 
     steps:
       - name: Checkout code
@@ -86,7 +89,7 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
-          cache-dependency-glob: rl/daydream_review_v1/uv.lock
+          cache-dependency-glob: rl/daydream_review/uv.lock
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -116,12 +119,12 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check with mypy
-        run: uv run mypy daydream_review_v1 tests
+        run: uv run mypy daydream_review tests
 
       - name: Run vulture
-        run: uv run vulture --config pyproject.toml daydream_review_v1 tests
+        run: uv run vulture --config pyproject.toml daydream_review tests
 
-      # The full documented standalone gate (rl/daydream_review_v1/README.md:17-21),
+      # The full documented standalone gate (rl/daydream_review/README.md:17-21),
       # including the two `slow` Docker-baseline image tests. The runner's daemon
       # must be usable so they PASS rather than skip (Task 0 spike); the live
       # actionlint `docker run` step in the `check` job proves this runner runs

@@ -126,22 +126,22 @@ def test_full_annotation_pipeline_survives_vm_loss(
         "--curation-id", curation_id, "--snapshot-id", success["final_snapshot_id"],
         "--revision", success_commit["sha"], "--destination", str(clean),
     ]) == 0
-    from daydream.training.corpus_v2.bundle import _verify_sha256sums
+    from daydream.training.corpus_projection.bundle import _verify_sha256sums
 
     _verify_sha256sums(clean, "")  # raises on any corruption
 
-    # 8. corpus-v2: both automatic gold classes + the human-adjudicated record.
+    # 8. projection: both automatic gold classes + the human-adjudicated record.
     # The human rater's decisive label is merged into the annotation row
     # before publication, so the human-adjudicated finding is gold too
     # (decisive + evidence); task-only findings never reach corpus.jsonl —
     # the projector routes them to adjudication-report.json (D8) and
     # summary["total"] counts emitted records only.
-    from daydream.training.corpus_v2.projector import (
-        BuildCorpusV2Config,
-        run_build_corpus_v2,
+    from daydream.training.corpus_projection.projector import (
+        BuildFrozenCorpusConfig,
+        build_frozen_corpus,
     )
 
-    summary = run_build_corpus_v2(BuildCorpusV2Config(
+    summary = build_frozen_corpus(BuildFrozenCorpusConfig(
         out_dir=tmp_path / "corpus-out", bundle_dir=stage / "curated" / curation_id,
         annotation_bundle_dir=clean, license_policy_path=policy_path))
     assert (tmp_path / "corpus-out" / "_SUCCESS").is_file()

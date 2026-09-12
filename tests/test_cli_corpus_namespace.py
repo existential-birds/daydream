@@ -14,6 +14,7 @@ code and on whether the handler was actually invoked — not on mere dispatch.
 """
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,10 +36,45 @@ def _run_main(argv: list[str]) -> int:
     return 0
 
 
-def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    out = tmp_path / "x.jsonl"
-    assert _run_main(["corpus", "build", "--out", str(out), "--dry-run"]) == 0
+def test_corpus_harvest_exits_nonzero_on_aborted_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 0, "aborted": 1}
 
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
+
+
+def test_corpus_harvest_exits_nonzero_on_row_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 2, "aborted": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
+
+
+def test_corpus_harvest_still_exits_zero_on_clean_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unresolved findings in the data are not process failure (spec KD)."""
+
+    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
+
+
+def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {}
+
+    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+        called["hit"] = True
+        return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
+    assert called["hit"]
+
+
+def test_corpus_label_route(monkeypatch: pytest.MonkeyPatch) -> None:
     label_called = {}
 
     def _fake_label(argv: list[str]) -> int:
@@ -60,11 +96,11 @@ def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> 
     # CI terminals wrap help output at 80 cols, so assert per token, not the
     # full usage line.
     assert "calibrate-reward" in captured.out
-    assert "build-v2" in captured.out
+    assert "build" in captured.out
     assert "hydrate-hub" in captured.out
     assert "harvest" in captured.out
     assert "build" in captured.out
-    assert "build-v2" in captured.out
+    assert "build" in captured.out
     assert "label" in captured.out
     assert "calibrate-reward" in captured.out
 
@@ -124,7 +160,7 @@ def test_adjudicate_publication_commands_run_through_main(
 
 
 # ---------------------------------------------------------------------------
-# Task 8 (#1080): build-v2 operator inputs — pinned license policy, exact-slug
+# Task 8 (#1080): build operator inputs — pinned license policy, exact-slug
 # copyleft opt-ins, and refusal of URL-shaped identities. Real-path: the
 # handler runs the real projector over a real fixture bundle pair; only the
 # policy file is authored by the test.
@@ -134,19 +170,19 @@ def test_adjudicate_publication_commands_run_through_main(
 def _run_build_v2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]
 ) -> tuple[int, str]:
-    """Drive ``daydream corpus build-v2`` through ``cli.main`` over the
-    standard fixture bundle pair (from tests.test_corpus_v2) and return
+    """Drive ``daydream corpus build`` through ``cli.main`` over the
+    standard fixture bundle pair (from tests.test_corpus_projection) and return
     (exit code, captured stdout+stderr)."""
-    from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
+    from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
 
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
     out_dir = tmp_path / "corpus-out"
     rc = _run_main([
-        "corpus", "build-v2",
+        "corpus", "build",
         "--bundle-root", str(bundle_dir),
         "--annotation-bundle-root", str(snap.parent),
-        "--out", str(out_dir / "corpus-v2.jsonl"),
+        "--out", str(out_dir / "corpus.jsonl"),
         *extra_args,
     ])
     captured = capsys.readouterr()
@@ -192,7 +228,7 @@ def test_build_v2_refuses_raw_authenticated_url_as_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A raw remote URL is never a repo identity: any URL-shaped --repo-slug
-    # value is refused before it can reach BuildCorpusV2Config.
+    # value is refused before it can reach BuildFrozenCorpusConfig.
     rc, out = _run_build_v2(tmp_path, capsys, [
         "--repo-slug", "https://user:token@github.com/owner/repo",
     ])

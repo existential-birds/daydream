@@ -203,7 +203,7 @@ def _score_candidate(rec: Mapping[str, Any]) -> RewardBreakdown:
     """Score one candidate through the canonical ``score_trajectory`` hook.
 
     The sampled ``findings`` subset is the candidate-varying input: verdicts
-    and grounding rate are derived from it (mirroring ``rubric_v2.score_review``),
+    and grounding rate are derived from it (mirroring ``rubric.score_review``),
     so candidates that differ only in their findings subset score differently
     and the winner filter can prefer one sampled completion over another.
     Record-level signals are used only when the record carries no findings.
