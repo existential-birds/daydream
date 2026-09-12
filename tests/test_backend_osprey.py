@@ -299,8 +299,10 @@ async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> None:
-    """Valid-JSONL run: spawn opts reach the transport, and the finally reaps
-    the child and releases the pipe fds even after a clean exit (pi/codex parity)."""
+    """Valid-JSONL run: spawn opts reach the transport, and the unconditional
+    lifecycle holds even after a clean exit: wait reaps the child, terminate
+    closes the pipe fds, and the finally drops the transport from the backend
+    list, the only cleanup exclusive to the finally block (pi/codex parity)."""
     lines, _ = _stream()
 
     backend = OspreyBackend(osprey_binary="fake")
@@ -314,9 +316,9 @@ async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> N
     assert len(spawner.procs) == 1
     proc = spawner.procs[0]
     assert proc.returncode == 0
-    assert proc.reaped, "the finally must reap the child even after clean exit"
-    assert proc.stdin.closed, "the finally must close the stdin pipe"
-    assert proc._transport.closed, "the finally must release the pipe fds even after clean exit"
+    assert proc.reaped, "the transport wait must reap the child even after a clean exit"
+    assert proc.stdin.closed, "the transport terminate must close the stdin pipe"
+    assert proc._transport.closed, "the transport terminate must release the pipe fds even after a clean exit"
     assert backend._transports == [], "the finally must drop the transport from the backend list"
 
 
