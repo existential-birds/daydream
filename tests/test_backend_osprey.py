@@ -137,6 +137,7 @@ async def _collect(
     stderr_held_open: bool = False,
     stdout_reader: asyncio.StreamReader | None = None,
     stderr_reader: asyncio.StreamReader | None = None,
+    workspace: Path = Path("/repo"),
 ) -> tuple[list[AgentEvent], FakeCliSpawner]:
     spawner = FakeCliSpawner()
 
@@ -158,7 +159,7 @@ async def _collect(
         events = [
             event
             async for event in backend.execute(
-                Path("/repo"),
+                workspace,
                 "prompt",
                 output_schema=output_schema,
                 continuation=continuation,
@@ -294,6 +295,29 @@ async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
 
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
     assert spawner.kwargs[0]["stderr"] is asyncio.subprocess.PIPE
+
+
+@pytest.mark.asyncio
+async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> None:
+    """Valid-JSONL run: spawn opts reach the transport, and the finally reaps
+    the child and releases the pipe fds even after a clean exit (pi/codex parity)."""
+    lines, _ = _stream()
+
+    backend = OspreyBackend(osprey_binary="fake")
+    events, spawner = await _collect(backend, lines, workspace=tmp_path)
+
+    assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
+    kwargs = spawner.kwargs[0]
+    assert kwargs["start_new_session"] is True
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["stderr"] is asyncio.subprocess.PIPE
+    assert len(spawner.procs) == 1
+    proc = spawner.procs[0]
+    assert proc.returncode == 0
+    assert proc.reaped, "the finally must reap the child even after clean exit"
+    assert proc.stdin.closed, "the finally must close the stdin pipe"
+    assert proc._transport.closed, "the finally must release the pipe fds even after clean exit"
+    assert backend._transports == [], "the finally must drop the transport from the backend list"
 
 
 @pytest.mark.asyncio
