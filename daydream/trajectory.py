@@ -726,7 +726,7 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
             [
                 item
                 for item in summaries
-                if isinstance(summaries, list) and isinstance(item, dict) and "invocation_id" in item
+                if isinstance(item, dict) and "invocation_id" in item
             ]
             if isinstance(summaries, list)
             else []
@@ -750,34 +750,31 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
             invocation_rows.setdefault((row_trajectory_id, invocation_id), []).append(invocation)
         if payload is root or direct_invocations or "run_started_at" in extra:
             continue
-        legacy_start: datetime | None = None
-        legacy_end: datetime | None = _timing_timestamp(extra.get("run_ended_at") or extra.get("snapshot_at"))
-        if legacy_start is None or legacy_end is None or legacy_end < legacy_start:
-            step_times = [
-                parsed
+        step_times = [
+            parsed
+            for step in payload.get("steps", [])
+            if isinstance(step, dict)
+            if (parsed := _timing_timestamp(step.get("timestamp"))) is not None
+        ]
+        if len(step_times) < 2:
+            continue
+        legacy_start, legacy_end = min(step_times), max(step_times)
+        phase = next(
+            (
+                str((step.get("extra") or {}).get("daydream_phase"))
                 for step in payload.get("steps", [])
-                if isinstance(step, dict)
-                if (parsed := _timing_timestamp(step.get("timestamp"))) is not None
-            ]
-            if len(step_times) >= 2:
-                legacy_start, legacy_end = min(step_times), max(step_times)
-        if legacy_start is not None and legacy_end is not None and legacy_start <= legacy_end:
-            phase = next(
-                (
-                    str((step.get("extra") or {}).get("daydream_phase"))
-                    for step in payload.get("steps", [])
-                    if isinstance(step, dict) and (step.get("extra") or {}).get("daydream_phase")
-                ),
-                "unknown",
-            )
-            invocation_rows[(str(trajectory_id), "legacy_fork_proxy")] = [
-                {
-                    "phase": phase,
-                    "started_at": legacy_start.isoformat(),
-                    "ended_at": legacy_end.isoformat(),
-                }
-            ]
-            diagnostics["legacy_fork_proxy_used"] += 1
+                if isinstance(step, dict) and (step.get("extra") or {}).get("daydream_phase")
+            ),
+            "unknown",
+        )
+        invocation_rows[(str(trajectory_id), "legacy_fork_proxy")] = [
+            {
+                "phase": phase,
+                "started_at": legacy_start.isoformat(),
+                "ended_at": legacy_end.isoformat(),
+            }
+        ]
+        diagnostics["legacy_fork_proxy_used"] += 1
 
     diagnostics["malformed_invocation"] += malformed_invocations
     attributed_invocations = 0

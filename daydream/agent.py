@@ -279,17 +279,9 @@ def detect_test_success(output: str) -> bool:
         if re.search(pattern, output_lower):
             return True
 
-    # Structured: positive passed count and no failures at all.
-    # pytest omits "0 failed" entirely when there are zero failures — an empty
-    # failed_counts means "no failures mentioned". When "0 failed" IS present,
-    # failed_counts is [0] (non-empty). Both cases are passes.
-    max_passed = max(passed_counts) if passed_counts else None
-    no_failures = not failed_counts or all(c == 0 for c in failed_counts)
-    if max_passed is not None and max_passed > 0 and no_failures:
-        return True
-
-    # Conservative fallback: bare "passed" with no count is not enough.
-    return False
+    # Positive failure counts were excluded above. A positive passed count is
+    # enough here; bare "passed" without a count remains a conservative False.
+    return any(count > 0 for count in passed_counts)
 
 
 def is_environmental_failure(test_output: str) -> bool:

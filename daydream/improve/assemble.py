@@ -762,30 +762,18 @@ def _iter_command_refs(
     normalized: dict[str, Any],
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """Yield (pointer, ref) pairs in first-use document order."""
-    steps = normalized.get("steps")
-    for index, step in enumerate(steps if isinstance(steps, list) else []):
-        if isinstance(step, dict) and isinstance(step.get("verification"), dict):
-            yield f"/steps/{index}/verification", step["verification"]
+    def verification_refs(entries: Any, pointer: str) -> Iterator[tuple[str, dict[str, Any]]]:
+        for index, entry in enumerate(entries if isinstance(entries, list) else []):
+            if isinstance(entry, dict) and isinstance(entry.get("verification"), dict):
+                yield f"{pointer}/{index}/verification", entry["verification"]
+
+    yield from verification_refs(normalized.get("steps"), "/steps")
     test_plan = normalized.get("test_plan")
     existing_coverage = test_plan.get("existing_coverage") if isinstance(test_plan, dict) else None
-    for index, coverage in enumerate(existing_coverage if isinstance(existing_coverage, list) else []):
-        if isinstance(coverage, dict) and isinstance(coverage.get("verification"), dict):
-            yield (
-                f"/test_plan/existing_coverage/{index}/verification",
-                coverage["verification"],
-            )
+    yield from verification_refs(existing_coverage, "/test_plan/existing_coverage")
     cases = test_plan.get("cases") if isinstance(test_plan, dict) else None
-    for index, case in enumerate(cases if isinstance(cases, list) else []):
-        if isinstance(case, dict) and isinstance(case.get("verification"), dict):
-            yield f"/test_plan/cases/{index}/verification", case["verification"]
-    criteria = normalized.get("done_criteria")
-    for index, criterion in enumerate(
-        criteria if isinstance(criteria, list) else []
-    ):
-        if isinstance(criterion, dict) and isinstance(
-            criterion.get("verification"), dict
-        ):
-            yield f"/done_criteria/{index}/verification", criterion["verification"]
+    yield from verification_refs(cases, "/test_plan/cases")
+    yield from verification_refs(normalized.get("done_criteria"), "/done_criteria")
     extra = normalized.get("additional_command_refs")
     for index, ref in enumerate(extra if isinstance(extra, list) else []):
         if isinstance(ref, dict):
