@@ -173,7 +173,7 @@ async def test_launch_clears_operator_observability_env(fixture_manifest_path: P
 
     await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
-    (argv, env), = runtime.programs
+    (_, env), = runtime.programs
     assert env["DAYDREAM_TRACE_TO"] == ""
     assert env["DAYDREAM_TRAJECTORY_HUB_REPO"] == ""
 

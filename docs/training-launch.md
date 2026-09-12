@@ -20,7 +20,7 @@ fixture-scale validation run:
 
 | Field | Value |
 |---|---|
-| `run_identity.corpus_digest` | `56cbaa74e133d4999d7a12496037c4e086bd88647c0b1113aecafbd34792b792` |
+| `run_identity.corpus_digest` | `f8f254b73fee23de638619b33d84467a8912bd7b9d1f597ef8986d1625e20132` |
 | `run_identity.split_digest` | `903de487711c6be182d582cee898570c5635c75e2c6c3dbcdf622af1236b33ee` |
 | `run_identity.reward_version` | `2026.09.04-1` |
 
@@ -117,7 +117,7 @@ measurably lose thread-level localization on the held-out split.
 The offline stages (Stage-0 gate, all dry-path validation, CI) ran on the
 development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU** — the dry path
 imports no pynvml and never initializes CUDA (asserted by
-`tests/training/test_coordinator_fixture_ci.py::test_ci_dry_path_has_no_gpu_imports`).
+`tests/training/test_stage1_sft_config.py::test_dry_run_passes_without_gpu`).
 
 GPU stages (Stage-1 dataset SFT, Stage-2 deterministic RFT replay, Stage-3
 online GRPO) are planned for a single-GPU 80 GB node (H100 or A100 80 GB);

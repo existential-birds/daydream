@@ -437,7 +437,7 @@ def _frozen_split_from_projection(
     """Build the Stage-0 :class:`FrozenSplit` from the projector's frozen
     boundary instead of re-freezing at runtime.
 
-    The projection projection was split deterministically at build time
+    The projection was split deterministically at build time
     (``lineage.split`` per record, drift-gated by the loader). Stage 0 maps
     that three-way boundary onto its two-way partition — train+validation
     rows train, holdout rows evaluate — and verifies the boundary fail-closed:

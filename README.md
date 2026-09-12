@@ -230,7 +230,8 @@ daydream corpus harvest                              # annotate all archived run
 daydream corpus harvest --dry-run
 daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
   --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl   # project a curated bundle into a frozen-corpus projection
-daydream corpus build --out PROJECTION_DIR/corpus.jsonl --dry-run    # print the projection summary, write nothing
+daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
+  --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl --dry-run    # print the projection summary, write nothing
 daydream corpus label <session-id> --outcome accepted  # manual outcome override
 daydream corpus calibrate-reward ...                   # deterministic reward-calibration artifact (see docs/calibration.md)
 daydream corpus hydrate-hub --source-repo org/ds --source-revision <commit-sha> \

@@ -418,7 +418,7 @@ def _alias_format_matches_current(alias: str) -> bool:
     free of identifiers that cannot dedupe. Fingerprints and non-alias
     strings pass through untouched.
     """
-    return not alias.startswith("member-") or alias.startswith("member:")
+    return not alias.startswith("member-")
 
 
 def _finding_member_identities(

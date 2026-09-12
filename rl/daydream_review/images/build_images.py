@@ -330,7 +330,6 @@ def _validate_red_flags(
     *,
     red: bool,
     base_only: bool,
-    manifest: dict[str, _ManifestEntry],
     prs: list[tuple[str, _ManifestEntry, _ManifestPR]],
 ) -> int | None:
     """Validate ``--red`` constraints before any build starts.
@@ -487,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no PR in {args.manifest} belongs to {args.only}", file=sys.stderr)
             return 2
 
-    red_status = _validate_red_flags(red=args.red, base_only=args.base_only, manifest=manifest, prs=prs)
+    red_status = _validate_red_flags(red=args.red, base_only=args.base_only, prs=prs)
     if red_status is not None:
         return red_status
 
