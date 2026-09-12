@@ -412,7 +412,7 @@ def _alias_format_matches_current(alias: str) -> bool:
     """True when a persisted member alias uses the current alias format.
 
     The current format is ``member:<sha256>`` (prioritize.member_alias).
-    Aliases persisted under a previous spelling (e.g. ``member-v1:<sha>``)
+    Aliases persisted under a previous (versioned-prefix) spelling
     can never equal a freshly computed current-format alias, so they are
     dead data at load — dropped rather than mapped, keeping the index
     free of identifiers that cannot dedupe. Fingerprints and non-alias
