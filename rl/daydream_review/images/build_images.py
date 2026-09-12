@@ -3,7 +3,7 @@
 Two rules govern everything in this file.
 
 **One image == one PR snapshot.** Each image is tagged with the 12-character head
-SHA of the pull request it bakes (``daydream-rl/fixture:9b92381663058``), which is
+SHA of the pull request it bakes (``daydream-rl/fixture:dd5245c87c338``), which is
 exactly the tag :meth:`DaydreamReviewTaskset.load` stamps onto the task. Nothing
 clones at rollout time and no rollout carries credentials: the repository, at that
 one commit, is already inside the image with ``origin`` pointing at an in-container

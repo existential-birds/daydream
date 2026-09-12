@@ -5,7 +5,7 @@
 # declared here, and a repo or PR absent from the manifest is not a task.
 #
 # `image` is a docker repository name WITHOUT a tag. The tag is the task's
-# 12-char head SHA, so one image == one PR snapshot: `daydream-rl/fixture:9b9238166305`.
+# 12-char head SHA, so one image == one PR snapshot: `daydream-rl/fixture:dd5245c87c33`.
 # That is what makes the green-baseline gate meaningful — the suite is proven
 # green at the exact commit the rollout reviews.
 #
@@ -40,8 +40,8 @@ protected_test_paths = ["tests"]
 [[repos."existential-birds/daydream-rl-fixture".prs]]
 pr_number = 1
 base_ref = "main"
-base_sha = "a225d61f1ada3bd03f06cdf8a3f3f2d00870f6c5"
-head_sha = "1ba756e6743d833dc361177c2fb4946e76015985"
+base_sha = "97a1057003fbeb9375d36d15459e025b2dab1da0"
+head_sha = "8780a53f6995c560e2a502507bb295844d7d396f"
 golden_comments = [
     { comment = "`divide` raises ZeroDivisionError when `b` is 0. Guard the divisor or document the contract.", path = "calc.py", line = 10, resolved = true },
 ]
@@ -49,8 +49,8 @@ golden_comments = [
 [[repos."existential-birds/daydream-rl-fixture".prs]]
 pr_number = 2
 base_ref = "main"
-base_sha = "1ba756e6743d833dc361177c2fb4946e76015985"
-head_sha = "9b92381663058612621b186545f91bfb3a54079c"
+base_sha = "8780a53f6995c560e2a502507bb295844d7d396f"
+head_sha = "dd5245c87c336bcdbc6401aa78b387ffbc474d41"
 golden_comments = [
     { comment = "`mean([])` raises ZeroDivisionError. Return 0.0 or raise a typed error instead.", path = "calc.py", line = 16, resolved = false },
 ]

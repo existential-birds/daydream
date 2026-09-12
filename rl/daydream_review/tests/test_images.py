@@ -347,7 +347,7 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
     assert f"skipping base build; reusing {base_image}" in result.stdout
 
-    tag = f"{FIXTURE_IMAGE}:{'9b92381663058612621b186545f91bfb3a54079c'[:12]}"
+    tag = f"{FIXTURE_IMAGE}:{'dd5245c87c336bcdbc6401aa78b387ffbc474d41'[:12]}"
     assert tag in _tags(), f"{tag} not built; have {_tags()}"
 
     probe = subprocess.run(
@@ -360,7 +360,7 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
         check=False,
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
-    assert "9b92381663058612621b186545f91bfb3a54079c" in probe.stdout
+    assert "dd5245c87c336bcdbc6401aa78b387ffbc474d41" in probe.stdout
     # origin is the in-container mirror, so daydream's terminal push stays inside
     # the container and no rollout needs a credential.
     assert "/srv/mirror.git" in probe.stdout

@@ -28,9 +28,9 @@ FIXTURE_TEST_COMMAND = "python -m unittest discover -q"
 
 # Commit SHAs of the history build_fixture_repo() produces. Asserted by
 # tests/test_taskset.py::test_fixture_repo_is_deterministic.
-FIXTURE_BASE_SHA = "a225d61f1ada3bd03f06cdf8a3f3f2d00870f6c5"
-FIXTURE_PR1_HEAD_SHA = "1ba756e6743d833dc361177c2fb4946e76015985"
-FIXTURE_PR2_HEAD_SHA = "9b92381663058612621b186545f91bfb3a54079c"
+FIXTURE_BASE_SHA = "97a1057003fbeb9375d36d15459e025b2dab1da0"
+FIXTURE_PR1_HEAD_SHA = "8780a53f6995c560e2a502507bb295844d7d396f"
+FIXTURE_PR2_HEAD_SHA = "dd5245c87c336bcdbc6401aa78b387ffbc474d41"
 
 _IDENTITY = {
     "GIT_AUTHOR_NAME": "Daydream Fixture",
@@ -54,8 +54,12 @@ _GITIGNORE = """__pycache__/
 
 _README = """# daydream-rl-fixture
 
-A deterministic throwaway repository used by the `daydream-review` verifiers
-environment's tests and by its fixture container image. Never published.
+A deterministic throwaway repository used by the verifiers environment's
+tests and by its fixture container image. Never published.
+
+NOTE: this text is a byte-stable external fixture contract — the fixture
+repo's commit SHAs are pinned in images/manifest.toml and the rundir-golden
+fixtures, and changing even a word here changes every SHA.
 """
 
 _CALC_V1 = '''"""Tiny arithmetic helpers used by the daydream RL fixture repo."""

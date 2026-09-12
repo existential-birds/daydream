@@ -389,7 +389,7 @@
         "results": [
           {
             "source_call_id": null,
-            "content": "On branch main\nYour branch is up to date with 'origin/main'.\n\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n\tmodified:   tests/test_calc.py\n\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\t.review-output.md\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n---DIFF---\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 3346a12..022f4b9 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -13,6 +13,9 @@ class TestCalc(unittest.TestCase):\n     def test_mean(self) -> None:\n         self.assertEqual(mean([1, 2, 3]), 2.0)\n \n+    def test_mean_non_integer(self) -> None:\n+        self.assertEqual(mean([1, 2]), 1.5)\n+\n \n if __name__ == \"__main__\":\n     unittest.main()\n---STAGED---\n---LOG---\n9b92381 Add calc.mean\n1ba756e Add calc.divide\na225d61 Initial commit: calc.add"
+            "content": "On branch main\nYour branch is up to date with 'origin/main'.\n\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n\tmodified:   tests/test_calc.py\n\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\t.review-output.md\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n---DIFF---\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 3346a12..022f4b9 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -13,6 +13,9 @@ class TestCalc(unittest.TestCase):\n     def test_mean(self) -> None:\n         self.assertEqual(mean([1, 2, 3]), 2.0)\n \n+    def test_mean_non_integer(self) -> None:\n+        self.assertEqual(mean([1, 2]), 1.5)\n+\n \n if __name__ == \"__main__\":\n     unittest.main()\n---STAGED---\n---LOG---\ndd5245c Add calc.mean\n8780a53 Add calc.divide\n97a1057 Initial commit: calc.add"
           },
           {
             "source_call_id": null,
@@ -401,7 +401,7 @@
           },
           {
             "source_call_id": null,
-            "content": "To [REDACTED]\n   9b92381..077aa87  main -> main"
+            "content": "To [REDACTED]\n   dd5245c..077aa87  main -> main"
           }
         ]
       },

@@ -22,12 +22,12 @@
     "remote_url": "[REDACTED]",
     "repo_slug": null,
     "branch": "main",
-    "base_branch": "1ba756e6743d833dc361177c2fb4946e76015985",
+    "base_branch": "8780a53f6995c560e2a502507bb295844d7d396f",
     "head_sha": "077aa8792a58adeafd253a717f9a8ab19d21c0cc"
   },
   "code_context": {
     "head_sha": "077aa8792a58adeafd253a717f9a8ab19d21c0cc",
-    "base_branch": "1ba756e6743d833dc361177c2fb4946e76015985",
+    "base_branch": "8780a53f6995c560e2a502507bb295844d7d396f",
     "branch": "main",
     "base_sha": "077aa8792a58adeafd253a717f9a8ab19d21c0cc",
     "changed_files": []
