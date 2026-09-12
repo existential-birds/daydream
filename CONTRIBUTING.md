@@ -56,9 +56,11 @@ purpose so the full gate suite runs — the benchmark objective tests need the
 The pre-push hook **rejects unsigned commits**. Make sure your commits are
 signed with your SSH key:
 
-1. Enable commit signing:
+1. Configure git to sign with your SSH key, then enable commit signing:
 
    ```bash
+   git config --global gpg.format ssh
+   git config --global user.signingkey ~/.ssh/<your-key>.pub
    git config --global commit.gpgsign true
    ```
 
@@ -102,9 +104,12 @@ lockcheck install lint deadcode typecheck test actionlint coverage-report check-
 ```
 
 This is the same set of steps the `check` job in `.github/workflows/ci.yml` runs —
-`rl-check` is the only CI job the gate deliberately omits. The pre-push hook runs
-`make check` after verifying signatures, so a green local `make check` is what
-keeps your push from being rejected.
+`rl-check` is the only CI job the gate deliberately omits. One scope difference:
+`make deadcode` also runs vulture over `rl/daydream_review/`, which CI's `check`
+job does not include — that scan happens in the separate `rl-check` job — so the
+local gate is the stricter one. The pre-push hook runs `make check` after
+verifying signatures, so a green local `make check` is what keeps your push from
+being rejected.
 
 ## Testing policy
 
