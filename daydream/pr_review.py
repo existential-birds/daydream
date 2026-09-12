@@ -25,17 +25,17 @@ misreported as an absent pull request.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
 import os
 import re
 import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import jsonschema
 
@@ -45,16 +45,16 @@ from daydream.config import DIAGRAM_KINDS
 from daydream.extensions import (
     CommentFinding,
     FindingRenderContext,
+    Registry,
     SummaryContext,
     SummaryFinding,
     get_registry,
 )
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
-from daydream.pr_comment_renderer import render_run_info_block
+from daydream.pr_comment_renderer import render_run_info
 from daydream.repository_paths import valid_repository_file_path
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import normalize_severity
-from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
@@ -79,6 +79,20 @@ class PostStatus(Enum):
     POSTED = "posted"
     NOTHING_TO_POST = "nothing-to-post"
     NO_PR = "no-pr"
+    FAILED = "failed"
+
+
+class ReviewEvent(StrEnum):
+    """GitHub review event authorized by the source-specific caller."""
+
+    COMMENT = "COMMENT"
+    APPROVE = "APPROVE"
+
+
+class SubmissionStatus(StrEnum):
+    """Whether the final classified review was posted."""
+
+    POSTED = "posted"
     FAILED = "failed"
 
 
@@ -123,6 +137,110 @@ class ParsedIssue:
     location_distrust: bool = False
     severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False
+
+
+@dataclass(frozen=True)
+class SubmissionFinding:
+    """Immutable finding value consumed by the shared submission operation."""
+
+    path: str
+    line: int | None
+    title: str
+    body: str
+    is_cross_stack: bool
+    confidence: str | None
+    severity: str | None
+    fingerprint: str | None
+    location_distrust: bool
+    severity_before_demotion: str | None
+    severity_off_vocabulary: bool
+
+    @classmethod
+    def from_parsed(cls, issue: ParsedIssue) -> SubmissionFinding:
+        """Snapshot one mutable classification finding."""
+        return cls(
+            path=issue.path,
+            line=issue.line,
+            title=issue.title,
+            body=issue.body,
+            is_cross_stack=issue.is_cross_stack,
+            confidence=issue.confidence,
+            severity=issue.severity,
+            fingerprint=issue.fingerprint,
+            location_distrust=issue.location_distrust,
+            severity_before_demotion=issue.severity_before_demotion,
+            severity_off_vocabulary=issue.severity_off_vocabulary,
+        )
+
+    def to_parsed(self) -> ParsedIssue:
+        """Create the renderer's mutable compatibility value."""
+        return ParsedIssue(
+            path=self.path,
+            line=self.line,
+            title=self.title,
+            body=self.body,
+            is_cross_stack=self.is_cross_stack,
+            confidence=self.confidence,
+            severity=self.severity,
+            fingerprint=self.fingerprint,
+            location_distrust=self.location_distrust,
+            severity_before_demotion=self.severity_before_demotion,
+            severity_off_vocabulary=self.severity_off_vocabulary,
+        )
+
+
+@dataclass(frozen=True)
+class InlineReviewComment:
+    """One immutable inline comment in a final GitHub review payload."""
+
+    path: str
+    line: int
+    side: Literal["RIGHT"]
+    body: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class FileCommentPayload:
+    """Payload for one top-level file review comment."""
+
+    commit_id: str
+    path: str
+    subject_type: Literal["file"] = "file"
+    body: str
+
+
+@dataclass(frozen=True)
+class ReviewPayload:
+    """Payload for the single final GitHub review."""
+
+    event: ReviewEvent
+    commit_id: str
+    body: str
+    comments: tuple[InlineReviewComment, ...]
+
+
+@dataclass(frozen=True)
+class ReviewPostResult:
+    """Transport-level result for the final review write."""
+
+    review_url: str | None
+    safe_error: str | None
+
+
+@dataclass(frozen=True)
+class ClassifiedReviewResult:
+    """Confirmed write results from the shared submitter.
+
+    ``final_review_posted=False`` means no successful response was confirmed;
+    it does not prove that an ambiguous failed request had no remote effect.
+    """
+
+    status: SubmissionStatus
+    review_url: str | None
+    posted_file_level: tuple[SubmissionFinding, ...]
+    folded_file_level: tuple[SubmissionFinding, ...]
+    final_review_posted: bool
+    safe_error: str | None
 
 
 @dataclass(frozen=True)
@@ -203,6 +321,8 @@ async def post_review_to_pr_from_report(
     merged_items_path: Path,
     *,
     console: Console,
+    run_info: str,
+    renderers: ReviewRenderers,
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
@@ -227,6 +347,9 @@ async def post_review_to_pr_from_report(
     an absent PR returns :attr:`PostStatus.NO_PR`, while an operational
     lookup failure returns :attr:`PostStatus.FAILED`. Neither falls back to
     current-branch discovery.
+
+    ``run_info`` and ``renderers`` are acquired by the caller before posting;
+    this entrypoint never reads live trajectories or selects payload renderers.
 
     ``diagram_blocks`` (issue #1113): host-rendered grounded-diagram markdown,
     threaded through to :func:`build_payload`.
@@ -258,6 +381,8 @@ async def post_review_to_pr_from_report(
         target_dir,
         issues,
         console=console,
+        run_info=run_info,
+        renderers=renderers,
         post=post,
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
@@ -927,6 +1052,7 @@ def classify(
     issues: list[ParsedIssue],
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+    renderers: ReviewRenderers | None = None,
 ) -> _ClassifiedIssues:
     """Split issues into inline, file-level, and body-only placements.
 
@@ -943,6 +1069,7 @@ def classify(
     issue cited. Callers should not rely on ``issue.body`` remaining
     unchanged after this call.
     """
+    renderers = renderers if renderers is not None else resolve_review_renderers(get_registry())
     out = _ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
     changed_files = pr_changed_files(target_dir, pr, auth=auth)
@@ -990,7 +1117,7 @@ def classify(
             _unplaced(issue)
             continue
         _note_relocation(issue, snapped)
-        out.inline.append(_inline_comment(issue, snapped))
+        out.inline.append(_inline_comment(issue, snapped, renderers))
         out.inline_issues.append(issue)
     return out
 
@@ -1024,13 +1151,13 @@ def _note_relocation(issue: ParsedIssue, posted_line: int) -> None:
     issue.body = f"{issue.body}\n\n{note}" if issue.body else note
 
 
-def _inline_comment(issue: ParsedIssue, line: int) -> dict[str, Any]:
+def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -> dict[str, Any]:
     """Build one inline review-comment dict for the review payload."""
     return {
         "path": issue.path,
         "line": line,
         "side": "RIGHT",
-        "body": _format_inline_body(issue),
+        "body": _format_inline_body(issue, renderers),
     }
 
 
@@ -1099,7 +1226,7 @@ def _comment_finding(issue: ParsedIssue) -> CommentFinding:
     )
 
 
-def _render_finding(issue: ParsedIssue, placement: str) -> str:
+def _render_finding(issue: ParsedIssue, placement: str, renderers: ReviewRenderers) -> str:
     """Render one finding's inner block through the registered ``"finding"`` renderer.
 
     Falls back to :func:`default_render_finding` (and warns) when the custom
@@ -1108,36 +1235,36 @@ def _render_finding(issue: ParsedIssue, placement: str) -> str:
     """
     cf = _comment_finding(issue)
     ctx = FindingRenderContext(placement=placement)
-    _fn = get_registry().renderer("finding")
+    _fn = renderers.finding
     _label = "builtin" if _fn is default_render_finding else "custom"
     try:
         result = _fn(cf, ctx)
     except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
         _logger.warning("%s 'finding' renderer failed (%s); using default", _label, exc)
-        return default_render_finding(cf, ctx)
+        return renderers.fallback_finding(cf, ctx)
     if not isinstance(result, str) or not result:
         _logger.warning(
             "%s 'finding' renderer failed (returned %r); using default", _label, result
         )
-        return default_render_finding(cf, ctx)
+        return renderers.fallback_finding(cf, ctx)
     return result
 
 
-def _format_inline_body(issue: ParsedIssue) -> str:
-    parts = [_render_finding(issue, "inline"), DAYDREAM_FOOTER]
+def _format_inline_body(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
+    parts = [_render_finding(issue, "inline", renderers), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
 
 
-def _format_file_level_body(issue: ParsedIssue) -> str:
+def _format_file_level_body(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
     """Render the body of a file-level review comment.
 
     Carries the same :data:`DAYDREAM_FOOTER` badge and hidden finding marker
     as an inline comment, so the labeler's author check and fingerprint join
     recognise it without any read-side special-casing.
     """
-    parts = [_render_finding(issue, "file_level"), DAYDREAM_FOOTER]
+    parts = [_render_finding(issue, "file_level", renderers), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
@@ -1175,7 +1302,7 @@ def _build_agent_prompt(issue: CommentFinding) -> str:
     )
 
 
-def _summary_body_block(issue: ParsedIssue) -> str:
+def _summary_body_block(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
     """Render one non-inline finding's block for the summary section.
 
     Routes the inner human block through the ``"finding"`` renderer seam
@@ -1183,7 +1310,7 @@ def _summary_body_block(issue: ParsedIssue) -> str:
     result is byte-identical to the finding's flattened header/body/prompt/marker
     sequence in the pre-seam summary section.
     """
-    block = _render_finding(issue, "summary")
+    block = _render_finding(issue, "summary", renderers)
     if issue.fingerprint:
         block = f"{block}\n{finding_marker(issue.fingerprint)}"
     return block
@@ -1221,22 +1348,22 @@ def _render_body_section(findings: tuple[SummaryFinding, ...]) -> str:
     return "\n".join(parts)
 
 
-def _summary_findings(body_only: list[ParsedIssue]) -> tuple[SummaryFinding, ...]:
+def _summary_findings(body_only: list[ParsedIssue], renderers: ReviewRenderers) -> tuple[SummaryFinding, ...]:
     """Map non-inline :class:`ParsedIssue` objects to public :class:`SummaryFinding`s."""
     return tuple(
-        SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue))
+        SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue, renderers))
         for issue in body_only
     )
 
 
-def _format_body_section(body_only: list[ParsedIssue]) -> str:
+def _format_body_section(body_only: list[ParsedIssue], renderers: ReviewRenderers) -> str:
     """Render the by-file non-inline findings section from internal issues.
 
     Retained as the ``ParsedIssue`` entry point (approval-snapshot guard);
     delegates to :func:`_render_body_section` so the default summary renderer
     and this path share one scaffolding implementation.
     """
-    return _render_body_section(_summary_findings(body_only))
+    return _render_body_section(_summary_findings(body_only, renderers))
 
 
 def default_render_summary(ctx: SummaryContext) -> str:
@@ -1261,7 +1388,169 @@ def default_render_summary(ctx: SummaryContext) -> str:
     return "\n\n".join(chunks)
 
 
-def _render_summary(ctx: SummaryContext) -> str:
+@dataclass(frozen=True)
+class ReviewRenderers:
+    """Resolved comment renderers and their explicit built-in fallbacks."""
+
+    finding: Callable[[CommentFinding, FindingRenderContext], str]
+    summary: Callable[[SummaryContext], str]
+    fallback_finding: Callable[[CommentFinding, FindingRenderContext], str] = default_render_finding
+    fallback_summary: Callable[[SummaryContext], str] = default_render_summary
+
+
+def resolve_review_renderers(registry: Registry) -> ReviewRenderers:
+    """Capture the run's renderer selection before payload assembly."""
+    return ReviewRenderers(
+        finding=registry.renderer("finding"),
+        summary=registry.renderer("summary"),
+    )
+
+
+def _snapshot_inline_comment(raw: Mapping[str, Any]) -> InlineReviewComment:
+    """Copy one internal inline dictionary into its immutable payload value."""
+    path = raw.get("path")
+    line = raw.get("line")
+    side = raw.get("side")
+    body = raw.get("body")
+    if (
+        not isinstance(path, str)
+        or type(line) is not int
+        or side != "RIGHT"
+        or not isinstance(body, str)
+    ):
+        raise ValueError("classified inline comment has an invalid shape")
+    return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
+
+
+@dataclass(frozen=True)
+class ClassifiedReviewPlan:
+    """Immutable, authorized input to the shared review write operation."""
+
+    pr: PRInfo
+    inline: tuple[InlineReviewComment, ...]
+    inline_issues: tuple[SubmissionFinding, ...]
+    file_level: tuple[SubmissionFinding, ...]
+    body_only: tuple[SubmissionFinding, ...]
+    event: ReviewEvent
+    run_info: str
+    renderers: ReviewRenderers
+    diagram_blocks: str | None
+
+    @classmethod
+    def from_classified(
+        cls,
+        pr: PRInfo,
+        classified: _ClassifiedIssues,
+        *,
+        event: ReviewEvent,
+        run_info: str,
+        renderers: ReviewRenderers,
+        diagram_blocks: str | None = None,
+    ) -> ClassifiedReviewPlan:
+        """Snapshot a mutable classified review after the caller authorizes it."""
+        return cls(
+            pr=pr,
+            inline=tuple(_snapshot_inline_comment(comment) for comment in classified.inline),
+            inline_issues=tuple(
+                SubmissionFinding.from_parsed(issue)
+                for issue in classified.inline_issues
+            ),
+            file_level=tuple(
+                SubmissionFinding.from_parsed(issue) for issue in classified.file_level
+            ),
+            body_only=tuple(
+                SubmissionFinding.from_parsed(issue) for issue in classified.body_only
+            ),
+            event=event,
+            run_info=run_info,
+            renderers=renderers,
+            diagram_blocks=diagram_blocks,
+        )
+
+
+class ReviewTransport(Protocol):
+    """Explicit capability for the two kinds of GitHub review writes."""
+
+    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool: ...
+
+    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult: ...
+
+
+def _file_comment_payload_dict(payload: FileCommentPayload) -> dict[str, Any]:
+    return {
+        "commit_id": payload.commit_id,
+        "path": payload.path,
+        "subject_type": payload.subject_type,
+        "body": payload.body,
+    }
+
+
+def _review_payload_dict(payload: ReviewPayload) -> dict[str, Any]:
+    return {
+        "event": payload.event.value,
+        "commit_id": payload.commit_id,
+        "body": payload.body,
+        "comments": [
+            {
+                "path": comment.path,
+                "line": comment.line,
+                "side": comment.side,
+                "body": comment.body,
+            }
+            for comment in payload.comments
+        ],
+    }
+
+
+@dataclass(frozen=True)
+class GitHubReviewTransport:
+    """GitHub review writes bound to one repository checkout and auth source."""
+
+    target_dir: Path
+    auth: GitHubAuth = field(repr=False)
+
+    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool:
+        endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"
+        try:
+            git_ops.gh_api(
+                self.target_dir,
+                endpoint,
+                method="POST",
+                input_data=_file_comment_payload_dict(payload),
+                auth=self.auth,
+            )
+        except GitError:
+            return False
+        return True
+
+    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult:
+        endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
+        try:
+            data = git_ops.gh_api(
+                self.target_dir,
+                endpoint,
+                method="POST",
+                input_data=_review_payload_dict(payload),
+                auth=self.auth,
+            )
+        except GitError as exc:
+            safe_error = "GitHub review submission failed"
+            if exc.preserved_payload_path is not None:
+                safe_error += (
+                    " (request payload preserved at "
+                    f"{exc.preserved_payload_path})"
+                )
+            return ReviewPostResult(review_url=None, safe_error=safe_error)
+        if not isinstance(data, dict):
+            return ReviewPostResult(review_url=None, safe_error=None)
+        url = data.get("html_url")
+        return ReviewPostResult(
+            review_url=str(url) if url else None,
+            safe_error=None,
+        )
+
+
+def _render_summary(ctx: SummaryContext, renderers: ReviewRenderers) -> str:
     """Render the summary body through the registered ``"summary"`` renderer.
 
     Falls back to :func:`default_render_summary` (and warns) when the custom
@@ -1269,15 +1558,15 @@ def _render_summary(ctx: SummaryContext) -> str:
     never break posting.
     """
     try:
-        result = get_registry().renderer("summary")(ctx)
+        result = renderers.summary(ctx)
     except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
         _logger.warning("custom 'summary' renderer failed (%s); using default", exc)
-        return default_render_summary(ctx)
+        return renderers.fallback_summary(ctx)
     if not isinstance(result, str) or not result:
         _logger.warning(
             "custom 'summary' renderer failed (returned %r); using default", result
         )
-        return default_render_summary(ctx)
+        return renderers.fallback_summary(ctx)
     return result
 
 
@@ -1327,61 +1616,6 @@ def _build_consolidated_prompt(
     )
 
 
-def _resolve_trajectory_paths(
-    recorder: TrajectoryRecorder | None,
-) -> tuple[list[Path], tempfile.TemporaryDirectory[str] | None]:
-    """Resolve trajectory file paths to feed the enriched-comment renderer.
-
-    Returns the parent trajectory plus any sibling fork files (deep mode).
-    Because :meth:`TrajectoryRecorder._write` only fires at ``__aexit__``,
-    the parent file does not yet exist when the PR comment is composed
-    mid-run; we therefore snapshot the in-memory parent ATIF Trajectory to a
-    tempfile so the renderer can read it like any other on-disk trajectory.
-    Sibling forks have already exited and written by post-time, so we glob
-    for them.
-
-    Discovery rule: parent path is taken from ``recorder.path``; siblings
-    are every ``*.json`` under the recorder's private ``artifact_run_dir``
-    when present. Standalone legacy recorders fall back to
-    ``<target_dir>/.daydream/runs/<session_id>``. Every fork in that run dir
-    belongs to this run by construction, so no prefix filtering is required.
-
-    The returned ``TemporaryDirectory`` (when not ``None``) MUST be kept
-    alive by the caller until the renderer finishes; closing it deletes
-    the snapshot file.
-    """
-    if recorder is None:
-        return [], None
-    paths: list[Path] = []
-    tmpdir: tempfile.TemporaryDirectory[str] | None = None
-    try:
-        # Snapshot the in-memory parent trajectory to a tempfile (parent
-        # file isn't written until __aexit__).
-        if recorder.steps:
-            trajectory = recorder.build_trajectory()
-            tmpdir = tempfile.TemporaryDirectory(prefix="daydream-traj-snapshot-")
-            snapshot = Path(tmpdir.name) / "parent.json"
-            snapshot.write_text(
-                json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8"
-            )
-            paths.append(snapshot)
-        # Discover sibling fork trajectories on disk (deep mode).
-        run_dir = recorder.artifact_run_dir or (
-            recorder.target_dir / ".daydream" / "runs" / recorder.session_id
-        )
-        sibling_dir = run_dir / "trajectories"
-        if sibling_dir.is_dir():
-            for sibling in sorted(sibling_dir.glob("*.json")):
-                if sibling.is_file():
-                    paths.append(sibling)
-    except Exception:  # noqa: BLE001 - renderer treats [] as missing data
-        if tmpdir is not None:
-            with contextlib.suppress(Exception):
-                tmpdir.cleanup()
-        return [], None
-    return paths, tmpdir
-
-
 _REVIEWED_COMMIT_MARKER = "- **Reviewed commit:**"
 
 
@@ -1399,27 +1633,6 @@ def _strip_forged_reviewed_commit_lines(run_info: str) -> str:
         for line in run_info.splitlines()
         if not line.lstrip().startswith(_REVIEWED_COMMIT_MARKER)
     )
-
-
-def _render_review_info_block() -> str:
-    """Render the enriched run-info block, falling back to a brief note.
-
-    Wraps :func:`render_run_info_block` with one extra safety net beyond
-    its own internal try/except: if any unexpected exception escapes (e.g.
-    snapshot write failure), we degrade to a 'run details unavailable'
-    note. The comment must still post (K8 / M9).
-    """
-    try:
-        recorder = get_current_recorder()
-        paths, tmpdir = _resolve_trajectory_paths(recorder)
-        try:
-            return render_run_info_block(paths)
-        finally:
-            if tmpdir is not None:
-                with contextlib.suppress(Exception):
-                    tmpdir.cleanup()
-    except Exception:  # noqa: BLE001 - posting must never crash on snapshot/discovery
-        return f"*run details unavailable*\n\n<sub>Generated by daydream v{daydream.__version__}</sub>"
 
 
 # Severities that must never let an opted-in review post as an approval.
@@ -1492,15 +1705,16 @@ def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> b
     )
 
 
-def build_payload(
+def _build_payload_for_event(
     pr: PRInfo,
     classified: _ClassifiedIssues,
     *,
-    run_info_override: str | None = None,
-    approve_on_clean: bool = False,
+    event: ReviewEvent,
+    run_info: str,
+    renderers: ReviewRenderers,
     diagram_blocks: str | None = None,
-) -> dict[str, Any]:
-    """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
+) -> ReviewPayload:
+    """Render a final review payload for a caller-authorized event.
 
     The review body uses collapsible sections so large reviews stay readable:
         **Code Review Summary**
@@ -1510,17 +1724,10 @@ def build_payload(
         Footer (🧙 Posted by daydream vX.Y.Z)
 
     Args:
-        run_info_override: Pre-rendered run-info markdown to use in place of
-            the live recorder block (``post-findings`` posts from artifact
-            data; there is no recorder in that process). ``None`` renders the
-            live block as usual.
-        approve_on_clean: Opt-in approval (issue #343). When True AND the
-            classified review has no blocking severity findings (anything
-            other than ``"low"`` or omitted, fail-closed — see
-            ``_NON_BLOCKING_SEVERITIES``), the payload's event becomes
-            ``"APPROVE"`` with a prepended approval line; otherwise the event
-            stays ``"COMMENT"`` and the body is byte-identical to the
-            non-approve path.
+        run_info: Pre-rendered run-info markdown from the live provider or
+            validated findings artifact.
+        renderers: Explicit renderer functions and built-in fallback functions.
+        event: Review event already authorized by the source-specific caller.
         diagram_blocks: Host-rendered grounded-diagram markdown (issue #1113),
             handed to the ``"summary"`` renderer as ``ctx.diagrams`` so it
             lands directly under the summary header. ``None`` (the default)
@@ -1528,7 +1735,7 @@ def build_payload(
     """
     all_issues_with_inline_meta = classified.all_issues()
 
-    clean = _is_clean_review(classified, approve_on_clean)
+    approved = event is ReviewEvent.APPROVE
 
     # Consolidated AI agent prompt (host-built; empty means "omit").
     agent_prompt = (
@@ -1541,7 +1748,6 @@ def build_payload(
     # breakdown + version footer, owned by the renderer), then the
     # conditional severity/confidence breakdown. The renderer emits its own
     # ``<sub>Generated by daydream...</sub>`` footer, so don't double it.
-    enriched_run_info = run_info_override if run_info_override is not None else _render_review_info_block()
     # The commit link targets the repo that holds the head commit: the fork
     # for fork-head PRs (``head_repo``), else the base repo from
     # ``owner``/``repo``. ``owner``/``repo`` themselves stay the base repo —
@@ -1562,7 +1768,7 @@ def build_payload(
     )
     if confidence_parts:
         extra_info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
-    review_info = f"{commit_line}\n\n{_strip_forged_reviewed_commit_lines(enriched_run_info)}"
+    review_info = f"{commit_line}\n\n{_strip_forged_reviewed_commit_lines(run_info)}"
     if extra_info_lines:
         review_info = f"{review_info}\n\n" + "\n".join(extra_info_lines)
     review_info_block = (
@@ -1573,15 +1779,15 @@ def build_payload(
     )
 
     summary_ctx = SummaryContext(
-        findings=_summary_findings(classified.body_only),
+        findings=_summary_findings(classified.body_only, renderers),
         agent_prompt=agent_prompt,
         review_info=review_info_block,
         diagrams=diagram_blocks or None,
     )
-    summary_body = _render_summary(summary_ctx)
+    summary_body = _render_summary(summary_ctx, renderers)
 
     body_chunks: list[str] = []
-    if clean:
+    if approved:
         body_chunks.append("✅ **Deep review passed with no high/medium findings.**")
     body_chunks.append(summary_body)
     # DAYDREAM_FOOTER is the bottom-of-comment "🧙 Posted by daydream"
@@ -1589,13 +1795,106 @@ def build_payload(
     # inside the review-info block.
     body_chunks.append(DAYDREAM_FOOTER)
 
-    payload: dict[str, Any] = {
-        "event": "APPROVE" if clean else "COMMENT",
-        "commit_id": pr.head_sha,
-        "body": "\n\n".join(body_chunks),
-        "comments": classified.inline,
-    }
-    return payload
+    return ReviewPayload(
+        event=event,
+        commit_id=pr.head_sha,
+        body="\n\n".join(body_chunks),
+        comments=tuple(
+            _snapshot_inline_comment(comment) for comment in classified.inline
+        ),
+    )
+
+
+def build_payload(
+    pr: PRInfo,
+    classified: _ClassifiedIssues,
+    *,
+    run_info: str,
+    renderers: ReviewRenderers,
+    approve_on_clean: bool = False,
+    diagram_blocks: str | None = None,
+) -> dict[str, Any]:
+    """Build the legacy dictionary payload after applying the approval gate."""
+    event = (
+        ReviewEvent.APPROVE
+        if _is_clean_review(classified, approve_on_clean)
+        else ReviewEvent.COMMENT
+    )
+    return _review_payload_dict(
+        _build_payload_for_event(
+            pr,
+            classified,
+            event=event,
+            run_info=run_info,
+            renderers=renderers,
+            diagram_blocks=diagram_blocks,
+        )
+    )
+
+
+def post_classified_review(
+    plan: ClassifiedReviewPlan,
+    *,
+    transport: ReviewTransport,
+) -> ClassifiedReviewResult:
+    """Submit ordered file comments, fold failures, then post one final review."""
+    posted: list[SubmissionFinding] = []
+    folded: list[SubmissionFinding] = []
+    for finding in plan.file_level:
+        payload = FileCommentPayload(
+            commit_id=plan.pr.head_sha,
+            path=finding.path,
+            subject_type="file",
+            body=_format_file_level_body(finding.to_parsed(), plan.renderers),
+        )
+        if transport.post_file_comment(plan.pr, payload):
+            posted.append(finding)
+        else:
+            folded.append(finding)
+
+    final_classified = _ClassifiedIssues(
+        inline=[
+            {
+                "path": comment.path,
+                "line": comment.line,
+                "side": comment.side,
+                "body": comment.body,
+            }
+            for comment in plan.inline
+        ],
+        inline_issues=[finding.to_parsed() for finding in plan.inline_issues],
+        file_level=[finding.to_parsed() for finding in posted],
+        body_only=[
+            *(finding.to_parsed() for finding in plan.body_only),
+            *(finding.to_parsed() for finding in folded),
+        ],
+    )
+    review_payload = _build_payload_for_event(
+        plan.pr,
+        final_classified,
+        event=plan.event,
+        run_info=plan.run_info,
+        renderers=plan.renderers,
+        diagram_blocks=plan.diagram_blocks,
+    )
+    review_result = transport.post_review(plan.pr, review_payload)
+    if review_result.review_url is None:
+        return ClassifiedReviewResult(
+            status=SubmissionStatus.FAILED,
+            review_url=None,
+            posted_file_level=tuple(posted),
+            folded_file_level=tuple(folded),
+            final_review_posted=False,
+            safe_error=review_result.safe_error,
+        )
+    return ClassifiedReviewResult(
+        status=SubmissionStatus.POSTED,
+        review_url=review_result.review_url,
+        posted_file_level=tuple(posted),
+        folded_file_level=tuple(folded),
+        final_review_posted=True,
+        safe_error=None,
+    )
 
 
 # --- Core orchestration ---------------------------------------------------
@@ -1644,6 +1943,8 @@ async def _post(
     issues: list[ParsedIssue],
     *,
     console: Console,
+    run_info: str,
+    renderers: ReviewRenderers,
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
@@ -1660,7 +1961,7 @@ async def _post(
     if pr is None:
         return PostStatus.NO_PR
 
-    classified = classify(target_dir, pr, issues, auth=auth)
+    classified = classify(target_dir, pr, issues, auth=auth, renderers=renderers)
     if (
         classified.is_empty()
         and not approve_on_clean
@@ -1695,109 +1996,39 @@ async def _post(
         print_info(console, "Skipped posting to PR.")
         return PostStatus.NOTHING_TO_POST
 
-    # File-level comments post first: a failure here has to fall back into the
-    # review body, which is built below.
-    posted, failed = _submit_file_level_comments(
-        target_dir, pr, classified.file_level, auth=auth
+    plan = ClassifiedReviewPlan.from_classified(
+        pr,
+        classified,
+        event=ReviewEvent.APPROVE if clean else ReviewEvent.COMMENT,
+        run_info=run_info,
+        renderers=renderers,
+        diagram_blocks=diagram_blocks,
     )
-    if failed:
-        classified.file_level = posted
-        classified.body_only.extend(failed)
+    result = post_classified_review(
+        plan,
+        transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
+    )
+    if result.folded_file_level:
         print_warning(
             console,
-            f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
+            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            "folded into the review body.",
         )
 
-    payload = build_payload(
-        pr, classified, approve_on_clean=approve_on_clean, diagram_blocks=diagram_blocks
-    )
-    review_url, error_msg = _submit_review(target_dir, pr, payload, auth=auth)
-    if review_url is None:
-        # ``error_msg`` carries the GitError text from git_ops, which includes
-        # the preserved tempfile path on failure (see git_ops.gh_api).
-        suffix = f" ({error_msg})" if error_msg else ""
+    if result.status is SubmissionStatus.FAILED:
+        suffix = f" ({result.safe_error})" if result.safe_error else ""
         # File-level comments post before the review, so some may already be
         # live on the PR — saying "no comments were posted" would be false.
         already = (
-            f" {len(classified.file_level)} file-level comment(s) were already posted."
-            if classified.file_level
+            f" {len(result.posted_file_level)} file-level comment(s) were already posted."
+            if result.posted_file_level
             else " No comments were posted."
         )
         print_warning(console, f"Failed to post PR review;{already}{suffix}")
         return PostStatus.FAILED
 
-    print_success(console, f"Posted review: {review_url}")
+    print_success(console, f"Posted review: {result.review_url}")
     return PostStatus.POSTED
-
-
-def _submit_file_level_comments(
-    target_dir: Path,
-    pr: PRInfo,
-    issues: list[ParsedIssue],
-    *,
-    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> tuple[list[ParsedIssue], list[ParsedIssue]]:
-    """POST each issue as a file-level review comment; return the ones that failed.
-
-    GitHub rejects ``subject_type`` inside a batch review payload (HTTP 422),
-    so file-level comments must be posted one at a time against
-    ``/pulls/{n}/comments``. Each one becomes a top-level, repliable thread on
-    that endpoint — the surface :func:`index_pr_review_comments` reads — which
-    is what makes these findings labelable at all.
-
-    Failures are returned rather than raised so the caller can fold them back
-    into the review body: a finding that cannot get its own thread must still
-    reach the maintainer.
-
-    Returns:
-        ``(posted, failed)`` partitioning ``issues`` in input order.
-    """
-    endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"
-    posted: list[ParsedIssue] = []
-    failed: list[ParsedIssue] = []
-    for issue in issues:
-        payload = {
-            "commit_id": pr.head_sha,
-            "path": issue.path,
-            "subject_type": "file",
-            "body": _format_file_level_body(issue),
-        }
-        try:
-            git_ops.gh_api(
-                target_dir, endpoint, method="POST", input_data=payload, auth=auth
-            )
-        except GitError:
-            failed.append(issue)
-        else:
-            posted.append(issue)
-    return posted, failed
-
-
-def _submit_review(
-    target_dir: Path,
-    pr: PRInfo,
-    payload: dict[str, Any],
-    *,
-    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> tuple[str | None, str | None]:
-    """POST the review payload via ``gh api``.
-
-    Returns:
-        ``(html_url, None)`` on success, ``(None, error_message)`` on failure.
-        The error message — when present — includes the preserved-payload path
-        produced by :func:`daydream.git_ops.gh_api` so callers can surface it.
-    """
-    endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
-    try:
-        data = git_ops.gh_api(
-            target_dir, endpoint, method="POST", input_data=payload, auth=auth
-        )
-    except GitError as exc:
-        return None, str(exc)
-    if not isinstance(data, dict):
-        return None, None
-    url = data.get("html_url")
-    return (str(url) if url else None), None
 
 
 def post_diagram_comment_to_pr(
@@ -2622,13 +2853,14 @@ def post_findings_from_artifact(
         print_info(console, f"Stale findings minimized: {resolved} succeeded, {failed} failed.")
 
     new_fingerprints = set(plan.new)
+    renderers = resolve_review_renderers(get_registry())
     classified = _ClassifiedIssues()
     for finding in artifact.findings:
         if finding.fingerprint not in new_fingerprints:
             continue
         issue = _issue_from_artifact_finding(finding)
         if finding.placement == "inline" and finding.line is not None:
-            classified.inline.append(_inline_comment(issue, finding.line))
+            classified.inline.append(_inline_comment(issue, finding.line, renderers))
             classified.inline_issues.append(issue)
         elif finding.placement == "file":
             classified.file_level.append(issue)
@@ -2659,35 +2891,37 @@ def post_findings_from_artifact(
         )
         return 0
 
-    posted_files, failed_files = _submit_file_level_comments(
-        target_dir, pr, classified.file_level, auth=auth
-    )
-    if failed_files:
-        classified.file_level = posted_files
-        classified.body_only.extend(failed_files)
-        print_info(
-            console,
-            f"{len(failed_files)} file-level comment(s) failed to post; folded into the review body.",
-        )
-
-    payload = build_payload(
+    submission_plan = ClassifiedReviewPlan.from_classified(
         pr,
         classified,
-        run_info_override=artifact.run_info,
-        approve_on_clean=can_approve,
+        event=ReviewEvent.APPROVE if can_approve else ReviewEvent.COMMENT,
+        run_info=(
+            artifact.run_info if artifact.run_info is not None else render_run_info(())
+        ),
+        renderers=renderers,
         diagram_blocks=diagram_blocks,
     )
-    review_url, error_msg = _submit_review(target_dir, pr, payload, auth=auth)
-    if review_url is None:
-        suffix = f" ({error_msg})" if error_msg else ""
+    result = post_classified_review(
+        submission_plan,
+        transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
+    )
+    if result.folded_file_level:
+        print_info(
+            console,
+            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            "folded into the review body.",
+        )
+
+    if result.status is SubmissionStatus.FAILED:
+        suffix = f" ({result.safe_error})" if result.safe_error else ""
         already = (
-            f"{len(posted_files)} file-level comment(s) were already posted."
-            if posted_files
+            f"{len(result.posted_file_level)} file-level comment(s) were already posted."
+            if result.posted_file_level
             else "No comments were posted."
         )
         print_error(console, "PR Review Post Failed", f"{already}{suffix}")
         return 1
-    print_success(console, f"Posted review: {review_url}")
+    print_success(console, f"Posted review: {result.review_url}")
     return 0
 
 

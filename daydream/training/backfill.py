@@ -14,7 +14,7 @@ Failure policy:
 
 * A *benign* PR absence (fork/deleted PR 404, unpushed-SHA 422, detected via
   :func:`~daydream.training.harvest._is_benign_pr_absence`) degrades inside
-  ``build_annotation`` to a local-branch rubric whose outcome is ``unknown``;
+  ``acquire_harvest_evidence`` to a local-branch rubric whose outcome is ``unknown``;
   the backfill stores that as the empty label list (harvest's serialization)
   — fail closed, never decisive (M19/M22), and byte-identical to the harvest
   writer so the M14 auto-dedup tuple matches between the two writers.
@@ -43,17 +43,18 @@ from rich.console import Console
 from daydream.archive.index import (
     append_label_observation,
     latest_label_observation,
-    query_runs,
 )
 from daydream.git_ops import GitError, RateLimitError
 from daydream.training import labeler_versions
 from daydream.training.harvest import (
-    _gh_api,
+    HarvestConfig,
+    HarvestServices,
     _is_benign_pr_absence,
-    _materialize_base_sha_if_missing,
-    _resolve_repo_for_row,
+    acquire_harvest_evidence,
     build_annotation,
+    make_harvest_services,
 )
+from daydream.training.harvest_types import HarvestRow
 from daydream.training.reply_classifier import (
     _ACCEPT_RULES,
     _DAYDREAM_AGENT_LOGINS,
@@ -137,6 +138,7 @@ def run_backfill(
     session_filter: str | None = None,
     report_path: Path | None = None,
     valid_at_override: str | None = None,
+    services: HarvestServices | None = None,
 ) -> dict[str, Any]:
     """Re-annotate every PR-linked indexed run and append a fresh generation.
 
@@ -153,6 +155,11 @@ def run_backfill(
             raises after observations are committed.
         valid_at_override: Explicit valid-time passed through to the
             annotation builder, beating the derived decisive-evidence stamp.
+        services: Per-run acquisition adapters; omission uses the production
+            archive, GitHub, and git adapters without a harvest cache. The
+            service and requested archive must resolve to the same directory.
+            Latest-label reads, observation writes, and reporting remain owned
+            by backfill; its writes do not use the provider's append override.
 
     Returns:
         Summary dict with ``sessions_reprocessed`` (PR-linked rows walked),
@@ -163,20 +170,16 @@ def run_backfill(
         msg = f"archive_dir does not exist: {archive_dir}"
         raise FileNotFoundError(msg)
 
-    if session_filter:
-        queue = query_runs(
-            archive_dir,
-            "session_id LIKE ? || '%'",
-            (session_filter,),
+    if services is None:
+        services = make_harvest_services(HarvestConfig(archive_dir=archive_dir))
+    requested_archive = archive_dir.resolve()
+    services_archive = services.archive_dir.resolve()
+    if requested_archive != services_archive:
+        raise ValueError(
+            f"backfill archive ownership mismatch: requested {requested_archive}, services {services_archive}"
         )
-    else:
-        queue = query_runs(archive_dir)
-    # Pinned session order for determinism (M18): identical archives must
-    # produce identical report and append orderings.
-    queue = sorted(queue, key=lambda row: row["session_id"])
-
     console: Console = create_console()
-    recording_gh = _RecordingGH(_gh_api)
+    recording_gh = _RecordingGH(services.github)
 
     summary: dict[str, Any] = {
         "sessions_reprocessed": 0,
@@ -186,39 +189,44 @@ def run_backfill(
         "errors": 0,
         "aborted": 0,
     }
+    queue: list[HarvestRow] = []
+    for row_number, raw in enumerate(services.query_rows(session_filter), start=1):
+        try:
+            queue.append(HarvestRow.from_mapping(raw, row_number=row_number))
+        except ValueError as exc:
+            summary["errors"] += 1
+            print_warning(console, f"backfill: {exc}")
+    # Pinned session order for determinism (M18): identical archives must
+    # produce identical report and append orderings.
+    queue.sort(key=lambda row: row.session_id)
     transitions: dict[str, dict[str, Any]] = {}
     disposition_counts: Counter[str] = Counter()
     pr_state_counts: Counter[str] = Counter()
     class_balance: Counter[str] = Counter()
     ambiguous_manual_review = 0
-    fetched_repos: set[Path] = set()
-
     for row in queue:
-        if not row.get("pr_repo") or row.get("pr_number") is None:
+        if not row.is_pr:
             summary["non_pr_skipped"] += 1
             continue
         try:
-            run_dir = Path(row["archive_path"])
-            row_repo_clone = _resolve_repo_for_row(
-                row, clone_cache=None, fetched_repos=fetched_repos, console=console
-            )
-            _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone, console=console)
-            old_labels = _latest_labels(archive_dir, row["session_id"])
+            row_repo_clone = services.resolve_repo(row, console=console)
+            base_sha_status = services.materialize_base_sha(row, row_repo_clone, console=console)
+            old_labels = _latest_labels(archive_dir, row.session_id)
             try:
-                payload = build_annotation(
+                evidence = acquire_harvest_evidence(
                     row,
-                    run_dir=run_dir,
-                    archive_dir=archive_dir,
-                    gh_api=recording_gh,
-                    repo_clone=row_repo_clone or archive_dir,
-                    clone_resolved=row_repo_clone is not None,
+                    services=services,
+                    github=recording_gh,
+                    repo_resolution=row_repo_clone,
+                    base_sha_status=base_sha_status,
                     valid_at_override=valid_at_override,
                 )
+                payload = build_annotation(row, evidence)
             except RateLimitError:
                 raise
             except GitError as exc:
                 # Benign absence (deleted repo/PR/comments 404, unpushed-SHA
-                # 422) that escaped build_annotation's internal degrade — fail
+                # 422) that escaped acquisition's internal degrade — fail
                 # closed (M19/M22): store unknown with the current policy
                 # version, never a decisive label. Transient failures re-raise
                 # into the per-row isolation handler below.
@@ -226,11 +234,11 @@ def run_backfill(
                     raise
                 print_warning(
                     console,
-                    f"backfill: PR evidence absent for session {row['session_id']} "
+                    f"backfill: PR evidence absent for session {row.session_id} "
                     f"({type(exc).__name__}: {exc}); labeling unknown (fail closed)",
                 )
                 labels: list[str] = []
-                transitions[row["session_id"]] = {
+                transitions[row.session_id] = {
                     "old_labels": old_labels,
                     "new_labels": labels,
                 }
@@ -240,11 +248,11 @@ def run_backfill(
                     continue
                 appended = append_label_observation(
                     archive_dir,
-                    row["session_id"],
+                    row.session_id,
                     labels=labels,
                     pr_state=None,
                     labeler_version=labeler_versions.LABELER_POLICY_VERSION,
-                    evidence_sha=row.get("head_sha"),
+                    evidence_sha=row.head_sha,
                 )
                 summary["appended" if appended else "skipped"] += 1
                 summary["sessions_reprocessed"] += 1
@@ -253,7 +261,7 @@ def run_backfill(
             # label list — harvest's serialization — so the M14 dedup tuple
             # stays byte-identical between the two writers, never decisive.
             labels = payload.labels
-            transitions[row["session_id"]] = {
+            transitions[row.session_id] = {
                 "old_labels": old_labels,
                 "new_labels": labels,
             }
@@ -275,7 +283,7 @@ def run_backfill(
                 continue
             appended = append_label_observation(
                 archive_dir,
-                row["session_id"],
+                row.session_id,
                 labels=labels,
                 pr_state=payload.pr_state,
                 labeler_version=labeler_versions.LABELER_POLICY_VERSION,
@@ -308,7 +316,7 @@ def run_backfill(
             summary["errors"] += 1
             print_warning(
                 console,
-                f"backfill: session {row.get('session_id', '<unknown>')} failed: "
+                f"backfill: session {row.session_id} failed: "
                 f"{type(exc).__name__}: {exc}",
             )
             continue

@@ -1062,6 +1062,8 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
 async def _step_findings_out(ctx: FlowContext) -> Stop:
     """Two-phase findings artifact (Phase A): emit the strict-schema artifact and STOP."""
     deep_state = DeepState(ctx.data)
+    from daydream.pr_review import resolve_review_renderers
+    from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
     from daydream.runner import _emit_findings_from_items
 
     items_file: Path = deep_state.items_file
@@ -1070,11 +1072,17 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
     # diagram step produced one, so Phase B can re-render the blocks into the
     # posted review from the validated specs.
     diagrams = (deep_state.diagrams or {}).get("payload")
+    recorder = get_current_recorder()
+    run_info = render_live_run_info(LiveRunInfoSource(recorder, ctx.artifacts))
+    if run_info.diagnostic is not None:
+        print_warning(console, run_info.diagnostic)
     return Stop(
         _emit_findings_from_items(
             ctx.work.repo,
             ctx.config,
             findings_items,
+            run_info=run_info.markdown,
+            renderers=resolve_review_renderers(ctx.registry),
             diagrams=diagrams,
             auth=ctx.github_execution.auth,
         )
@@ -1137,7 +1145,13 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     if deep_state.mode == "review":
         return None
 
-    from daydream.pr_review import PostStatus, post_review_to_pr_from_report
+    from daydream.pr_review import PostStatus, post_review_to_pr_from_report, resolve_review_renderers
+    from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
+
+    recorder = get_current_recorder()
+    run_info = render_live_run_info(LiveRunInfoSource(recorder, ctx.artifacts))
+    if run_info.diagnostic is not None:
+        print_warning(console, run_info.diagnostic)
 
     items_file: Path = deep_state.items_file
     pr_kwargs = (
@@ -1148,6 +1162,8 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     outcome = await post_review_to_pr_from_report(
         ctx.work.repo,
         items_file,
+        run_info=run_info.markdown,
+        renderers=resolve_review_renderers(ctx.registry),
         console=console,
         post=deep_state.mode == "comment",
         approve_on_clean=_approve_on_clean(ctx.config),

@@ -770,9 +770,17 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     payload: dict[str, Any] = diagrams.get("payload") or {}
 
     if ctx.config.findings_out is not None:
+        from daydream.pr_review import resolve_review_renderers
+        from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
+        from daydream.trajectory import get_current_recorder
+
+        run_info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
+        if run_info.diagnostic is not None:
+            print_warning(console, run_info.diagnostic)
         return Stop(
             _emit_diagram_findings(
-                ctx.work.repo, ctx.config, payload, auth=ctx.github_execution.auth
+                ctx.work.repo, ctx.config, payload, auth=ctx.github_execution.auth,
+                run_info=run_info.markdown, renderers=resolve_review_renderers(ctx.registry),
             )
         )
 

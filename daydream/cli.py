@@ -37,10 +37,10 @@ top-level ``TARGET`` positional):
 """
 
 import argparse
-import inspect
 import signal
 import sys
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -1237,10 +1237,8 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
 def _handle_harvest_command(argv: list[str]) -> int:
     """Handle ``daydream corpus harvest [...]``.
 
-    Drives :func:`daydream.training.harvest.run_harvest` (looked up via the
-    module attribute so test monkeypatches take effect). ``run_harvest`` is a
-    coroutine in production, so it is driven through :func:`anyio.run`; a
-    synchronous test double that returns a summary directly is used as-is.
+    Composes the harvest services and drives
+    :func:`daydream.training.harvest.run_harvest` through :func:`anyio.run`.
     Returns an exit code; ``main`` translates it to a process exit. An
     aborted summary (``aborted >= 1``) or any per-row harvest errors
     (``errors > 0``) exits ``1``; a clean partial completion with unresolved
@@ -1276,15 +1274,8 @@ def _handle_harvest_command(argv: list[str]) -> int:
         session_filter=args.session,
         gh_request_spacing_sec=args.gh_spacing_sec,
     )
-    run_harvest = _harvest.run_harvest
-    summary: dict[str, int]
-    if inspect.iscoroutinefunction(run_harvest):
-        summary = anyio.run(run_harvest, config)
-    else:
-        # A synchronous test double (monkeypatched stub) is driven directly —
-        # anyio.run rejects non-coroutine callables. Production run_harvest is
-        # always async, so mypy only sees the coroutine type here.
-        summary = run_harvest(config)  # type: ignore[assignment]
+    services = _harvest.make_harvest_services(config)
+    summary = anyio.run(partial(_harvest.run_harvest, services=services), config)
     print_info(console, str(summary))
     if summary.get("aborted", 0) >= 1 or summary.get("errors", 0) > 0:
         return 1

@@ -25,6 +25,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.pr_review import ReviewRenderers
 from daydream.run_context import RunContext
 from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
@@ -1510,6 +1511,8 @@ async def test_run_comment_full_flow(
         merged_items_path: Path,
         *,
         console: Any,
+        run_info: str,
+        renderers: ReviewRenderers,
         post: Any,
         approve_on_clean: Any=False,
         pr_number: int | None = None,
@@ -1724,10 +1727,11 @@ async def test_run_comment_submission_failure_exits_nonzero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., 'RunConfig'],
+    fake_gh: Any,
 ) -> None:
     """Comment mode: a failed GitHub review post -> exit 1.
 
-    Only ``_submit_review`` is mocked to fail; everything else (the review
+    Only the external gh process is configured to fail; everything else (the review
     pipeline, ``_post``, classification, payload build) runs production code.
     """
     from daydream.pr_review import PRInfo
@@ -1749,9 +1753,8 @@ async def test_run_comment_submission_failure_exits_nonzero(
         url="https://example/pr/7",
     )
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
-    monkeypatch.setattr(
-        "daydream.pr_review._submit_review",
-        lambda _td, _pr, _payload, **_kwargs: (None, "gh api failed: HTTP 500"),
+    fake_gh.set_response(
+        "POST", "repos/acme/widgets/pulls/7/reviews", {"__error__": "HTTP 500"},
     )
 
     config = make_config(tmp_path, output_mode="comment")
@@ -1766,6 +1769,7 @@ async def test_run_loop_submission_failure_warns_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., 'RunConfig'],
+    fake_gh: Any,
 ) -> None:
     """Default deep loop: a failed review post warns-and-continues (exit 0).
 
@@ -1793,9 +1797,8 @@ async def test_run_loop_submission_failure_warns_and_continues(
         url="https://example/pr/7",
     )
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
-    monkeypatch.setattr(
-        "daydream.pr_review._submit_review",
-        lambda _td, _pr, _payload, **_kwargs: (None, "gh api failed: HTTP 500"),
+    fake_gh.set_response(
+        "POST", "repos/acme/widgets/pulls/7/reviews", {"__error__": "HTTP 500"},
     )
 
     # Approve the PR-post gate but decline the apply-fixes gate so the run ends

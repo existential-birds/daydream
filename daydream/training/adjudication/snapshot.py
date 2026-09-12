@@ -13,6 +13,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from daydream.training._immutable_json import thaw_json
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.labeler_versions import (
@@ -47,7 +48,7 @@ _PIN_FIELDS = (
 
 
 def record_evidence_digest(
-    per_finding_evidence_lists: Sequence[Sequence[dict[str, Any]]],
+    per_finding_evidence_lists: Sequence[Sequence[Mapping[str, Any]]],
 ) -> str | None:
     """Digest over the session's flattened per-finding reply evidence.
 
@@ -58,7 +59,7 @@ def record_evidence_digest(
     so a digest-less row never collides with a digested one under the
     versioned dedup key.
     """
-    evidence = [entry for per_finding in per_finding_evidence_lists for entry in per_finding]
+    evidence = [thaw_json(entry) for per_finding in per_finding_evidence_lists for entry in per_finding]
     return reply_evidence_digest(evidence) if evidence else None
 
 
@@ -100,7 +101,7 @@ def build_canonical_record(
         "record_id": record_id(session_id, trajectory_id, segment_id, fingerprint),
         "fingerprint": fingerprint,
         "disposition": resolution.disposition,
-        "evidence": list(resolution.evidence),
+        "evidence": [thaw_json(entry) for entry in resolution.evidence],
         "evidence_digest": evidence_digest,
         "session_id": session_id,
         "trajectory_id": trajectory_id,

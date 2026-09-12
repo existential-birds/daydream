@@ -119,6 +119,7 @@ from daydream.workspace import (
 )
 
 if TYPE_CHECKING:
+    from daydream import pr_review
     from daydream.pr_review import ParsedIssue
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
@@ -1608,6 +1609,8 @@ async def _dispatch(
 
 def _emit_diagram_findings(
     target_dir: Path, config: RunConfig, payload: dict[str, Any], *,
+    run_info: str,
+    renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Write the Phase A findings artifact for a diagram-only run (issue #1113).
@@ -1627,7 +1630,10 @@ def _emit_diagram_findings(
         ``0`` on success, ``1`` when no PR is resolvable or the artifact is
         over the size cap.
     """
-    return _write_findings_for_parsed(target_dir, config, [], kind="diagram", diagrams=payload, auth=auth)
+    return _write_findings_for_parsed(
+        target_dir, config, [], kind="diagram", diagrams=payload, auth=auth,
+        run_info=run_info, renderers=renderers,
+    )
 
 
 def _emit_findings_from_items(
@@ -1636,6 +1642,8 @@ def _emit_findings_from_items(
     items: list[dict[str, Any]],
     *,
     diagrams: dict[str, Any] | None = None,
+    run_info: str,
+    renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Write the Phase A findings artifact from canonical merged items.
@@ -1658,7 +1666,10 @@ def _emit_findings_from_items(
     from daydream import pr_review
 
     parsed = pr_review.parsed_issues_from_items(items)
-    return _write_findings_for_parsed(target_dir, config, parsed, diagrams=diagrams, auth=auth)
+    return _write_findings_for_parsed(
+        target_dir, config, parsed, diagrams=diagrams, auth=auth,
+        run_info=run_info, renderers=renderers,
+    )
 
 
 def _write_findings_for_parsed(
@@ -1668,6 +1679,8 @@ def _write_findings_for_parsed(
     *,
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
+    run_info: str,
+    renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Resolve the target PR and write the strict-schema findings artifact.
@@ -1717,7 +1730,8 @@ def _write_findings_for_parsed(
         target_dir,
         pr,
         parsed,
-        run_info=pr_review._render_review_info_block(),
+        run_info=run_info,
+        renderers=renderers,
         kind=kind,
         diagrams=diagrams,
         auth=auth,

@@ -87,6 +87,7 @@ from __future__ import annotations
 import hashlib
 import json
 import types
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -237,7 +238,7 @@ class ScoringInputs:
         length: Char-count length proxy, or ``None`` when absent.
     """
 
-    verifier_verdicts: list[dict[str, Any]] | None
+    verifier_verdicts: Sequence[Mapping[str, Any]] | None
     grounding_rate: float | None
     format_valid: bool
     length: int | None

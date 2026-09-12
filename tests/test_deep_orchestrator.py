@@ -44,8 +44,9 @@ from tests.harness.stub_backend import (
 
 if TYPE_CHECKING:
     from daydream.config_file import DaydreamFileConfig
-    from daydream.pr_review import PRInfo
+    from daydream.pr_review import PRInfo, ReviewRenderers
     from daydream.review_profile import ResolvedProfile
+    from daydream.run_context import RunContext
     from daydream.runner import RunConfig
 
 # Re-exported under their historical ``_``-private names so this module's call
@@ -4643,9 +4644,20 @@ async def test_resume_fix_skips_pr_post(
     post_calls: list[dict[str, Any]] = []
 
     async def _spy(
-        target_dir: Path, report_path: Path, *, console: Any
+        target_dir: Path,
+        merged_items_path: Path,
+        *,
+        console: Any,
+        run_info: str,
+        renderers: ReviewRenderers,
+        post: bool = False,
+        approve_on_clean: bool = False,
+        pr_number: int | None = None,
+        diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
+        auth: Any,
     ) -> None:
-        post_calls.append({"target_dir": target_dir, "report_path": report_path})
+        post_calls.append({"target_dir": target_dir, "report_path": merged_items_path})
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _spy)
 
@@ -6031,6 +6043,8 @@ def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[bool]
         merged_items_path: Any,
         *,
         console: Any,
+        run_info: str,
+        renderers: ReviewRenderers,
         post: Any,
         approve_on_clean: Any=False,
         diagram_blocks: Any=None,
@@ -7974,7 +7988,20 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    async def _post_forbidden(target_dir: Path, report_path: Path, *, console: Any) -> None:
+    async def _post_forbidden(
+        target_dir: Path,
+        merged_items_path: Path,
+        *,
+        console: Any,
+        run_info: str,
+        renderers: ReviewRenderers,
+        post: bool = False,
+        approve_on_clean: bool = False,
+        pr_number: int | None = None,
+        diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
+        auth: Any,
+    ) -> None:
         raise AssertionError("--findings-out must not post to the PR")
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
@@ -8028,7 +8055,20 @@ async def test_cleanup_keeps_report_on_findings_out_run(
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    async def _post_forbidden(target_dir: Path, report_path: Path, *, console: Any) -> None:
+    async def _post_forbidden(
+        target_dir: Path,
+        merged_items_path: Path,
+        *,
+        console: Any,
+        run_info: str,
+        renderers: ReviewRenderers,
+        post: bool = False,
+        approve_on_clean: bool = False,
+        pr_number: int | None = None,
+        diagram_blocks: str | None = None,
+        run_context: RunContext | None = None,
+        auth: Any,
+    ) -> None:
         raise AssertionError("--findings-out must not post to the PR")
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)

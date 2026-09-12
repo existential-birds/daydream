@@ -18,6 +18,7 @@ agent step. No production code is modified by this file.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from collections.abc import Callable
@@ -27,11 +28,42 @@ from typing import Any
 
 import pytest
 
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
 FIXTURE_MODEL_ID = "fixture-model-id"
+_PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
+
+
+def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
+    """Exercise the real session sink from the fake external backend boundary."""
+    from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
+
+    recorder = get_current_recorder()
+    assert recorder is not None
+    while recorder.parent is not None:
+        recorder = recorder.parent
+    if not recorder.steps:
+        return None
+    assert recorder.artifact_run_dir is not None
+    assert recorder.document_writer is not None
+    trajectory_id = f"{recorder.session_id}-live-post-canary"
+    path = recorder.artifact_run_dir / "trajectories" / "live-post-canary.json"
+    trajectory = recorder.build_trajectory().to_json_dict()
+    trajectory["trajectory_id"] = trajectory_id
+    trajectory["agent"]["model_name"] = _PARTIAL_MODEL
+    json_bytes = (
+        b"private-prompt-canary: malformed trajectory"
+        if malformed
+        else json.dumps(trajectory).encode("utf-8")
+    )
+    recorder.document_writer(
+        TrajectoryDocumentSnapshot(trajectory_id, path, json_bytes),
+        "complete" if malformed else "partial",
+    )
+    return path
 
 
 # Fake SDK message types (real-shape: AssistantMessage carries .model, no .usage;
@@ -475,23 +507,27 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
 
 
-# gh / PR plumbing patches: find_open_pr returns a fake PRInfo and _submit_review
+# gh / PR plumbing patches: find_open_pr returns a fake PRInfo and fake gh
 # captures the payload (the only allowed non-SDK mock per the brief — it stands
 # in for the gh-CLI subprocess that would post to GitHub).
 
 
 @dataclass
 class _CapturedPost:
-    payloads: list[dict[str, Any]] = field(default_factory=list)
+    gh: FakeGh
+
+    @property
+    def payloads(self) -> list[dict[str, Any]]:
+        return [call.payload for call in self.gh.calls("POST", "repos/test-owner/test-repo/pulls/123/reviews")]
 
 
 @pytest.fixture
-def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
-    """Wire find_open_pr + _submit_review so build_payload runs and we see
+def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
+    """Wire PR discovery and fake gh so the complete submission runs and we see
     the rendered markdown without ever touching GitHub."""
     from daydream import pr_review
 
-    captured = _CapturedPost()
+    captured = _CapturedPost(fake_gh)
 
     fake_pr = pr_review.PRInfo(
         number=123,
@@ -509,16 +545,10 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
         lambda target_dir, **_kwargs: fake_pr,
     )
 
-    def _capture(
-        target_dir: Path, pr: pr_review.PRInfo, payload: dict[str, Any], **_kwargs: Any
-    ) -> tuple[str, None]:
-        captured.payloads.append(payload)
-        return "https://example/pr/123#review-1", None
-
-    monkeypatch.setattr(
-        "daydream.pr_review._submit_review", _capture,
+    fake_gh.set_response(
+        "POST", "repos/test-owner/test-repo/pulls/123/reviews",
+        {"html_url": "https://example/pr/123#review-1"},
     )
-
     return captured
 
 
@@ -607,8 +637,8 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
         symbols imported into that module (isinstance-pinning).
       - ``pr_review.find_open_pr`` returns a synthetic ``PRInfo`` (avoids
         ``gh pr list`` subprocess).
-      - ``pr_review._submit_review`` captures the payload (avoids ``gh api``
-        subprocess that would actually POST the comment).
+      - the fake ``gh`` process captures the payload; the real API adapter
+        and its temporary request-file handling run unchanged.
 
     Everything else — RunConfig dispatch, _run_loop_deep, run_deep, the
     real ``TrajectoryRecorder``, ``ClaudeBackend.execute``, ``run_agent``,
@@ -739,6 +769,18 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
 
+    partial_paths: list[Path] = []
+
+    class PartialSiblingSDK(_FakeSDKClient):
+        async def query(self, prompt: str) -> None:
+            await super().query(prompt)
+            if not partial_paths:
+                path = _write_live_sibling_canary(malformed=False)
+                if path is not None:
+                    partial_paths.append(path)
+
+    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", PartialSiblingSDK)
+
     config = RunConfig(
         target=str(deep_target_multi),
         cleanup=False,
@@ -754,6 +796,9 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
     payload = captured_post.payloads[-1]
     body = payload["body"]
     assert isinstance(body, str)
+
+    assert len(partial_paths) == 1
+    assert _PARTIAL_MODEL not in body
 
     # Print rendered markdown so a future failure trace shows what we observed.
     print("\n=== RENDERED PR COMMENT BODY ===")
@@ -830,3 +875,44 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
         f"BUG: Exploration row Tools='0' but the forks issued tool calls.\n"
         f"  row: {exploration_row!r}"
     )
+    assert tools_cell == "3"
+    assert cost_cell == "$0.36"
+
+
+async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
+    deep_target_multi: Path,
+    patch_sdk: None,
+    captured_post: _CapturedPost,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bad retained document degrades run details, not the authorized post."""
+    from daydream.runner import RunConfig, run
+
+    _silence_ui(monkeypatch)
+    _answer_prompts(monkeypatch)
+    malformed_paths: list[Path] = []
+
+    class MalformedSiblingSDK(_FakeSDKClient):
+        async def query(self, prompt: str) -> None:
+            await super().query(prompt)
+            # Merge follows the sweep's trajectory reads. Inject here so only
+            # live post acquisition encounters the malformed completed child.
+            if not malformed_paths and "cross-stack merge agent" in prompt.lower():
+                path = _write_live_sibling_canary(malformed=True)
+                if path is not None:
+                    malformed_paths.append(path)
+
+    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", MalformedSiblingSDK)
+    exit_code = await run(RunConfig(target=str(deep_target_multi), cleanup=False, archive=False))
+
+    assert exit_code == 0
+    assert len(malformed_paths) == 1
+    assert len(captured_post.payloads) == 1
+    body = captured_post.payloads[0]["body"]
+    assert "*run details unavailable*" in body
+    assert "- **Reviewed commit:** [`0000000`]" in body
+    output = capsys.readouterr().out
+    assert "run info: trajectory document invalid" in output
+    assert "private-prompt-canary" not in body + output
+    assert str(malformed_paths[0]) not in body + output

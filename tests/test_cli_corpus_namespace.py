@@ -14,7 +14,6 @@ code and on whether the handler was actually invoked — not on mere dispatch.
 """
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 

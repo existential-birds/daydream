@@ -18,17 +18,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import Manifest
-from daydream.git_ops import GitError, RateLimitError
+from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, RateLimitError
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
-from daydream.training import backfill
 from daydream.training.backfill import run_backfill
+from daydream.training.harvest import HarvestConfig, _ProductionHarvestServices
 from daydream.training.reply_classifier import (
     _ACCEPT_RULES,
     _DISPUTE_RULES,
@@ -127,22 +126,28 @@ def _add_run(
     return archive
 
 
+class _BackfillServices(_ProductionHarvestServices):
+    """Real filesystem/SQLite adapters with an explicit fake GitHub endpoint."""
+
+    def __init__(self, archive: Path, github: Callable[..., Any]) -> None:
+        super().__init__(HarvestConfig(archive_dir=archive), INHERIT_GITHUB_AUTH)
+        self._responder = github
+
+    def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
+        return self._responder(repo, endpoint, **kwargs)
+
+
 def _archive_with_session(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     replies: list[dict[str, Any]] | None,
     gh_error: int | None = None,
     **run_kwargs: Any,
-) -> Path:
-    """Archive with one PR-linked session whose reply evidence is ``replies``.
-
-    ``gh_api`` is monkeypatched to return the comment payloads without network.
-    """
+) -> tuple[Path, _BackfillServices]:
+    """Archive and explicit provider for one PR-linked session."""
     archive = _add_run(tmp_path, **run_kwargs)
-    monkeypatch.setattr(
-        backfill, "_gh_api", _fake_gh(comments=_thread_comments(replies), gh_error=gh_error)
+    return archive, _BackfillServices(
+        archive, _fake_gh(comments=_thread_comments(replies), gh_error=gh_error),
     )
-    return archive
 
 
 def _observations(archive: Path) -> list[dict[str, Any]]:
@@ -169,36 +174,39 @@ def snapshot_rows(archive: Path) -> list[dict[str, Any]]:
     return _observations(archive)
 
 
-def test_backfill_appends_new_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
-    summary = run_backfill(archive, dry_run=False)
+def test_backfill_appends_new_generation(tmp_path: Path) -> None:
+    archive, services = _archive_with_session(tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")])
+    summary = run_backfill(archive, services=services, dry_run=False)
     assert summary["sessions_reprocessed"] == 1
     rows = all_observations(archive)
     assert rows[-1]["labeler_policy_version"] is not None
     assert rows[-1]["labels"] == '["accepted"]'
 
 
-def test_backfill_rerun_is_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_rerun_is_noop(tmp_path: Path) -> None:
     """Unchanged GitHub evidence + unchanged versions ⇒ second run appends nothing (M18)."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
-    run_backfill(archive, dry_run=False)
+    archive, services = _archive_with_session(tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")])
+    run_backfill(archive, services=services, dry_run=False)
     before = observation_count(archive)
-    summary = run_backfill(archive, dry_run=False)
+    summary = run_backfill(archive, services=services, dry_run=False)
     assert observation_count(archive) == before
     assert summary["appended"] == 0 and summary["skipped"] >= 1
 
 
-def test_backfill_fails_closed_on_deleted_comments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_fails_closed_on_deleted_comments(tmp_path: Path) -> None:
     """Deleted/inaccessible comments ⇒ unknown, never decisive (M19/M22)."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=None, gh_error=404)
-    run_backfill(archive, dry_run=False)
+    archive, services = _archive_with_session(tmp_path, replies=None, gh_error=404)
+    run_backfill(archive, services=services, dry_run=False)
     rows = all_observations(archive)
     assert rows[-1]["labels"] == '[]'
 
 
-def test_backfill_report_is_machine_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("False positive", assoc="OWNER")])
-    summary = run_backfill(archive, dry_run=False, report_path=tmp_path / "report.json")
+def test_backfill_report_is_machine_readable(tmp_path: Path) -> None:
+    bot_reply = {**_reply("Fixed"), "id": 3, "user": {"login": "daydream-runner"}, "is_self_reply": True}
+    archive, services = _archive_with_session(
+        tmp_path, replies=[_reply("False positive", assoc="OWNER"), bot_reply],
+    )
+    summary = run_backfill(archive, services=services, dry_run=False, report_path=tmp_path / "report.json")
     report = json.loads((tmp_path / "report.json").read_text())
     for key in ("run_label_transitions", "disposition_counts", "parser_rule_count",
                 "ambiguous_manual_review", "bot_self_reply_exclusions", "pr_state_counts", "class_balance"):
@@ -211,16 +219,18 @@ def test_backfill_report_is_machine_readable(tmp_path: Path, monkeypatch: pytest
     assert report["pr_state_counts"] == {"merged": 1}
     assert report["class_balance"] == {"rejected": 1}
     assert report["ambiguous_manual_review"] == 0
-    assert report["bot_self_reply_exclusions"] == 0
+    # Reviewer acquisition and thread indexing each fetch this payload. The
+    # report counts fetched replies, preserving both observations.
+    assert report["bot_self_reply_exclusions"] == 2
     assert report["parser_rule_count"] == (
         len(_ACCEPT_RULES) + len(_REJECT_RULES) + len(_DISPUTE_RULES) + len(_FACTUAL_DISAGREEMENT_RULES)
     )
 
 
-def test_backfill_dry_run_builds_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_dry_run_builds_without_writing(tmp_path: Path) -> None:
     """dry_run=True (the module's headline mode) builds annotations but writes nothing."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
-    summary = run_backfill(archive, dry_run=True, report_path=tmp_path / "report.json")
+    archive, services = _archive_with_session(tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")])
+    summary = run_backfill(archive, services=services, dry_run=True, report_path=tmp_path / "report.json")
     assert summary["appended"] == 0
     assert summary["skipped"] == 0
     assert summary["sessions_reprocessed"] == 1
@@ -230,7 +240,7 @@ def test_backfill_dry_run_builds_without_writing(tmp_path: Path, monkeypatch: py
     assert report["summary"] == summary
 
 
-def test_backfill_fails_closed_on_benign_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_fails_closed_on_benign_escape(tmp_path: Path) -> None:
     """A benign 404 escaping build_annotation (merge OK, comment fetch 404) lands in
     backfill's own fail-closed handler: unknown with the current policy version."""
     _add_run(tmp_path)
@@ -240,8 +250,8 @@ def test_backfill_fails_closed_on_benign_escape(tmp_path: Path, monkeypatch: pyt
             raise GitError(f"gh api {endpoint} failed (HTTP 404)")
         return {"merged": True, "merged_at": None}
 
-    monkeypatch.setattr(backfill, "_gh_api", responder)
-    summary = run_backfill(tmp_path / "archive", dry_run=False)
+    services = _BackfillServices(tmp_path / "archive", responder)
+    summary = run_backfill(tmp_path / "archive", services=services, dry_run=False)
     assert summary["sessions_reprocessed"] == 1
     assert summary["appended"] == 1
     assert summary["errors"] == 0
@@ -250,56 +260,62 @@ def test_backfill_fails_closed_on_benign_escape(tmp_path: Path, monkeypatch: pyt
     assert rows[-1]["pr_state"] is None
 
 
-def test_backfill_aborts_on_rate_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_aborts_on_rate_limit(tmp_path: Path) -> None:
     """RateLimitError aborts the sweep cleanly, preserving the remaining queue."""
-    _add_run(tmp_path)
+    # Insert in reverse order: the stable session ordering must still encounter
+    # the failing first session before doing any work for the other one.
+    _add_run(tmp_path, session_id="z", run_dir_name="last", pr_repo="o/last")
+    _add_run(tmp_path, session_id="a", run_dir_name="first", pr_repo="o/first")
+    requested: list[str] = []
 
     def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        requested.append(repo)
         raise RateLimitError(f"gh api {endpoint} failed (HTTP 429)", retry_after=5)
 
-    monkeypatch.setattr(backfill, "_gh_api", responder)
-    summary = run_backfill(tmp_path / "archive", dry_run=False)
+    services = _BackfillServices(tmp_path / "archive", responder)
+    summary = run_backfill(tmp_path / "archive", services=services, dry_run=False)
     assert summary["aborted"] == 1
     assert summary["appended"] == 0
+    assert requested == ["o/first"]
     assert observation_count(tmp_path / "archive") == 0
 
 
-def test_backfill_non_pr_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_non_pr_skipped(tmp_path: Path) -> None:
     """A run with no PR link is skipped and counted, never annotated."""
     _add_run(tmp_path, pr_repo=None, pr_number=None)
-    monkeypatch.setattr(backfill, "_gh_api", _fake_gh(comments=_thread_comments(None)))
-    summary = run_backfill(tmp_path / "archive", dry_run=False)
+    services = _BackfillServices(tmp_path / "archive", _fake_gh(comments=_thread_comments(None)))
+    summary = run_backfill(tmp_path / "archive", services=services, dry_run=False)
     assert summary["non_pr_skipped"] == 1
     assert summary["sessions_reprocessed"] == 0
     assert observation_count(tmp_path / "archive") == 0
 
 
-def test_backfill_session_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_session_filter(tmp_path: Path) -> None:
     """session_filter restricts the queue; filtered-out sessions stay untouched."""
-    _archive_with_session(
-        tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")],
+    _, services = _archive_with_session(
+        tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")],
         session_id="s1", run_dir_name="run_a",
     )
-    _archive_with_session(
-        tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")],
+    _, services = _archive_with_session(
+        tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")],
         session_id="s2", run_dir_name="run_b",
     )
-    summary = run_backfill(tmp_path / "archive", dry_run=False, session_filter="s2")
+    summary = run_backfill(tmp_path / "archive", services=services, dry_run=False, session_filter="s2")
     assert summary["sessions_reprocessed"] == 1
     assert summary["non_pr_skipped"] == 0
     rows = all_observations(tmp_path / "archive")
     assert [row["session_id"] for row in rows] == ["s2"]
 
 
-def test_backfill_valid_at_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_valid_at_override(tmp_path: Path) -> None:
     """valid_at_override beats the derived decisive-evidence timestamp."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
-    run_backfill(archive, dry_run=False, valid_at_override="2026-02-01T00:00:00Z")
+    archive, services = _archive_with_session(tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")])
+    run_backfill(archive, services=services, dry_run=False, valid_at_override="2026-02-01T00:00:00Z")
     rows = all_observations(archive)
     assert rows[-1]["valid_at"] == "2026-02-01T00:00:00+00:00"
 
 
-def test_backfill_per_row_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_per_row_isolation(tmp_path: Path) -> None:
     """A transient failure (HTTP 500) on one row isolates; the next row survives."""
     _add_run(tmp_path, session_id="s1", run_dir_name="run_a", repo_slug="o/fail", pr_repo="o/fail")
     _add_run(tmp_path, session_id="s2", run_dir_name="run_b", repo_slug="o/ok", pr_repo="o/ok")
@@ -313,8 +329,8 @@ def test_backfill_per_row_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             return []
         return {"merged": True, "merged_at": None}
 
-    monkeypatch.setattr(backfill, "_gh_api", responder)
-    summary = run_backfill(tmp_path / "archive", dry_run=False)
+    services = _BackfillServices(tmp_path / "archive", responder)
+    summary = run_backfill(tmp_path / "archive", services=services, dry_run=False)
     assert summary["errors"] == 1
     assert summary["appended"] == 1
     assert summary["sessions_reprocessed"] == 1
@@ -323,18 +339,18 @@ def test_backfill_per_row_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert rows[-1]["labels"] == '["accepted"]'
 
 
-def test_backfill_historical_rows_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_historical_rows_untouched(tmp_path: Path) -> None:
     """Backfill never mutates or deletes existing label_observations (M17)."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
+    archive, services = _archive_with_session(tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")])
     legacy = snapshot_rows(archive)
-    run_backfill(archive, dry_run=False)
+    run_backfill(archive, services=services, dry_run=False)
     assert snapshot_rows(archive)[: len(legacy)] == legacy
 
 
-def test_backfill_old_labels_human_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_old_labels_human_precedence(tmp_path: Path) -> None:
     """run_label_transitions['old_labels'] reflects the archive's winner
     projection: a human override beats a newer auto row (human-first)."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
+    archive, services = _archive_with_session(tmp_path, replies=[_reply("Fixed in abc123", assoc="OWNER")])
     conn = sqlite3.connect(archive / "index.db")
     try:
         conn.execute(
@@ -350,7 +366,7 @@ def test_backfill_old_labels_human_precedence(tmp_path: Path, monkeypatch: pytes
         conn.commit()
     finally:
         conn.close()
-    summary = run_backfill(archive, dry_run=True, report_path=tmp_path / "report.json")
+    summary = run_backfill(archive, services=services, dry_run=True, report_path=tmp_path / "report.json")
     report = json.loads((tmp_path / "report.json").read_text())
     transition = report["run_label_transitions"]["s1"]
     assert transition["old_labels"] == ["human"]

@@ -215,6 +215,7 @@ def build_findings_artifact(
     run_info: str | None,
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
+    renderers: pr_review.ReviewRenderers | None = None,
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> dict[str, Any]:
     """Classify issues against the PR diff and build the findings artifact.
@@ -238,7 +239,7 @@ def build_findings_artifact(
         the remainder carry ``placement="body"``. Both non-inline placements
         have ``line=None``.
     """
-    classified = pr_review.classify(target_dir, pr, issues, auth=auth)
+    classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers)
     findings = [
         _finding_dict(issue, placement="inline", line=entry["line"])
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)

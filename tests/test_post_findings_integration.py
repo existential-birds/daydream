@@ -51,7 +51,7 @@ def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
     — a substring check against the raw capture fails on the wrap.
     """
     out = capsys.readouterr().out
-    return " ".join(out.translate({ord(char): " " for char in "│╭╮╰╯─"}).split())
+    return " ".join(out.translate({ord(char): " " for char in "│╭╮╰╯─║╔╗╚╝═"}).split())
 
 
 def _post_argv(
@@ -1330,3 +1330,98 @@ def test_post_findings_matched_high_blocks_approval(
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
     assert "no high/medium findings" not in posts[0].payload["body"]
+
+
+@pytest.mark.parametrize("run_info", ["Artifact-owned run details", None])
+def test_artifact_post_never_acquires_live_trajectory_details(
+    fake_gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    run_info: str | None,
+) -> None:
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=3, placement="inline", title="Finding")],
+    )
+    document = json.loads(artifact.read_text())
+    document["run_info"] = run_info
+    artifact.write_text(json.dumps(document))
+    attempts: list[str] = []
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        attempts.append("live acquisition")
+        raise AssertionError("artifact posting attempted live trajectory acquisition")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("daydream.trajectory.get_current_recorder", forbidden)
+        patch.setattr("daydream.pr_run_info.render_live_run_info", forbidden)
+        patch.setattr("daydream.pr_comment_renderer.render_run_info_block", forbidden)
+        patch.setattr("tempfile.TemporaryDirectory", forbidden)
+        assert cli_main(_post_argv(artifact)) == 0
+    assert attempts == []
+    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
+    assert (run_info if run_info is not None else "*run details unavailable*") in body
+    assert body.count("- **Reviewed commit:**") == 1
+
+
+def test_post_findings_orders_file_writes_and_folds_failed_thread_once(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifact = _write_artifact(tmp_path / "findings.json", [
+        _finding("a" * 64, path="first.py", line=None, placement="file", title="First thread"),
+        _finding("b" * 64, path="second.py", line=None, placement="file", title="Folded thread"),
+        _finding("c" * 64, path="context.py", line=None, placement="body", title="Original body"),
+    ])
+    fake_gh.set_response("diff-paths", value=["first.py"])
+
+    assert cli_main(_post_argv(artifact)) == 0
+
+    writes = [call for call in fake_gh.calls("POST") if call.endpoint != "graphql"]
+    assert [call.endpoint for call in writes] == [
+        "repos/o/r/pulls/7/comments", "repos/o/r/pulls/7/comments", "repos/o/r/pulls/7/reviews",
+    ]
+    assert [call.payload["path"] for call in writes[:2]] == ["first.py", "second.py"]
+    assert all(call.payload["subject_type"] == "file" for call in writes[:2])
+    payload = writes[-1].payload
+    assert payload["commit_id"] == "h" * 40
+    assert payload["event"] == "COMMENT"
+    assert payload["comments"] == []
+    markers = parse_finding_markers(payload["body"])
+    assert markers == ["c" * 64, "b" * 64]
+    assert payload["body"].index("Original body") < payload["body"].index("Folded thread")
+    assert "1 file-level comment(s) failed to post; folded into the review body." in _console_text(capsys)
+
+
+@pytest.mark.parametrize("file_posts", [False, True], ids=["zero-writes", "partial-write"])
+def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], file_posts: bool,
+) -> None:
+    artifact = _write_artifact(tmp_path / "findings.json", [
+        _finding("a" * 64, path="first.py", line=None, placement="file", title="File finding"),
+    ])
+    fake_gh.set_response("diff-paths", value=["first.py"] if file_posts else [])
+    secret = "opaque-private-installation-credential"
+    fake_gh.set_response("POST", "repos/o/r/pulls/7/reviews", {"__error__": f"HTTP 422: {secret}"})
+
+    assert cli_main(_post_argv(artifact)) == 1
+
+    writes = [call for call in fake_gh.calls("POST") if call.endpoint != "graphql"]
+    assert [call.endpoint for call in writes] == [
+        "repos/o/r/pulls/7/comments", "repos/o/r/pulls/7/reviews",
+    ]
+    review = writes[-1]
+    assert review.argv is not None
+    payload_path = Path(review.argv[review.argv.index("--input") + 1])
+    try:
+        assert json.loads(payload_path.read_text()) == review.payload
+        message = _console_text(capsys)
+        assert "PR Review Post Failed" in message
+        assert "payload preserved at" in message
+        # Rich may wrap this machine path; removing whitespace recovers the displayed value.
+        assert str(payload_path) in message.replace(" ", "")
+        if file_posts:
+            assert "1 file-level comment(s) were already posted." in message
+            assert "No comments were posted." not in message
+        else:
+            assert "No comments were posted." in message
+        assert secret not in message
+    finally:
+        payload_path.unlink(missing_ok=True)
