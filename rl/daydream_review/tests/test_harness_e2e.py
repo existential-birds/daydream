@@ -126,14 +126,14 @@ def test_live_rollout(tmp_path: Path) -> None:
     base_url = os.environ.get("DAYDREAM_RL_LIVE_BASE_URL")
     backend = os.environ.get("DAYDREAM_RL_LIVE_BACKEND", "claude")
 
-    argv_extra = ["--env.agent.harness.backend", backend]
+    argv_extra = ["--harness.backend", backend]
     result = subprocess.run(
         [
             "uv", "run", "eval", "@", "configs/eval-stub.toml",
             "-m", model, "--no-rich", "-o", str(paths["out"]),
-            "--env.agent.harness.repo-path", str(paths["repo"]),
-            "--env.agent.harness.archive-root", str(paths["archive"]),
-            "--env.agent.harness.home", str(paths["home"]),
+            "--harness.repo-path", str(paths["repo"]),
+            "--harness.archive-root", str(paths["archive"]),
+            "--harness.home", str(paths["home"]),
             *(["--client.base-url", base_url] if base_url else []),
             *argv_extra,
         ],

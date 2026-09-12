@@ -130,7 +130,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
 
     _verify_sha256sums(clean, "")  # raises on any corruption
 
-    # 8. corpus-v2: both automatic gold classes + the human-adjudicated record.
+    # 8. projection: both automatic gold classes + the human-adjudicated record.
     # The human rater's decisive label is merged into the annotation row
     # before publication, so the human-adjudicated finding is gold too
     # (decisive + evidence); task-only findings never reach corpus.jsonl —

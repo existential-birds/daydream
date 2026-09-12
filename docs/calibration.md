@@ -32,20 +32,21 @@ a `_SUCCESS` completion marker.
   `rubric_schema_version`). `record_id` must be unique across lines, and each
   record's stored `lineage.split` must match the split deterministically
   re-derived from the bundle salt and split rates.
-- `lineage.json` — a single object with `schema_version: "corpus-v2"`, `salt`,
+- `lineage.json` — a single object with `schema_version: "lineage"`, `salt`,
   `holdout_rate`, `val_rate`, `as_of`, `valid_at`.
 - `SHA256SUMS` — lines of `<sha256>  <name>` covering the bundle files.
 
 `--gold-labels` and `--breakdowns` must be JSON objects keyed by the same
 `record_id` values.
 
-This wire format is **not** what `daydream corpus build` emits: build output
-holds `schema_version: "1"` records without `record_id` or a per-record
-`lineage`, writes a lineage manifest with `trajectory_set_hash` /
-`labeler_version` / `reward_version` / `as_of` / `created_at` (no salt or
-split rates), and produces no `SHA256SUMS`. Pointing `calibrate-reward`
-directly at a build output directory therefore fails the first gate by
-design; the in-repo reference producer of the calibration wire format is
+This wire format matches what `daydream corpus build` (now the projection
+pipeline) emits: build output holds `schema_version: "2"` records with
+`record_id` and a per-record `lineage` (`lineage.split` included), and writes
+a lineage manifest carrying `schema_version: "lineage"` with `salt` /
+`holdout_rate` / `val_rate` / `as_of` / `valid_at`. It still writes no
+`SHA256SUMS`, so pointing `calibrate-reward` at a raw build output directory
+fails the first gate by design; the in-repo reference producer of the
+complete calibration wire format is
 `tests/fixtures/training/calibration/build_fixture.py`.
 
 ## Invocation
@@ -82,7 +83,7 @@ Optional flags:
 
 Given the same inputs and the same `--seed`, the emitted artifact is
 byte-reproducible. The artifact records the SHA256 of every input file, the
-corpus lineage (`schema_version: corpus-v2`, `content_digests`, `as_of`,
+corpus lineage (`schema_version: lineage`, `content_digests`, `as_of`,
 `valid_at`, `salt`, split rates), and the resolved version stamps. The
 artifact schema version is `calibration-artifact`.
 

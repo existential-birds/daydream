@@ -308,7 +308,7 @@ def _enrich_report_items(
     Attaches each record's observations, applies three-tier effective
     adjudication (a human decisive judgment whose evidence digest matches the
     fresh item overrides the disposition), stamps the temporal axis first, and
-    classifies ``tier``/``posterior_eligible`` with the corpus-v2 authority.
+    classifies ``tier``/``posterior_eligible`` with the projection authority.
     Gold eligibility requires a human decision made against the item's fresh
     evidence digest, so automatic decisive records without one — and decisive
     records whose only human observation was made against older evidence, a

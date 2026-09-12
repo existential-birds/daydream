@@ -6,7 +6,7 @@ gate raises :class:`CalibrationError` naming the offending record/field, and no
 artifact is ever written unless all gates pass.
 
 Split membership is re-derived read-only from ``lineage.json`` (salt +
-holdout/val rates) via a deterministic hash of the record id - the corpus-v2
+holdout/val rates) via a deterministic hash of the record id - the
 split derivation whose canonical definition lives in this module and in
 ``docs/calibration.md``. Each record's stored ``lineage['split']`` must match
 its re-derived split, and the derived train/val/holdout sets must stay
@@ -56,7 +56,7 @@ def _tool_version() -> str:
 TOOL_VERSION = _tool_version()
 
 _RECORD_SCHEMA_VERSION = "2"
-_LINEAGE_SCHEMA_VERSION = "corpus-v2"
+_LINEAGE_SCHEMA_VERSION = "lineage"
 _ALLOWED_LICENSE_DECISIONS = frozenset({"allow", "deny-recorded"})
 
 _REQUIRED_RECORD_FIELDS = ("schema_version", "record_id", "session_id", "repo_slug", "reward_version", "lineage")
@@ -118,7 +118,7 @@ class CalibrationConfig:
 def assign_split(record_id: str, *, holdout_rate: float, val_rate: float, salt: str) -> str:
     """Deterministically re-derive a record's split from its id (read-only).
 
-    The corpus-v2 split derivation (canonical here; documented in
+    The split derivation (canonical here; documented in
     ``docs/calibration.md``): a seeded hash of ``salt:record_id`` selects
     holdout / val / train in fixed rate order.
     """

@@ -20,9 +20,9 @@ fixture-scale validation run:
 
 | Field | Value |
 |---|---|
-| `run_identity.corpus_digest` | `80cfdda8293d5854216ed1845c6228e6d8ada013152a54d924309813704854ce` |
-| `run_identity.split_digest` | `fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` |
-| `run_identity.reward_version` | `2026.05.28-2` |
+| `run_identity.corpus_digest` | `56cbaa74e133d4999d7a12496037c4e086bd88647c0b1113aecafbd34792b792` |
+| `run_identity.split_digest` | `903de487711c6be182d582cee898570c5635c75e2c6c3dbcdf622af1236b33ee` |
+| `run_identity.reward_version` | `2026.09.04-1` |
 
 Corpus-side loading goes through `daydream.training.stacks.load_v2_projection`,
 which fail-closes on the C5 exclusion list and C8 copyleft opt-in before any
@@ -54,7 +54,7 @@ For real-corpus training, the input is a frozen-corpus projection directory
 produced by the projector. The real-corpus command sequence is:
 
 ```bash
-daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR
+daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
 ```
 
 ```bash

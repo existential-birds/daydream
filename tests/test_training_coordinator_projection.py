@@ -1,6 +1,6 @@
 """Corpus-v2 integration tests for the four-stage training coordinator.
 
-Enters from the production entrypoint (``run_pipeline``) with a real corpus-v2
+Enters from the production entrypoint (``run_pipeline``) with a real projected-corpus
 projection directory on the real filesystem (mocking nothing — every stage
 here is CPU-bound) and asserts observable outcomes: Stage 0 consumes the
 projector's frozen split rather than re-freezing at runtime, the manifest
@@ -117,7 +117,7 @@ def _build_projection(
     base_sha: str = BASE_SHA,
     n_sessions: int = 80,
 ) -> Path:
-    """Build a real corpus-v2 projection directory with accepted + rejected
+    """Build a real projected-corpus projection directory with accepted + rejected
     gold outcome findings (plus one silver process-trace and one task-only
     record), placed in the split file each record id deterministically
     assigns. Label assignment is seeded off the deterministic holdout
@@ -201,7 +201,7 @@ def _build_projection(
     (out / "lineage.json").write_text(
         json.dumps(
             {
-                "schema_version": "corpus-v2",
+                "schema_version": "lineage",
                 "salt": SALT,
                 "holdout_rate": HOLDOUT_RATE,
                 "val_rate": VAL_RATE,
@@ -319,7 +319,7 @@ def test_cli_legacy_corpus_flag_is_gone(tmp_path: Path, cli_runner: Any) -> None
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """AC6: the 50-record real-projection fixture feeds the full pipeline.
 
-    The fixture materializes a corpus-v2 projection with the real
+    The fixture materializes a projected-corpus projection with the real
     ``build_frozen_corpus`` over a curated bundle + annotation snapshot
     (finding text, git shas, and diff bodies present — the producer-shaped
     manifest puts base_sha under ``code_context``; the projector embeds each

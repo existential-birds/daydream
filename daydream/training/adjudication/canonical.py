@@ -300,7 +300,7 @@ def run_canonical_harvest(
         # state (the flag is set by the materializer and merely carried
         # through the merge loop above). The ``annotations.jsonl`` projection
         # row (written below) neutralizes the conflicted disposition so the
-        # corpus-v2 gate never classifies it gold.
+        # projection schema gate never classifies it gold.
         labels = sorted(
             {
                 f"finding-{record['disposition']}"
@@ -347,7 +347,7 @@ def run_canonical_harvest(
             skipped_sessions += 1
 
     # annotations.jsonl from the same in-memory merged records — no second shape.
-    # The corpus-v2 gold gate (``tiers.classify_tier``) reads only
+    # The projected-corpus gold gate (``tiers.classify_tier``) reads only
     # disposition/evidence/evidence_after_as_of, never the ``conflicting``
     # flag, so a conflicted record must not carry its decisive disposition
     # here or it would project gold with ``outcome_label`` set. Emit the

@@ -1,5 +1,5 @@
 """Spike probe (task 0, issue #1081): force-check the two load-bearing
-assumptions of the corpus-v2 enrichment plan against a real-shaped curated
+assumptions of the projection enrichment plan against a real-shaped curated
 bundle before any task writes code that depends on them:
 
 1. Extraction point — the curated bundle's batch directory

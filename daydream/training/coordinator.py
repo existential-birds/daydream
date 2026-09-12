@@ -137,7 +137,7 @@ def _outcome_rows(
 
     Accepts the committed fixture shape (``comment_id``/``text``/``label``),
     v1 records exports (``session_id``/
-    ``review_output``/``outcome_label``), and corpus-v2 records
+    ``review_output``/``outcome_label``), and projection records
     (``session_id``/``finding_text``/``outcome_label``). Gold-gate evidence
     fields (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
     ``decisive_only``) are carried through when the record provides them; an
@@ -149,7 +149,7 @@ def _outcome_rows(
 
     Args:
         records: Corpus records in any of the accepted shapes.
-        require_finding_text: When True (the corpus-v2 path), a gold-labeled
+        require_finding_text: When True (the projection path), a gold-labeled
             record with no readable text raises instead of being silently
             skipped — a v2 gold record without its localized finding text is
             a broken projection, never an empty-row row.
@@ -170,7 +170,7 @@ def _outcome_rows(
         if not (comment_id and text):
             if require_finding_text:
                 raise RuntimeError(
-                    f"stage0 refused: corpus-v2 gold record "
+                    f"stage0 refused: projection gold record "
                     f"{rec.get('record_id') or comment_id!r} has outcome_label "
                     f"{label!r} but no finding_text/text/review_output — a gold "
                     "record without its localized finding text is a broken "
@@ -201,7 +201,7 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     on rejected or silver traces. Rows are prompt/completion JSONL — the shape
     the prime-rl ``sft`` loader accepts (``messages`` column or both
     ``prompt``/``completion``). Gold vs silver counts are reported separately
-    (M9), matching the recipe's tier accounting. On corpus-v2 records the
+    (M9), matching the recipe's tier accounting. On projection records the
     completion is the localized ``finding_text`` of the gold-accepted
     finding; the completion field chain is
     ``completion`` → ``finding_text`` → ``text`` → ``review_output``.
@@ -238,7 +238,7 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Deterministic SFT prompt built from a record's frozen review context.
 
-    On corpus-v2 records the repo slug and task SHAs live under
+    On projection records the repo slug and task SHAs live under
     ``task_identity`` (the repo slug also under ``lineage``); they are read
     v2-first with the v1 top-level / ``code_context`` fallback (Pattern A, the
     same order :func:`_rft_rows` uses), so a v2 prompt carries the record's
@@ -325,7 +325,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     a v1 row without one is refused at Stage 2 exactly where the replay
     would refuse it.
 
-    On corpus-v2 records the intrinsic scoring signals are derived from the
+    On projection records the intrinsic scoring signals are derived from the
     record itself: the frozen projection record is admission/shape/drift-
     validated, so ``format_valid`` is True (the v1 bronze-parse failure floor
     cannot apply), and the record's adjudicated outcome is mapped onto the
@@ -385,7 +385,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
         if identity:
-            # Corpus-v2 records carry no archived verifier-verdicts file; the
+            # Projection records carry no archived verifier-verdicts file; the
             # record's own adjudicated outcome is its capture-time judgment.
             # Map it onto the shared verdict vocabulary (the labels
             # score_trajectory's verdict_map consumes) so the replay reads a
@@ -437,7 +437,7 @@ def _frozen_split_from_projection(
     """Build the Stage-0 :class:`FrozenSplit` from the projector's frozen
     boundary instead of re-freezing at runtime.
 
-    The corpus-v2 projection was split deterministically at build time
+    The projection projection was split deterministically at build time
     (``lineage.split`` per record, drift-gated by the loader). Stage 0 maps
     that three-way boundary onto its two-way partition — train+validation
     rows train, holdout rows evaluate — and verifies the boundary fail-closed:
@@ -466,7 +466,7 @@ def _frozen_split_from_projection(
     held_out = _outcome_rows(projection.by_split["holdout"], require_finding_text=True)
     if not held_out:
         raise RuntimeError(
-            "stage0 refused: the corpus-v2 frozen split has no gold outcome rows in "
+            "stage0 refused: the projection frozen split has no gold outcome rows in "
             "its holdout split; the gate would evaluate against nothing and refuses closed"
         )
     salt = str(projection.lineage["salt"])
@@ -483,7 +483,7 @@ def _frozen_split_from_projection(
         )
         if recorded != recomputed:
             raise RuntimeError(
-                f"stage0 refused: corpus-v2 record {rec.get('record_id')!r} boundary "
+                f"stage0 refused: projection record {rec.get('record_id')!r} boundary "
                 f"drift — recorded split {recorded!r} != recomputed {recomputed!r}; "
                 "the frozen split is not trusted over recomputation"
             )
@@ -519,7 +519,7 @@ def _run_stage0(
 
     All CPU-bound; runs identically on the dry path (the gate evaluates on
     cached model state — the small classifier is trained in-process, no GPU).
-    On corpus-v2 input the split is not re-frozen: the projector's frozen
+    On projection input the split is not re-frozen: the projector's frozen
     boundary is consumed via :func:`_frozen_split_from_projection`.
     """
     rows = _outcome_rows(records, require_finding_text=projection is not None)

@@ -186,8 +186,8 @@ class BackendExecutionInput:
         """Return a fresh complete environment for one native transport."""
         return dict(self._environment)
 
-# external contract: "claude-pretooluse" names Anthropic's PreToolUse hook
-# capability, not a project-owned generation; do not version it.
+# host-side capability sentinel, not an external contract: Anthropic's hook
+# token is spelled "PreToolUse" (see claude.py); do not version this literal.
 AUDIT_ROOT_ISOLATION = "claude-pretooluse"
 AuditIsolationReason = Literal[
     "unsupported_backend",

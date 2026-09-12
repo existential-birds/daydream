@@ -290,9 +290,7 @@ def test_main_acquires_upstream_mirror_once_per_slug(
     assert status == 0
     # The manifest's network clone_url must be acquired exactly once for both
     # PRs; a regression that re-clones the upstream slug per PR fails here.
-    upstream_clone_url = load_manifest(build_images.DEFAULT_MANIFEST)[
-        REFERENCE_SLUG
-    ].clone_url
+    upstream_clone_url = load_manifest(manifest)[REFERENCE_SLUG].clone_url
     assert clones == [upstream_clone_url], (
         f"expected one upstream mirror acquisition ({upstream_clone_url}), got {clones}"
     )

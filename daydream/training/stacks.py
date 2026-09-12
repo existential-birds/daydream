@@ -65,7 +65,7 @@ _SPLIT_FILENAMES = {
 
 @dataclass(frozen=True)
 class V2Projection:
-    """A loaded corpus-v2 projection directory.
+    """A loaded projection projection directory.
 
     Attributes:
         records: All v2 records, in split-file order (train, validation,
@@ -123,24 +123,24 @@ def _load_lineage(projection_dir: Path) -> dict[str, object]:
     lineage_path = projection_dir / "lineage.json"
     if not lineage_path.is_file():
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: missing lineage.json — "
+            f"projection projection {projection_dir}: missing lineage.json — "
             "refusing a projection without its pinned split parameters"
         )
     try:
         lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: lineage.json is not valid "
+            f"projection projection {projection_dir}: lineage.json is not valid "
             f"JSON: {exc}"
         ) from exc
     if not isinstance(lineage, dict):
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: lineage.json is not a JSON object"
+            f"projection projection {projection_dir}: lineage.json is not a JSON object"
         )
     for key in ("salt", "holdout_rate", "val_rate"):
         if lineage.get(key) is None:
             raise ValueError(
-                f"corpus v2 projection {projection_dir}: lineage.json missing "
+                f"projection projection {projection_dir}: lineage.json missing "
                 f"{key!r} — refusing to recompute splits without the pinned "
                 "assignment parameters"
             )
@@ -161,7 +161,7 @@ def _enforce_split_consistency(
         val_rate_obj, (int, float)
     ):
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: lineage.json holdout_rate/"
+            f"projection projection {projection_dir}: lineage.json holdout_rate/"
             "val_rate must be numeric"
         )
     holdout_rate = float(holdout_rate_obj)
@@ -180,7 +180,7 @@ def _enforce_split_consistency(
             offenders.append(f"{record_id} (recorded {recorded!r}, recomputed {expected!r})")
     if offenders:
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: split drift detected for "
+            f"projection projection {projection_dir}: split drift detected for "
             f"{len(offenders)} record(s): {', '.join(offenders)}. The recorded "
             "lineage.split disagrees with the split recomputed from the record "
             "id under the pinned salt/rates — refusing a drifted projection."
@@ -192,7 +192,7 @@ def load_dataset_v2(
     *,
     allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Load a projected corpus v2 directory (the frozen train/validation/
+    """Load a projected projection directory (the frozen train/validation/
     holdout JSONL manifests from ``build_frozen_corpus``), enforcing repo
     identity, the license-decision stamp, and C5/C8 fail-closed.
 
@@ -237,7 +237,7 @@ def load_dataset_v2(
     projection_dir = Path(path)
     if not (projection_dir / "_SUCCESS").is_file():
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: missing _SUCCESS marker — "
+            f"projection projection {projection_dir}: missing _SUCCESS marker — "
             "refusing a partial or incomplete projection"
         )
     records: list[dict[str, object]] = []
@@ -251,7 +251,7 @@ def load_dataset_v2(
                 schema_version = record.get("schema_version")
                 if schema_version != "2":
                     raise ValueError(
-                        f"corpus v2 record {record.get('record_id')!r} in "
+                        f"projection record {record.get('record_id')!r} in "
                         f"{projection_dir / filename}: schema_version {schema_version!r} "
                         "!= '2' — refusing a record not projected by the v2 schema"
                     )
@@ -287,7 +287,7 @@ def _enforce_v2_identity_and_gates(
         repo_slug = lineage.get("repo_slug") if lineage else None
         if not isinstance(repo_slug, str) or not repo_slug:
             raise ValueError(
-                f"corpus v2 record {record_id!r} in {path}: lineage.repo_slug "
+                f"projection record {record_id!r} in {path}: lineage.repo_slug "
                 "missing or empty — refusing a record without repo identity"
             )
         decision_obj = lineage.get("license_decision") if lineage else None
@@ -300,7 +300,7 @@ def _enforce_v2_identity_and_gates(
             or not decision_slug
         ):
             raise ValueError(
-                f"corpus v2 record {record_id!r} in {path}: lineage.license_decision "
+                f"projection record {record_id!r} in {path}: lineage.license_decision "
                 "missing, malformed, or not a resolved admitted/rejected decision — "
                 "refusing a record without an immutable license decision"
             )
@@ -316,7 +316,7 @@ def _enforce_v2_identity_and_gates(
     if excluded_offenders:
         raise ValueError(
             f"C5 violation ({REASON_CODE_C5_EXCLUDED_REPO}): excluded repo(s) in "
-            f"corpus v2 projection {path}: {', '.join(excluded_offenders)}. These "
+            f"projection projection {path}: {', '.join(excluded_offenders)}. These "
             "repositories are the held-out benchmark and must never appear in a "
             "training dataset, regardless of any flag."
         )
@@ -342,7 +342,7 @@ def _enforce_v2_identity_and_gates(
     if copyleft_offenders:
         raise ValueError(
             f"C8 violation ({REASON_CODE_C8_COPYLEFT_UNOPTED}): copyleft repo(s) "
-            f"in corpus v2 projection {path} without explicit opt-in: "
+            f"in projection projection {path} without explicit opt-in: "
             f"{', '.join(copyleft_offenders)}. Pass these slugs via "
             "allow_copyleft to admit them."
         )
@@ -353,7 +353,7 @@ def load_v2_projection(
     *,
     allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> V2Projection:
-    """Load a corpus-v2 projection directory into a :class:`V2Projection`.
+    """Load a projection projection directory into a :class:`V2Projection`.
 
     Reuses :func:`load_dataset_v2` for the existing
     fail-closed gates (missing ``_SUCCESS``, non-``"2"`` ``schema_version``,
@@ -378,7 +378,7 @@ def load_v2_projection(
         records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
     except FileNotFoundError as exc:
         raise ValueError(
-            f"corpus v2 projection {projection_dir}: missing split file "
+            f"projection projection {projection_dir}: missing split file "
             f"{exc.filename!r} — refusing an incomplete projection"
         ) from exc
     lineage = _load_lineage(projection_dir)
@@ -390,7 +390,7 @@ def load_v2_projection(
         split = lineage_obj.get("split") if isinstance(lineage_obj, dict) else None
         if split not in by_split:
             raise ValueError(
-                f"corpus v2 projection {projection_dir}: record "
+                f"projection projection {projection_dir}: record "
                 f"{record.get('record_id')!r} carries unknown split {split!r}"
             )
         by_split[cast(str, split)].append(record)
@@ -400,7 +400,7 @@ def load_v2_projection(
         split_path = projection_dir / filename
         if not split_path.is_file():
             raise ValueError(
-                f"corpus v2 projection {projection_dir}: missing split file "
+                f"projection projection {projection_dir}: missing split file "
                 f"{filename!r} — refusing an incomplete projection"
             )
         split_digests[filename] = _sha256_file(split_path)

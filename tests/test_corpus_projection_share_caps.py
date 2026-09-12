@@ -1,4 +1,4 @@
-"""Tests for the corpus-v2 share-cap stage and its build wiring."""
+"""Tests for the projection share-cap stage and its build wiring."""
 import hashlib
 import json
 from collections.abc import Callable

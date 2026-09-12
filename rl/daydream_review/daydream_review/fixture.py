@@ -54,7 +54,7 @@ _GITIGNORE = """__pycache__/
 
 _README = """# daydream-rl-fixture
 
-A deterministic throwaway repository used by the `daydream-review-v1` verifiers
+A deterministic throwaway repository used by the `daydream-review` verifiers
 environment's tests and by its fixture container image. Never published.
 """
 

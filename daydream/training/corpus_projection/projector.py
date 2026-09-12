@@ -157,7 +157,7 @@ class BuildFrozenCorpusConfig:
     as_of: str | None = None
     holdout_rate: float = 0.1
     val_rate: float = 0.1
-    salt: str = "daydream-corpus-v2"
+    salt: str = "daydream-projection-salt"
     caps: dict[str, int] = field(default_factory=dict)
     # Output-share caps (issue #1079): true share of the final emitted
     # population, enforced per dimension over the post-tier-cap population.
@@ -1209,7 +1209,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     content_digests["annotations.jsonl"] = snapshot_digest
     annotation_as_of = annotation_lineage.get("as_of")
     lineage = {
-        "schema_version": "corpus-v2",
+        "schema_version": "lineage",
         "curation_id": bundle.curation_id,
         "hub_commit": bundle.source_hub_commit,
         "source_hub_commit": bundle.source_hub_commit,

@@ -1,6 +1,6 @@
 """Task-1 tests: fail-closed validation matrix (M2) for ``calibrate-reward``.
 
-``fixture_corpus`` builds a minimal synthetic corpus-v2 bundle in ``tmp_path``;
+``fixture_corpus`` builds a minimal synthetic projected-corpus bundle in ``tmp_path``;
 corruption variants are injected through ``CalibrationConfig.corruptions`` so
 every gate is exercised against otherwise-identical inputs.
 """
@@ -86,7 +86,7 @@ def _build_fixture(tmp_path: Path) -> Path:
     (corpus_dir / "lineage.json").write_text(
         json.dumps(
             {
-                "schema_version": "corpus-v2",
+                "schema_version": "lineage",
                 "salt": SALT,
                 "holdout_rate": 0.1,
                 "val_rate": 0.1,

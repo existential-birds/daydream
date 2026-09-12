@@ -673,7 +673,7 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
 
 
 def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
-    """The non-gold guarantee extends to the corpus-v2 projection: a
+    """The non-gold guarantee extends to the projection projection: a
     conflicted session's annotations.jsonl row (full record, ``conflicting``
     flag intact) must never classify gold with ``outcome_label`` set even
     with a decisive disposition + evidence -- the same gate canonical.py
@@ -695,7 +695,7 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     # the flag rides through the harvest into the projection input verbatim
     assert any(row.get("conflicting") is True for row in rows)
     # build_frozen_corpus's snapshot assembly (session-scoped resolutions) --
-    # the boundary classify_tier reaches the corpus-v2 gold label through.
+    # the boundary classify_tier reaches the projection gold label through.
     session = {
         "session_id": "s1",
         "trajectory_id": "s1",

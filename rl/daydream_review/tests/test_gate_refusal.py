@@ -129,7 +129,7 @@ def _projection_record(
     *, session_id: str, split: str, label: str | None,
     finding_text: str | None, diff_body: str, base_sha: str, head_sha: str,
 ) -> dict[str, object]:
-    """A corpus-v2 record the projector would emit for one finding (mirrors
+    """A projected-corpus record the projector would emit for one finding (mirrors
     tests/test_training_coordinator_v2.py::_v2_record — kept minimal but
     schema-faithful so the coordinator's fail-closed gates admit it)."""
     diff_digest = hashlib.sha256(diff_body.encode("utf-8")).hexdigest()
@@ -187,7 +187,7 @@ def _projection_record(
 
 
 def _build_projection(tmp_path: Path) -> Path:
-    """Build a real corpus-v2 projection directory with accepted + rejected
+    """Build a real projected-corpus projection directory with accepted + rejected
     gold outcome rows on both sides of the frozen split (mirrors
     tests/test_training_coordinator_v2.py::_build_projection)."""
     from daydream.training.corpus_projection.splits import assign_split
@@ -241,7 +241,7 @@ def _build_projection(tmp_path: Path) -> Path:
     (proj / "lineage.json").write_text(
         json.dumps(
             {
-                "schema_version": "corpus-v2",
+                "schema_version": "lineage",
                 "salt": salt,
                 "holdout_rate": holdout_rate,
                 "val_rate": val_rate,

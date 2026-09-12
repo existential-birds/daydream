@@ -782,7 +782,7 @@ def reviewer_set_penalty_prior(
     responsibility.
 
     Rows with malformed ``reviewer_logins`` / ``labels`` JSON are skipped with a
-    :func:`warnings.warn` (mirroring ``corpus._annotation_reward``) so a single
+    :func:`warnings.warn` so a single
     bad row never crashes the aggregate.
 
     Args:

@@ -1,4 +1,4 @@
-"""Schema tests for the extended corpus-v2 record schema (finding_text / task_identity)."""
+"""Schema tests for the extended projection record schema (finding_text / task_identity)."""
 
 import json
 from pathlib import Path

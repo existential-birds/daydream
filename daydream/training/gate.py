@@ -165,7 +165,7 @@ def write_split_sidecar(
     """Write the canonical ``<labels>.gate-split.json`` digest sidecar.
 
     Shared by every producer of the M18 resume-guard / stage-manifest split
-    contract (:func:`freeze_split` and the corpus-v2 frozen-boundary path in
+    contract (:func:`freeze_split` and the projected-corpus frozen-boundary path in
     :mod:`daydream.training.coordinator`), so the sidecar shape cannot drift
     between them. Writes use the shared crash-safe JSON writer.
 

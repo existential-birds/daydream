@@ -40,7 +40,7 @@ def _task(fixture_manifest_path: Path) -> DaydreamReviewTask:
         taskset = DaydreamReviewTaskset(
             DaydreamReviewConfig(
                 id="daydream-review",
-                                manifest_path=fixture_manifest_path,
+                manifest_path=fixture_manifest_path,
                 gate_report_path=Path(gate_name),
             )
         )
@@ -122,7 +122,7 @@ async def test_launch_passes_the_selected_backend_to_the_cli(
 
 
 async def test_launch_carries_extra_args_before_the_target(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(
@@ -138,7 +138,7 @@ fixture_manifest_path: Path
 
 
 async def test_launch_unsets_ambient_github_credentials(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
@@ -179,7 +179,7 @@ async def test_launch_clears_operator_observability_env(fixture_manifest_path: P
 
 
 async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """Tests still red after the fix pass is an outcome to score, not a crash."""
     task = _task(fixture_manifest_path)
@@ -198,7 +198,7 @@ fixture_manifest_path: Path
 
 
 async def test_launch_leaves_a_crash_to_raise(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """No artifacts means infrastructure failure: let HarnessError fire."""
     task = _task(fixture_manifest_path)
@@ -212,7 +212,7 @@ fixture_manifest_path: Path
 
 
 async def test_launch_does_not_stop_on_a_half_written_archive(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """final_metrics is written last; without it the pipeline did not finish."""
     task = _task(fixture_manifest_path)
@@ -230,7 +230,7 @@ fixture_manifest_path: Path
 
 
 async def test_setup_names_the_missing_binaries(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     class MissingBinaries(_DockerLikeRuntime):
         """Docker-shaped runtime whose image is missing every required binary."""
@@ -249,7 +249,7 @@ fixture_manifest_path: Path
 
 
 async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """Capture loss must be loud: a bypassed interception server would otherwise
     produce a normal-looking archive and a positive reward."""
@@ -299,7 +299,7 @@ class _OrderingDockerRuntime(_DockerLikeRuntime):
 
 
 async def test_launch_uses_run_as_agent_wrapper_under_docker(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """Container launches drop to the non-root agent identity via run-as-agent.
 
@@ -343,7 +343,7 @@ fixture_manifest_path: Path
 
 
 async def test_docker_launch_preflights_writability_before_run_as_agent(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """The docker deep flow's first write succeeds because the image bakes both
     trees agent-owned (repo.Dockerfile's combined chown layer covers /work/repo
@@ -390,7 +390,7 @@ async def test_preflight_quotes_repo_path(fixture_manifest_path: Path) -> None:
 
 
 async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """A non-agent-writable repo or mirror is a rebuild signal, never a runtime
     repair: launch raises RuntimeError naming both paths and the rebuild entry
@@ -476,7 +476,7 @@ class _ArchivingDockerRuntime(_DockerLikeRuntime):
 
 
 async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """The sealed run dir is re-chowned root-owned read-only at seal time.
 
@@ -499,7 +499,7 @@ fixture_manifest_path: Path
 
 
 async def test_seal_failure_is_fail_closed_and_recorded(
-fixture_manifest_path: Path
+    fixture_manifest_path: Path
 ) -> None:
     """A seal-production failure is fail-closed, never silently unsealed.
 

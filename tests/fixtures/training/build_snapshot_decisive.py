@@ -57,7 +57,7 @@ def build_snapshot_decisive(*, hostile: bool = False) -> FakeHub:
             session_id, session.repo_slug, session.skill, session.outcome_labels
         )
         data = manifest.to_dict()
-        # License evidence the corpus-v2 admission gate and bundle loader
+        # License evidence the projection admission gate and bundle loader
         # require for every admitted batch (MIT, accepted by the policy the
         # projector run in the test pins).
         data["license_evidence"] = {"spdx_id": "MIT", "source": "github-api"}

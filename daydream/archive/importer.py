@@ -589,7 +589,7 @@ def classify_run_level(
         per-finding adjudication queue, not a fan-out. Only a row whose
         ``evidence_sha`` matches exactly one projected finding lands in
         ``per_finding`` (the sole path into the ``_is_admitted_outcome_gold``
-        / ``_rubric_decisive_only`` semantics).
+        adjudication semantics).
 
     Raises:
         ValueError: When a row's ``labels`` field is malformed JSON (naming

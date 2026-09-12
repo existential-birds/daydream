@@ -3,7 +3,7 @@
   "content_digests": {},
   "holdout_rate": 0.2,
   "salt": "calibration-fixture-salt-nondegenerate",
-  "schema_version": "corpus-v2",
+  "schema_version": "lineage",
   "val_rate": 0.2,
   "valid_at": "2025-12-01T00:00:00+00:00"
 }

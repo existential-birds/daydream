@@ -10,7 +10,7 @@ cd "$(git rev-parse --show-toplevel)"
 # Versioned identifiers the project owned and renamed in #1093. A match here
 # is a regression: the greenfield rule is exactly one neutral name per
 # identifier and no supported code paths referencing removed loaders.
-VERSIONED_RE='corpus_v2|stacks_v2|rubric_v2|daydream_review_v1|build-v2|run_build_corpus_v2|curation-manifest-v1|member-v1|calibration-artifact-v1|AUDIT_ROOT_ISOLATION_V1|claude-pretooluse-v1'
+VERSIONED_RE='corpus_v2|corpus-v2|stacks_v2|rubric_v2|daydream_review_v1|daydream-review-v1|build-v2|run_build_corpus_v2|curation-manifest-v1|member-v1|calibration-artifact-v1|AUDIT_ROOT_ISOLATION_V1|claude-pretooluse-v1'
 
 # Paths excluded from the scan. Each entry names why the path is out of scope.
 EXCLUDED_PATHS=(
@@ -57,7 +57,7 @@ while IFS= read -r file; do
     if allowlisted "$line"; then
       continue
     fi
-    if [[ -z "$violations" ]]; then
+    if [[ "$violations" -eq 0 ]]; then
       echo "project-owned versioned names found (external contracts are allowlisted):"
       echo "offending lines:"
     fi

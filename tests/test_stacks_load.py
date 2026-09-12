@@ -67,7 +67,7 @@ def _write_projection(tmp_path: Path, record_ids: list[str]) -> Path:
     (out / "lineage.json").write_text(
         json.dumps(
             {
-                "schema_version": "corpus-v2",
+                "schema_version": "lineage",
                 "salt": SALT,
                 "holdout_rate": HOLDOUT_RATE,
                 "val_rate": VAL_RATE,
