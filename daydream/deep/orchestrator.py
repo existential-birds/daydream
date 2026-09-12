@@ -271,7 +271,7 @@ def _collapse_stacks_for_tiny_diff(
     Returns:
         Tuple of ``(possibly_collapsed_stacks, single_stack_mode)``.
     """
-    if threshold <= 0 or not (0 < len(changed_files) <= threshold):
+    if not (0 < len(changed_files) <= threshold):
         return stacks, False
 
     non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
@@ -289,23 +289,9 @@ def _collapse_stacks_for_tiny_diff(
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
         real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
-        if len(real_language) == 1:
-            lang = real_language[0]
-            return (
-                [
-                    *structural,
-                    StackAssignment(
-                        stack_name=lang.stack_name,
-                        files=combined_files,
-                        is_docs_only=False,
-                    ),
-                ],
-                True,
-            )
-        # ≥2 real-language stacks: one agent cannot cover two per-language scopes,
-        # so the combined assignment uses the native generic-fallback scope.
+        stack_name = real_language[0].stack_name if len(real_language) == 1 else GENERIC_STACK
         combined = StackAssignment(
-            stack_name=GENERIC_STACK,
+            stack_name=stack_name,
             files=combined_files,
             is_docs_only=False,
         )
@@ -410,12 +396,8 @@ def _resolve_mode(config: RunConfig) -> str:
         return config.flow_name
     # Issue #1113: checked before ``shallow`` so ``--diagram-only`` is never
     # reinterpreted as a shallow review by an unrelated flag combination.
-    if config.output_mode == "diagram":
-        return "diagram"
-    if config.output_mode == "review":
-        return "review"
-    if config.output_mode == "comment":
-        return "comment"
+    if config.output_mode in ("diagram", "review", "comment"):
+        return config.output_mode
     if config.shallow:
         return "shallow"
     return "loop"
@@ -622,34 +604,104 @@ def _collapse_stacks_for_shallow(
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
 
-    non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
-    real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
+    real_language = [s for s in stacks if s.stack_name not in (STRUCTURE_STACK_NAME, GENERIC_STACK)]
 
     if config.stack is not None:
-        combined = StackAssignment(
-            stack_name=config.stack,
-            files=combined_files,
-            is_docs_only=False,
-        )
+        stack_name = config.stack
     elif len(real_language) == 1:
         # Scope preservation: a sole real-language stack survives unchanged,
         # absorbing any generic/docs files.
-        lang = real_language[0]
-        combined = StackAssignment(
-            stack_name=lang.stack_name,
-            files=combined_files,
-            is_docs_only=False,
-        )
+        stack_name = real_language[0].stack_name
     else:
         # Multiple real-language stacks (one agent cannot cover two per-language
         # scopes) or no real language at all: the combined assignment uses the
         # native generic-fallback scope.
-        combined = StackAssignment(
-            stack_name=GENERIC_STACK,
-            files=combined_files,
-            is_docs_only=False,
-        )
+        stack_name = GENERIC_STACK
+    combined = StackAssignment(
+        stack_name=stack_name,
+        files=combined_files,
+        is_docs_only=False,
+    )
     return [*structural, combined], True
+
+
+def _prepare_review_stacks(
+    config: RunConfig,
+    changed_files: list[str],
+    diff: str,
+    target_dir: Path,
+    mode: str,
+) -> tuple[list[StackAssignment], bool, dict[str, set[str]]]:
+    """Resolve review scopes, optional shards, and the diagram import graph."""
+    # Stack detection (from diff file list). Built-in detection is
+    # registry-independent (M1); fork stack rules still resolve via the
+    # registry inside detect_stacks.
+    stacks = detect_stacks(changed_files)
+    # Structural gating (M8): ``detect_stacks`` still emits the structural
+    # meta-stack; a profile that disables ``structural_enabled`` removes only
+    # that assignment/call here, before collapse/sharding publish the list.
+    # This pre-context call reads the same resolved pipeline that
+    # ``FlowContext.pipeline()`` resolves in-flow.
+    if not _config_pipeline(config).structural_enabled:
+        stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
+    # Issue #172 — tiny-diff short-circuit. When the diff is small enough
+    # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
+    # to a single combined assignment and skip merge+arbiter downstream.
+    # ``single_stack_mode`` is recomputed here (top of run_deep) so a
+    # ``--start-at merge``/``--start-at fix`` resume on a tiny diff re-enters
+    # the same bypass branch rather than routing to the absent merge agent.
+    stacks, single_stack_mode = _collapse_stacks_for_tiny_diff(
+        stacks, changed_files, threshold=_shallow_fanout_threshold(config)
+    )
+    # Issue #330 — ``--shallow`` forces the single-stack assignment regardless
+    # of diff size, so no arbiter / cross-stack merge runs.
+    if mode == "shallow":
+        stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
+
+    # Issue #731: deep-review sharding. Runs AFTER the tiny-diff/shallow
+    # collapse passes (which must stay byte-identical) and BEFORE
+    # ``ctx.data["stacks"]`` is published below. Skipped whenever
+    # ``single_stack_mode`` is True (tiny-diff or shallow collapse already
+    # folded everything into one stack) and off by default (forensic mode
+    # passes the stack list through untouched). ``build_import_graph`` is
+    # fail-open (never raises; returns ``{}`` on any failure); byte sizing
+    # uses the FULL on-disk ``diff``, not the bounded in-memory value.
+    import_graph: dict[str, set[str]] = {}
+    sharding_enabled = _deep_shard_enabled(config)
+    if sharding_enabled and not single_stack_mode:
+        try:
+            import_graph = build_import_graph(changed_files, target_dir)
+        except Exception:
+            import_graph = {}
+        stacks = shard_stacks(
+            stacks,
+            diff,
+            max_files=_deep_shard_max_files(config),
+            max_bytes=_deep_shard_max_bytes(config),
+            fanout_cap=_deep_shard_fanout_cap(config),
+            frontier_max=_deep_shard_frontier_max(config),
+            graph=import_graph,
+        )
+
+    # Issue #1113: the sequence diagram's cross-module rule needs the
+    # changed-file import graph, but the sharding branch above builds it
+    # only when sharding is enabled (off by default) AND the run is not in
+    # single_stack_mode -- so in practice essentially never. Build it here
+    # when the diagram step can run, and publish it on ctx.data. The bare
+    # ``except Exception`` is required, not defensive: ``build_import_graph``
+    # documents itself as never raising, but its ``get_parser`` call reaches
+    # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
+    if (
+        not import_graph
+        and config.start_at != "fix"
+        and _diagram_mode_for(config, mode) != "off"
+    ):
+        try:
+            import_graph = build_import_graph(changed_files, target_dir)
+        except Exception:
+            import_graph = {}
+
+    return stacks, single_stack_mode, import_graph
 
 
 @bind_resolved_run_context
@@ -669,18 +721,10 @@ async def _run_review_spine(
     run_context = resolve_run_context(run_context)
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
-    from daydream.backends import Backend
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.hunk_index import write_hunk_index
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import _default_backend_name, _open_recorder, _resolve_review_profile
-
-    # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
-    # so phases that resolve to the same model/effort share an instance and
-    # differing ones stay isolated.
-    backend_cache: dict[
-        tuple[str, str | None, str | None, Path | None], Backend
-    ] = {}
 
     target_dir = work.repo
 
@@ -791,74 +835,10 @@ async def _run_review_spine(
                     )
                     return 1
 
-        # Stack detection (from diff file list). Built-in detection is
-        # registry-independent (M1); fork stack rules still resolve via the
-        # registry inside detect_stacks.
         changed_files = _diff_changed_files(diff)
-        stacks = detect_stacks(changed_files)
-        # Structural gating (M8): ``detect_stacks`` still emits the structural
-        # meta-stack; a profile that disables ``structural_enabled`` removes only
-        # that assignment/call here, before collapse/sharding publish the list.
-        # This pre-context call reads the same resolved pipeline that
-        # ``FlowContext.pipeline()`` resolves in-flow.
-        if not _config_pipeline(config).structural_enabled:
-            stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
-        # Issue #172 — tiny-diff short-circuit. When the diff is small enough
-        # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
-        # to a single combined assignment and skip merge+arbiter downstream.
-        # ``single_stack_mode`` is recomputed here (top of run_deep) so a
-        # ``--start-at merge``/``--start-at fix`` resume on a tiny diff re-enters
-        # the same bypass branch rather than routing to the absent merge agent.
-        stacks, single_stack_mode = _collapse_stacks_for_tiny_diff(
-            stacks, changed_files, threshold=_shallow_fanout_threshold(config)
+        stacks, single_stack_mode, import_graph = _prepare_review_stacks(
+            config, changed_files, diff, target_dir, mode
         )
-        # Issue #330 — ``--shallow`` forces the single-stack assignment regardless
-        # of diff size, so no arbiter / cross-stack merge runs.
-        if mode == "shallow":
-            stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
-
-        # Issue #731: deep-review sharding. Runs AFTER the tiny-diff/shallow
-        # collapse passes (which must stay byte-identical) and BEFORE
-        # ``ctx.data["stacks"]`` is published below. Skipped whenever
-        # ``single_stack_mode`` is True (tiny-diff or shallow collapse already
-        # folded everything into one stack) and off by default (forensic mode
-        # passes the stack list through untouched). ``build_import_graph`` is
-        # fail-open (never raises; returns ``{}`` on any failure); byte sizing
-        # uses the FULL on-disk ``diff``, not the bounded in-memory value.
-        import_graph: dict[str, set[str]] = {}
-        sharding_enabled = _deep_shard_enabled(config)
-        if sharding_enabled and not single_stack_mode:
-            try:
-                import_graph = build_import_graph(changed_files, target_dir)
-            except Exception:
-                import_graph = {}
-            stacks = shard_stacks(
-                stacks,
-                diff,
-                max_files=_deep_shard_max_files(config),
-                max_bytes=_deep_shard_max_bytes(config),
-                fanout_cap=_deep_shard_fanout_cap(config),
-                frontier_max=_deep_shard_frontier_max(config),
-                graph=import_graph,
-            )
-
-        # Issue #1113: the sequence diagram's cross-module rule needs the
-        # changed-file import graph, but the sharding branch above builds it
-        # only when sharding is enabled (off by default) AND the run is not in
-        # single_stack_mode -- so in practice essentially never. Build it here
-        # when the diagram step can run, and publish it on ctx.data. The bare
-        # ``except Exception`` is required, not defensive: ``build_import_graph``
-        # documents itself as never raising, but its ``get_parser`` call reaches
-        # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
-        if (
-            not import_graph
-            and config.start_at != "fix"
-            and _diagram_mode_for(config, mode) != "off"
-        ):
-            try:
-                import_graph = build_import_graph(changed_files, target_dir)
-            except Exception:
-                import_graph = {}
 
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
@@ -887,8 +867,8 @@ async def _run_review_spine(
                 sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
             )
 
-        # Flow context (steps communicate through ctx.data); ctx shares
-        # run_deep's backend cache so instance-sharing semantics are unchanged.
+        # Flow context owns the per-run backend cache shared by all steps;
+        # steps communicate through ctx.data.
         # Issue #644 — the in-memory diff is bounded at gather time to
         # ``INLINE_DIFF_BUDGET_BYTES`` via whole-block retention (``diff.patch``
         # above stays FULL on disk for the archival/coverage/eval/training
@@ -953,7 +933,6 @@ async def _run_review_spine(
                 "branch": branch,
                 "failed_stacks": {},
             },
-            _backend_cache=backend_cache,
             allow_standalone_artifacts=allow_standalone,
         )
 
