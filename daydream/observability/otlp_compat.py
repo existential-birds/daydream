@@ -209,14 +209,13 @@ def classify_http_ack(
 ) -> tuple[str, int, int]:
     """Classify one HTTP acknowledgment. Returns (verdict, accepted, rejected).
 
-    Binding decision 8: HTTP 200 with the protobuf content type and a complete
-    zero-byte body is the canonical full success. Positive rejection is a
-    terminal partial result; zero rejection with a warning is accepted with
-    warning. Neither partial form is ever retried.
+    A complete zero-length 200 body is canonical full success for any (or no)
+    content type — vendors such as LangSmith ack with an empty body and no
+    Content-Type. Non-empty bodies must still be a decodable protobuf ack.
+    Positive rejection is a terminal partial result; zero rejection with a
+    warning is accepted with warning. Neither partial form is ever retried.
     """
     if status != 200:
-        return (_ACK_MALFORMED, 0, 0)
-    if content_type is None or content_type.split(";")[0].strip() != "application/x-protobuf":
         return (_ACK_MALFORMED, 0, 0)
     if body is None or not complete:
         return (_ACK_OVERSIZED if body is not None else _ACK_MALFORMED, 0, 0)
@@ -224,6 +223,10 @@ def classify_http_ack(
         return (_ACK_OVERSIZED, 0, 0)
     if not body:
         return (_ACK_EMPTY_OK, 0, 0)
+    # The content-type guard applies only to non-empty bodies: an empty ack
+    # short-circuits above regardless of what content type was declared.
+    if content_type is None or content_type.split(";")[0].strip() != "application/x-protobuf":
+        return (_ACK_MALFORMED, 0, 0)
     response = ExportTraceServiceResponse()
     try:
         response.ParseFromString(body)

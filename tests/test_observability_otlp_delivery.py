@@ -83,7 +83,7 @@ def _partial_response(rejected: int) -> ScriptedResponse:
 
 
 def test_http_zero_byte_protobuf_200_is_canonical_full_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Binding decision 8: 200 + protobuf content type + empty body = full success."""
+    """200 + protobuf content type + empty body = full success (the canonical ack)."""
     content_types: list[str | None] = []
     with scripted_otlp_collector([ScriptedResponse()], capture_content_type=content_types) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
@@ -97,15 +97,36 @@ def test_http_zero_byte_protobuf_200_is_canonical_full_success(monkeypatch: pyte
         assert content_types == ["application/x-protobuf"]
 
 
-def test_http_wrong_content_type_is_terminal(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    with scripted_otlp_collector([ScriptedResponse(headers={"Content-Type": "application/json"})]) as receiver:
+def test_http_empty_body_200_no_content_type_is_full_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LangSmith canonical ack: 200 + zero-length body + no Content-Type = full success."""
+    content_types: list[str | None] = []
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={})], capture_content_type=content_types
+    ) as receiver:  # ScriptedResponse defaults: status=200, body=b"" — headers empty ⇒ no CT sent
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # terminal: no retry
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+        assert snapshot["delivered"] == 1
+        assert snapshot["accepted"] == 0  # no counts are invented from a non-conforming ack
+        assert snapshot["unverified"] == 0
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # no retry
+        assert content_types == [None]
+
+
+def test_http_wrong_content_type_with_empty_body_is_success_any_ct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M1/M6: empty-body 200 short-circuits before the content-type guard, for any CT."""
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"})]
+    ) as receiver:  # default empty body
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        exporter.shutdown()
+        assert len(receiver.requests) == 1
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1 and snapshot["unverified"] == 0
 
 
 def test_http_undecodable_body_is_terminal_and_never_logged(
