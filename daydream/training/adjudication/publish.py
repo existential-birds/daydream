@@ -926,7 +926,8 @@ def _verified_existing_success(
     prefix: str,
     final_id: str,
     data_payloads: Mapping[str, bytes],
-) -> tuple[str, bytes]:
+) -> dict[str, Any]:
+    """Verify both committed prefixes and return their publication receipt."""
     marker_path = f"{prefix}{_SUCCESS_FILENAME}"
     marker_bytes = _download_remote(client, marker_path, revision)
     data_oid = _parse_success(marker_bytes, final_id=final_id)
@@ -947,23 +948,12 @@ def _verified_existing_success(
         prefix=prefix,
         expected=data_payloads,
     )
-    return data_oid, marker_bytes
-
-
-def _final_result(
-    *,
-    success_oid: str,
-    data_oid: str,
-    final_id: str,
-    prefix: str,
-    files: Mapping[str, bytes],
-) -> dict[str, Any]:
     return {
-        "hub_commit_sha": success_oid,
+        "hub_commit_sha": revision,
         "data_commit_sha": data_oid,
         "final_snapshot_id": final_id,
         "prefix": prefix,
-        "files": sorted([*files, _SUCCESS_FILENAME]),
+        "files": sorted([*data_payloads, _SUCCESS_FILENAME]),
     }
 
 
@@ -992,20 +982,13 @@ def publish_final_annotation_bundle(
         remote_files = _list_remote(client, current)
         names = _prefix_names(remote_files, prefix)
         if _SUCCESS_FILENAME in names:
-            existing_data_oid, _marker = _verified_existing_success(
+            return _verified_existing_success(
                 client,
                 revision=current,
                 remote_files=remote_files,
                 prefix=prefix,
                 final_id=final_id,
                 data_payloads=data_payloads,
-            )
-            return _final_result(
-                success_oid=current,
-                data_oid=existing_data_oid,
-                final_id=final_id,
-                prefix=prefix,
-                files=data_payloads,
             )
         if names:
             _verify_prefix(
@@ -1046,20 +1029,13 @@ def publish_final_annotation_bundle(
         remote_files = _list_remote(client, current)
         names = _prefix_names(remote_files, prefix)
         if _SUCCESS_FILENAME in names:
-            existing_data_oid, _marker = _verified_existing_success(
+            return _verified_existing_success(
                 client,
                 revision=current,
                 remote_files=remote_files,
                 prefix=prefix,
                 final_id=final_id,
                 data_payloads=data_payloads,
-            )
-            return _final_result(
-                success_oid=current,
-                data_oid=existing_data_oid,
-                final_id=final_id,
-                prefix=prefix,
-                files=data_payloads,
             )
         _verify_prefix(
             client,
@@ -1084,20 +1060,13 @@ def publish_final_annotation_bundle(
             continue
         pinned_success = _pin_repository(client, revision=success_oid)
         success_files = _list_remote(client, pinned_success)
-        verified_data_oid, _verified_marker = _verified_existing_success(
+        return _verified_existing_success(
             client,
             revision=pinned_success,
             remote_files=success_files,
             prefix=prefix,
             final_id=final_id,
             data_payloads=data_payloads,
-        )
-        return _final_result(
-            success_oid=pinned_success,
-            data_oid=verified_data_oid,
-            final_id=final_id,
-            prefix=prefix,
-            files=data_payloads,
         )
     raise HubUnavailableError("final success publication could not win the concurrent-update race")
 
