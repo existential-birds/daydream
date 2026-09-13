@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import calendar
 import gzip
+import json
 import logging
 import ssl
 import threading
@@ -211,9 +212,13 @@ def classify_http_ack(
 
     A complete zero-length 200 body is canonical full success for any (or no)
     content type — vendors such as LangSmith ack with an empty body and no
-    Content-Type. Non-empty bodies must still be a decodable protobuf ack.
-    Positive rejection is a terminal partial result; zero rejection with a
-    warning is accepted with warning. Neither partial form is ever retried.
+    Content-Type. Non-empty protobuf bodies must be a decodable protobuf ack.
+    A 200 + application/json body is accepted with warning when it parses as
+    a JSON object with no truthy top-level "error"/"errors" indication
+    (HoneyHive shape); JSON with an error indication, non-object JSON, or an
+    undecodable body stays terminal malformed. Positive rejection is a
+    terminal partial result; zero rejection with a warning is accepted with
+    warning. Neither partial form is ever retried.
     """
     if status != 200:
         return (_ACK_MALFORMED, 0, 0)
@@ -223,9 +228,17 @@ def classify_http_ack(
         return (_ACK_OVERSIZED, 0, 0)
     if not body:
         return (_ACK_EMPTY_OK, 0, 0)
-    # The content-type guard applies only to non-empty bodies: an empty ack
-    # short-circuits above regardless of what content type was declared.
-    if content_type is None or content_type.split(";")[0].strip() != "application/x-protobuf":
+    if content_type is None:
+        return (_ACK_MALFORMED, 0, 0)
+    if content_type.split(";")[0].strip() == "application/json":
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return (_ACK_MALFORMED, 0, 0)
+        if isinstance(parsed, dict) and not parsed.get("error") and not parsed.get("errors"):
+            return (_ACK_PARTIAL, 0, 0)  # zero-rejected warning form
+        return (_ACK_MALFORMED, 0, 0)
+    if content_type.split(";")[0].strip() != "application/x-protobuf":
         return (_ACK_MALFORMED, 0, 0)
     response = ExportTraceServiceResponse()
     try:

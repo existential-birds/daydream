@@ -142,6 +142,38 @@ def test_http_undecodable_body_is_terminal_and_never_logged(
         assert "opaque-garbage" not in caplog.text
 
 
+def test_http_vendor_json_success_ack_is_accepted_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HoneyHive shape: 200 + application/json + {"success": true} = accepted with warning."""
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": true}')]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1
+        assert snapshot["warning"] is True
+        assert snapshot["unverified"] == 0
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # never retried
+
+
+def test_http_json_ack_with_error_indication_is_terminal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false, "error": "boom"}')]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # terminal, never retried
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+        assert "boom" not in caplog.text  # body text is never logged
+
+
 def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A decoded acknowledgment over 4 MiB fails once and never retries."""
     big = b"\n\x02\x08\x03" + b"x" * (4 * 1024 * 1024)  # > 4 MiB decoded budget
