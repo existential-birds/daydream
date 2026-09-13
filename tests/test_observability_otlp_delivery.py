@@ -175,6 +175,47 @@ def test_http_json_ack_with_error_indication_is_terminal(
         assert "boom" not in caplog.text  # body text is never logged
 
 
+def test_http_json_ack_success_false_without_error_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented HoneyHive inverse {"success": false} is an explicit vendor failure.
+
+    The accept path reads the vendor-documented "success" flag: an explicitly
+    falsy success with no "error" key is still error-indicating JSON and stays
+    terminal OTLP_MALFORMED_ACK — never recorded as delivered.
+    """
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false}')]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # terminal, never retried
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+
+
+def test_http_vendor_json_ack_success_content_type_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 9110 media types are case-insensitive: Application/JSON; charset=utf-8."""
+    with scripted_otlp_collector(
+        [
+            ScriptedResponse(
+                headers={"Content-Type": "Application/JSON; charset=utf-8"}, body=b'{"success": true}'
+            )
+        ]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1 and snapshot["warning"] is True
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # never retried
+
+
 def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A decoded acknowledgment over 4 MiB fails once and never retries."""
     big = b"\n\x02\x08\x03" + b"x" * (4 * 1024 * 1024)  # > 4 MiB decoded budget
@@ -369,8 +410,12 @@ def test_classify_http_ack_none_body_is_not_success() -> None:
     assert (verdict, accepted, rejected) == ("malformed", 0, 0)
 
 
-# ------------------------------------------------------------------ credential-provider rejection
-
+def test_classify_http_ack_json_without_positive_success_is_malformed() -> None:
+    """A JSON ack with no truthy success flag is never graded delivered."""
+    verdict, accepted, rejected = classify_http_ack(
+        status=200, content_type="application/json", body=b'{"ok": false}', complete=True
+    )
+    assert (verdict, accepted, rejected) == ("malformed", 0, 0)
 
 
 @pytest.mark.parametrize("env_var", _CREDENTIAL_PROVIDER_VARS)

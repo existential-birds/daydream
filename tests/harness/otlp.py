@@ -122,7 +122,7 @@ def scripted_otlp_collector(
     The plain ``otlp_collector`` always answers 200 with an empty protobuf body,
     which cannot exercise acknowledgment classification. This variant scripts
     the exact status/content-type/body sequence per request and records each
-    request's Content-Type for the strict acknowledgment tests. Bodies that are
+    ack's Content-Type for the strict acknowledgment tests. Bodies that are
     valid protobuf requests are additionally decoded through the normal
     capture path so partial-success bodies stay observable.
     """

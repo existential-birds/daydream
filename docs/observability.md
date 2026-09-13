@@ -371,8 +371,8 @@ The LangSmith ledger is therefore trustworthy: a stored batch shows as
 `delivered`, not `unverified`. `scripts/verify_observability_readback.py`
 continues to run as independent storage evidence — it proves the payload is
 actually readable from the destination, which the ack alone never does.
-HoneyHive returns the canonical protobuf-content-type empty ack, which is
-also classified `empty_ok` (full success).
+HoneyHive's documented JSON ack (`{"success": true}`) is recorded as
+`delivered` with `warning=True`, matching the classification above.
 
 Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as

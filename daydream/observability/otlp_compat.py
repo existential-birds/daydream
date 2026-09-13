@@ -214,11 +214,13 @@ def classify_http_ack(
     content type — vendors such as LangSmith ack with an empty body and no
     Content-Type. Non-empty protobuf bodies must be a decodable protobuf ack.
     A 200 + application/json body is accepted with warning when it parses as
-    a JSON object with no truthy top-level "error"/"errors" indication
-    (HoneyHive shape); JSON with an error indication, non-object JSON, or an
-    undecodable body stays terminal malformed. Positive rejection is a
-    terminal partial result; zero rejection with a warning is accepted with
-    warning. Neither partial form is ever retried.
+    a JSON object carrying a truthy top-level "success" flag and no truthy
+    top-level "error"/"errors" indication — the documented HoneyHive
+    {"success": true} shape; an explicitly falsy "success", JSON with an
+    error indication, non-object JSON, or an undecodable body stays terminal
+    malformed. The media-type comparison is case-insensitive per RFC 9110.
+    Positive rejection is a terminal partial result; zero rejection with a
+    warning is accepted with warning. Neither partial form is ever retried.
     """
     if status != 200:
         return (_ACK_MALFORMED, 0, 0)
@@ -230,12 +232,17 @@ def classify_http_ack(
         return (_ACK_EMPTY_OK, 0, 0)
     if content_type is None:
         return (_ACK_MALFORMED, 0, 0)
-    if content_type.split(";")[0].strip() == "application/json":
+    if content_type.split(";")[0].strip().lower() == "application/json":
         try:
             parsed = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             return (_ACK_MALFORMED, 0, 0)
-        if isinstance(parsed, dict) and not parsed.get("error") and not parsed.get("errors"):
+        if (
+            isinstance(parsed, dict)
+            and parsed.get("success")  # vendor-documented flag; falsy success is a failure
+            and not parsed.get("error")
+            and not parsed.get("errors")
+        ):
             return (_ACK_PARTIAL, 0, 0)  # zero-rejected warning form
         return (_ACK_MALFORMED, 0, 0)
     if content_type.split(";")[0].strip() != "application/x-protobuf":
