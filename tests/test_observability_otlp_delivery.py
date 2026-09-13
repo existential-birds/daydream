@@ -37,6 +37,7 @@ from daydream.observability.exporters import (
     langsmith_exporter,
     otlp_exporter,
 )
+from daydream.observability.otlp_compat import classify_http_ack
 from tests.harness.otlp import ScriptedResponse, otlp_collector, scripted_otlp_collector
 
 # The private requests-session credential provider settings the whole-operation
@@ -353,6 +354,23 @@ def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch
 
 
 # ------------------------------------------------------------------ credential-provider rejection
+
+
+def test_classify_http_ack_incomplete_empty_read_is_not_success() -> None:
+    """M5: a zero-length *incomplete* read must not be graded full success."""
+    verdict, accepted, rejected = classify_http_ack(status=200, content_type=None, body=b"", complete=False)
+    assert (verdict, accepted, rejected) == ("oversized", 0, 0)
+
+
+def test_classify_http_ack_none_body_is_not_success() -> None:
+    verdict, accepted, rejected = classify_http_ack(
+        status=200, content_type="application/x-protobuf", body=None, complete=True
+    )
+    assert (verdict, accepted, rejected) == ("malformed", 0, 0)
+
+
+# ------------------------------------------------------------------ credential-provider rejection
+
 
 
 @pytest.mark.parametrize("env_var", _CREDENTIAL_PROVIDER_VARS)
