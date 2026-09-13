@@ -356,16 +356,24 @@ before #1156 closes.
 
 LangSmith's canonical OTLP success acknowledgment is HTTP 200 with a
 zero-byte body and **no Content-Type header** (confirmed with real exports
-and minimal probes, 2026-09-09). The owned transport classifies any
-`200` response whose content type is missing or not
-`application/x-protobuf` as `OTLP_MALFORMED_ACK` and records it
-`unverified` in the per-destination ledger — per binding decision 8,
-absence of the protobuf content type is terminal/unverified, and
-acceptance counts are never invented from non-conforming acks. LangSmith
-does store the payload (proven exclusively by the native readback gate,
-never by the ack), so with that destination the ledger will show
-`delivered=0 / unverified` even when storage succeeded. Delivery to
-LangSmith is therefore judged by `scripts/verify_observability_readback.py`
-results, not by the exporter ack ledger. HoneyHive returns the canonical
-protobuf-content-type empty ack and is classified `empty_ok` (full
-success).
+and minimal probes, 2026-09-09). The owned transport classifies a complete
+zero-length `200` ack body as full success (`empty_ok`, recorded `delivered`
+in the per-destination ledger) regardless of the response `Content-Type` —
+any content type, or none at all. Acceptance is still never invented from
+non-conforming acks: a `200` with a genuinely undecodable non-empty body —
+an opaque body, a JSON body carrying an error indication, or non-object
+JSON — remains terminal `OTLP_MALFORMED_ACK` / `unverified` and is never
+retried. A `200` with `application/json` whose body is a JSON object with no
+error indication (HoneyHive's documented `{"success": true}`) is accepted
+with a warning: `delivered` with `warning=True`, never retried.
+
+The LangSmith ledger is therefore trustworthy: a stored batch shows as
+`delivered`, not `unverified`. `scripts/verify_observability_readback.py`
+continues to run as independent storage evidence — it proves the payload is
+actually readable from the destination, which the ack alone never does.
+HoneyHive returns the canonical protobuf-content-type empty ack, which is
+also classified `empty_ok` (full success).
+
+Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
+id — a project id yields HTTP 403 because it is forwarded as
+`x-tenant-id`.
