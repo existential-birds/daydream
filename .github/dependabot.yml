@@ -59,6 +59,13 @@ updates:
           - patch
     commit-message:
       prefix: chore(deps)
+    # verifiers is held on the 0.2.x line in rl/daydream_review/pyproject.toml:
+    # prime-rl v0.7.0 vendors verifiers 0.2.0 and shadows the venv's copy at
+    # runtime (README "Vendored-verifiers skew (AC10)"), so the 0.3.1 bump
+    # Dependabot proposes can never merge. Same shape as the tree-sitter hold
+    # above: tell it here instead of re-reviewing the PR every week.
+    ignore:
+      - dependency-name: verifiers
 
   # Third-party GitHub Actions. Re-enabled after the hand-maintained SHA→version
   # map in tests/test_workflow_templates.py was deleted: that map, not the SHA
