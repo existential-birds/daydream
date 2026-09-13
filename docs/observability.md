@@ -363,9 +363,10 @@ any content type, or none at all. Acceptance is still never invented from
 non-conforming acks: a `200` with a genuinely undecodable non-empty body —
 an opaque body, a JSON body carrying an error indication, or non-object
 JSON — remains terminal `OTLP_MALFORMED_ACK` / `unverified` and is never
-retried. A `200` with `application/json` whose body is a JSON object with no
-error indication (HoneyHive's documented `{"success": true}`) is accepted
-with a warning: `delivered` with `warning=True`, never retried.
+retried. A `200` with `application/json` whose body is a JSON object with a
+truthy top-level `success` flag and no error indication (HoneyHive's
+documented `{"success": true}`) is accepted with a warning: `delivered`
+with `warning=True`, never retried.
 
 The LangSmith ledger is therefore trustworthy: a stored batch shows as
 `delivered`, not `unverified`. `scripts/verify_observability_readback.py`
