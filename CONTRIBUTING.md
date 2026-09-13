@@ -48,13 +48,13 @@ purpose so the full gate suite runs — the benchmark objective tests need the
 - `scripts/hooks/pre-commit` — a fast commit-time gate that runs ruff on the
   staged Python files (scoped to `daydream/`, `tests/`, and
   `rl/daydream_review/`, linted from the index, not the working tree).
-- `scripts/hooks/pre-push` — verifies every pushed commit carries an SSH
-  signature, then delegates to `make check`, the full local CI gate.
+- `scripts/hooks/pre-push` — verifies every pushed commit carries a valid
+  signature (SSH or GPG), then delegates to `make check`, the full local CI gate.
 
 ### SSH signing
 
-The pre-push hook **rejects unsigned commits**. Make sure your commits are
-signed with your SSH key:
+The pre-push hook **rejects unsigned commits** and accepts any valid signature
+(SSH or GPG). Make sure your commits are signed, e.g. with your SSH key:
 
 1. Configure git to sign with your SSH key, then enable commit signing:
 
