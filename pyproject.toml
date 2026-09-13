@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 benchmark = ["harbor>=0.22,<0.23"]
-hub = ["huggingface_hub>=1.30.0"]
+hub = ["huggingface_hub>=1.31.0"]
 
 [dependency-groups]
 dev = [
@@ -44,7 +44,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-xdist>=3.6",
-    "ruff>=0.16.6",
+    "ruff>=0.16.7",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20260815",
     "types-requests>=2.32",
