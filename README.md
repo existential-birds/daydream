@@ -584,15 +584,20 @@ The `.daydream/exploration/` cache is reused on an exact key match. The key excl
 
 ## Development
 
+**New to contributing? Read [CONTRIBUTING.md](CONTRIBUTING.md) — setup, commands, the required gate, and PR workflow.**
+
 ```bash
 make install
 make hooks      # install git hooks
 make lint       # ruff linter
 make typecheck  # mypy
 make test       # pytest
+make deadcode   # vulture dead-code scan
+make coverage-report  # verify coverage.xml after make test
+make check-naming  # naming-convention check
 make actionlint # workflow YAML checks via Docker
 make rl-check   # standalone RL: lockcheck + ruff + mypy + pytest
-make check      # all root + workflow + RL CI checks
+make check      # the required gate (rl-check is separate; run it when touching rl/)
 ```
 
 `make install` runs `uv sync --all-extras`. This builds the virtualenv for the targets above. Like
@@ -611,6 +616,8 @@ Editors that support [EditorConfig](https://editorconfig.org) pick up the root
 YAML, 4-space TOML, tabs in Makefiles, preserved Markdown hard breaks).
 
 See [docs/coverage.md](docs/coverage.md) for the coverage gate and ratchet procedure.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## License
 
