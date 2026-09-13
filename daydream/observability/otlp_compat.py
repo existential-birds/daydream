@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import calendar
 import gzip
+import json
 import logging
 import ssl
 import threading
@@ -209,14 +210,19 @@ def classify_http_ack(
 ) -> tuple[str, int, int]:
     """Classify one HTTP acknowledgment. Returns (verdict, accepted, rejected).
 
-    Binding decision 8: HTTP 200 with the protobuf content type and a complete
-    zero-byte body is the canonical full success. Positive rejection is a
-    terminal partial result; zero rejection with a warning is accepted with
-    warning. Neither partial form is ever retried.
+    A complete zero-length 200 body is canonical full success for any (or no)
+    content type — vendors such as LangSmith ack with an empty body and no
+    Content-Type. Non-empty protobuf bodies must be a decodable protobuf ack.
+    A 200 + application/json body is accepted with warning when it parses as
+    a JSON object carrying a true boolean top-level "success" flag and no
+    "error"/"errors" key — the documented HoneyHive
+    {"success": true} shape; an explicitly falsy "success", JSON with an
+    error indication, non-object JSON, or an undecodable body stays terminal
+    malformed. The media-type comparison is case-insensitive per RFC 9110.
+    Positive rejection is a terminal partial result; zero rejection with a
+    warning is accepted with warning. Neither partial form is ever retried.
     """
     if status != 200:
-        return (_ACK_MALFORMED, 0, 0)
-    if content_type is None or content_type.split(";")[0].strip() != "application/x-protobuf":
         return (_ACK_MALFORMED, 0, 0)
     if body is None or not complete:
         return (_ACK_OVERSIZED if body is not None else _ACK_MALFORMED, 0, 0)
@@ -224,6 +230,24 @@ def classify_http_ack(
         return (_ACK_OVERSIZED, 0, 0)
     if not body:
         return (_ACK_EMPTY_OK, 0, 0)
+    if content_type is None:
+        return (_ACK_MALFORMED, 0, 0)
+    if content_type.split(";")[0].strip().lower() == "application/json":
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return (_ACK_MALFORMED, 0, 0)
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("success"), bool)
+            and parsed["success"]  # vendor-documented flag; falsy success is a failure
+            and "error" not in parsed
+            and "errors" not in parsed
+        ):
+            return (_ACK_PARTIAL, 0, 0)  # zero-rejected warning form
+        return (_ACK_MALFORMED, 0, 0)
+    if content_type.split(";")[0].strip().lower() != "application/x-protobuf":
+        return (_ACK_MALFORMED, 0, 0)
     response = ExportTraceServiceResponse()
     try:
         response.ParseFromString(body)
