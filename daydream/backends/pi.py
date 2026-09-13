@@ -241,64 +241,46 @@ def _pi_retry_attempts() -> int:
     return value
 
 
-def _pi_retry_base_delay() -> float:
-    raw = os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S")
+def _pi_retry_delay(env_name: str, default: float) -> float:
+    """Read one finite, non-negative retry delay from the environment."""
+    raw = os.environ.get(env_name)
     if raw is None:
-        return _PI_DEFAULT_RETRY_BASE_DELAY
+        return default
     try:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not a valid float; using default %g",
+            "%s=%r is not a valid float; using default %g",
+            env_name,
             raw,
-            _PI_DEFAULT_RETRY_BASE_DELAY,
+            default,
         )
-        return _PI_DEFAULT_RETRY_BASE_DELAY
+        return default
     if not math.isfinite(value):
         logger.warning(
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not finite; using default %g",
+            "%s=%r is not finite; using default %g",
+            env_name,
             raw,
-            _PI_DEFAULT_RETRY_BASE_DELAY,
+            default,
         )
-        return _PI_DEFAULT_RETRY_BASE_DELAY
+        return default
     if value < 0:
         logger.warning(
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is negative; using default %g",
+            "%s=%r is negative; using default %g",
+            env_name,
             raw,
-            _PI_DEFAULT_RETRY_BASE_DELAY,
+            default,
         )
-        return _PI_DEFAULT_RETRY_BASE_DELAY
+        return default
     return value
+
+
+def _pi_retry_base_delay() -> float:
+    return _pi_retry_delay("DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY)
 
 
 def _pi_retry_max_delay() -> float:
-    raw = os.environ.get("DAYDREAM_PI_RETRY_MAX_DELAY_S")
-    if raw is None:
-        return _PI_DEFAULT_RETRY_MAX_DELAY
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning(
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not a valid float; using default %g",
-            raw,
-            _PI_DEFAULT_RETRY_MAX_DELAY,
-        )
-        return _PI_DEFAULT_RETRY_MAX_DELAY
-    if not math.isfinite(value):
-        logger.warning(
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not finite; using default %g",
-            raw,
-            _PI_DEFAULT_RETRY_MAX_DELAY,
-        )
-        return _PI_DEFAULT_RETRY_MAX_DELAY
-    if value < 0:
-        logger.warning(
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is negative; using default %g",
-            raw,
-            _PI_DEFAULT_RETRY_MAX_DELAY,
-        )
-        return _PI_DEFAULT_RETRY_MAX_DELAY
-    return value
+    return _pi_retry_delay("DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY)
 
 
 # Shared error-taxonomy tokens, used by both the retryable-message check and

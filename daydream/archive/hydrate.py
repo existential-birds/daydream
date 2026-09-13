@@ -1123,9 +1123,9 @@ def _policy_binding(
     # plain re-resolution over absent evidence would produce). Non-license
     # exclusions (ingest/fixture) were never adjudicated by the license gate
     # and stay out of the license decisions digest.
-    recorded_excluded = _load_dedupe_ledger(
+    recorded_excluded = _DedupeLedger.load(
         _dedupe_dir(stage, _pre_identity_dir(stage, str(source_commit)).name) / "dedupe.jsonl"
-    )
+    ).latest
     license_codes = {
         REASON_CODE_C5_EXCLUDED_REPO,
         REASON_CODE_C8_COPYLEFT_UNOPTED,
@@ -1226,22 +1226,50 @@ def _append_dedupe_entry(path: Path, entry: dict[str, Any]) -> None:
         fh.write(json.dumps(entry) + "\n")
 
 
-def _load_dedupe_ledger(path: Path) -> dict[str, dict[str, Any]]:
-    """Latest recorded dedupe entry per session id (empty when absent/corrupt)."""
-    latest: dict[str, dict[str, Any]] = {}
-    if not path.is_file():
-        return latest
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            if isinstance(entry, dict) and entry.get("session_id"):
-                latest[str(entry["session_id"])] = entry
-    except (OSError, ValueError):
-        return latest
-    return latest
+@dataclass
+class _DedupeLedger:
+    """The three dedupe views of one append-only ledger snapshot.
+
+    ``latest`` keeps the latest record of any status, including the valid
+    prefix of corrupt JSONL. Both admitted views are empty on corruption.
+    A later collision never replaces an admitted digest: the published
+    derivative remains the baseline (M7).
+
+    ``ever_admitted`` also retains pristine pre-enrichment digests. Enrichment
+    rewrites the manifest and ``restamp_admitted_digests`` records the new
+    digest, but re-ingesting that pristine content is still idempotent, not a
+    collision. Collision-entry digests never enter this history, so a mutated
+    derivative stays a collision on every later run.
+    """
+
+    latest: dict[str, dict[str, Any]] = field(default_factory=dict)
+    admitted: dict[str, str | None] = field(default_factory=dict)
+    ever_admitted: dict[str, set[str]] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, path: Path) -> _DedupeLedger:
+        ledger = cls()
+        if not path.is_file():
+            return ledger
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if not isinstance(entry, dict) or not entry.get("session_id"):
+                    continue
+                sid = str(entry["session_id"])
+                ledger.latest[sid] = entry
+                if entry.get("status") == "admitted":
+                    digest = entry.get("content_digest")
+                    ledger.admitted[sid] = digest
+                    if isinstance(digest, str) and digest:
+                        ledger.ever_admitted.setdefault(sid, set()).add(digest)
+        except (OSError, ValueError):
+            ledger.admitted.clear()
+            ledger.ever_admitted.clear()
+        return ledger
 
 
 def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
@@ -1356,8 +1384,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     # The latest *admitted* digest is the durable collision key: a later
     # collision entry must not let a re-run re-admit the mutated derivative
     # over the published baseline (M7 durability across re-runs).
-    admitted_digests = _latest_admitted_digests(ledger_path)
-    ever_admitted = _ever_admitted_digests(ledger_path)
+    ledger = _DedupeLedger.load(ledger_path)
     result = DedupeResult()
     runs_dir = stage / "runs"
     if runs_dir.is_dir():
@@ -1403,8 +1430,8 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                 continue
 
             digest = sanitize._derivative_digest(derivative)
-            if admitted_digests.get(sid) not in (None, digest):
-                if digest in ever_admitted.get(sid, set()):
+            if ledger.admitted.get(sid) not in (None, digest):
+                if digest in ledger.ever_admitted.get(sid, set()):
                     # Idempotent re-ingest of the same source content: the
                     # derivative differs from the *latest* admitted digest only
                     # because this pipeline's own enrichment rewrote its
@@ -1465,62 +1492,6 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
             result.admitted += 1
     rebuild_index(stage)
     return result
-
-
-def _latest_admitted_digests(path: Path) -> dict[str, str | None]:
-    """Latest *admitted* dedupe entry per session id (collision entries never win).
-
-    The admitted derivative is never overwritten (M7), so a later collision
-    entry must not replace the admitted content digest in the import ledger —
-    the published batch content is still the baseline.
-    """
-    latest: dict[str, str | None] = {}
-    if not path.is_file():
-        return latest
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            if isinstance(entry, dict) and entry.get("session_id") \
-                    and entry.get("status") == "admitted":
-                latest[str(entry["session_id"])] = entry.get("content_digest")
-    except (OSError, ValueError):
-        return {}
-    return latest
-
-
-def _ever_admitted_digests(path: Path) -> dict[str, set[str]]:
-    """Every *admitted* content digest ever recorded per session id.
-
-    Richer than :func:`_latest_admitted_digests`: an idempotent same-stage-dir
-    re-run re-ingests the *pristine* pre-enrichment content, whose digest was
-    safely recorded (as ``admitted``) before enrichment rewrote the manifest
-    and :func:`restamp_admitted_digests` refreshed the baseline to the enriched
-    digest. That pristine digest is a known-good published baseline — never a
-    collision — so it must survive in the re-ingest set even after a later
-    restamp moved the latest-admitted digest on. Collision-entry digests are
-    deliberately excluded: a mutated derivative stays a collision on every
-    later run (M7 durability).
-    """
-    ever: dict[str, set[str]] = {}
-    if not path.is_file():
-        return ever
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            if isinstance(entry, dict) and entry.get("session_id") \
-                    and entry.get("status") == "admitted":
-                digest = entry.get("content_digest")
-                if isinstance(digest, str) and digest:
-                    ever.setdefault(str(entry["session_id"]), set()).add(digest)
-    except (OSError, ValueError):
-        return {}
-    return ever
 
 
 def admission_summary_buckets(
@@ -1662,8 +1633,7 @@ def build_import_ledger(
     source_commit = str(source_commit)
     curated = _curated_dir(stage, source_commit, binding=binding)
     dedupe_ledger = _dedupe_dir(stage, _pre_identity_dir(stage, source_commit).name) / "dedupe.jsonl"
-    recorded = _load_dedupe_ledger(dedupe_ledger)
-    admitted_digests = _latest_admitted_digests(dedupe_ledger)
+    dedupe_state = _DedupeLedger.load(dedupe_ledger)
 
     ingest_results: list[dict[str, Any]] = []
     ingest_path = stage / "downloads" / revision / "_ingest_results.json"
@@ -1695,7 +1665,7 @@ def build_import_ledger(
         if sid in seen_session_ids:
             raise HydrationError(redact_text(f"duplicate ingest result for candidate session {sid!r}"))
         seen_session_ids.add(sid)
-        entry = recorded.get(sid) or {}
+        entry = dedupe_state.latest.get(sid) or {}
         reason_code = raw_result.get("reason_code")
         if raw_result.get("status") == "admitted":
             # A current ingest admission can be turned into an exclusion or
@@ -1709,7 +1679,7 @@ def build_import_ledger(
                 imported.append(
                     {
                         "session_id": sid,
-                        "content_digest": admitted_digests.get(
+                        "content_digest": dedupe_state.admitted.get(
                             sid, entry.get("content_digest")
                         ),
                     }
@@ -1723,7 +1693,7 @@ def build_import_ledger(
         {
             "session_id": str(entry["session_id"]),
             "reason_code": entry.get("reason_code"),
-            "content_digest": (recorded.get(str(entry["session_id"]), {}) or {}).get("content_digest"),
+            "content_digest": (dedupe_state.latest.get(str(entry["session_id"]), {}) or {}).get("content_digest"),
         }
         for entry in sorted(quarantined + excluded, key=lambda item: str(item["session_id"]))
     ]
