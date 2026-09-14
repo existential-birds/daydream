@@ -118,7 +118,7 @@ class _RetryableFailingBackend:
             self.calls += 1
             self.advance(self.advance_s)
             raise _RetryableBackendError("transient")
-            yield  # pragma: no cover - unreachable, marks this a generator
+            yield  # pragma: no cover - unreachable, marks this a generator  # noqa
 
         return _gen()
 
