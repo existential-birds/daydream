@@ -660,7 +660,10 @@ async def _run_agent(
                 result_continuation = None
                 tool_calls = 0
                 budget_reason: str | None = None
-                attempt_started_at = clock.monotonic()
+                # Guarded so the retry branch can charge the attempt's backend
+                # time before its backoff sleep, keeping that sleep out of
+                # backend_s (it is counted in backoff_s instead).
+                attempt_started_at: float | None = clock.monotonic()
                 attempts_dispatched += 1
                 # Track tool names by id for log mode output
                 tool_names: dict[str, str] = {}
@@ -960,10 +963,14 @@ async def _run_agent(
                             with anyio.move_on_after(
                                 BUDGET_CLEANUP_GRACE_S, shield=True
                             ) as cleanup_scope:
-                                await event_stream_scope.aclose()
+                                # Stamp the abort reason BEFORE aclose(): a hung
+                                # backend subprocess can block the close until the
+                                # grace fires, and the turn must still carry its
+                                # stop_reason and partial mark.
                                 if inv is not None:
                                     inv.mark_aborted(budget_reason)
                                     inv.observe(TurnEndEvent())
+                                await event_stream_scope.aclose()
                             cleanup_elapsed_s = clock.monotonic() - cleanup_started_at
                             if cleanup_scope.cancel_called:
                                 _logger.warning(
@@ -1021,12 +1028,20 @@ async def _run_agent(
                         # The event-stream scope has already closed only this failed
                         # invocation. Backend-wide cancel() is reserved for shutdown.
                         tool_registry.discard_all()
+                        # Charge the failed attempt's backend time up to the
+                        # backoff point: the sleep that follows is retry backoff
+                        # (counted in backoff_s) and must not also land in
+                        # backend_s, or backend_s + backoff_s would overcount.
+                        if attempt_started_at is not None:
+                            backend_s += clock.monotonic() - attempt_started_at
+                            attempt_started_at = None
                         await anyio.sleep(delay)
                         backoff_s += delay
                         continue
                     raise
                 finally:
-                    backend_s += clock.monotonic() - attempt_started_at
+                    if attempt_started_at is not None:
+                        backend_s += clock.monotonic() - attempt_started_at
 
             # One honest stop record when a time budget ended the invocation --
             # best-effort and recorder-optional, so a recorder failure never

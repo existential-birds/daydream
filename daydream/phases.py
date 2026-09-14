@@ -3341,19 +3341,17 @@ async def phase_fix_parallel(
                 run_context=run_context,
                 deadline=budget.deadline,
             )
-            if turn_reason is not None:
-                # A fix turn's only reachable budget reason is
-                # ``wall_budget_exceeded`` (``tool_call_budget`` is unlimited),
-                # so map it to the group's own wall ceiling and pass every
-                # other reason through verbatim. Do NOT record the item as
-                # processed: the turn did not complete.
-                group_reason = (
-                    "group_wall_budget_exceeded"
-                    if turn_reason == "wall_budget_exceeded"
-                    else turn_reason
-                )
-                await _record_budget_stop(fkey, group_reason, len(grp), budget)
+            if turn_reason == "wall_budget_exceeded":
+                # The group's own wall ceiling ended the turn mid-call. Do NOT
+                # record the item as processed: the turn did not complete.
+                await _record_budget_stop(fkey, "group_wall_budget_exceeded", len(grp), budget)
                 return
+            # Any other turn reason (a ``tool_vetoed:<tool>`` supervisor veto is
+            # the only reachable one -- ``tool_call_budget`` is unlimited) is a
+            # policy signal, not a budget ceiling. Mirror the batched path's
+            # absorption: record the item as processed and keep the group going,
+            # so one veto cannot starve the remaining findings. The veto itself
+            # is already recorded in the trajectory by run_agent.
             budget.record_item()
             successful_groups.add(fkey)
 
