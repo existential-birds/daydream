@@ -6605,6 +6605,109 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     assert "wall_budget_exceeded" in stop_reasons, "batched turn did not trip its own per-invocation wall budget"
 
 
+async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """(15a) retry backoff + backend time for one invocation cannot exceed the budget."""
+    from daydream.backends.pi import PiError  # same import as tests/test_agent_retry.py:22
+    from daydream.runner import run
+    from tests.harness.fake_clock import FakeClock
+
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "App.tsx", "high")]
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = 250.0
+    stub.fix_retryable_failures = 99            # a failing ladder that must be cut, not exhausted
+    stub.fix_retryable_error = PiError("429 rate limit", retryable=True)
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj,
+                                          assume="yes", output_mode="loop"))
+
+    assert isinstance(exit_code, int)
+    assert len([c for c in stub.calls if c["prompt"].lower().startswith("fix this issue")]) == 3
+    recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
+    assert recorded["App.tsx"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
+
+
+async def test_run_cuts_a_single_item_group_at_the_group_deadline(  # (15b)
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """(15b) A one-call group is cut at the GROUP deadline, and the turn is not progress."""
+    from daydream.runner import run
+    from tests.harness.fake_clock import FakeClock
+
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "App.tsx", "high")]   # exactly one finding -> one call
+    stub.runaway_single_fix_file = "App.tsx"
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = 200.0
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj,
+                                          assume="yes", output_mode="loop"))
+    assert isinstance(exit_code, int)
+
+    singles = _single_fix_calls_for(stub, "App.tsx")
+    assert len(singles) == 1                                    # exactly one call, no fallback loop
+    recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
+    assert recorded["App.tsx"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
+    meta = events[0]["metadata"]
+    assert meta["file"] == "App.tsx" and meta["reason"] == "group_wall_budget_exceeded"
+    assert meta["items_processed"] == 0 and meta["items_skipped"] == 1
+    assert meta["elapsed_s"] >= 600.0
+
+
+async def test_run_cuts_a_batched_group_at_the_group_deadline(  # (15c/15f)
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """(15c/15f) remaining < scaled call budget: the batch dies at the group deadline, zero fallback."""
+    from daydream.runner import run
+    from tests.harness.fake_clock import FakeClock
+
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)]
+    stub.runaway_batched_fix_file = "api.py"
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = 200.0
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj,
+                                          assume="yes", output_mode="loop"))
+    assert isinstance(exit_code, int)
+
+    assert _single_fix_calls_for(stub, "api.py") == []          # zero fallback fixes
+    recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
+    assert recorded["api.py"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
+    assert events[0]["metadata"]["reason"] == "group_wall_budget_exceeded"
+    assert events[0]["metadata"]["items_processed"] == 0
+    assert events[0]["metadata"]["elapsed_s"] >= 600.0
+    stop_reasons = _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason")
+    assert "wall_budget_exceeded" in stop_reasons   # the real budget path, not a stub raise
+
+
 async def test_run_batches_same_file_findings_into_one_fix_turn(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
