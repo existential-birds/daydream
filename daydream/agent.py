@@ -41,6 +41,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -637,6 +638,7 @@ async def _run_agent(
             attempts_dispatched = 0
             backend_s = 0.0
             backoff_s = 0.0
+            cleanup_elapsed_s = 0.0
             _logger.debug(
                 "invocation deadline: effective=%s limit=%s caller=%s wall_budget_s=%s",
                 effective_deadline,
@@ -949,10 +951,26 @@ async def _run_agent(
                         aborted_reason = budget_reason
                         if budget_reason is not None:
                             observed.abort(budget_reason)
-                            await event_stream_scope.aclose()
-                            if inv is not None:
-                                inv.mark_aborted(budget_reason)
-                                inv.observe(TurnEndEvent())
+                            # Cleanup can hang on a backend subprocess that never
+                            # exits. Bound it with a shielded grace so it cannot
+                            # extend or abort the already-captured partial result;
+                            # the grace time is measured on the clock seam and
+                            # reported separately from the invocation's elapsed_s.
+                            cleanup_started_at = clock.monotonic()
+                            with anyio.move_on_after(
+                                BUDGET_CLEANUP_GRACE_S, shield=True
+                            ) as cleanup_scope:
+                                await event_stream_scope.aclose()
+                                if inv is not None:
+                                    inv.mark_aborted(budget_reason)
+                                    inv.observe(TurnEndEvent())
+                            cleanup_elapsed_s = clock.monotonic() - cleanup_started_at
+                            if cleanup_scope.cancel_called:
+                                _logger.warning(
+                                    "post-expiry cleanup exceeded its %ss grace; "
+                                    "continuing with the captured partial result",
+                                    BUDGET_CLEANUP_GRACE_S,
+                                )
                             if policy.log_mode:
                                 _print_log(f"[aborted] {budget_reason}")
                             elif use_callback and progress_callback is not None:
@@ -1018,10 +1036,11 @@ async def _run_agent(
                     recorder.emit_agent_budget_stop(
                         phase,
                         limit_expired=limit_expired or "invocation_wall_budget",
-                        elapsed_s=clock.monotonic() - invocation_start,
+                        elapsed_s=clock.monotonic() - invocation_start - cleanup_elapsed_s,
                         backend_s=backend_s,
                         backoff_s=backoff_s,
                         attempts=attempts_dispatched,
+                        cleanup_elapsed_s=cleanup_elapsed_s,
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
                     _logger.exception("failed to record agent budget stop")

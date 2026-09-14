@@ -64,6 +64,13 @@ DEFAULT_TOOL_CALL_BUDGET: int | None = None
 # bounds a hung turn.
 TEST_WALL_BUDGET_S = 3600.0
 
+# Bounded post-expiry cleanup grace (issue #734). When a spent deadline aborts
+# an invocation, the backend event-stream teardown can hang (a subprocess that
+# never exits). Cleanup runs inside a shielded ``move_on_after`` bounded by this
+# grace, so it can never extend or abort the already-captured partial result.
+# Deliberately not configurable; mirrors the observability trace cleanup grace.
+BUDGET_CLEANUP_GRACE_S = 10.0
+
 # Per-file-group aggregate budget for the fix phase (issue #201). The
 # per-invocation guards above bound each individual run_agent turn; these bound
 # the *cumulative* cost of all fix turns targeting a single file group, so one

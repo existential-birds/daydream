@@ -373,6 +373,40 @@ async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
     assert _agent_step_with_stop_reason(traj)["extra"]["stop_reason"] == "wall_budget_exceeded"
 
 
+async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=1_000.0)
+
+    class _HangingCloseBackend(_BurstBackend):
+        def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                try:
+                    yield TextEvent(text="partial-output-sentinel")
+                    yield ToolStartEvent(id="t", name="Bash", input={"command": "ls"})
+                    fake.advance(10.0)  # push the next event past the deadline
+                    yield ToolStartEvent(id="t2", name="Bash", input={"command": "ls"})
+                finally:
+                    await anyio.sleep(3_600)  # teardown that never completes
+
+            return _gen()
+
+    fake.install(monkeypatch)
+    monkeypatch.setattr("daydream.agent.BUDGET_CLEANUP_GRACE_S", 0.2)
+    start = anyio.current_time()
+
+    with anyio.fail_after(5):
+        output, _, reason = await run_agent(
+            _HangingCloseBackend(), tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=5.0
+        )
+
+    assert reason == "wall_budget_exceeded"
+    assert "partial-output-sentinel" in output
+    assert anyio.current_time() - start < 3.0   # bounded by the grace, not the teardown
+
+
 async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
     tmp_path: Path,
 ) -> None:
