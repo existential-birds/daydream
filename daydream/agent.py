@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
+from daydream import clock
 from daydream.artifact_visibility import artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
@@ -428,6 +429,7 @@ async def run_agent(
     read_only: bool = False,
     persist_session: bool = True,
     wall_budget_s: float | None = None,
+    deadline: float | None = None,
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
@@ -449,7 +451,8 @@ async def run_agent(
         result = await _run_agent(
             backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
             continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
-            persist_session=persist_session, wall_budget_s=wall_budget_s, tool_call_budget=tool_call_budget,
+            persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
+            tool_call_budget=tool_call_budget,
             validate_structured_output=validate_structured_output,
             sanctioned_inputs=sanctioned_inputs,
             run_context=context,
@@ -473,6 +476,7 @@ async def _run_agent(
     read_only: bool = False,
     persist_session: bool = True,
     wall_budget_s: float | None = None,
+    deadline: float | None = None,
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
@@ -514,11 +518,18 @@ async def _run_agent(
             pass True, while mutating phases keep the False default.
         persist_session: When False, request an ephemeral backend invocation.
             The default preserves existing continuation behavior.
-        wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded
-            the loop and this invocation's event iterator are closed, the ATIF
-            turn is marked aborted, and the partial output is returned — no
-            exception reaches the caller. ``None`` (the default) disables the
-            wall budget.
+        wall_budget_s: Opt-in invocation-wide wall-clock budget. It is
+            converted to one absolute effective deadline before the retry
+            loop and enforced across every attempt (pre-dispatch, pre-backoff,
+            and mid-stream). When spent, the invocation's event iterator is
+            closed, the ATIF turn is marked aborted, and the partial output is
+            returned — no exception reaches the caller. ``None`` (the default)
+            disables the budget. See ``deadline`` for a caller-owned bound.
+        deadline: Optional caller-owned absolute deadline on the process-local
+            :func:`daydream.clock.monotonic` timeline. It is never persisted.
+            The effective deadline is ``min(deadline, now + wall_budget_s)``
+            over whichever inputs are present, derived once for the whole
+            invocation so retries and backoff cannot restart the clock.
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
@@ -599,7 +610,42 @@ async def _run_agent(
             if max_delay < 0:
                 raise ValueError("retry max delay must be >= 0")
 
+            # Derive ONE absolute effective deadline for the whole invocation,
+            # before the retry loop: retries, attempt restarts and backoff all
+            # spend this same deadline instead of restarting it. ``limit_expired``
+            # names which input produced it (caller deadline wins a tie).
+            invocation_start = clock.monotonic()
+            if deadline is not None and wall_budget_s is not None:
+                wall_deadline = invocation_start + wall_budget_s
+                if deadline <= wall_deadline:
+                    effective_deadline = deadline
+                    limit_expired = "caller_deadline"
+                else:
+                    effective_deadline = wall_deadline
+                    limit_expired = "invocation_wall_budget"
+            elif deadline is not None:
+                effective_deadline = deadline
+                limit_expired = "caller_deadline"
+            elif wall_budget_s is not None:
+                effective_deadline = invocation_start + wall_budget_s
+                limit_expired = "invocation_wall_budget"
+            else:
+                effective_deadline = None
+                limit_expired = None
+            _logger.debug(
+                "invocation deadline: effective=%s limit=%s caller=%s wall_budget_s=%s",
+                effective_deadline,
+                limit_expired,
+                deadline,
+                wall_budget_s,
+            )
+
             for attempt in range(max_attempts + 1):
+                # Never dispatch an attempt once the deadline is spent: the
+                # ladder stops here and returns the partial output unchanged.
+                if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                    aborted_reason = "wall_budget_exceeded"
+                    break
                 # Reset accumulated state so a failed attempt's partial output
                 # does not leak into the next attempt's return value.
                 output_parts = []
@@ -910,6 +956,11 @@ async def _run_agent(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
                     if attempt < exception_max_retries and getattr(exc, "retryable", False):
+                        # Spending the deadline ends the ladder before the next
+                        # backoff sleep: no attempt, no sleep, no raise.
+                        if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                            aborted_reason = "wall_budget_exceeded"
+                            break
                         delay = min(
                             base_delay * (2 ** attempt) + random.uniform(0, 1),
                             max_delay,

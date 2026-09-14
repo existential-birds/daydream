@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +25,7 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ToolStartEvent,
     TurnEndEvent,
@@ -81,6 +82,48 @@ class _BurstBackend:
 
     async def cancel(self) -> None:
         self.cancel_calls += 1
+
+
+class _RetryableBackendError(RuntimeError):
+    """A retryable transport failure for the deadline-retry tests."""
+
+    retryable = True
+
+
+@dataclass
+class _RetryableFailingBackend:
+    """Backend that advances an injected clock per attempt, then fails retryably."""
+
+    advance: Callable[[float], None]
+    advance_s: float
+    model = "mock-model"
+    fanout_concurrency: int = 4
+    calls: int = 0
+    retry_policy: RetryPolicy = field(
+        default_factory=lambda: RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    )
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            self.calls += 1
+            self.advance(self.advance_s)
+            raise _RetryableBackendError("transient")
+            yield  # pragma: no cover - unreachable, marks this a generator
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        pass
 
 
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
@@ -208,6 +251,29 @@ async def test_run_agent_abort_records_reason_and_turn_end(
 
     assert invocation.abort_reasons == ["tool_call_budget_exceeded"]
     assert isinstance(invocation.events[-1], TurnEndEvent)
+
+
+async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A caller deadline spans the whole retry ladder; a retry cannot restart it."""
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    # retry_policy: attempts=20, delays=0.0; advances the injected clock per attempt.
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=400.0)
+
+    output, _, reason = await run_agent(
+        backend, tmp_path, "go",
+        phase=DaydreamPhase.FIX,
+        wall_budget_s=10_000.0,          # deliberately looser than the caller deadline
+        deadline=1_600.0,                # absolute: fake clock starts at 1000.0
+    )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.calls == 2            # 1000 -> 1400 (attempt 1) -> 1800 (attempt 2), then spent
+    assert fake.monotonic_value == 1_800.0
+    assert output == ""
 
 
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
