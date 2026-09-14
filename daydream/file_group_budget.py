@@ -51,6 +51,14 @@ class FileGroupBudget:
         """Wall-clock seconds left before the deadline, clamped at zero."""
         return max(0.0, self.deadline - clock.monotonic())
 
+    def elapsed_s(self) -> float:
+        """Wall-clock seconds consumed by the group so far (unclamped).
+
+        The recorded duration, not the remaining budget: a stop event states how
+        much of the ceiling the group actually consumed.
+        """
+        return clock.monotonic() - self._wall_start
+
     def check(self) -> str | None:
         """Return a budget-reason string if any ceiling is reached, else None.
 

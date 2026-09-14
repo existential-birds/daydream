@@ -3292,13 +3292,15 @@ async def phase_fix_parallel(
         grp_len: int,
         budget: FileGroupBudget,
     ) -> None:
-        """Record a group budget stop: trajectory event, failures entry, warning."""
+        """Record a group budget stop: trajectory event (with group elapsed),
+        failures entry, and warning."""
         processed = budget.items_processed
         skipped = grp_len - processed
         if recorder is not None:
             recorder.emit_file_group_budget_exceeded(
                 file=fkey, reason=reason,
                 items_processed=processed, items_skipped=skipped,
+                elapsed_s=budget.elapsed_s(),
             )
         async with _failures_lock:
             failures[fkey] = f"file_group_budget_exceeded: {reason}"

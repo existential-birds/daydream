@@ -3203,7 +3203,13 @@ class TrajectoryRecorder:
         self._emit_phase_event(phase, "phase_end", **metadata)
 
     def emit_file_group_budget_exceeded(
-        self, *, file: str, reason: str, items_processed: int, items_skipped: int
+        self,
+        *,
+        file: str,
+        reason: str,
+        items_processed: int,
+        items_skipped: int,
+        elapsed_s: float | None = None,
     ) -> None:
         """Record a ``file_group_budget_exceeded`` event for the FIX phase (#201).
 
@@ -3218,14 +3224,20 @@ class TrajectoryRecorder:
             reason: Which ceiling tripped (e.g. ``"group_serial_item_limit"``).
             items_processed: Findings fixed before the budget fired.
             items_skipped: Remaining findings in the group left unfixed.
+            elapsed_s: Wall-clock seconds the group consumed before the stop.
+                Omitted from the metadata when ``None`` (the pre-existing
+                four-key shape stays byte-identical for callers that lack it).
         """
+        metadata: dict[str, Any] = {
+            "file": file,
+            "reason": reason,
+            "items_processed": items_processed,
+            "items_skipped": items_skipped,
+        }
+        if elapsed_s is not None:
+            metadata["elapsed_s"] = elapsed_s
         self._emit_phase_event(
-            DaydreamPhase.FIX,
-            "file_group_budget_exceeded",
-            file=file,
-            reason=reason,
-            items_processed=items_processed,
-            items_skipped=items_skipped,
+            DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata
         )
 
     def emit_agent_budget_stop(

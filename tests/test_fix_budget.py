@@ -16,6 +16,7 @@ collinear with wall-time and call-count, so it added no independent signal.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,30 @@ from daydream.config import (
 )
 from daydream.config_file import load_file_config
 from daydream.file_group_budget import FileGroupBudget
+from daydream.trajectory import (
+    DaydreamRunFlow,
+    TrajectoryRecorder,
+    _reset_recorder_for_tests,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_recorder() -> Any:
+    _reset_recorder_for_tests()
+    yield
+    _reset_recorder_for_tests()
+
+
+def _group_budget_recorder(tmp_path: Path) -> TrajectoryRecorder:
+    """A FIX-phase recorder writing to ``tmp_path`` (mirrors test_agent_budget)."""
+    return TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id="test",
+    )
+
 
 # -- FileGroupBudget -------------------------------------------------------
 
@@ -78,6 +103,27 @@ def test_group_budget_deadline_and_remaining_track_the_injected_clock(
     fake.advance(1.0)
     assert budget.check() == "group_wall_budget_exceeded"
     assert budget.remaining() == 0.0  # clamped, never negative
+
+
+async def test_group_budget_event_records_the_ceiling_and_group_elapsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    recorder = _group_budget_recorder(tmp_path)
+    budget = FileGroupBudget(max_wall_seconds=600.0, max_serial_items=6)
+    fake.advance(700.0)
+
+    async with recorder:
+        recorder.emit_file_group_budget_exceeded(
+            file="api.py", reason="group_wall_budget_exceeded",
+            items_processed=0, items_skipped=6, elapsed_s=budget.elapsed_s(),
+        )
+
+    meta = recorder.phase_event_dicts()[0]["metadata"]
+    assert meta["reason"] == "group_wall_budget_exceeded"
+    assert meta["elapsed_s"] == 700.0
 
 
 # -- config-file overrides -------------------------------------------------
