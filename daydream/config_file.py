@@ -59,8 +59,11 @@ class DaydreamFileConfig:
         group_max_wall_s: Per-file-group fix wall-clock ceiling in seconds
             (issue #201), a global ``[tool.daydream]`` key. Bounds the cumulative
             wall-clock of all fix ``run_agent`` turns targeting one file group so
-            a runaway file cannot dominate a run. ``None`` (the default when the
-            key is absent or junk) falls through to
+            a runaway file cannot dominate a run. Must be finite and
+            non-negative; ``0`` is valid and means "skip this group's fixes"
+            (the between-calls ``check()`` short-circuits before any fix turn).
+            ``None`` (the default when the key is absent or junk -- negative,
+            NaN, inf, bool, or non-number) falls through to
             ``config.DEFAULT_GROUP_MAX_WALL_S`` (600.0).
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201), a
             global ``[tool.daydream]`` key. Caps the number of per-finding fix
@@ -328,7 +331,7 @@ def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
 def _coerce_float(raw: Any) -> float | None:
     """Return ``raw`` as a float, or None for bool/non-number (degrade to default).
 
-    Accepts TOML ints and floats (an int budget like ``group_max_wall_s = 600``
+    Accepts TOML ints and floats (an int budget like ``test_command_wall_s = 600``
     round-trips to ``600.0``); rejects bool and everything else.
     """
     if isinstance(raw, bool):
@@ -348,6 +351,23 @@ def _coerce_quality_threshold(raw: Any) -> float | None:
     exceed it, flagging files that did not regress. Anything invalid --
     negative, NaN, inf, bool, or non-number -- degrades to ``None`` so the
     ``config.py`` default applies.
+    """
+    value = _coerce_float(raw)
+    if value is None or not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def _coerce_non_negative_float(raw: Any) -> float | None:
+    """Return ``raw`` as a finite non-negative float, else None (degrade to default).
+
+    A file-group wall ceiling may legitimately be ``0`` -- the intentional
+    "skip this group's fixes" escape hatch that ``FileGroupBudget.check()``
+    honours as a pre-call short-circuit. Negative, NaN, and inf values are not
+    meaningful ceilings (a negative or NaN wall makes every elapsed-time
+    comparison trip immediately or never; inf disables the bound), so they
+    degrade to ``None`` and let the ``config.py`` default apply. Everything
+    invalid -- negative, NaN, inf, bool, or non-number -- degrades to ``None``.
     """
     value = _coerce_float(raw)
     if value is None or not math.isfinite(value) or value < 0:
@@ -498,7 +518,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         precision_mode=precision,
         approve_on_clean=approve_on_clean,
         scope_issue_filing=scope_issue_filing,
-        group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
+        group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         uncovered_sweep=uncovered_sweep,
