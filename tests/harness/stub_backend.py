@@ -150,6 +150,16 @@ class StubBackend:
         # one-call group whose own turn burns the shared group clock, so a test
         # can prove a single-item group is cut without a fallback loop (#734).
         self.runaway_single_fix_file: str | None = None
+        # When set, a runaway burst waits -- yielding nothing and
+        # ``anyio.sleep(0)``-ing -- until this gate returns truthy; only then
+        # does the burst begin. Lets a test make a sibling group's completion a
+        # deterministic precondition instead of a timing race (#734).
+        self.runaway_gate: Callable[[], bool] | None = None
+        # Basenames of files whose fix turn ran to completion (a ResultEvent was
+        # consumed and the generator returned). The sentinel files are removed by
+        # the fix-footprint guard, so this is the surviving proof a sibling's fix
+        # turn finished when a concurrent group's deadline fires (#734).
+        self.completed_fix_files: list[str] = []
         # When set, ``clock_advance`` is called once per emitted event with
         # ``clock_advance_per_event_s`` seconds, charging an injected fake clock
         # instead of sleeping real wall time. The clock-advance path takes
@@ -1056,6 +1066,8 @@ class StubBackend:
                 and batched_hdr is None
                 and fixed_name == self.runaway_single_fix_file
             ):
+                while self.runaway_gate is not None and not self.runaway_gate():
+                    await anyio.sleep(0)
                 for n in range(500):
                     yield ToolStartEvent(id=f"stc-{n}", name="Bash", input={"command": "find /"})
                     if self.clock_advance is not None:
@@ -1115,6 +1127,7 @@ class StubBackend:
                 yield TextEvent(text="Applied the deferred writes.")
                 self._tick()
                 yield ResultEvent(structured_output=None, continuation=None)
+                self.completed_fix_files.append(fixed_name)
                 return
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
@@ -1138,6 +1151,7 @@ class StubBackend:
             self._tick()
             yield ResultEvent(structured_output=None, continuation=None)
             self._tick()
+            self.completed_fix_files.append(fixed_name)
             return
 
         # Recommendation verifier (#83). Discriminator is the verifier's role
