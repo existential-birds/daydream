@@ -6022,7 +6022,9 @@ async def test_batched_and_fallback_calls_share_the_group_deadline(
     from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
 
-    items = [{"id": i, "item_uid": f"item:{i}", "file": "a.py", "related_files": []} for i in (1, 2)]
+    items: list[dict[str, Any]] = [
+        {"id": i, "item_uid": f"item:{i}", "file": "a.py", "related_files": []} for i in (1, 2)
+    ]
     footprint = AuthorizedFixFootprint.build(tmp_path, set(), items)
     snapshot = WorktreeRollbackSnapshot(
         ref="r", index=IndexSnapshot(tree_sha="t", paths=()), path_states=(), untracked={}
