@@ -276,6 +276,33 @@ async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
     assert output == ""
 
 
+async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            _, _, reason = await run_agent(
+                backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+                wall_budget_s=10_000.0, deadline=5_600.0,
+            )
+
+    assert reason == "wall_budget_exceeded"
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["limit_expired"] == "caller_deadline"
+    assert meta["attempts"] == 2            # 5000 -> 5300 (attempt 1) -> 5600 (attempt 2), then spent
+    assert meta["elapsed_s"] == 600.0 and meta["backend_s"] == 600.0
+    assert "5600.0" not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
+
+
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
     """A slow stream with wall_budget_s=0.2 returns, step marked wall_budget_exceeded."""
     backend = _BurstBackend(count=200, sleep_s=0.05)

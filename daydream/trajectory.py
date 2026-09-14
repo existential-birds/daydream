@@ -3228,6 +3228,45 @@ class TrajectoryRecorder:
             items_skipped=items_skipped,
         )
 
+    def emit_agent_budget_stop(
+        self,
+        phase: DaydreamPhase,
+        *,
+        limit_expired: str,
+        elapsed_s: float,
+        backend_s: float,
+        backoff_s: float,
+        attempts: int,
+        cleanup_elapsed_s: float | None = None,
+    ) -> None:
+        """Record which time limit ended an invocation and how its time was spent.
+
+        Emitted by ``_run_agent`` (FIX phase) exactly once when the effective
+        invocation deadline ends a turn -- before dispatch, before a backoff
+        sleep, or mid-stream. Serialized into ``Trajectory.extra["phase_events"]``.
+        Only durations and the reason code are recorded -- never a raw monotonic
+        deadline value, which would otherwise be reusable across runs.
+
+        Args:
+            phase: The ``DaydreamPhase`` the invocation ran under.
+            limit_expired: Which input produced the effective deadline.
+            elapsed_s: Wall time from invocation start to the stop.
+            backend_s: Time spent inside dispatched backend attempts.
+            backoff_s: Sum of retry delays actually slept.
+            attempts: Number of attempts dispatched.
+            cleanup_elapsed_s: Optional time spent in bounded post-stop cleanup.
+        """
+        self._emit_phase_event(
+            phase,
+            "agent_budget_stop",
+            limit_expired=limit_expired,
+            elapsed_s=elapsed_s,
+            backend_s=backend_s,
+            backoff_s=backoff_s,
+            attempts=attempts,
+            cleanup_elapsed_s=cleanup_elapsed_s,
+        )
+
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
         """Record a findings supervisor verdict in the deep phase."""
         self._emit_phase_event(

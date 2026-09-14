@@ -632,6 +632,11 @@ async def _run_agent(
             else:
                 effective_deadline = None
                 limit_expired = None
+            # Telemetry counters for the single invocation: only dispatched
+            # attempts and time actually spent inside them are charged.
+            attempts_dispatched = 0
+            backend_s = 0.0
+            backoff_s = 0.0
             _logger.debug(
                 "invocation deadline: effective=%s limit=%s caller=%s wall_budget_s=%s",
                 effective_deadline,
@@ -653,6 +658,8 @@ async def _run_agent(
                 result_continuation = None
                 tool_calls = 0
                 budget_reason: str | None = None
+                attempt_started_at = clock.monotonic()
+                attempts_dispatched += 1
                 # Track tool names by id for log mode output
                 tool_names: dict[str, str] = {}
                 callback_text_parts: list[str] = []
@@ -997,8 +1004,27 @@ async def _run_agent(
                         # invocation. Backend-wide cancel() is reserved for shutdown.
                         tool_registry.discard_all()
                         await anyio.sleep(delay)
+                        backoff_s += delay
                         continue
                     raise
+                finally:
+                    backend_s += clock.monotonic() - attempt_started_at
+
+            # One honest stop record when a time budget ended the invocation --
+            # best-effort and recorder-optional, so a recorder failure never
+            # changes the returned (output, continuation, reason) tuple.
+            if aborted_reason == "wall_budget_exceeded" and recorder is not None:
+                try:
+                    recorder.emit_agent_budget_stop(
+                        phase,
+                        limit_expired=limit_expired or "invocation_wall_budget",
+                        elapsed_s=clock.monotonic() - invocation_start,
+                        backend_s=backend_s,
+                        backoff_s=backoff_s,
+                        attempts=attempts_dispatched,
+                    )
+                except Exception:  # noqa: BLE001 - telemetry must never break the run
+                    _logger.exception("failed to record agent budget stop")
 
         except _ToolSupervisorFailure as exc:
             original = exc.original
