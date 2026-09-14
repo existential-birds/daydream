@@ -2905,7 +2905,8 @@ async def phase_fix(
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
-) -> None:
+    deadline: float | None = None,
+) -> str | None:
     """Phase 3: Apply a single fix for one feedback item.
 
     Args:
@@ -2929,6 +2930,15 @@ async def phase_fix(
         test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
+        deadline: Optional absolute monotonic deadline forwarded to
+            ``run_agent``. The effective bound is the earliest of this and the
+            invocation's ``wall_budget_s``.
+
+    Returns:
+        The fix turn's budget-stop reason (``str``) when a budget ceiling cut
+        the turn short, else ``None``. Callers that ignore the return value
+        keep working; ``None`` always means the turn completed without a
+        budget stop.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -2978,11 +2988,12 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
         progress_cb = _cb
 
-    await run_agent(
+    _, _, budget_reason = await run_agent(
         backend, work.repo, prompt,
         phase=DaydreamPhase.FIX,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        deadline=deadline,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
@@ -2991,6 +3002,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         # Verdict unknown at fix time (issue #744); the post-fix fix-verify
         # step renders the honest resolved/attempted-not-fixed line.
         print_fix_complete(console, item_num, total, outcome=None)
+    return budget_reason
 
 
 @bind_resolved_run_context
@@ -3193,9 +3205,10 @@ async def phase_fix_parallel(
     ``"file_group_budget_exceeded:"`` reason prefix (distinguishable from
     exception-based entries) and a ``file_group_budget_exceeded`` trajectory
     event is emitted.  Callers MUST NOT revert budget-exceeded entries; only
-    remaining findings are unprocessed, not the ones already applied.  The
-    per-invocation guards inside each fix call are unchanged; this is an aggregate
-    guard layered on top (Approach B — between-calls check, no mid-call abort).
+    remaining findings are unprocessed, not the ones already applied. Each
+    individual fix call is also bounded mid-call by that same group deadline,
+    and a fix turn that times out is reported back as a group stop rather than
+    counted as progress.
 
     Args:
         backend: The Backend to execute against (shared across tasks).
@@ -3295,15 +3308,17 @@ async def phase_fix_parallel(
         """Fix a group's findings one at a time, honoring the group budget.
 
         Checks ``budget.check()`` before each ``phase_fix`` call; on a budget
-        stop, records it and returns without processing the remainder. The
-        serial-item counter is bumped once per completed call.
+        stop, records it and returns without processing the remainder. Each
+        call is also bounded mid-call by ``budget.deadline``; when the turn
+        reports a budget stop the group records a stop instead of progress.
+        The serial-item counter is bumped only once per completed call.
         """
         for item, item_num in grp:
             budget_reason = budget.check()
             if budget_reason is not None:
                 await _record_budget_stop(fkey, budget_reason, len(grp), budget)
                 return
-            await phase_fix(
+            turn_reason = await phase_fix(
                 backend, work, item, item_num, total,
                 edit_scope=edit_scope,
                 read_scope=footprint.run_allowed_paths,
@@ -3312,7 +3327,21 @@ async def phase_fix_parallel(
                 exploration_dir=exploration_dir,
                 test_map=test_map,
                 run_context=run_context,
+                deadline=budget.deadline,
             )
+            if turn_reason is not None:
+                # A fix turn's only reachable budget reason is
+                # ``wall_budget_exceeded`` (``tool_call_budget`` is unlimited),
+                # so map it to the group's own wall ceiling and pass every
+                # other reason through verbatim. Do NOT record the item as
+                # processed: the turn did not complete.
+                group_reason = (
+                    "group_wall_budget_exceeded"
+                    if turn_reason == "wall_budget_exceeded"
+                    else turn_reason
+                )
+                await _record_budget_stop(fkey, group_reason, len(grp), budget)
+                return
             budget.record_item()
             successful_groups.add(fkey)
 
