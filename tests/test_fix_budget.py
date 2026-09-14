@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
@@ -58,6 +60,24 @@ def test_item_limit_takes_precedence_over_wall() -> None:
     budget = FileGroupBudget(max_wall_seconds=0.0, max_serial_items=1)
     budget.record_item()
     assert budget.check() == "group_serial_item_limit"
+
+
+def test_group_budget_deadline_and_remaining_track_the_injected_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    budget = FileGroupBudget(max_wall_seconds=600.0, max_serial_items=6)
+
+    assert budget.deadline == 1_600.0
+    assert budget.remaining() == 600.0
+    fake.advance(599.0)
+    assert budget.check() is None
+    assert budget.remaining() == 1.0
+    fake.advance(1.0)
+    assert budget.check() == "group_wall_budget_exceeded"
+    assert budget.remaining() == 0.0  # clamped, never negative
 
 
 # -- config-file overrides -------------------------------------------------
