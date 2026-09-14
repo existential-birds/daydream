@@ -299,6 +299,53 @@ async def test_run_agent_wall_budget(tmp_path: Path) -> None:
     assert step["extra"]["stop_reason"] == "wall_budget_exceeded"
 
 
+async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    class _ClockAdvancingBurstBackend:
+        """Streams text + tool starts, advancing the injected clock per event."""
+
+        model = "mock-model"
+        fanout_concurrency = 2
+
+        def __init__(self, advance: Any, advance_s: float) -> None:
+            self.advance, self.advance_s, self.delivered, self.cancel_calls = advance, advance_s, 0, 0
+
+        def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                for i in range(200):
+                    yield TextEvent(text=f"partial-output-sentinel-{i}")
+                    self.advance(self.advance_s)
+                    self.delivered += 1
+                    yield ToolStartEvent(id=f"t{i}", name="Bash", input={"command": "ls"})
+
+            return _gen()
+
+        async def cancel(self) -> None:
+            self.cancel_calls += 1
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    backend = _ClockAdvancingBurstBackend(fake.advance, 200.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            output, _, reason = await run_agent(
+                backend, tmp_path, "go",
+                phase=DaydreamPhase.FIX,
+                wall_budget_s=600.0,          # deadline = 1000 + 600 = 1600
+            )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.delivered == 3             # 1000->1200->1400->1600: the 4th event is past it
+    assert backend.cancel_calls == 0          # sibling isolation: no backend-wide cancel
+    assert "partial-output-sentinel-2" in output   # text emitted before expiry survives
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    assert _agent_step_with_stop_reason(traj)["extra"]["stop_reason"] == "wall_budget_exceeded"
+
+
 async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
     tmp_path: Path,
 ) -> None:

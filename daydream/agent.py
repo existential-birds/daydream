@@ -703,16 +703,31 @@ async def _run_agent(
                         if inv is not None:
                             inv.observe_user_step(prompt=prompt)
 
-                        # Per-invocation abort controls live here so both backends are
-                        # covered without a backend-signature change. The wall budget
-                        # cancels the async-for via move_on_after; the tool-call ceiling
-                        # and supervisor veto break in-loop.
+                        # Per-invocation abort controls live here so both backends
+                        # are covered without a backend-signature change: the tool-call
+                        # ceiling and supervisor veto break in-loop, while the deadline
+                        # is read per event and also backstopped by a real-time
+                        # move_on_after over the time the effective deadline has left.
+                        remaining_s = (
+                            max(effective_deadline - clock.monotonic(), 0.0)
+                            if effective_deadline is not None
+                            else None
+                        )
                         wall_scope: Any = (
-                            anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
+                            anyio.move_on_after(remaining_s) if remaining_s is not None else nullcontext()
                         )
 
                         with wall_scope:
                             async for event in event_iter:
+                                # The single effective deadline is enforced per streamed
+                                # event so an injected clock can expire mid-turn even
+                                # though move_on_after only measures real time.
+                                if (
+                                    effective_deadline is not None
+                                    and clock.monotonic() >= effective_deadline
+                                ):
+                                    budget_reason = "wall_budget_exceeded"
+                                    break
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
@@ -916,10 +931,11 @@ async def _run_agent(
                             if use_callback:
                                 await _flush_callback_text()
 
-                        # Abort handling: the wall scope cancelled the loop, a quantitative
-                        # tool ceiling fired, or a supervisor veto broke out. Mark the
-                        # ATIF turn aborted and let the invocation's event-stream scope
-                        # close its resources before returning partial output.
+                        # Abort handling: a spent deadline cut the loop, the wall
+                        # backstop cancelled it, a quantitative tool ceiling fired, or
+                        # a supervisor veto broke out. Mark the ATIF turn aborted and
+                        # let the invocation's event-stream scope close its resources
+                        # before returning partial output.
                         wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
                         if budget_reason is None and wall_cancelled:
                             budget_reason = "wall_budget_exceeded"
