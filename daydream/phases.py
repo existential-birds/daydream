@@ -3020,6 +3020,7 @@ async def phase_fix_batched(
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
+    deadline: float | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -3050,6 +3051,10 @@ async def phase_fix_batched(
         test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
+        deadline: Optional absolute monotonic deadline forwarded unchanged to
+            ``run_agent`` (and to the single-item ``phase_fix`` delegation).
+            The effective bound is the earliest of this, the scaled call budget,
+            and any enclosing group deadline.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -3062,6 +3067,7 @@ async def phase_fix_batched(
             exploration_dir=exploration_dir,
             test_map=test_map,
             run_context=run_context,
+            deadline=deadline,
         )
         return
 
@@ -3110,8 +3116,11 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
     prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
-    # Scale budgets linearly with the number of findings so a batched group of N
-    # findings gets the same per-finding headroom as a single-finding turn.
+    # Scale call budgets linearly with the number of findings so a batched group
+    # of N findings gets the same per-finding headroom as a single-finding turn.
+    # ``deadline`` (the group's absolute wall limit) still caps the effective
+    # bound: ``run_agent`` takes the earliest of this scaled budget and the
+    # group deadline, so the batched turn can never outlive the group.
     scaled_tool_budget = None if DEFAULT_TOOL_CALL_BUDGET is None else DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
@@ -3130,6 +3139,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         phase=DaydreamPhase.FIX,
         tool_call_budget=scaled_tool_budget,
         wall_budget_s=scaled_wall_budget,
+        deadline=deadline,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
@@ -3402,6 +3412,7 @@ async def phase_fix_parallel(
                                             exploration_dir=exploration_dir,
                                             test_map=test_map,
                                             run_context=run_context,
+                                            deadline=budget.deadline,
                                         )
                                         budget.record_item()
                                         successful_groups.add(fkey)
