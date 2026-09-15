@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +25,7 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ToolStartEvent,
     TurnEndEvent,
@@ -81,6 +82,48 @@ class _BurstBackend:
 
     async def cancel(self) -> None:
         self.cancel_calls += 1
+
+
+class _RetryableBackendError(RuntimeError):
+    """A retryable transport failure for the deadline-retry tests."""
+
+    retryable = True
+
+
+@dataclass
+class _RetryableFailingBackend:
+    """Backend that advances an injected clock per attempt, then fails retryably."""
+
+    advance: Callable[[float], None]
+    advance_s: float
+    model = "mock-model"
+    fanout_concurrency: int = 4
+    calls: int = 0
+    retry_policy: RetryPolicy = field(
+        default_factory=lambda: RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    )
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            self.calls += 1
+            self.advance(self.advance_s)
+            raise _RetryableBackendError("transient")
+            yield  # pragma: no cover - unreachable, marks this a generator  # noqa
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        pass
 
 
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
@@ -210,6 +253,56 @@ async def test_run_agent_abort_records_reason_and_turn_end(
     assert isinstance(invocation.events[-1], TurnEndEvent)
 
 
+async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A caller deadline spans the whole retry ladder; a retry cannot restart it."""
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    # retry_policy: attempts=20, delays=0.0; advances the injected clock per attempt.
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=400.0)
+
+    output, _, reason = await run_agent(
+        backend, tmp_path, "go",
+        phase=DaydreamPhase.FIX,
+        wall_budget_s=10_000.0,          # deliberately looser than the caller deadline
+        deadline=1_600.0,                # absolute: fake clock starts at 1000.0
+    )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.calls == 2            # 1000 -> 1400 (attempt 1) -> 1800 (attempt 2), then spent
+    assert fake.monotonic_value == 1_800.0
+    assert output == ""
+
+
+async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            _, _, reason = await run_agent(
+                backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+                wall_budget_s=10_000.0, deadline=5_600.0,
+            )
+
+    assert reason == "wall_budget_exceeded"
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["limit_expired"] == "caller_deadline"
+    assert meta["attempts"] == 2            # 5000 -> 5300 (attempt 1) -> 5600 (attempt 2), then spent
+    assert meta["elapsed_s"] == 600.0 and meta["backend_s"] == 600.0
+    assert "5600.0" not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
+
+
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
     """A slow stream with wall_budget_s=0.2 returns, step marked wall_budget_exceeded."""
     backend = _BurstBackend(count=200, sleep_s=0.05)
@@ -231,6 +324,87 @@ async def test_run_agent_wall_budget(tmp_path: Path) -> None:
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     step = _agent_step_with_stop_reason(traj)
     assert step["extra"]["stop_reason"] == "wall_budget_exceeded"
+
+
+async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    class _ClockAdvancingBurstBackend:
+        """Streams text + tool starts, advancing the injected clock per event."""
+
+        model = "mock-model"
+        fanout_concurrency = 2
+
+        def __init__(self, advance: Any, advance_s: float) -> None:
+            self.advance, self.advance_s, self.delivered, self.cancel_calls = advance, advance_s, 0, 0
+
+        def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                for i in range(200):
+                    yield TextEvent(text=f"partial-output-sentinel-{i}")
+                    self.advance(self.advance_s)
+                    self.delivered += 1
+                    yield ToolStartEvent(id=f"t{i}", name="Bash", input={"command": "ls"})
+
+            return _gen()
+
+        async def cancel(self) -> None:
+            self.cancel_calls += 1
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    backend = _ClockAdvancingBurstBackend(fake.advance, 200.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            output, _, reason = await run_agent(
+                backend, tmp_path, "go",
+                phase=DaydreamPhase.FIX,
+                wall_budget_s=600.0,          # deadline = 1000 + 600 = 1600
+            )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.delivered == 3             # 1000->1200->1400->1600: the 4th event is past it
+    assert backend.cancel_calls == 0          # sibling isolation: no backend-wide cancel
+    assert "partial-output-sentinel-2" in output   # text emitted before expiry survives
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    assert _agent_step_with_stop_reason(traj)["extra"]["stop_reason"] == "wall_budget_exceeded"
+
+
+async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=1_000.0)
+
+    class _HangingCloseBackend(_BurstBackend):
+        def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                try:
+                    yield TextEvent(text="partial-output-sentinel")
+                    yield ToolStartEvent(id="t", name="Bash", input={"command": "ls"})
+                    fake.advance(10.0)  # push the next event past the deadline
+                    yield ToolStartEvent(id="t2", name="Bash", input={"command": "ls"})
+                finally:
+                    await anyio.sleep(3_600)  # teardown that never completes
+
+            return _gen()
+
+    fake.install(monkeypatch)
+    monkeypatch.setattr("daydream.agent.BUDGET_CLEANUP_GRACE_S", 0.2)
+    start = anyio.current_time()
+
+    with anyio.fail_after(5):
+        output, _, reason = await run_agent(
+            _HangingCloseBackend(), tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=5.0
+        )
+
+    assert reason == "wall_budget_exceeded"
+    assert "partial-output-sentinel" in output
+    assert anyio.current_time() - start < 3.0   # bounded by the grace, not the teardown
 
 
 async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(

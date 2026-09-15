@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
+from daydream import clock
 from daydream.artifact_visibility import artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
@@ -40,6 +41,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -428,6 +430,7 @@ async def run_agent(
     read_only: bool = False,
     persist_session: bool = True,
     wall_budget_s: float | None = None,
+    deadline: float | None = None,
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
@@ -449,7 +452,8 @@ async def run_agent(
         result = await _run_agent(
             backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
             continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
-            persist_session=persist_session, wall_budget_s=wall_budget_s, tool_call_budget=tool_call_budget,
+            persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
+            tool_call_budget=tool_call_budget,
             validate_structured_output=validate_structured_output,
             sanctioned_inputs=sanctioned_inputs,
             run_context=context,
@@ -473,6 +477,7 @@ async def _run_agent(
     read_only: bool = False,
     persist_session: bool = True,
     wall_budget_s: float | None = None,
+    deadline: float | None = None,
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
@@ -514,11 +519,18 @@ async def _run_agent(
             pass True, while mutating phases keep the False default.
         persist_session: When False, request an ephemeral backend invocation.
             The default preserves existing continuation behavior.
-        wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded
-            the loop and this invocation's event iterator are closed, the ATIF
-            turn is marked aborted, and the partial output is returned — no
-            exception reaches the caller. ``None`` (the default) disables the
-            wall budget.
+        wall_budget_s: Opt-in invocation-wide wall-clock budget. It is
+            converted to one absolute effective deadline before the retry
+            loop and enforced across every attempt (pre-dispatch, pre-backoff,
+            and mid-stream). When spent, the invocation's event iterator is
+            closed, the ATIF turn is marked aborted, and the partial output is
+            returned — no exception reaches the caller. ``None`` (the default)
+            disables the budget. See ``deadline`` for a caller-owned bound.
+        deadline: Optional caller-owned absolute deadline on the process-local
+            :func:`daydream.clock.monotonic` timeline. It is never persisted.
+            The effective deadline is ``min(deadline, now + wall_budget_s)``
+            over whichever inputs are present, derived once for the whole
+            invocation so retries and backoff cannot restart the clock.
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
@@ -599,14 +611,63 @@ async def _run_agent(
             if max_delay < 0:
                 raise ValueError("retry max delay must be >= 0")
 
+            # Derive ONE absolute effective deadline for the whole invocation,
+            # before the retry loop: retries, attempt restarts and backoff all
+            # spend this same deadline instead of restarting it. ``limit_expired``
+            # names which input produced it (caller deadline wins a tie).
+            invocation_start = clock.monotonic()
+            if deadline is not None and wall_budget_s is not None:
+                wall_deadline = invocation_start + wall_budget_s
+                if deadline <= wall_deadline:
+                    effective_deadline = deadline
+                    limit_expired = "caller_deadline"
+                else:
+                    effective_deadline = wall_deadline
+                    limit_expired = "invocation_wall_budget"
+            elif deadline is not None:
+                effective_deadline = deadline
+                limit_expired = "caller_deadline"
+            elif wall_budget_s is not None:
+                effective_deadline = invocation_start + wall_budget_s
+                limit_expired = "invocation_wall_budget"
+            else:
+                effective_deadline = None
+                limit_expired = None
+            # Telemetry counters for the single invocation: only dispatched
+            # attempts and time actually spent inside them are charged.
+            attempts_dispatched = 0
+            backend_s = 0.0
+            backoff_s = 0.0
+            cleanup_elapsed_s = 0.0
+            _logger.debug(
+                "invocation deadline: effective=%s limit=%s caller=%s wall_budget_s=%s",
+                effective_deadline,
+                limit_expired,
+                deadline,
+                wall_budget_s,
+            )
+
             for attempt in range(max_attempts + 1):
-                # Reset accumulated state so a failed attempt's partial output
-                # does not leak into the next attempt's return value.
+                # Reset accumulated state BEFORE the deadline checks: a failed
+                # attempt's partial output must never leak into the invocation
+                # return when the pre-dispatch break (or the retry branch's
+                # pre-backoff break) ends the ladder, so the caller sees only
+                # output from the attempt that actually completed the turn.
                 output_parts = []
                 structured_result = None
                 result_continuation = None
                 tool_calls = 0
                 budget_reason: str | None = None
+                # Never dispatch an attempt once the deadline is spent: the
+                # ladder stops here with the reset state.
+                if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                    aborted_reason = "wall_budget_exceeded"
+                    break
+                # Guarded so the retry branch can charge the attempt's backend
+                # time before its backoff sleep, keeping that sleep out of
+                # backend_s (it is counted in backoff_s instead).
+                attempt_started_at: float | None = clock.monotonic()
+                attempts_dispatched += 1
                 # Track tool names by id for log mode output
                 tool_names: dict[str, str] = {}
                 callback_text_parts: list[str] = []
@@ -657,16 +718,31 @@ async def _run_agent(
                         if inv is not None:
                             inv.observe_user_step(prompt=prompt)
 
-                        # Per-invocation abort controls live here so both backends are
-                        # covered without a backend-signature change. The wall budget
-                        # cancels the async-for via move_on_after; the tool-call ceiling
-                        # and supervisor veto break in-loop.
+                        # Per-invocation abort controls live here so both backends
+                        # are covered without a backend-signature change: the tool-call
+                        # ceiling and supervisor veto break in-loop, while the deadline
+                        # is read per event and also backstopped by a real-time
+                        # move_on_after over the time the effective deadline has left.
+                        remaining_s = (
+                            max(effective_deadline - clock.monotonic(), 0.0)
+                            if effective_deadline is not None
+                            else None
+                        )
                         wall_scope: Any = (
-                            anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
+                            anyio.move_on_after(remaining_s) if remaining_s is not None else nullcontext()
                         )
 
                         with wall_scope:
                             async for event in event_iter:
+                                # The single effective deadline is enforced per streamed
+                                # event so an injected clock can expire mid-turn even
+                                # though move_on_after only measures real time.
+                                if (
+                                    effective_deadline is not None
+                                    and clock.monotonic() >= effective_deadline
+                                ):
+                                    budget_reason = "wall_budget_exceeded"
+                                    break
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
@@ -870,20 +946,41 @@ async def _run_agent(
                             if use_callback:
                                 await _flush_callback_text()
 
-                        # Abort handling: the wall scope cancelled the loop, a quantitative
-                        # tool ceiling fired, or a supervisor veto broke out. Mark the
-                        # ATIF turn aborted and let the invocation's event-stream scope
-                        # close its resources before returning partial output.
+                        # Abort handling: a spent deadline cut the loop, the wall
+                        # backstop cancelled it, a quantitative tool ceiling fired, or
+                        # a supervisor veto broke out. Mark the ATIF turn aborted and
+                        # let the invocation's event-stream scope close its resources
+                        # before returning partial output.
                         wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
                         if budget_reason is None and wall_cancelled:
                             budget_reason = "wall_budget_exceeded"
                         aborted_reason = budget_reason
                         if budget_reason is not None:
                             observed.abort(budget_reason)
-                            await event_stream_scope.aclose()
-                            if inv is not None:
-                                inv.mark_aborted(budget_reason)
-                                inv.observe(TurnEndEvent())
+                            # Cleanup can hang on a backend subprocess that never
+                            # exits. Bound it with a shielded grace so it cannot
+                            # extend or abort the already-captured partial result;
+                            # the grace time is measured on the clock seam and
+                            # reported separately from the invocation's elapsed_s.
+                            cleanup_started_at = clock.monotonic()
+                            with anyio.move_on_after(
+                                BUDGET_CLEANUP_GRACE_S, shield=True
+                            ) as cleanup_scope:
+                                # Stamp the abort reason BEFORE aclose(): a hung
+                                # backend subprocess can block the close until the
+                                # grace fires, and the turn must still carry its
+                                # stop_reason and partial mark.
+                                if inv is not None:
+                                    inv.mark_aborted(budget_reason)
+                                    inv.observe(TurnEndEvent())
+                                await event_stream_scope.aclose()
+                            cleanup_elapsed_s = clock.monotonic() - cleanup_started_at
+                            if cleanup_scope.cancel_called:
+                                _logger.warning(
+                                    "post-expiry cleanup exceeded its %ss grace; "
+                                    "continuing with the captured partial result",
+                                    BUDGET_CLEANUP_GRACE_S,
+                                )
                             if policy.log_mode:
                                 _print_log(f"[aborted] {budget_reason}")
                             elif use_callback and progress_callback is not None:
@@ -910,10 +1007,27 @@ async def _run_agent(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
                     if attempt < exception_max_retries and getattr(exc, "retryable", False):
+                        # Spending the deadline ends the ladder before the next
+                        # backoff sleep: no attempt, no sleep, no raise. The
+                        # failed attempt's partials are discarded so they cannot
+                        # leak into the invocation return.
+                        if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                            output_parts = []
+                            structured_result = None
+                            result_continuation = None
+                            aborted_reason = "wall_budget_exceeded"
+                            break
                         delay = min(
                             base_delay * (2 ** attempt) + random.uniform(0, 1),
                             max_delay,
                         )
+                        # Bound the backoff sleep by the time the effective
+                        # deadline has left: a retry storm must not overshoot
+                        # the invocation/group ceiling by up to one backoff
+                        # interval. A spent deadline then breaks at the top of
+                        # the next loop iteration.
+                        if effective_deadline is not None:
+                            delay = min(delay, max(effective_deadline - clock.monotonic(), 0.0))
                         retry_msg = (
                             f"Backend error ({type(exc).__name__}), retrying "
                             f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
@@ -929,9 +1043,42 @@ async def _run_agent(
                         # The event-stream scope has already closed only this failed
                         # invocation. Backend-wide cancel() is reserved for shutdown.
                         tool_registry.discard_all()
+                        # Charge the failed attempt's backend time up to the
+                        # backoff point: the sleep that follows is retry backoff
+                        # (counted in backoff_s) and must not also land in
+                        # backend_s, or backend_s + backoff_s would overcount.
+                        if attempt_started_at is not None:
+                            backend_s += clock.monotonic() - attempt_started_at
+                            attempt_started_at = None
                         await anyio.sleep(delay)
+                        backoff_s += delay
                         continue
                     raise
+                finally:
+                    if attempt_started_at is not None:
+                        # Post-stop cleanup (the bounded backend aclose) is not
+                        # dispatched-attempt time: exclude it so backend_s keeps
+                        # its documented 'time inside dispatched attempts'
+                        # semantics and backend_s + backoff_s can never exceed
+                        # elapsed_s (which already subtracts cleanup_elapsed_s).
+                        backend_s += clock.monotonic() - attempt_started_at - cleanup_elapsed_s
+
+            # One honest stop record when a time budget ended the invocation --
+            # best-effort and recorder-optional, so a recorder failure never
+            # changes the returned (output, continuation, reason) tuple.
+            if aborted_reason == "wall_budget_exceeded" and recorder is not None:
+                try:
+                    recorder.emit_agent_budget_stop(
+                        phase,
+                        limit_expired=limit_expired or "invocation_wall_budget",
+                        elapsed_s=clock.monotonic() - invocation_start - cleanup_elapsed_s,
+                        backend_s=backend_s,
+                        backoff_s=backoff_s,
+                        attempts=attempts_dispatched,
+                        cleanup_elapsed_s=cleanup_elapsed_s,
+                    )
+                except Exception:  # noqa: BLE001 - telemetry must never break the run
+                    _logger.exception("failed to record agent budget stop")
 
         except _ToolSupervisorFailure as exc:
             original = exc.original

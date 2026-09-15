@@ -2905,7 +2905,8 @@ async def phase_fix(
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
-) -> None:
+    deadline: float | None = None,
+) -> str | None:
     """Phase 3: Apply a single fix for one feedback item.
 
     Args:
@@ -2929,6 +2930,15 @@ async def phase_fix(
         test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
+        deadline: Optional absolute monotonic deadline forwarded to
+            ``run_agent``. The effective bound is the earliest of this and the
+            invocation's ``wall_budget_s``.
+
+    Returns:
+        The fix turn's budget-stop reason (``str``) when a budget ceiling cut
+        the turn short, else ``None``. Callers that ignore the return value
+        keep working; ``None`` always means the turn completed without a
+        budget stop.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -2978,11 +2988,12 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
         progress_cb = _cb
 
-    await run_agent(
+    _, _, budget_reason = await run_agent(
         backend, work.repo, prompt,
         phase=DaydreamPhase.FIX,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        deadline=deadline,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
@@ -2991,6 +3002,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         # Verdict unknown at fix time (issue #744); the post-fix fix-verify
         # step renders the honest resolved/attempted-not-fixed line.
         print_fix_complete(console, item_num, total, outcome=None)
+    return budget_reason
 
 
 @bind_resolved_run_context
@@ -3008,6 +3020,7 @@ async def phase_fix_batched(
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
+    deadline: float | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -3038,6 +3051,10 @@ async def phase_fix_batched(
         test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
+        deadline: Optional absolute monotonic deadline forwarded unchanged to
+            ``run_agent`` (and to the single-item ``phase_fix`` delegation).
+            The effective bound is the earliest of this, the scaled call budget,
+            and any enclosing group deadline.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -3050,6 +3067,7 @@ async def phase_fix_batched(
             exploration_dir=exploration_dir,
             test_map=test_map,
             run_context=run_context,
+            deadline=deadline,
         )
         return
 
@@ -3098,8 +3116,11 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
     prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
-    # Scale budgets linearly with the number of findings so a batched group of N
-    # findings gets the same per-finding headroom as a single-finding turn.
+    # Scale call budgets linearly with the number of findings so a batched group
+    # of N findings gets the same per-finding headroom as a single-finding turn.
+    # ``deadline`` (the group's absolute wall limit) still caps the effective
+    # bound: ``run_agent`` takes the earliest of this scaled budget and the
+    # group deadline, so the batched turn can never outlive the group.
     scaled_tool_budget = None if DEFAULT_TOOL_CALL_BUDGET is None else DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
@@ -3118,6 +3139,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         phase=DaydreamPhase.FIX,
         tool_call_budget=scaled_tool_budget,
         wall_budget_s=scaled_wall_budget,
+        deadline=deadline,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
@@ -3193,9 +3215,10 @@ async def phase_fix_parallel(
     ``"file_group_budget_exceeded:"`` reason prefix (distinguishable from
     exception-based entries) and a ``file_group_budget_exceeded`` trajectory
     event is emitted.  Callers MUST NOT revert budget-exceeded entries; only
-    remaining findings are unprocessed, not the ones already applied.  The
-    per-invocation guards inside each fix call are unchanged; this is an aggregate
-    guard layered on top (Approach B — between-calls check, no mid-call abort).
+    remaining findings are unprocessed, not the ones already applied. Each
+    individual fix call is also bounded mid-call by that same group deadline,
+    and a fix turn that times out is reported back as a group stop rather than
+    counted as progress.
 
     Args:
         backend: The Backend to execute against (shared across tasks).
@@ -3269,13 +3292,15 @@ async def phase_fix_parallel(
         grp_len: int,
         budget: FileGroupBudget,
     ) -> None:
-        """Record a group budget stop: trajectory event, failures entry, warning."""
+        """Record a group budget stop: trajectory event (with group elapsed),
+        failures entry, and warning."""
         processed = budget.items_processed
         skipped = grp_len - processed
         if recorder is not None:
             recorder.emit_file_group_budget_exceeded(
                 file=fkey, reason=reason,
                 items_processed=processed, items_skipped=skipped,
+                elapsed_s=budget.elapsed_s(),
             )
         async with _failures_lock:
             failures[fkey] = f"file_group_budget_exceeded: {reason}"
@@ -3295,15 +3320,23 @@ async def phase_fix_parallel(
         """Fix a group's findings one at a time, honoring the group budget.
 
         Checks ``budget.check()`` before each ``phase_fix`` call; on a budget
-        stop, records it and returns without processing the remainder. The
-        serial-item counter is bumped once per completed call.
+        stop, records it and returns without processing the remainder. Each
+        call is also bounded mid-call by ``budget.deadline``; when the turn
+        reports a budget stop the group records a stop instead of progress and
+        restores the group from the round snapshot, since the cut turn may
+        have left partial edits. A turn cut by its own per-turn wall budget
+        while the group ceiling still has time left
+        (``group_max_wall_s > DEFAULT_WALL_BUDGET_S``) is absorbed like the
+        batched path's other non-group reasons rather than stopping the group.
+        The serial-item counter is bumped once per consumed call slot (a
+        completed turn, or a turn absorbed under a non-group reason).
         """
         for item, item_num in grp:
             budget_reason = budget.check()
             if budget_reason is not None:
                 await _record_budget_stop(fkey, budget_reason, len(grp), budget)
                 return
-            await phase_fix(
+            turn_reason = await phase_fix(
                 backend, work, item, item_num, total,
                 edit_scope=edit_scope,
                 read_scope=footprint.run_allowed_paths,
@@ -3312,7 +3345,44 @@ async def phase_fix_parallel(
                 exploration_dir=exploration_dir,
                 test_map=test_map,
                 run_context=run_context,
+                deadline=budget.deadline,
             )
+            if turn_reason == "wall_budget_exceeded":
+                if group_max_wall_s > DEFAULT_WALL_BUDGET_S and budget.remaining() > 0:
+                    # The invocation's own per-turn wall budget
+                    # (DEFAULT_WALL_BUDGET_S) cut the turn, not the group
+                    # ceiling: the group wall exceeds the per-turn budget, so
+                    # when this fires the group still has time left. Recording
+                    # a group stop here would mislabel the failure and return
+                    # early, skipping valid findings. Mirror the absorption
+                    # path below: the partial attempt keeps its slot and the
+                    # group continues.
+                    budget.record_item()
+                    successful_groups.add(fkey)
+                    continue
+                # The group's own wall ceiling ended the turn mid-call. Do NOT
+                # record the item as processed: the turn did not complete.
+                if budget.remaining() <= 0:
+                    # The cut turn may have left partial edits in the worktree;
+                    # restore the complete group from the round snapshot so the
+                    # half-applied change cannot reach fix-verify/test/commit,
+                    # mirroring the batched fallback recovery.
+                    try:
+                        git_ops.restore_group_worktree_from_snapshot(
+                            work.repo, round_snapshot, edit_scope
+                        )
+                    except Exception as restore_err:  # noqa: BLE001
+                        raise RuntimeError(
+                            "failed to restore the complete fix group after its wall budget cut"
+                        ) from restore_err
+                await _record_budget_stop(fkey, "group_wall_budget_exceeded", len(grp), budget)
+                return
+            # Any other turn reason (a ``tool_vetoed:<tool>`` supervisor veto is
+            # the only reachable one -- ``tool_call_budget`` is unlimited) is a
+            # policy signal, not a budget ceiling. Mirror the batched path's
+            # absorption: record the item as processed and keep the group going,
+            # so one veto cannot starve the remaining findings. The veto itself
+            # is already recorded in the trajectory by run_agent.
             budget.record_item()
             successful_groups.add(fkey)
 
@@ -3373,6 +3443,7 @@ async def phase_fix_parallel(
                                             exploration_dir=exploration_dir,
                                             test_map=test_map,
                                             run_context=run_context,
+                                            deadline=budget.deadline,
                                         )
                                         budget.record_item()
                                         successful_groups.add(fkey)
