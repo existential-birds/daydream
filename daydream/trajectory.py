@@ -3250,14 +3250,21 @@ class TrajectoryRecorder:
         backoff_s: float,
         attempts: int,
         cleanup_elapsed_s: float | None = None,
+        retry_stop_reason: str | None = None,
+        circuit_state: str | None = None,
+        retry_recovery_spent_s: float | None = None,
+        partial_edit_handling: str | None = None,
     ) -> None:
-        """Record which time limit ended an invocation and how its time was spent.
+        """Record which limit ended an invocation and how its time was spent.
 
-        Emitted by ``_run_agent`` (FIX phase) exactly once when the effective
-        invocation deadline ends a turn -- before dispatch, before a backoff
-        sleep, or mid-stream. Serialized into ``Trajectory.extra["phase_events"]``.
-        Only durations and the reason code are recorded -- never a raw monotonic
-        deadline value, which would otherwise be reusable across runs.
+        Emitted by ``_run_agent`` (FIX phase) exactly once when a bound ends a
+        turn. The deadline path (``limit_expired`` is a deadline input) records
+        the partial output as kept; every retry-ladder stop -- allowance
+        exhaustion, hint-exceeds-budget, attempts exhaustion, an open circuit --
+        records ``retry_stop_reason`` and discards the failed attempt's partials.
+        Serialized into ``Trajectory.extra["phase_events"]``. Only durations and
+        reason/state codes are recorded -- never a raw monotonic deadline value,
+        which would otherwise be reusable across runs.
 
         Args:
             phase: The ``DaydreamPhase`` the invocation ran under.
@@ -3267,6 +3274,16 @@ class TrajectoryRecorder:
             backoff_s: Sum of retry delays actually slept.
             attempts: Number of attempts dispatched.
             cleanup_elapsed_s: Optional time spent in bounded post-stop cleanup.
+            retry_stop_reason: Which retry-ladder limit ended the ladder, or
+                ``None`` for a deadline stop. Draws from the documented set
+                ``retry_recovery_allowance_exhausted``, ``retry_attempts_exhausted``,
+                ``circuit_open``, ``retry_hint_exceeds_budget``.
+            circuit_state: The run circuit's observed state (``closed``/
+                ``open``/``half_open``) at the stop.
+            retry_recovery_spent_s: Cumulative retry overhead charged to the
+                allowance (``0.0`` when it was never activated).
+            partial_edit_handling: ``"kept"`` for a deadline stop, ``"discarded"``
+                for a retry-ladder stop.
         """
         self._emit_phase_event(
             phase,
@@ -3277,6 +3294,10 @@ class TrajectoryRecorder:
             backoff_s=backoff_s,
             attempts=attempts,
             cleanup_elapsed_s=cleanup_elapsed_s,
+            retry_stop_reason=retry_stop_reason,
+            circuit_state=circuit_state,
+            retry_recovery_spent_s=retry_recovery_spent_s,
+            partial_edit_handling=partial_edit_handling,
         )
 
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:

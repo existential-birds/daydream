@@ -708,6 +708,40 @@ async def _run_agent(
             backend_s = 0.0
             backoff_s = 0.0
             cleanup_elapsed_s = 0.0
+            attempt_started_at: float | None = None
+
+            def _emit_ladder_stop(stop_reason: str) -> None:
+                """Record one retry-ladder stop before its failure is raised.
+
+                Best-effort and recorder-optional, so telemetry can never change
+                the raised failure. Only durations and reason/state codes are
+                written -- never a monotonic value or the deadline.
+                """
+                if recorder is None:
+                    return
+                now = clock.monotonic()
+                pending = (
+                    max(now - attempt_started_at, 0.0)
+                    if attempt_started_at is not None
+                    else 0.0
+                )
+                try:
+                    recorder.emit_agent_budget_stop(
+                        phase,
+                        limit_expired="retry_ladder",
+                        elapsed_s=now - invocation_start,
+                        backend_s=backend_s + pending,
+                        backoff_s=backoff_s,
+                        attempts=attempts_dispatched,
+                        cleanup_elapsed_s=None,
+                        retry_stop_reason=stop_reason,
+                        circuit_state=run_context.outage_circuit.state(now),
+                        retry_recovery_spent_s=recovery.spent_s,
+                        partial_edit_handling="discarded",
+                    )
+                except Exception:  # noqa: BLE001 - telemetry must never break the run
+                    _logger.exception("failed to record agent retry-ladder stop")
+
             _logger.debug(
                 "invocation deadline: effective=%s limit=%s caller=%s wall_budget_s=%s",
                 effective_deadline,
@@ -735,7 +769,7 @@ async def _run_agent(
                 # Guarded so the retry branch can charge the attempt's backend
                 # time before its backoff sleep, keeping that sleep out of
                 # backend_s (it is counted in backoff_s instead).
-                attempt_started_at: float | None = clock.monotonic()
+                attempt_started_at = clock.monotonic()
                 # Retry attempts' backend time is charged to the recovery budget;
                 # the attempt that produces the first retryable failure is not
                 # (activation happens after it).
@@ -1069,6 +1103,10 @@ async def _run_agent(
                             tool_registry.finish_all()
                             console.print()
 
+                    # A completed, un-aborted attempt closes the run circuit;
+                    # budget aborts share this break but are not a success.
+                    if budget_reason is None:
+                        run_context.outage_circuit.record_success()
                     break  # success — exit the retry loop
 
                 except _ToolSupervisorFailure:
@@ -1105,7 +1143,19 @@ async def _run_agent(
                         # dispatch, no sleep, straight to the caller with the
                         # current failure's attributes intact.
                         if recovery.remaining() <= 0.0:
+                            _emit_ladder_stop("retry_recovery_allowance_exhausted")
                             raise
+                        # The run-scoped circuit decides whether the ladder
+                        # may dispatch again and counts the failure when it
+                        # does. First attempts never consult it, so stale open
+                        # state cannot block a healthy call; a suppressed ladder
+                        # raises the current failure with its retryable
+                        # attribute intact.
+                        circuit_now = clock.monotonic()
+                        if not run_context.outage_circuit.admit_retry(circuit_now).allowed:
+                            _emit_ladder_stop("circuit_open")
+                            raise
+                        run_context.outage_circuit.record_failure(circuit_now)
                         # Bound the backoff by the smaller of the exponential
                         # growth, the configured maximum, the remaining allowance
                         # and the time the effective deadline has left: a retry
@@ -1132,6 +1182,7 @@ async def _run_agent(
                                     max(effective_deadline - clock.monotonic(), 0.0)
                                 )
                             if budget_bounds and hint > min(budget_bounds):
+                                _emit_ladder_stop("retry_hint_exceeds_budget")
                                 raise
                         delay = min(
                             hint if hint is not None else _sample_retry_delay(cap), cap
@@ -1168,6 +1219,8 @@ async def _run_agent(
                         await anyio.sleep(delay)
                         backoff_s += delay
                         continue
+                    if classification.retries_allowed and exception_max_retries > 0:
+                        _emit_ladder_stop("retry_attempts_exhausted")
                     raise
                 finally:
                     if attempt_started_at is not None:
@@ -1183,7 +1236,8 @@ async def _run_agent(
 
             # One honest stop record when a time budget ended the invocation --
             # best-effort and recorder-optional, so a recorder failure never
-            # changes the returned (output, continuation, reason) tuple.
+            # changes the returned (output, continuation, reason) tuple. Unlike
+            # a retry-ladder stop, the deadline keeps the attempt's partials.
             if aborted_reason == "wall_budget_exceeded" and recorder is not None:
                 try:
                     recorder.emit_agent_budget_stop(
@@ -1194,6 +1248,10 @@ async def _run_agent(
                         backoff_s=backoff_s,
                         attempts=attempts_dispatched,
                         cleanup_elapsed_s=cleanup_elapsed_s,
+                        retry_stop_reason=None,
+                        circuit_state=run_context.outage_circuit.state(clock.monotonic()),
+                        retry_recovery_spent_s=recovery.spent_s,
+                        partial_edit_handling="kept",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
                     _logger.exception("failed to record agent budget stop")

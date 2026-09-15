@@ -71,6 +71,15 @@ TEST_WALL_BUDGET_S = 3600.0
 # Deliberately not configurable; mirrors the observability trace cleanup grace.
 BUDGET_CLEANUP_GRACE_S = 10.0
 
+# Run-scoped outage circuit (issue #734). After this many consecutive retryable
+# failures the circuit opens and suppresses further retry dispatches until the
+# probe interval elapses, at which point exactly one half-open probe is
+# admitted. The probe interval is deliberately shorter than the 120 s maximum
+# backoff so a coordinated circuit is never slower to recover than a lone
+# ladder. Deliberately not configuration keys (mirrors BUDGET_CLEANUP_GRACE_S).
+RETRY_CIRCUIT_FAILURE_THRESHOLD = 3
+RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
+
 # Per-file-group aggregate budget for the fix phase (issue #201). The
 # per-invocation guards above bound each individual run_agent turn; these bound
 # the *cumulative* cost of all fix turns targeting a single file group, so one

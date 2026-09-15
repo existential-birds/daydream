@@ -10,6 +10,7 @@ partial output is returned without cancelling sibling backend invocations.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -651,3 +653,75 @@ async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
     assert output == "done"
     assert reason is None  # 1200 s of legitimate post-retry work is not cancelled
     assert backend.calls == 2
+
+
+def _ending_backend(
+    monkeypatch: pytest.MonkeyPatch, ending: str
+) -> tuple[Any, _RetryableFailingBackend, RunContext]:
+    """Build ``(fake_clock, backend, run_context)`` for one ladder ending."""
+    from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    run_context = RunContext(InteractionPolicy(interactive=False))
+    if ending == "deadline":
+        # The 1_800 s wall budget is spent inside the first dispatched attempt.
+        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=1_800.0)
+    elif ending == "allowance":
+        # The 60 s allowance is spent by the first 60 s backoff sleep.
+        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=30.0)
+        backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0)
+    elif ending == "attempts":
+        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
+        backend.retry_policy = RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0)
+    elif ending == "circuit":
+        # Open the one run-scoped circuit first; the ladder is then suppressed.
+        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
+        circuit = run_context.outage_circuit
+        for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
+            circuit.record_failure(fake.monotonic_value)
+    else:  # pragma: no cover - parametrization is closed
+        raise AssertionError(ending)
+    return fake, backend, run_context
+
+
+@pytest.mark.parametrize(
+    ("ending", "expected_stop", "expected_partial"),
+    [
+        pytest.param("deadline", None, "kept", id="deadline"),
+        pytest.param("allowance", "retry_recovery_allowance_exhausted", "discarded", id="allowance"),
+        pytest.param("attempts", "retry_attempts_exhausted", "discarded", id="attempts"),
+        pytest.param("circuit", "circuit_open", "discarded", id="circuit"),
+    ],
+)
+async def test_every_ladder_ending_records_one_budget_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ending: str, expected_stop: str | None, expected_partial: str
+) -> None:
+    """Each way a retry ladder ends leaves exactly one budget-stop record."""
+    fake, backend, run_context = _ending_backend(monkeypatch, ending)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            with contextlib.suppress(Exception):
+                await run_agent(
+                    backend,
+                    tmp_path,
+                    "go",
+                    phase=DaydreamPhase.FIX,
+                    wall_budget_s=1_800.0,
+                    retry_recovery_allowance_s=60.0,
+                    run_context=run_context,
+                )
+
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["retry_stop_reason"] == expected_stop
+    assert meta["partial_edit_handling"] == expected_partial
+    assert meta["circuit_state"] in {"closed", "open", "half_open"}
+    assert set(meta) >= {"attempts", "backend_s", "backoff_s", "elapsed_s"}
+    assert str(fake.monotonic_value) not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
