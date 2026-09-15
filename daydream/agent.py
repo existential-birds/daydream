@@ -46,7 +46,12 @@ from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.prompt_budget import PreparedSanctionedInputs
-from daydream.retry_policy import FailureClass, RetryRecoveryBudget, classify_failure
+from daydream.retry_policy import (
+    FailureClass,
+    RetryRecoveryBudget,
+    classify_failure,
+    parse_message_retry_hint,
+)
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -88,6 +93,25 @@ def _sample_retry_delay(cap: float) -> float:
     if cap <= 0:
         return 0.0
     return random.uniform(0.0, cap)
+
+
+def _retry_hint(exc: BaseException) -> float | None:
+    """Extract a finite, non-negative server retry hint from *exc*, else ``None``.
+
+    The ``retry_after`` attribute wins; when it is absent the failure message is
+    parsed for a ``retry[- ]after[: ]N`` token. A present-but-malformed
+    attribute (a string, ``nan``, ``inf``, a negative) is ignored rather than
+    coerced, degrading to jitter; ``0`` is a valid hint. Never raises.
+    """
+    attribute = getattr(exc, "retry_after", None)
+    if attribute is None:
+        return parse_message_retry_hint(str(exc))
+    if isinstance(attribute, bool) or not isinstance(attribute, (int, float)):
+        return None
+    value = float(attribute)
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
 class _ToolSupervisorFailure(Exception):
@@ -1093,7 +1117,25 @@ async def _run_agent(
                         if effective_deadline is not None:
                             cap = min(cap, max(effective_deadline - clock.monotonic(), 0.0))
                         cap = max(cap, 0.0)
-                        delay = min(_sample_retry_delay(cap), cap)
+                        # A server hint replaces jitter, but never extends either
+                        # budget: a hint longer than the remaining allowance or
+                        # the remaining deadline stops the ladder exactly as
+                        # exhaustion does. The outer min() below keeps an
+                        # over-large hint (and a hostile sample) inside the cap.
+                        hint = _retry_hint(exc)
+                        if hint is not None:
+                            budget_bounds = []
+                            if recovery.active:
+                                budget_bounds.append(recovery.remaining())
+                            if effective_deadline is not None:
+                                budget_bounds.append(
+                                    max(effective_deadline - clock.monotonic(), 0.0)
+                                )
+                            if budget_bounds and hint > min(budget_bounds):
+                                raise
+                        delay = min(
+                            hint if hint is not None else _sample_retry_delay(cap), cap
+                        )
                         retry_msg = (
                             f"Backend error ({type(exc).__name__}), retrying "
                             f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."

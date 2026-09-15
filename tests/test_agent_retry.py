@@ -22,6 +22,7 @@ from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _is_retryable_error_message
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
 
 def _fail_then_succeed(
@@ -429,3 +430,177 @@ async def test_failure_classification_decides_retries(
         assert (await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW))[0] == "done"
 
     assert backend.call_count == expected_calls
+
+
+class _HintError(RuntimeError):
+    """A retryable transport failure that can carry a server-provided hint."""
+
+    retryable = True
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+@pytest.mark.parametrize(
+    ("pinned", "expected"),
+    [
+        pytest.param("cap", 30.0, id="pinned-to-cap"),
+        pytest.param(0.0, 0.0, id="pinned-to-zero"),
+        pytest.param("hostile", 30.0, id="hostile-sample-is-clamped"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_bounded_full_jitter_never_exceeds_the_cap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pinned: object, expected: float
+) -> None:
+    """The delay is ``min(sample(0, cap), cap)``: a hostile sampler cannot overshoot.
+
+    ``retry_attempts=1`` pins the ladder to a single retry so the delay list is
+    exactly the one computed backoff; ``base_delay_s``/``max_delay_s`` pin the
+    exponential cap to 30 s.
+    """
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    sampler = {"cap": lambda cap: cap, 0.0: lambda _cap: 0.0, "hostile": lambda cap: cap * 10}[pinned]
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", sampler)
+    backend = ScriptedBackend(
+        events=[_HintError("503 Service Unavailable")],
+        retry_attempts=1,
+        retry_base_delay_s=30.0,
+        retry_max_delay_s=60.0,
+    )
+
+    with pytest.raises(_HintError):
+        await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0,
+            retry_recovery_allowance_s=300.0,
+        )
+
+    assert slept == [pytest.approx(expected)]
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_slept", "stop"),
+    [
+        pytest.param(30.0, [30.0], None, id="valid-and-fits"),
+        pytest.param(600.0, [], "retry_hint_exceeds_budget", id="valid-but-too-long"),
+        pytest.param(0.0, [0.0], None, id="zero-is-honoured"),
+        pytest.param(None, [30.0], None, id="absent-degrades-to-jitter"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_server_retry_hint_is_honoured_and_capped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    retry_after: float | None,
+    expected_slept: list[float],
+    stop: str | None,
+) -> None:
+    """A numeric server hint replaces jitter but never extends the budget.
+
+    ``retry_attempts=1`` pins the ladder to a single retry so a fitting hint is
+    observable as exactly one sleep and two dispatches. The jitter seam is
+    pinned to the cap so an absent hint is distinguishable from a hint.
+    """
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(
+        events=[_HintError("503 Service Unavailable", retry_after=retry_after)],
+        retry_attempts=1,
+        retry_base_delay_s=30.0,
+        retry_max_delay_s=60.0,
+    )
+
+    with pytest.raises(_HintError):
+        await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0,
+            retry_recovery_allowance_s=300.0,
+        )
+
+    assert slept == [pytest.approx(s) for s in expected_slept]
+    if stop is None:
+        assert backend.call_count == 2
+    else:
+        assert backend.call_count == 1  # hint longer than the budget extends nothing
+
+
+class _MessageHintError(RuntimeError):
+    """A retryable failure that carries its hint only in the message token."""
+
+    retryable = True
+
+
+@pytest.mark.asyncio
+async def test_server_retry_hint_is_read_from_the_message_when_the_attribute_is_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ``retry-after: N`` message token is honoured when no attribute is set."""
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(
+        events=[_MessageHintError("503 Service Unavailable; retry-after: 45")],
+        retry_attempts=1,
+        retry_base_delay_s=60.0,
+        retry_max_delay_s=60.0,
+    )
+
+    with pytest.raises(_MessageHintError):
+        await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0,
+            retry_recovery_allowance_s=300.0,
+        )
+
+    assert slept == [pytest.approx(45.0)]
+    assert backend.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        pytest.param("30", id="string"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="inf"),
+        pytest.param(-5.0, id="negative"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_malformed_retry_after_attribute_degrades_to_jitter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed: object
+) -> None:
+    """A present-but-invalid ``retry_after`` is ignored, never coerced to a delay."""
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(
+        events=[_HintError("503 Service Unavailable", retry_after=malformed)],
+        retry_attempts=1,
+        retry_base_delay_s=30.0,
+        retry_max_delay_s=60.0,
+    )
+
+    with pytest.raises(_HintError):
+        await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0,
+            retry_recovery_allowance_s=300.0,
+        )
+
+    assert slept == [pytest.approx(30.0)]  # jitter pinned to the cap, not the malformed value

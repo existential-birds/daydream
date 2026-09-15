@@ -14,6 +14,7 @@ hostile exception cannot make classification itself a failure.
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -72,6 +73,32 @@ _PERMANENT_CONDITION_RE = re.compile(
     r"|not authenticated",
     re.IGNORECASE,
 )
+
+#: Numeric-seconds ``retry[- ]after[: ]N`` token in a failure message. Shared
+#: by the agent retry branch and any backend that carries a hint in text rather
+#: than on the exception attribute.
+_RETRY_HINT_RE = re.compile(r"retry[- ]after[:\s]+([+-]?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def parse_message_retry_hint(message: str) -> float | None:
+    """Extract a numeric-seconds server retry hint from *message*.
+
+    Returns ``None`` for an absent, non-numeric, negative, or non-finite hint;
+    an unparseable hint degrades to jitter rather than to a fabricated delay.
+    ``0`` is a valid hint. Never raises.
+    """
+    if not message:
+        return None
+    match = _RETRY_HINT_RE.search(message)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
