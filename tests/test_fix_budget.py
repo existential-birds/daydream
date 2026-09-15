@@ -1,7 +1,7 @@
 """Unit tests for the per-file-group fix budget (issue #201).
 
 Covers the two pieces the real-path enforcement tests (in
-``test_deep_orchestrator.py``) build on:
+``deep_orchestrator/test_precision_budgets_and_tiers.py``) build on:
 
 1. ``FileGroupBudget`` — the aggregate guard's ``check``/``record_item``
    semantics (which ceiling fires, in what order).

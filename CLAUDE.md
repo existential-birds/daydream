@@ -57,7 +57,8 @@ production entrypoint (`runner.run` / the CLI) with real dependencies (real temp
 filesystem, real event loop), mocking only the external network/API backend (via the `Backend` protocol /
 `create_backend` seam). Tests must assert observable outcomes (exit code, files written, fixes applied or
 declined, transcript state), never that a function was merely called. Unit tests are supplementary, not a
-substitute. Reference exemplar: the non-interactive/EOF gate tests in `tests/test_deep_orchestrator.py`.
+substitute. Reference exemplar: the non-interactive/EOF gate tests in
+`tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py`.
 
 **No caveats.** All work is completed and proven, or explicitly in progress. No deferred items, no
 "optional" follow-ups, no smoke-tests substituted for real coverage.
