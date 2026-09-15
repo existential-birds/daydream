@@ -41,7 +41,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.config import BUDGET_CLEANUP_GRACE_S
+from daydream.config import BUDGET_CLEANUP_GRACE_S, DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -76,12 +76,6 @@ from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG
 
 _logger = logging.getLogger(__name__)
 
-#: Default cumulative retry-recovery allowance for one invocation, in seconds.
-#: The issue's proposed value; not yet tuned against outage data (no corpus is
-#: reachable from this host). ``0`` is the sanctioned "no retry recovery" value.
-#: Task 6 (config) owns the file-config/env precedence for this bound.
-DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
-
 
 def _sample_retry_delay(cap: float) -> float:
     """Sample a bounded full-jitter backoff delay uniformly from ``[0, cap]``.
@@ -93,6 +87,37 @@ def _sample_retry_delay(cap: float) -> float:
     if cap <= 0:
         return 0.0
     return random.uniform(0.0, cap)
+
+
+def _coerce_retry_recovery_allowance(raw: Any, source: str) -> float | None:
+    """Validate one declared retry-recovery allowance, warning on an invalid value.
+
+    ``raw`` may be a number or a numeric string (the env shape). A bool, a
+    non-number, a non-finite value, or a negative value is refused as an
+    effective bound and degrades to the documented default, observably, rather
+    than becoming a bound. ``0`` is valid and disables retry recovery.
+    """
+    value: float | None
+    if isinstance(raw, bool):
+        value = None
+    elif isinstance(raw, (int, float)):
+        value = float(raw)
+    elif isinstance(raw, str):
+        try:
+            value = float(raw)
+        except ValueError:
+            value = None
+    else:
+        value = None
+    if value is None or not math.isfinite(value) or value < 0:
+        _logger.warning(
+            "daydream: invalid retry-recovery allowance %s=%r; using default %s",
+            source,
+            raw,
+            DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
+        )
+        return None
+    return value
 
 
 def _retry_hint(exc: BaseException) -> float | None:
@@ -590,8 +615,14 @@ async def _run_agent(
             retry attempt is charged against it, and a spent allowance re-raises
             the current failure without dispatching again. It composes with the
             single effective deadline by clamping (never re-basing) and never
-            interrupts an attempt that is already running. ``None`` (the
-            default) resolves to ``DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``; ``0``
+            interrupts an attempt that is already running. Resolution precedence:
+            the backend's ``RetryPolicy.retry_recovery_allowance_s``, then a
+            backend ``retry_recovery_allowance_s`` attribute, then this argument,
+            then ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S``, then
+            ``DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. An invalid single value
+            degrades to the default with a warning; a contradiction
+            (``base_delay > max_delay`` or a non-zero declared allowance with
+            retries disabled) raises ``ValueError`` before any dispatch. ``0``
             disables retry recovery.
         validate_structured_output: When True (default), structured output —
             the backend-supplied primary result and the extraction fallback alike
@@ -670,6 +701,71 @@ async def _run_agent(
             if max_delay < 0:
                 raise ValueError("retry max delay must be >= 0")
 
+            # Resolve the cumulative retry-recovery allowance once, before any
+            # dispatch, respecting the declared precedence: a complete backend
+            # policy > a backend attribute > the explicit argument > the ambient
+            # env var > the documented default. An invalid single value degrades
+            # to the default with a warning (never an effective bound); the
+            # contradictory combinations below are refused outright.
+            allowance_source: tuple[str, Any] | None = None
+            if retry_policy is not None:
+                policy_allowance = getattr(
+                    retry_policy, "retry_recovery_allowance_s", None
+                )
+                if policy_allowance is not None:
+                    allowance_source = (
+                        "RetryPolicy.retry_recovery_allowance_s",
+                        policy_allowance,
+                    )
+            if allowance_source is None:
+                backend_allowance = getattr(
+                    backend, "retry_recovery_allowance_s", None
+                )
+                if backend_allowance is not None:
+                    allowance_source = ("retry_recovery_allowance_s", backend_allowance)
+            if allowance_source is None and retry_recovery_allowance_s is not None:
+                allowance_source = (
+                    "retry_recovery_allowance_s",
+                    retry_recovery_allowance_s,
+                )
+            if allowance_source is None and retry_policy is None:
+                env_allowance = os.environ.get(
+                    "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
+                )
+                if env_allowance is not None:
+                    allowance_source = (
+                        "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S",
+                        env_allowance,
+                    )
+            resolved_allowance = DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+            declared_allowance = False
+            if allowance_source is not None:
+                parsed_allowance = _coerce_retry_recovery_allowance(
+                    allowance_source[1], allowance_source[0]
+                )
+                if parsed_allowance is not None:
+                    resolved_allowance = parsed_allowance
+                    declared_allowance = True
+
+            # Two declared values can each be valid and still contradict one
+            # another. Refuse the combination here, before any dispatch, with a
+            # message naming both keys -- never coerce it into a plausible bound.
+            # The allowance check fires only for a *declared* non-zero value: the
+            # default 300s must not turn ``retry_attempts = 0`` (a legitimate
+            # "no retries" declaration) into an error.
+            if base_delay > max_delay:
+                raise ValueError(
+                    f"retry_base_delay_s ({base_delay}) must not exceed "
+                    f"retry_max_delay_s ({max_delay})"
+                )
+            if declared_allowance and resolved_allowance > 0 and max_attempts == 0:
+                raise ValueError(
+                    "retry_recovery_allowance_s "
+                    f"({resolved_allowance}) cannot be non-zero while retries are "
+                    "disabled (max_attempts == 0); set retry_recovery_allowance_s = 0 "
+                    "to disable retry recovery explicitly"
+                )
+
             # Derive ONE absolute effective deadline for the whole invocation,
             # before the retry loop: retries, attempt restarts and backoff all
             # spend this same deadline instead of restarting it. ``limit_expired``
@@ -694,11 +790,7 @@ async def _run_agent(
                 limit_expired = None
             # Resolve the cumulative retry-recovery allowance once, after the
             # single effective deadline so activation can clamp to what remains.
-            recovery = RetryRecoveryBudget(
-                DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-                if retry_recovery_allowance_s is None
-                else retry_recovery_allowance_s
-            )
+            recovery = RetryRecoveryBudget(resolved_allowance)
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
             # retry-recovery budget is a third, independent accumulator: its

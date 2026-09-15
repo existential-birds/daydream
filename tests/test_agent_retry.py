@@ -604,3 +604,133 @@ async def test_a_malformed_retry_after_attribute_degrades_to_jitter(
         )
 
     assert slept == [pytest.approx(30.0)]  # jitter pinned to the cap, not the malformed value
+
+
+@pytest.mark.asyncio
+async def test_contradictory_retry_budgets_refuse_before_any_dispatch(tmp_path: Path) -> None:
+    backend = ScriptedBackend(
+        events=[_HintError("503")],
+        retry_attempts=3,
+        retry_base_delay_s=120.0,
+        retry_max_delay_s=2.0,
+    )  # would fail retryably if dispatched
+
+    with pytest.raises(ValueError, match="retry_base_delay_s"):
+        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX)
+
+    assert backend.call_count == 0  # refused before dispatch
+
+
+@pytest.mark.asyncio
+async def test_a_non_zero_allowance_with_retries_disabled_is_contradictory(
+    tmp_path: Path,
+) -> None:
+    backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=0)
+
+    with pytest.raises(ValueError, match="retry_recovery_allowance_s"):
+        await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            retry_recovery_allowance_s=60.0,
+        )
+
+    assert backend.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_zero_allowance_is_the_sanctioned_way_to_disable_retry_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
+
+    with pytest.raises(_HintError):
+        await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            retry_recovery_allowance_s=0.0,
+        )
+
+    assert backend.call_count == 1 and slept == []
+
+
+@pytest.mark.asyncio
+async def test_retry_recovery_allowance_precedence_policy_then_attribute_then_argument(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A superior declared source wins; a zero allowance ends the ladder immediately."""
+    # Policy (a complete retry declaration) outranks the backend attribute and
+    # the explicit argument: its zero allowance stops after one dispatch.
+    policy_backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
+    policy_backend.retry_policy = SimpleNamespace(
+        attempts=5,
+        base_delay_s=0.0,
+        max_delay_s=0.0,
+        retry_recovery_allowance_s=0.0,
+    )
+    policy_backend.retry_recovery_allowance_s = 300.0
+
+    with pytest.raises(_HintError):
+        await run_agent(
+            policy_backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            retry_recovery_allowance_s=300.0,
+        )
+    assert policy_backend.call_count == 1
+
+    # Backend attribute outranks the explicit argument.
+    attribute_backend = ScriptedBackend(
+        events=[_HintError("503")],
+        retry_attempts=5,
+        retry_recovery_allowance_s=0.0,
+    )
+    with pytest.raises(_HintError):
+        await run_agent(
+            attribute_backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            retry_recovery_allowance_s=300.0,
+        )
+    assert attribute_backend.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_recovery_allowance_argument_outranks_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The file-config argument beats the ambient env override; the env is the last resort."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "0")
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+
+    argument_backend = ScriptedBackend(
+        events=[_HintError("503")],
+        retry_attempts=1,
+        retry_base_delay_s=0.0,
+        retry_max_delay_s=0.0,
+    )
+    with pytest.raises(_HintError):
+        await run_agent(
+            argument_backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            retry_recovery_allowance_s=300.0,
+        )
+    assert argument_backend.call_count == 2  # the argument's 300s outranked the env's 0s
+
+    # Nothing declared but the env: the env's zero stops after one dispatch.
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    env_backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
+    with pytest.raises(_HintError):
+        await run_agent(env_backend, tmp_path, "go", phase=DaydreamPhase.FIX)
+    assert env_backend.call_count == 1

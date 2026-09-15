@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +72,15 @@ class DaydreamFileConfig:
             calls in one file group (the group is severity-sorted, so the dropped
             tail is lowest-severity). ``None`` (the default when the key is absent
             or junk) falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (6).
+        retry_recovery_allowance_s: Issue #734. Cumulative retry-overhead
+            allowance for one invocation, in seconds, a global ``[tool.daydream]``
+            key. Bounds the whole retry ladder: once the first retryable failure
+            activates it, every backoff sleep and retry attempt is charged
+            against it. Must be finite and non-negative; ``0`` is valid and means
+            "no retry recovery". ``None`` (the default when the key is absent or
+            junk -- negative, NaN, inf, bool, or non-number) falls through to
+            ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S`` (300.0); an invalid
+            declared value is warned about so the degradation is observable.
         uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep
             (second-pass reviewer over diff files no per-stack reviewer read).
             ``None`` falls through to the RunConfig field / orchestrator default
@@ -168,6 +179,7 @@ class DaydreamFileConfig:
     scope_issue_filing: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
+    retry_recovery_allowance_s: float | None = None
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
@@ -375,6 +387,27 @@ def _coerce_non_negative_float(raw: Any) -> float | None:
     return value
 
 
+def _coerce_retry_recovery_allowance(merged: dict[str, Any]) -> float | None:
+    """Coerce ``retry_recovery_allowance_s``, warning when a declared value is invalid.
+
+    An absent key stays silent and degrades to ``None`` (the ``config.py``
+    default then applies). A present-but-invalid value -- negative, NaN, inf,
+    bool, or non-number -- also degrades to ``None`` but is logged, naming the
+    key, the raw value, and the default that applies, so an operator's typo is
+    observable rather than a silent no-op.
+    """
+    raw = merged.get("retry_recovery_allowance_s")
+    value = _coerce_non_negative_float(raw)
+    if raw is not None and value is None:
+        logger.warning(
+            "daydream config: retry_recovery_allowance_s = %r is invalid (must be "
+            "a finite non-negative number); using default %s",
+            raw,
+            DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
+        )
+    return value
+
+
 def _coerce_positive_float(raw: Any) -> float | None:
     """Return ``raw`` as a finite positive float, else None (degrade to default).
 
@@ -524,6 +557,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         scope_issue_filing=scope_issue_filing,
         group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
+        retry_recovery_allowance_s=_coerce_retry_recovery_allowance(merged),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         uncovered_sweep=uncovered_sweep,
         uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),

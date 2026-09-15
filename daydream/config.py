@@ -80,6 +80,17 @@ BUDGET_CLEANUP_GRACE_S = 10.0
 RETRY_CIRCUIT_FAILURE_THRESHOLD = 3
 RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
 
+# Cumulative retry-recovery allowance for one invocation (issue #734). A retry
+# may spend only the recovery budget it was given, never the invocation's
+# useful-work time: once the first retryable failure activates it, every backoff
+# sleep and every retry attempt is charged against it, and a spent allowance
+# re-raises the current failure without dispatching again. Overridable via
+# ``[tool.daydream] retry_recovery_allowance_s`` (file config) or the ambient
+# ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var; ``0`` is the sanctioned
+# "no retry recovery" value. 300.0 is the issue's proposed value, NOT yet tuned
+# against outage data (no corpus is reachable from this host).
+DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
+
 # Per-file-group aggregate budget for the fix phase (issue #201). The
 # per-invocation guards above bound each individual run_agent turn; these bound
 # the *cumulative* cost of all fix turns targeting a single file group, so one

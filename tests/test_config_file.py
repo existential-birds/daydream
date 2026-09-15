@@ -428,3 +428,32 @@ def test_diagram_threshold_keys_accept_hyphenated_spellings(tmp_path: Path) -> N
     assert cfg.diagram_min_code_files == 4
     assert cfg.diagram_min_modules == 5
     assert cfg.diagram_min_branch_points == 7
+
+
+def test_retry_recovery_allowance_round_trips_from_the_file_config(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text("retry_recovery_allowance_s = 120\n", encoding="utf-8")
+
+    config = load_file_config(tmp_path)
+
+    assert config.retry_recovery_allowance_s == 120.0
+
+
+def test_an_invalid_retry_recovery_allowance_degrades_observably(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / ".daydream.toml").write_text('retry_recovery_allowance_s = -5\n', encoding="utf-8")
+
+    config = load_file_config(tmp_path)
+
+    assert config.retry_recovery_allowance_s is None            # default applies
+    assert any("retry_recovery_allowance_s" in r.message for r in caplog.records)
+
+
+def test_an_absent_retry_recovery_allowance_stays_silent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A repo that never declares the key gets no warning and the default applies."""
+    config = load_file_config(tmp_path)
+
+    assert config.retry_recovery_allowance_s is None
+    assert not any("retry_recovery_allowance_s" in r.message for r in caplog.records)
