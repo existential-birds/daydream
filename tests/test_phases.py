@@ -23,6 +23,7 @@ from daydream.config import REVIEW_OUTPUT_FILE, TEST_WALL_BUDGET_S
 from daydream.trajectory import TrajectoryRecorder
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
 from tests.harness.stub_backend import StubBackend
@@ -6014,6 +6015,44 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
 
 
 @pytest.mark.asyncio
+async def test_batched_and_fallback_calls_share_the_group_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext]
+) -> None:
+    from daydream import phases
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
+
+    items: list[dict[str, Any]] = [
+        {"id": i, "item_uid": f"item:{i}", "file": "a.py", "related_files": []} for i in (1, 2)
+    ]
+    footprint = AuthorizedFixFootprint.build(tmp_path, set(), items)
+    snapshot = WorktreeRollbackSnapshot(
+        ref="r", index=IndexSnapshot(tree_sha="t", paths=()), path_states=(), untracked={}
+    )
+    batched_deadlines: list[float | None] = []
+    serial_deadlines: list[float | None] = []
+
+    async def _fail_batch(*args: Any, **kwargs: Any) -> None:
+        batched_deadlines.append(kwargs["deadline"])
+        raise RuntimeError("stub: batched fix failure for a.py")
+
+    async def _fix(*args: Any, **kwargs: Any) -> str | None:
+        serial_deadlines.append(kwargs["deadline"])
+        return None
+
+    monkeypatch.setattr(phases, "phase_fix_batched", _fail_batch)
+    monkeypatch.setattr(phases, "phase_fix", _fix)
+
+    await phases.phase_fix_parallel(
+        cast(Backend, object()), make_work(tmp_path), items,
+        footprint=footprint, round_snapshot=snapshot,
+    )
+
+    assert len(batched_deadlines) == 1 and len(serial_deadlines) == 2
+    assert set(batched_deadlines + serial_deadlines) == {batched_deadlines[0]}  # one deadline, no fresh timer
+
+
+@pytest.mark.asyncio
 async def test_phase_test_once_records_host_input_and_output_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6414,6 +6453,39 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     assert batched_calls == ["a.py"]
     assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_fix_turn_is_recorded_as_a_group_stop_not_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext]
+) -> None:
+    from daydream import phases
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
+
+    items = [{"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": []}]
+    footprint = AuthorizedFixFootprint.build(tmp_path, set(), items)
+    snapshot = WorktreeRollbackSnapshot(
+        ref="r", index=IndexSnapshot(tree_sha="t", paths=()), path_states=(), untracked={}
+    )
+    seen: list[float | None] = []
+
+    async def _timed_out_fix(*args: Any, **kwargs: Any) -> str:
+        seen.append(kwargs["deadline"])
+        return "wall_budget_exceeded"
+
+    fake = FakeClock(monotonic_value=99_999.0).install(monkeypatch)
+    assert fake.monotonic_value == 99_999.0
+    monkeypatch.setattr(phases, "phase_fix", _timed_out_fix)
+
+    failures = await phases.phase_fix_parallel(
+        cast(Backend, object()), make_work(tmp_path), items,
+        footprint=footprint, round_snapshot=snapshot,
+        group_max_wall_s=600.0, group_max_serial_items=6,
+    )
+
+    assert failures == {"a.py": "file_group_budget_exceeded: group_wall_budget_exceeded"}
+    assert seen == [100_599.0]    # the group's own absolute deadline: 99_999.0 + 600.0
 
 
 async def test_phase_fix_parallel_partial_dispatch_preserves_successful_group(

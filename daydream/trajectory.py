@@ -3203,7 +3203,13 @@ class TrajectoryRecorder:
         self._emit_phase_event(phase, "phase_end", **metadata)
 
     def emit_file_group_budget_exceeded(
-        self, *, file: str, reason: str, items_processed: int, items_skipped: int
+        self,
+        *,
+        file: str,
+        reason: str,
+        items_processed: int,
+        items_skipped: int,
+        elapsed_s: float | None = None,
     ) -> None:
         """Record a ``file_group_budget_exceeded`` event for the FIX phase (#201).
 
@@ -3218,14 +3224,59 @@ class TrajectoryRecorder:
             reason: Which ceiling tripped (e.g. ``"group_serial_item_limit"``).
             items_processed: Findings fixed before the budget fired.
             items_skipped: Remaining findings in the group left unfixed.
+            elapsed_s: Wall-clock seconds the group consumed before the stop.
+                Omitted from the metadata when ``None`` (the pre-existing
+                four-key shape stays byte-identical for callers that lack it).
+        """
+        metadata: dict[str, Any] = {
+            "file": file,
+            "reason": reason,
+            "items_processed": items_processed,
+            "items_skipped": items_skipped,
+        }
+        if elapsed_s is not None:
+            metadata["elapsed_s"] = elapsed_s
+        self._emit_phase_event(
+            DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata
+        )
+
+    def emit_agent_budget_stop(
+        self,
+        phase: DaydreamPhase,
+        *,
+        limit_expired: str,
+        elapsed_s: float,
+        backend_s: float,
+        backoff_s: float,
+        attempts: int,
+        cleanup_elapsed_s: float | None = None,
+    ) -> None:
+        """Record which time limit ended an invocation and how its time was spent.
+
+        Emitted by ``_run_agent`` (FIX phase) exactly once when the effective
+        invocation deadline ends a turn -- before dispatch, before a backoff
+        sleep, or mid-stream. Serialized into ``Trajectory.extra["phase_events"]``.
+        Only durations and the reason code are recorded -- never a raw monotonic
+        deadline value, which would otherwise be reusable across runs.
+
+        Args:
+            phase: The ``DaydreamPhase`` the invocation ran under.
+            limit_expired: Which input produced the effective deadline.
+            elapsed_s: Wall time from invocation start to the stop.
+            backend_s: Time spent inside dispatched backend attempts.
+            backoff_s: Sum of retry delays actually slept.
+            attempts: Number of attempts dispatched.
+            cleanup_elapsed_s: Optional time spent in bounded post-stop cleanup.
         """
         self._emit_phase_event(
-            DaydreamPhase.FIX,
-            "file_group_budget_exceeded",
-            file=file,
-            reason=reason,
-            items_processed=items_processed,
-            items_skipped=items_skipped,
+            phase,
+            "agent_budget_stop",
+            limit_expired=limit_expired,
+            elapsed_s=elapsed_s,
+            backend_s=backend_s,
+            backoff_s=backoff_s,
+            attempts=attempts,
+            cleanup_elapsed_s=cleanup_elapsed_s,
         )
 
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
