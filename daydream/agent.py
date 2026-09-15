@@ -46,6 +46,7 @@ from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.prompt_budget import PreparedSanctionedInputs
+from daydream.retry_policy import FailureClass, classify_failure
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -73,6 +74,10 @@ _logger = logging.getLogger(__name__)
 
 class _ToolSupervisorFailure(Exception):
     """Internal marker that keeps supervisor failures out of backend retries."""
+
+    #: Names this failure for the shared classifier; a supervisor veto is a
+    #: permanent, never-retryable decision.
+    failure_class = FailureClass.TOOL_POLICY
 
     def __init__(self, original: Exception) -> None:
         self.original = original
@@ -1003,10 +1008,16 @@ async def _run_agent(
                 except Exception as exc:
                     if use_callback:
                         await _flush_callback_text()
+                    # Classify once per failure, before the per-failure cap: a
+                    # permanent condition (bad credentials, an unknown model, a
+                    # schema rejection) wins even when the message also carries
+                    # a transient token or the exception advertises a higher
+                    # retry cap.
+                    classification = classify_failure(exc)
                     exception_max_retries = min(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
-                    if attempt < exception_max_retries and getattr(exc, "retryable", False):
+                    if attempt < exception_max_retries and classification.retries_allowed:
                         # Spending the deadline ends the ladder before the next
                         # backoff sleep: no attempt, no sleep, no raise. The
                         # failed attempt's partials are discarded so they cannot

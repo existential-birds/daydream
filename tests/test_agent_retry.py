@@ -368,3 +368,64 @@ async def test_run_agent_retry_exhausted_marks_trajectory_partial(
     assert trajectory_path.exists(), "trajectory.json was not written on retry exhaustion"
     trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert trajectory["extra"]["partial"] is True
+
+
+class _PermanentWithHigherCap(PiError):
+    """A permanent failure that also advertises a per-failure retry cap."""
+
+    max_retries = 5
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_calls"),
+    [
+        pytest.param(
+            PiError("model not found: gpt-5 (503)", retryable=True, category="SERVER_ERROR"),
+            1,
+            id="permanent-beats-transient-token",
+        ),
+        pytest.param(
+            PiError("invalid api key: not configured", retryable=False, category="AUTH_CONFIG"),
+            1,
+            id="auth",
+        ),
+        pytest.param(
+            PiError("response failed JSON schema validation", retryable=False, category="SCHEMA"),
+            1,
+            id="schema",
+        ),
+        pytest.param(
+            _PermanentWithHigherCap("model not found: gpt-5", category="AUTH_CONFIG"),
+            1,
+            id="cap-override-cannot-raise",
+        ),
+        pytest.param(
+            PiError("429 rate limit exceeded", retryable=True, category="RATE_LIMIT"),
+            2,
+            id="rate-limit",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failure_classification_decides_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: PiError,
+    expected_calls: int,
+) -> None:
+    """Permanent conditions get zero retries; transient ones still retry."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    backend = (
+        ScriptedBackend(events=[error])
+        if expected_calls == 1
+        else _fail_then_succeed(error, text="done")
+    )
+
+    if expected_calls == 1:
+        with pytest.raises(type(error)):
+            await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+    else:
+        assert (await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW))[0] == "done"
+
+    assert backend.call_count == expected_calls
