@@ -126,6 +126,46 @@ class _RetryableFailingBackend:
         pass
 
 
+@dataclass
+class _RetryableThenSucceedingBackend:
+    """Attempt 1 fails retryably; attempt 2 spends a large, legitimate turn then succeeds."""
+
+    advance: Callable[[float], None]
+    retry_advance_s: float
+    success_advance_s: float
+    model = "mock-model"
+    fanout_concurrency: int = 4
+    calls: int = 0
+    retry_policy: RetryPolicy = field(
+        default_factory=lambda: RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    )
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            self.calls += 1
+            if self.calls == 1:
+                self.advance(self.retry_advance_s)
+                raise _RetryableBackendError("transient")
+            self.advance(self.success_advance_s)
+            yield TextEvent(text="done")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        pass
+
+
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
     return TrajectoryRecorder(
         path=tmp_path / ".daydream" / "trajectory.json",
@@ -527,3 +567,87 @@ async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> N
         await task
 
     assert backend.cancelled is True
+
+
+async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=30.0)
+    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0)
+
+    with pytest.raises(_RetryableBackendError):
+        await run_agent(
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0, retry_recovery_allowance_s=60.0,
+        )
+
+    # 1000 (+30 attempt 1) -> backoff 60 -> 1090 (+30 attempt 2) -> allowance spent -> stop
+    assert backend.calls == 2
+    assert slept == [60.0]
+    assert fake.monotonic_value == 1_120.0
+
+
+async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
+    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0)
+
+    with pytest.raises(_RetryableBackendError):
+        await run_agent(
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+            retry_recovery_allowance_s=100.0,
+        )
+
+    assert backend.calls == 4  # 1 + 40 + 40 + 20, then the allowance is spent
+    assert slept == [40.0, 40.0, 20.0]  # a re-basing implementation would sleep 40 forever
+
+
+async def test_group_deadline_still_wins_over_a_larger_allowance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=20.0)
+    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+
+    _, _, reason = await run_agent(
+        backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+        deadline=1_030.0, retry_recovery_allowance_s=300.0,
+    )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.calls == 2  # stopped at the group deadline, not the allowance
+
+
+async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    backend = _RetryableThenSucceedingBackend(
+        advance=fake.advance, retry_advance_s=0.0, success_advance_s=1_200.0
+    )
+
+    output, _, reason = await run_agent(
+        backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+        wall_budget_s=1_800.0, retry_recovery_allowance_s=300.0,
+    )
+
+    assert output == "done"
+    assert reason is None  # 1200 s of legitimate post-retry work is not cancelled
+    assert backend.calls == 2

@@ -46,7 +46,7 @@ from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.prompt_budget import PreparedSanctionedInputs
-from daydream.retry_policy import FailureClass, classify_failure
+from daydream.retry_policy import FailureClass, RetryRecoveryBudget, classify_failure
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -70,6 +70,24 @@ from daydream.ui import (
 from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG
 
 _logger = logging.getLogger(__name__)
+
+#: Default cumulative retry-recovery allowance for one invocation, in seconds.
+#: The issue's proposed value; not yet tuned against outage data (no corpus is
+#: reachable from this host). ``0`` is the sanctioned "no retry recovery" value.
+#: Task 6 (config) owns the file-config/env precedence for this bound.
+DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
+
+
+def _sample_retry_delay(cap: float) -> float:
+    """Sample a bounded full-jitter backoff delay uniformly from ``[0, cap]``.
+
+    The only consumer of ``random`` in the retry path; tests pin this seam. The
+    sampler is never seeded. Callers clamp the result to ``cap`` again so a
+    hostile sample cannot overshoot.
+    """
+    if cap <= 0:
+        return 0.0
+    return random.uniform(0.0, cap)
 
 
 class _ToolSupervisorFailure(Exception):
@@ -437,6 +455,7 @@ async def run_agent(
     wall_budget_s: float | None = None,
     deadline: float | None = None,
     tool_call_budget: int | None = None,
+    retry_recovery_allowance_s: float | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
@@ -459,6 +478,7 @@ async def run_agent(
             continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
             persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
             tool_call_budget=tool_call_budget,
+            retry_recovery_allowance_s=retry_recovery_allowance_s,
             validate_structured_output=validate_structured_output,
             sanctioned_inputs=sanctioned_inputs,
             run_context=context,
@@ -484,6 +504,7 @@ async def _run_agent(
     wall_budget_s: float | None = None,
     deadline: float | None = None,
     tool_call_budget: int | None = None,
+    retry_recovery_allowance_s: float | None = None,
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
@@ -539,6 +560,15 @@ async def _run_agent(
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
+        retry_recovery_allowance_s: Cumulative retry-overhead allowance for this
+            invocation, in seconds. It bounds the whole retry ladder: once the
+            first retryable failure activates it, every backoff sleep and every
+            retry attempt is charged against it, and a spent allowance re-raises
+            the current failure without dispatching again. It composes with the
+            single effective deadline by clamping (never re-basing) and never
+            interrupts an attempt that is already running. ``None`` (the
+            default) resolves to ``DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``; ``0``
+            disables retry recovery.
         validate_structured_output: When True (default), structured output —
             the backend-supplied primary result and the extraction fallback alike
             — is returned only when its shape is usable by downstream consumers
@@ -638,8 +668,18 @@ async def _run_agent(
             else:
                 effective_deadline = None
                 limit_expired = None
+            # Resolve the cumulative retry-recovery allowance once, after the
+            # single effective deadline so activation can clamp to what remains.
+            recovery = RetryRecoveryBudget(
+                DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+                if retry_recovery_allowance_s is None
+                else retry_recovery_allowance_s
+            )
             # Telemetry counters for the single invocation: only dispatched
-            # attempts and time actually spent inside them are charged.
+            # attempts and time actually spent inside them are charged. The
+            # retry-recovery budget is a third, independent accumulator: its
+            # charges are never added to backend_s or backoff_s, so the
+            # backend_s + backoff_s <= elapsed_s invariant holds unchanged.
             attempts_dispatched = 0
             backend_s = 0.0
             backoff_s = 0.0
@@ -672,6 +712,10 @@ async def _run_agent(
                 # time before its backoff sleep, keeping that sleep out of
                 # backend_s (it is counted in backoff_s instead).
                 attempt_started_at: float | None = clock.monotonic()
+                # Retry attempts' backend time is charged to the recovery budget;
+                # the attempt that produces the first retryable failure is not
+                # (activation happens after it).
+                charge_recovery = recovery.active
                 attempts_dispatched += 1
                 # Track tool names by id for log mode output
                 tool_names: dict[str, str] = {}
@@ -1018,6 +1062,11 @@ async def _run_agent(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
                     if attempt < exception_max_retries and classification.retries_allowed:
+                        # Activate the cumulative retry-recovery allowance on the
+                        # first retryable failure, clamped once to whatever the
+                        # effective deadline leaves so the two bounds compose by
+                        # clamping, never by re-basing.
+                        recovery.activate(clock.monotonic(), effective_deadline)
                         # Spending the deadline ends the ladder before the next
                         # backoff sleep: no attempt, no sleep, no raise. The
                         # failed attempt's partials are discarded so they cannot
@@ -1028,17 +1077,23 @@ async def _run_agent(
                             result_continuation = None
                             aborted_reason = "wall_budget_exceeded"
                             break
-                        delay = min(
-                            base_delay * (2 ** attempt) + random.uniform(0, 1),
-                            max_delay,
-                        )
-                        # Bound the backoff sleep by the time the effective
-                        # deadline has left: a retry storm must not overshoot
-                        # the invocation/group ceiling by up to one backoff
-                        # interval. A spent deadline then breaks at the top of
-                        # the next loop iteration.
+                        # Spending the recovery allowance ends the ladder too: no
+                        # dispatch, no sleep, straight to the caller with the
+                        # current failure's attributes intact.
+                        if recovery.remaining() <= 0.0:
+                            raise
+                        # Bound the backoff by the smaller of the exponential
+                        # growth, the configured maximum, the remaining allowance
+                        # and the time the effective deadline has left: a retry
+                        # storm must not overshoot either ceiling by up to one
+                        # backoff interval.
+                        cap = min(base_delay * (2 ** attempt), max_delay)
+                        if recovery.active:
+                            cap = min(cap, recovery.remaining())
                         if effective_deadline is not None:
-                            delay = min(delay, max(effective_deadline - clock.monotonic(), 0.0))
+                            cap = min(cap, max(effective_deadline - clock.monotonic(), 0.0))
+                        cap = max(cap, 0.0)
+                        delay = min(_sample_retry_delay(cap), cap)
                         retry_msg = (
                             f"Backend error ({type(exc).__name__}), retrying "
                             f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
@@ -1059,8 +1114,15 @@ async def _run_agent(
                         # (counted in backoff_s) and must not also land in
                         # backend_s, or backend_s + backoff_s would overcount.
                         if attempt_started_at is not None:
-                            backend_s += clock.monotonic() - attempt_started_at
+                            delta = clock.monotonic() - attempt_started_at
+                            backend_s += delta
+                            if charge_recovery:
+                                recovery.charge_attempt(delta)
                             attempt_started_at = None
+                        # The backoff sleep is retry overhead: charge it to the
+                        # cumulative allowance before sleeping so a later
+                        # failure sees the un-rebased remainder.
+                        recovery.charge(delay)
                         await anyio.sleep(delay)
                         backoff_s += delay
                         continue
@@ -1072,7 +1134,10 @@ async def _run_agent(
                         # its documented 'time inside dispatched attempts'
                         # semantics and backend_s + backoff_s can never exceed
                         # elapsed_s (which already subtracts cleanup_elapsed_s).
-                        backend_s += clock.monotonic() - attempt_started_at - cleanup_elapsed_s
+                        delta = clock.monotonic() - attempt_started_at - cleanup_elapsed_s
+                        backend_s += delta
+                        if charge_recovery:
+                            recovery.charge_attempt(delta)
 
             # One honest stop record when a time budget ended the invocation --
             # best-effort and recorder-optional, so a recorder failure never

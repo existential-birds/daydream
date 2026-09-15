@@ -15,7 +15,7 @@ hostile exception cannot make classification itself a failure.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -80,6 +80,66 @@ class RetryDecision:
 
     failure_class: FailureClass
     retries_allowed: bool
+
+
+@dataclass
+class RetryRecoveryBudget:
+    """Cumulative retry-overhead allowance for one invocation's ladder.
+
+    A retry may spend only the recovery budget it was given, never the
+    invocation's useful-work time. The budget is activated on the *first*
+    retryable failure; at that instant its ``allowance_s`` is clamped once to
+    the remaining effective deadline so it composes with the single invocation
+    deadline by clamping, never by re-basing. Every later failure consults the
+    same cumulative accumulator, so a retry storm cannot reset the allowance.
+
+    Pure state: the caller supplies every clock value. Charges are cumulative
+    and independent of ``backend_s``/``backoff_s``; :meth:`remaining` never
+    returns a negative value.
+    """
+
+    allowance_s: float
+    _activated_at: float | None = field(default=None, init=False)
+    _spent_s: float = field(default=0.0, init=False)
+
+    def activate(self, now: float, effective_deadline: float | None = None) -> None:
+        """Start the allowance clock; idempotent on every later failure.
+
+        On the first call the activation instant is recorded and ``allowance_s``
+        is clamped to whatever the effective deadline leaves (never increased),
+        once, never re-based. Later calls are no-ops.
+        """
+        if self._activated_at is not None:
+            return
+        self._activated_at = now
+        if effective_deadline is not None:
+            remaining_deadline_s = effective_deadline - now
+            if remaining_deadline_s < self.allowance_s:
+                self.allowance_s = max(remaining_deadline_s, 0.0)
+
+    @property
+    def active(self) -> bool:
+        """Whether a retryable failure has activated the budget."""
+        return self._activated_at is not None
+
+    @property
+    def spent_s(self) -> float:
+        """Cumulative retry overhead charged so far."""
+        return self._spent_s
+
+    def charge(self, seconds: float) -> None:
+        """Charge backoff-sleep seconds to the cumulative allowance."""
+        if seconds > 0:
+            self._spent_s += seconds
+
+    def charge_attempt(self, seconds: float) -> None:
+        """Charge time spent inside a retry attempt to the cumulative allowance."""
+        if seconds > 0:
+            self._spent_s += seconds
+
+    def remaining(self) -> float:
+        """Seconds of recovery allowance left, clamped at zero."""
+        return max(0.0, self.allowance_s - self._spent_s)
 
 
 def _decide(failure_class: FailureClass) -> RetryDecision:
