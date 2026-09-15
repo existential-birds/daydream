@@ -1278,122 +1278,45 @@ def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
     assert result["per_file"]["app.py"]["high_cc_functions"] == 0
 
 
-def test_quality_verbosity_flags_identity_comprehension(tmp_path: Path) -> None:
-    ws = _quality_workspace(tmp_path, {"app.py": "def f(items):\n    return [x for x in items]\n"})
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param("def f(items):\n    return [x for x in items]\n", 1 / 2, id="identity-comprehension"),
+        pytest.param(
+            "def process(items):\n    for x in items:\n        if len(items) == 0:\n"
+            "            return None\n        print(x)\n",
+            2 / 5,
+            id="empty-list-guard",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = x + 1\n    return intermediate * 2\n",
+            round(1 / 3, 4),
+            id="single-use-variable",
+        ),
+        pytest.param(
+            "def inner(x, y):\n    return x + y\n\ndef outer(x, y):\n    return inner(x, y)\n",
+            2 / 4,
+            id="trivial-wrapper",
+        ),
+        pytest.param(
+            "def f(a, b, c):\n    if a:\n        if b:\n            if c:\n"
+            "                return 1\n    return 0\n",
+            round(2 / 6, 4),
+            id="nested-ladder",
+        ),
+        pytest.param(
+            "def a():\n    if x > 1:\n        return 1\n    return 0\n\n"
+            "def b():\n    if x > 1:\n        return 1\n    return 0\n",
+            6 / 8,
+            id="clone-block",
+        ),
+    ],
+)
+def test_quality_verbosity_detects_redundancy(tmp_path: Path, source: str, expected: float) -> None:
+    ws = _quality_workspace(tmp_path, {"app.py": source})
+    entry = analyze_quality(ws / ".daydream")["per_file"]["app.py"]
     assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(1 / 2)
-
-
-def test_quality_verbosity_flags_empty_list_guard(tmp_path: Path) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def process(items):\n"
-                "    for x in items:\n"
-                "        if len(items) == 0:\n"
-                "            return None\n"
-                "        print(x)\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(2 / 5)
-
-
-def test_quality_verbosity_flags_single_use_variable(tmp_path: Path) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def compute(x):\n"
-                "    intermediate = x + 1\n"
-                "    return intermediate * 2\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(round(1 / 3, 4))
-
-
-def test_quality_verbosity_flags_trivial_wrapper(tmp_path: Path) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def inner(x, y):\n"
-                "    return x + y\n"
-                "\n"
-                "def outer(x, y):\n"
-                "    return inner(x, y)\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(2 / 4)
-
-
-def test_quality_verbosity_flags_nested_ladder(tmp_path: Path) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(a, b, c):\n"
-                "    if a:\n"
-                "        if b:\n"
-                "            if c:\n"
-                "                return 1\n"
-                "    return 0\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(round(2 / 6, 4))
-
-
-def test_quality_verbosity_flags_clone_block(tmp_path: Path) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def a():\n"
-                "    if x > 1:\n"
-                "        return 1\n"
-                "    return 0\n"
-                "\n"
-                "def b():\n"
-                "    if x > 1:\n"
-                "        return 1\n"
-                "    return 0\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(6 / 8)
+    assert entry["verbosity"] == pytest.approx(expected)
 
 
 def test_quality_per_file_keyed_by_relative_path(tmp_path: Path) -> None:
@@ -1633,159 +1556,60 @@ def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> No
     assert entry["erosion"] == 1.0
 
 
-def test_quality_verbosity_filtered_comprehension_not_flagged(tmp_path: Path) -> None:
-    """``[x for x in items if x > 0]`` filters, so it is not an identity."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(items):\n    return [x for x in items if x > 0]\n"},
-    )
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(
+            "def f(items):\n    return [x for x in items if x > 0]\n",
+            0.0,
+            id="filtered-comprehension",
+        ),
+        pytest.param(
+            "def f(a, b):\n    return [x for x in a for y in b]\n",
+            0.0,
+            id="multi-generator-comprehension",
+        ),
+        pytest.param(
+            "def f(items):\n    while should_continue(items):\n"
+            "        if not items:\n            break\n",
+            0.0,
+            id="predicate-guard",
+        ),
+        pytest.param(
+            "def f(items):\n    while items:\n        if not items:\n            break\n",
+            2 / 4,
+            id="bare-collection-guard",
+        ),
+        pytest.param(
+            "def f(items):\n    while len(items) > 0:\n        if not items:\n"
+            "            break\n",
+            2 / 4,
+            id="len-comparison-guard",
+        ),
+    ],
+)
+def test_quality_verbosity_collection_cases(tmp_path: Path, source: str, expected: float) -> None:
+    ws = _quality_workspace(tmp_path, {"app.py": source})
+    entry = analyze_quality(ws / ".daydream")["per_file"]["app.py"]
+    if expected:
+        assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(expected)
 
+
+@pytest.mark.parametrize(
+    ("source", "verbosity"),
+    [
+        ("def f(x):\n    return g(x, 42)\n", 0.0),  # literal argument
+        ("def f(x):\n    return g(x=x)\n", 0.0),  # keyword argument
+        ("def f(*xs):\n    return g(*xs)\n", 0.0),  # starred argument
+        ("def f(x: int):\n    return g(x)\n", 1.0),  # annotation adds no behavior
+        ("def f(x=1):\n    return g(x)\n", 0.0),  # default adds behavior
+    ],
+)
+def test_quality_verbosity_wrapper_cases(tmp_path: Path, source: str, verbosity: float) -> None:
+    ws = _quality_workspace(tmp_path, {"app.py": source})
     result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
-
-
-def test_quality_verbosity_multi_generator_comprehension_not_flagged(
-    tmp_path: Path,
-) -> None:
-    """``[x for x in a for y in b]`` is a product, not a passthrough."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(a, b):\n    return [x for x in a for y in b]\n"},
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
-
-
-def test_quality_verbosity_while_predicate_guard_not_flagged(tmp_path: Path) -> None:
-    """A predicate merely receiving the collection does not prove it nonempty."""
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(items):\n"
-                "    while should_continue(items):\n"
-                "        if not items:\n"
-                "            break\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
-
-
-def test_quality_verbosity_while_bare_collection_guard_flagged(tmp_path: Path) -> None:
-    """``while items:`` proves nonemptiness, so the guard is redundant."""
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(items):\n"
-                "    while items:\n"
-                "        if not items:\n"
-                "            break\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(2 / 4)
-
-
-def test_quality_verbosity_while_len_comparison_guard_flagged(tmp_path: Path) -> None:
-    """``while len(items) > 0:`` proves nonemptiness, so the guard is redundant."""
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(items):\n"
-                "    while len(items) > 0:\n"
-                "        if not items:\n"
-                "            break\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(2 / 4)
-
-
-def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(
-    tmp_path: Path,
-) -> None:
-    """``g(x, 42)`` supplies a literal, so the wrapper is not a pure passthrough."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(x):\n    return g(x, 42)\n"},
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
-
-
-def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(
-    tmp_path: Path,
-) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(x):\n    return g(x=x)\n"},
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
-
-
-def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(
-    tmp_path: Path,
-) -> None:
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(*xs):\n    return g(*xs)\n"},
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
-
-
-def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(
-    tmp_path: Path,
-) -> None:
-    """A type annotation adds no behavior, so ``def f(x: int): return g(x)`` is a wrapper."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(x: int):\n    return g(x)\n"},
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 1.0
-
-
-def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(
-    tmp_path: Path,
-) -> None:
-    """A default supplies behavior, so ``def f(x=1): return g(x)`` is not a wrapper."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def f(x=1):\n    return g(x)\n"},
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0
+    assert result["per_file"]["app.py"]["verbosity"] == verbosity
 
 
 # --- review round 2 fix regressions (#316) ---

@@ -1,39 +1,8 @@
-"""Single point of contact for all ``git`` and ``gh`` subprocess calls.
+"""Single subprocess boundary for repository ``git`` and GitHub ``gh`` operations.
 
-This module centralises every shell-out daydream performs against the local
-repository or GitHub.  All callers should depend on the public API declared
-here rather than spawning ``git`` / ``gh`` directly — that lets the worktree
-isolation work evolve invariants (timeouts, working directory contracts,
-error semantics) without rewriting the same incantations across the codebase.
-
-Conventions:
-    * Every command receives ``cwd=repo`` (no ``git -C`` shenanigans).
-    * Read-only queries time out at 5 seconds, IO-bound at 30 seconds, and
-      ``gh`` operations at 60 seconds.
-    * ``git`` timeouts are retried a bounded number of times before raising
-      :class:`GitTimeoutError` — a trivial command exceeding its timeout means
-      the host is overloaded, not that the command hung. Only read-only queries
-      are retried; mutating operations (fetch/checkout/clean/worktree/amend)
-      pass ``retries=0`` because re-running a non-idempotent command after a
-      timeout could happen on top of partial repo changes.
-
-Error-handling patterns:
-    Functions in this module follow one of two documented patterns:
-
-    **Hard failure (raise GitError)**: Used when the caller cannot proceed
-    without the result. Examples: :func:`head_sha`, :func:`diff`, :func:`fetch`.
-    These raise :class:`GitError` (or a subclass) on any non-zero exit.
-
-    **Soft failure (return sentinel)**: Used when "data not available" is a
-    valid, expected outcome the caller can handle inline. These return
-    ``None``, ``False``, ``0``, or ``[]`` on non-zero exit instead of raising.
-    Examples: :func:`remote_url`, :func:`merge_base`, :func:`gh_repo_view`.
-
-    Each function's docstring specifies which pattern it follows under its
-    **Raises** or **Returns** section.
-
-Apart from the shared bounded subprocess-termination helper, this module uses
-only the standard library.
+Commands run from ``repo``. Read-only queries may retry timeouts; mutating
+commands do not. Callers choose hard failures (``GitError``) or documented
+sentinels when absence is expected.
 """
 
 from __future__ import annotations
@@ -479,38 +448,12 @@ def _run_git(
     input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[Any]:
-    """Run ``git`` in *repo* with hardened defaults.
+    """Run ``git`` from *repo*, returning its completed process without checking its exit code.
 
-    Args:
-        capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
-        input_text: Optional text piped to the subprocess on **stdin** (used
-            for ``git update-ref --stdin`` batch transactions whose payload
-            cannot express the whole ref set on argv). Encoded to UTF-8 when
-            *capture_bytes* is set so the binary variant never feeds ``str``
-            to the subprocess.
-        input_bytes: Optional raw bytes piped to stdin. Requires
-            ``capture_bytes=True`` and is mutually exclusive with
-            ``input_text``.
-        retries: How many additional attempts to make after a
-            :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
-            Only timeouts are retried; other failures raise immediately.
-            Mutating wrappers pass ``retries=0`` because re-running a
-            non-idempotent git command after a timeout is unsafe; only
-            read-only queries inherit the retrying default.
-        env_cmd: Optional environment mapping for the subprocess (default None
-            inherits the parent environment). Preflight read-only helpers pass
-            ``GIT_TERMINAL_PROMPT=0`` here so a credential failure is surfaced
-            rather than prompting on stdin.
-
-    Returns:
-        The completed process. ``returncode`` is left to the caller to inspect.
-
-    Raises:
-        GitTimeoutError: If every attempt times out. Subclass of
-            :class:`GitError`, so existing ``except GitError`` handlers still
-            catch it.
-        GitError: If the underlying subprocess machinery fails for any other
-            reason (missing binary, OS-level error).
+    Text input is UTF-8 encoded for binary capture; raw byte input requires
+    binary capture. Only timeouts are retried. Mutating callers pass
+    ``retries=0`` to avoid repeating a partially completed command. Subprocess
+    failures raise ``GitError``; exhausted timeouts raise ``GitTimeoutError``.
     """
     if input_text is not None and input_bytes is not None:
         raise GitError("git subprocess input must be text or bytes, not both")
@@ -566,35 +509,12 @@ def _run_gh(
     input_text: str | None = None,
     retries: int = 0,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``gh`` in *repo* with hardened defaults.
+    """Run ``gh`` from *repo*, returning its text-decoded completed process.
 
-    Args:
-        timeout: Subprocess timeout in seconds. ``None`` (the default) uses the
-            env-overridable :func:`_gh_timeout`.
-        input_text: Optional text piped to the subprocess on **stdin** (used to
-            pass secret values to ``gh secret set``, which reads stdin when
-            ``--body`` is omitted, so the value never appears in the process
-            argument vector).
-        retries: How many additional attempts to make after a
-            :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
-            Only timeouts are retried; other failures raise immediately. Defaults
-            to ``0`` so a non-idempotent ``gh`` call (e.g. ``pr create``,
-            ``secret set``, a GraphQL mutation) is never re-run after a timeout.
-            Read-only callers pass :func:`_gh_retries` to ride out host CPU
-            starvation.
-
-    The subprocess environment is resolved from *auth* once for the complete
-    retry sequence. ``None`` requests live parent-process inheritance; an
-    explicit mapping is already complete and is passed through unchanged.
-
-    Returns:
-        The completed process with text-decoded stdout/stderr.
-
-    Raises:
-        GitTimeoutError: If every attempt times out. Subclass of
-            :class:`GitError`.
-        GitError: If the subprocess machinery fails for any other reason
-            (missing ``gh``, OS-level error).
+    Authentication is resolved once per retry sequence. The default timeout
+    comes from :func:`_gh_timeout`; mutating calls do not retry. Sensitive
+    values can be sent through ``input_text`` rather than argv. Subprocess
+    failures raise ``GitError``; exhausted timeouts raise ``GitTimeoutError``.
     """
     if timeout is None:
         timeout = _gh_timeout()
@@ -1213,38 +1133,13 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
 def capture_recommended_patch(
     repo: Path, base_ref: str | None, out_path: Path, *, preexisting_untracked: set[str] | None = None
 ) -> bool:
-    """Write daydream's proposed diff (``base_ref`` → working tree) to *out_path*.
+    """Write the pre-fix-base to working-tree patch, including newly untracked files.
 
-    Captures the *recommended-change patch*: the difference between the pre-fix
-    tree named by *base_ref* and the current working tree — i.e. the edits
-    daydream applied during the fix phase. This is distinct from ``diff.patch``,
-    which is the PR-under-review diff captured before any fix ran.
-
-    *base_ref* must be resolved by the caller BEFORE fixes run, as
-    ``pre_fix_snapshot or pre_fix_head_sha``: :func:`stash_create` returns
-    ``None`` on a clean tree (the common pre-fix case), so the pre-fix ``HEAD``
-    SHA is the fallback base. The ``HEAD`` SHA must be captured before fixes
-    because the commit phase advances ``HEAD`` past the fix.
-
-    Best-effort: writes nothing and returns ``False`` when *base_ref* is
-    ``None`` or git fails. When the diff is empty (no fix landed) it writes an
-    *empty* marker file (and returns ``False``) so the run is distinguishable
-    from a legacy archive, which has no ``recommended.patch`` at all —
-    otherwise ``_read_recommended_patch`` falls back to ``diff.patch`` (the
-    PR-under-review diff) and mislabels a no-recommendation run as "applied".
-    Never raises.
-
-    Args:
-        base_ref: Pre-fix base ref (a ``stash create`` SHA or a ``HEAD`` SHA),
-            or ``None`` when no pre-fix snapshot could be taken.
-        preexisting_untracked: Set of repo-relative paths that were untracked
-            BEFORE the fix ran. Matching untracked files contribute no creation
-            hunk (they are not daydream's changes); files absent from the set
-            still do. Order follows :func:`list_untracked`, never re-sorted.
-            ``None`` (default) excludes nothing, preserving legacy behavior.
-
-    Returns:
-        ``True`` when a non-empty patch was written, else ``False``.
+    The caller captures *base_ref* before fixes and excludes paths in
+    *preexisting_untracked*. A missing base or git failure returns ``False``
+    without writing. An empty diff writes an empty marker to distinguish no
+    recommendation from an old archive without ``recommended.patch``. This
+    best-effort function never raises and returns ``True`` only for a nonempty patch.
     """
     if not base_ref:
         return False
@@ -1285,34 +1180,10 @@ def capture_recommended_patch_with_base(
     *,
     preexisting_untracked: set[str] | None = None,
 ) -> bool:
-    """Capture the recommended patch, resolving the pre-fix base centrally.
+    """Use a pre-fix stash SHA, falling back to the pre-fix ``HEAD`` SHA.
 
-    Thin wrapper over :func:`capture_recommended_patch` that resolves the
-    pre-fix base as ``pre_fix_snapshot or pre_fix_head`` in one place, so the
-    deep and shallow fix paths cannot drift apart in how they pick the base.
-
-    *pre_fix_snapshot* is a ``stash create`` SHA of the tracked tree taken
-    before fixes; :func:`stash_create` returns ``None`` on a clean tree (the
-    common pre-fix case), so *pre_fix_head* -- the pre-fix ``HEAD`` SHA -- is
-    the fallback base. *pre_fix_head* is therefore only consulted when the
-    snapshot is ``None`` and need not be captured otherwise. Both must be
-    captured *before* the fix/commit phase, which advances ``HEAD`` past the
-    fix.
-
-    Best-effort: never raises (see :func:`capture_recommended_patch`).
-
-    Args:
-        pre_fix_snapshot: ``stash create`` SHA, or ``None`` when the tree was
-            clean or the snapshot failed.
-        pre_fix_head: Pre-fix ``HEAD`` SHA, or ``None``. Used only when
-            *pre_fix_snapshot* is ``None``.
-        preexisting_untracked: Set of repo-relative paths that were untracked
-            BEFORE the fix ran, forwarded to
-            :func:`capture_recommended_patch` so they contribute no creation
-            hunk. ``None`` (default) excludes nothing.
-
-    Returns:
-        ``True`` when a non-empty patch was written, else ``False``.
+    Both inputs are captured before fixes or commit. Forwards the base and
+    preexisting untracked paths to :func:`capture_recommended_patch`.
     """
     base_ref = pre_fix_snapshot or pre_fix_head
     return capture_recommended_patch(
@@ -4235,38 +4106,14 @@ def gh_api(
     headers: dict[str, str] | None = None,
     idempotent: bool = False,
 ) -> Any:
-    """Call ``gh api <endpoint>`` and return parsed JSON.
+    """Call ``gh api <endpoint>`` and parse JSON, or NDJSON when *jq* is set.
 
-    Args:
-        paginate: When True, pass ``--paginate`` to walk all result pages.
-        input_data: Optional JSON-serialisable payload. When provided, it is
-            written to a temporary file and passed via ``--input <path>`` and
-            the call uses ``--method <method>`` (gh's preferred form). On
-            success the tempfile is removed; on failure it is preserved and
-            its path is included in the raised :class:`GitError` so callers
-            can inspect the exact request body that was sent.
-        jq: Optional ``gh --jq`` filter. Each filtered value is JSON-encoded,
-            then parsed as NDJSON and returned as a list. With
-            ``paginate=True`` gh concatenates each page's raw JSON, which is
-            not itself valid JSON for array endpoints — a filter like ``".[]"``
-            flattens every page to one value per line instead.
-        headers: Optional extra request headers passed via ``gh api -H``. An
-            explicit ``Authorization`` header takes precedence over the
-            ``token``-scheme header gh derives from ``GH_TOKEN`` — required
-            for App JWT calls, which GitHub only accepts as ``Bearer``.
-        idempotent: When True, the call is retried on timeout (host CPU
-            starvation). Set this only for reads — GET endpoints and GraphQL
-            *queries* — never for mutations, since ``method``/``input_data``
-            alone cannot distinguish a GraphQL query from a mutation (both POST).
-
-    Returns:
-        The parsed JSON value (object, list, or scalar); with *jq*, a list of
-        the filtered values.
-
-    Raises:
-        RateLimitError: If the call fails due to a GitHub API rate limit
-            (detected from the ``gh`` stderr marker-set).
-        GitError: If the call fails for any other reason or returns invalid JSON.
+    A JSON *input_data* body travels through a temporary file: success removes
+    it; failure preserves it and names its path in ``GitError``. *jq* flattens
+    concatenated paginated arrays into one JSON value per line. Explicit
+    authorization headers support App JWT calls. Only read callers set
+    *idempotent* to retry timeouts: GraphQL mutations also use POST and cannot
+    be inferred from *method*. Rate limits raise ``RateLimitError``.
     """
     header_args = [arg for name, value in (headers or {}).items() for arg in ("-H", f"{name}: {value}")]
     output_args: list[str] = []
@@ -4578,31 +4425,11 @@ def gh_issue_create(
     repo_slug: str | None = None,
     labels: list[str] | None = None,
 ) -> str:
-    """Open a GitHub issue via ``gh issue create`` and return its URL.
+    """Create an issue for an out-of-scope finding and return its URL.
 
-    Used by the fix loop (issue #336) to route out-of-scope-but-valid findings
-    — files outside the reviewed diff or residuals after a fix round — into a
-    tracked issue instead of auto-applying them to the PR.
-
-    The body is written to a temp file and passed via ``--body-file`` so it
-    never appears on the process argument vector (process-list hygiene; bodies
-    can be large). Same pattern as ``gh secret set``'s stdin path.
-
-    Args:
-        repo: Worktree the call is rooted in (cwd for ``gh``).
-        title: Issue title (inline ``--title``).
-        body: Issue body markdown (written to a tempfile, passed as
-            ``--body-file``).
-        repo_slug: Explicit ``owner/repo`` target (``--repo``). When *None*
-            the ambient ``gh`` context (cwd) is used.
-        labels: Optional labels applied verbatim as repeated ``--label`` flags.
-            *None* (the default) emits no ``--label`` flag.
-
-    Returns:
-        The created issue's URL (parsed from ``gh``'s stdout).
-
-    Raises:
-        GitError: If the ``gh issue create`` call fails (stderr included).
+    The body travels through ``--body-file`` and never appears on argv.
+    *repo_slug* selects an explicit repository; labels are optional. Failed
+    creation raises ``GitError``.
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", delete=False, encoding="utf-8"
@@ -4637,27 +4464,10 @@ def gh_issue_list(
     limit: int = 100,
     repo_slug: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List issues via ``gh issue list``; best-effort (empty list on failure).
+    """List issues for best-effort cross-run finding deduplication.
 
-    Used by the fix loop (issue #336) for cross-run dedup of out-of-scope
-    findings filed as issues: before filing, the caller checks whether an open
-    issue already carries the finding's fingerprint marker, so a re-run/resume
-    does not re-file the same finding (GitHub is the store — same stateless
-    cross-run dedup model as :mod:`daydream.reconcile`). Best-effort by design
-    so a failed ``gh issue list`` (no auth, offline, cross-org) degrades to
-    filing rather than blocking the scope decision.
-
-    Args:
-        repo: Worktree the call is rooted in (cwd for ``gh``).
-        state: Issue state filter (``--state``); defaults to ``open``.
-        search: Optional ``--search`` qualifier to narrow results.
-        limit: Cap on the number of issues returned (``--limit``).
-        repo_slug: Explicit ``owner/repo`` target (``--repo``). When *None*
-            the ambient ``gh`` context (cwd) is used.
-
-    Returns:
-        List of issue dicts (``number``, ``title``, ``body``, ``url``) — empty
-        when no issues match or the call fails.
+    Returns ``[]`` on lookup failure so a transient GitHub error does not
+    block filing an out-of-scope finding. Rows carry number, title, body, and URL.
     """
     args: list[str] = [
         "issue",
@@ -4694,26 +4504,11 @@ def gh_issue_list_strict(
     state: str = "all",
     repo_slug: str,
 ) -> list[dict[str, Any]]:
-    """List every issue through the paginated REST API, failing closed.
+    """List all repository issues with strict lookup and response validation.
 
-    Unlike :func:`gh_issue_list`, this helper is for workflows where an empty
-    result after a failed lookup could cause a duplicate write. It therefore
-    raises on transport, API, and response-shape failures. GitHub's REST issue
-    endpoint also returns pull requests; those rows are deliberately excluded.
-
-    Args:
-        repo: Worktree the call is rooted in (cwd for ``gh``).
-        state: One of ``"open"``, ``"closed"``, or ``"all"``.
-        repo_slug: Explicit GitHub ``owner/repo`` target.
-
-    Returns:
-        Normalized issue dictionaries containing ``number``, ``title``,
-        ``body``, ``url``, and ``state``. Pagination is unbounded rather than
-        stopping at GitHub's 100-item page size.
-
-    Raises:
-        GitError: If the arguments are invalid, lookup fails, or GitHub returns
-            an unexpected response shape.
+    A failed or malformed lookup raises ``GitError`` because an empty result
+    could cause duplicate writes. Pagination is unbounded, and GitHub's
+    issue-endpoint pull request rows are excluded.
     """
     if state not in {"open", "closed", "all"}:
         raise GitError(f"invalid issue state {state!r}")

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, cast
 
 import pytest
 
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _CommittingStubBackend,
     _eroded_main_repo,
@@ -28,9 +29,13 @@ from tests.test_deep_orchestrator import (
     _silence,
 )
 
-if TYPE_CHECKING:
-    from daydream.pr_review import ReviewRenderers
-    from daydream.run_context import RunContext
+
+async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
+    raise AssertionError("--findings-out must not post to the PR")
+
+
+def _matching_prompt(calls: list[dict[str, Any]], fragment: str) -> str:
+    return cast(str, next(call["prompt"] for call in calls if fragment in call["prompt"].lower()))
 
 
 async def test_deep_findings_out_emits_artifact_and_stops(
@@ -40,28 +45,11 @@ async def test_deep_findings_out_emits_artifact_and_stops(
 ) -> None:
     """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings artifact from the canonical
     merged items and STOPS -- no PR post, no fix."""
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     _install_stub_backend(monkeypatch, multi_stack_target)
-
-    async def _post_forbidden(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: Any,
-    ) -> None:
-        raise AssertionError("--findings-out must not post to the PR")
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
 
@@ -99,28 +87,11 @@ async def test_cleanup_keeps_report_on_findings_out_run(
 ) -> None:
     """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``."""
     from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     _install_stub_backend(monkeypatch, multi_stack_target)
-
-    async def _post_forbidden(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: Any,
-    ) -> None:
-        raise AssertionError("--findings-out must not post to the PR")
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
     _pin_findings_pr(monkeypatch, multi_stack_target)
@@ -145,7 +116,6 @@ async def test_test_verdict_artifact_written_on_passing_suite(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: a run whose suite passes leaves ``test-verdict.json`` on disk."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -184,7 +154,6 @@ async def test_test_verdict_artifact_written_on_failing_suite(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: a permanently-red suite STILL leaves ``test-verdict.json``."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -210,7 +179,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite."""
-    from daydream.runner import run
 
     _silence(monkeypatch, prompts=False)
     _force_interactive(monkeypatch)
@@ -252,10 +220,8 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
 
     assert await _run_deep(tiny_diff_target) == 0
 
-    intent_prompt = next(
-        c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()
-    )
-    wonder_prompt = next(c["prompt"] for c in stub.calls if "evaluate the implementation" in c["prompt"].lower())
+    intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
+    wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
 
     for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
         assert "diff --git" in prompt, f"{name} prompt did not inline the diff"
@@ -305,10 +271,8 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
         "the bounded diff must stay over the inline budget so the pointer fallback is exercised"
     )
 
-    intent_prompt = next(
-        c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()
-    )
-    wonder_prompt = next(c["prompt"] for c in stub.calls if "evaluate the implementation" in c["prompt"].lower())
+    intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
+    wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
 
     assert "Read the diff file at" in intent_prompt
     # The wonder pointer clause is "in the diff at {diff_path}"; the inline
@@ -339,10 +303,8 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target) == 0
 
-    intent_prompt = next(
-        c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()
-    )
-    wonder_prompt = next(c["prompt"] for c in stub.calls if "evaluate the implementation" in c["prompt"].lower())
+    intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
+    wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
 
     assert "Read the diff file at" in intent_prompt
     assert "diff.patch" in wonder_prompt
@@ -356,14 +318,14 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
     # per-stack prompt falls back to the diff.patch pointer instead of silently
     # inlining aaa.py's hunk with zzz.py's hunks unreachable. The react stack
     # (App.tsx only, fully retained) keeps its inline.
-    python_prompt = next(c["prompt"] for c in stub.calls if "you are reviewing the python stack" in c["prompt"].lower())
+    python_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
     assert "Read it directly" in python_prompt, (
         "a stack mixing retained and dropped blocks must fall back to the full diff.patch pointer"
     )
     assert "SMALL_RETAINED_MARKER" not in python_prompt, (
         "must not inline the retained block while the dropped block is missing"
     )
-    react_prompt = next(c["prompt"] for c in stub.calls if "you are reviewing the react stack" in c["prompt"].lower())
+    react_prompt = _matching_prompt(stub.calls, "you are reviewing the react stack")
     assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
 
 
@@ -416,9 +378,7 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     assert len(bounded_results) == 1
     assert "# daydream: deep diff truncated:" in bounded_results[0]
     assert "line 50 of filler content" not in bounded_results[0]
-    per_stack_prompt = next(
-        c["prompt"] for c in stub.calls if "you are reviewing the python stack" in c["prompt"].lower()
-    )
+    per_stack_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
     assert "Read it directly" in per_stack_prompt, (
         "the python stack mixes retained (api.py) and dropped (big.py) blocks; "
         "it must fall back to the full diff.patch pointer, never inline a "
@@ -426,7 +386,7 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     )
     assert "diff --git" not in per_stack_prompt
     assert "line 50 of filler content" not in per_stack_prompt
-    react_prompt = next(c["prompt"] for c in stub.calls if "you are reviewing the react stack" in c["prompt"].lower())
+    react_prompt = _matching_prompt(stub.calls, "you are reviewing the react stack")
     assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
 
 
@@ -672,7 +632,6 @@ async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
     """AC (issue #309): the sweep reviews an uncovered file, its finding is an ordinary merged finding, coverage
     stats improve, and the report surfaces coverage."""
     from daydream.eval.analyzer import analyze_coverage, load_trajectories
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)

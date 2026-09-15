@@ -619,119 +619,39 @@ def test_build_payload_shape(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> Non
     assert body.rstrip().endswith("</sub>")
 
 
-def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
-    """approve_on_clean=True + zero high/medium findings -> event APPROVE."""
-    classified = pr_review._ClassifiedIssues(
+def _classified_with_severity(
+    severity: str, confidence: str, *, body_confidence: str | None = None,
+) -> pr_review._ClassifiedIssues:
+    return pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
-        body_only=[
-            ParsedIssue(
-                path="b.py",
-                line=None,
-                title="File note",
-                body="desc",
-                confidence="MEDIUM",
-                severity="low",
-            )
-        ],
-        inline_issues=[
-            ParsedIssue(
-                path="a.py",
-                line=10,
-                title="t",
-                body="b",
-                confidence="LOW",
-                severity="low",
-            )
-        ],
+        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
+                               confidence=body_confidence or confidence, severity=severity)],
+        inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b",
+                                   confidence=confidence, severity=severity)],
     )
 
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
+
+def _approval_payload(pr: PRInfo, classified: pr_review._ClassifiedIssues) -> dict[str, Any]:
+    return build_payload(
+        pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
+
+
+def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo) -> None:
+    """A review with only low findings may approve when enabled."""
+    payload = _approval_payload(pr, _classified_with_severity("low", "LOW", body_confidence="MEDIUM"))
     assert payload["event"] == "APPROVE"
     assert "no high/medium findings" in payload["body"]
-    # F3: the reviewed SHA is pinned on every payload, APPROVE included.
     assert payload["commit_id"] == pr.head_sha
-    # Approval prefix added; rest of body format intact.
     assert "**Code Review Summary**" in payload["body"]
-    # The approval line is first, before the summary header.
     assert payload["body"].index("no high/medium findings") < payload["body"].index("**Code Review Summary**")
 
 
-def test_build_payload_keeps_comment_when_high_finding(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
-    """approve_on_clean=True but a high-severity finding -> event COMMENT."""
-    classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
-        body_only=[
-            ParsedIssue(
-                path="b.py",
-                line=None,
-                title="File note",
-                body="desc",
-                confidence="HIGH",
-                severity="high",
-            )
-        ],
-        inline_issues=[
-            ParsedIssue(
-                path="a.py",
-                line=10,
-                title="t",
-                body="b",
-                confidence="HIGH",
-                severity="high",
-            )
-        ],
-    )
-
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
-    assert payload["event"] == "COMMENT"
-    assert "no high/medium findings" not in payload["body"]
-
-
-def test_build_payload_keeps_comment_when_medium_finding(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
-    """approve_on_clean=True but a medium-severity finding -> event COMMENT."""
-    classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
-        body_only=[
-            ParsedIssue(
-                path="b.py",
-                line=None,
-                title="File note",
-                body="desc",
-                confidence="MEDIUM",
-                severity="medium",
-            )
-        ],
-        inline_issues=[
-            ParsedIssue(
-                path="a.py",
-                line=10,
-                title="t",
-                body="b",
-                confidence="MEDIUM",
-                severity="medium",
-            )
-        ],
-    )
-
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+@pytest.mark.parametrize("severity", ["high", "medium"])
+def test_build_payload_keeps_comment_when_blocking_finding(pr: PRInfo, severity: str) -> None:
+    """High and medium findings block approval even when it is enabled."""
+    payload = _approval_payload(pr, _classified_with_severity(severity, severity.upper()))
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
@@ -746,13 +666,7 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    payload = _approval_payload(pr, classified)
     assert payload["event"] == "APPROVE"
 
 
@@ -781,13 +695,7 @@ def test_build_payload_keeps_comment_when_off_vocabulary_severity(
         ],
     )
 
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    payload = _approval_payload(pr, classified)
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
@@ -1799,13 +1707,7 @@ def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
             )
         ],
     )
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    payload = _approval_payload(pr, classified)
     assert payload["event"] == "COMMENT"
 
 
@@ -1891,13 +1793,7 @@ def test_null_severity_does_not_block_approval(pr: PRInfo, monkeypatch: pytest.M
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
-    payload = build_payload(
-        pr,
-        classified,
-        approve_on_clean=True,
-        renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    payload = _approval_payload(pr, classified)
     assert payload["event"] == "APPROVE"
     assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
 

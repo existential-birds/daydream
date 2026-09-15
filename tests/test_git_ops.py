@@ -2016,18 +2016,13 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
 # --- gh issue create ---------------------------------------------------------
 
 
+@pytest.mark.parametrize("labels", [None, ["daydream", "tech-debt"]], ids=["no-labels", "two-labels"])
 def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    labels: list[str] | None,
 ) -> None:
-    """`gh_issue_create` shells out via `_run_gh` with title inline, body in a
-    tempfile (`--body-file`, never on argv), optional `--label` flags and a
-    `--repo owner/name` target. Returns the parsed issue URL.
-
-    Issue-filing is the routing target for out-of-scope findings (issue #336);
-    bodies can be large, so they never appear in argv (process-list hygiene,
-    same rule as `gh secret set`'s stdin path).
-    """
+    """Issue bodies travel through an unlinked file, never argv; labels remain optional."""
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -2050,7 +2045,7 @@ def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
         title="out-of-scope: refactor handler.py error path",
         body="evidence and rationale\nthat the fix loop overreached\n",
         repo_slug="octocat/hello",
-        labels=["daydream", "tech-debt"],
+        labels=labels,
     )
 
     # URL is parsed from stdout.
@@ -2070,33 +2065,11 @@ def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
     assert not Path(body_path).exists()
     # The body text itself must not appear anywhere in argv.
     assert "that the fix loop overreached" not in argv
-    # Both labels, in order, after --label.
+    # Every supplied label remains in order; None emits no label flags.
     label_positions = [i for i, tok in enumerate(argv) if tok == "--label"]
-    assert [argv[i + 1] for i in label_positions] == ["daydream", "tech-debt"]
+    assert [argv[i + 1] for i in label_positions] == (labels or [])
     # Ran in the target repo's cwd.
     assert captured["cwd"] == repo
-
-
-def test_gh_issue_create_omits_label_flags_when_none(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """No `labels` argument → no `--label` flag on argv at all."""
-    repo = _make_repo_with_main(tmp_path)
-    captured: dict[str, Any] = {}
-
-    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        captured["argv"] = list(args)
-        return subprocess.CompletedProcess(
-            args=list(args), returncode=0,
-            stdout="https://github.com/octocat/hello/issues/7\n", stderr="",
-        )
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
-
-    url = git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
-    assert url == "https://github.com/octocat/hello/issues/7"
-    assert "--label" not in captured["argv"]
-
 
 def test_gh_issue_create_raises_on_non_zero_exit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -1878,22 +1878,14 @@ def post_classified_review(
         diagram_blocks=plan.diagram_blocks,
     )
     review_result = transport.post_review(plan.pr, review_payload)
-    if review_result.review_url is None:
-        return ClassifiedReviewResult(
-            status=SubmissionStatus.FAILED,
-            review_url=None,
-            posted_file_level=tuple(posted),
-            folded_file_level=tuple(folded),
-            final_review_posted=False,
-            safe_error=review_result.safe_error,
-        )
+    posted_review = review_result.review_url is not None
     return ClassifiedReviewResult(
-        status=SubmissionStatus.POSTED,
+        status=SubmissionStatus.POSTED if posted_review else SubmissionStatus.FAILED,
         review_url=review_result.review_url,
         posted_file_level=tuple(posted),
         folded_file_level=tuple(folded),
-        final_review_posted=True,
-        safe_error=None,
+        final_review_posted=posted_review,
+        safe_error=None if posted_review else review_result.safe_error,
     )
 
 

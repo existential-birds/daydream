@@ -85,6 +85,24 @@ def _end_event(
     )
 
 
+def _sealed_invocation(
+    tmp_path: Path,
+    *,
+    native_start_ms: int | None = NATIVE_START_MS,
+    ended_at_ns: int = HOST_END_NS,
+    boundary_complete: bool = True,
+) -> tuple[Any, Invocation]:
+    recorder = make_recorder(tmp_path)
+    inv = _iq(recorder)
+    inv.observe(
+        GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000, boundary_complete=boundary_complete)
+    )
+    inv.observe(
+        _end_event(native_start_ms=native_start_ms, ended_at_ns=ended_at_ns, boundary_complete=boundary_complete)
+    )
+    return recorder, inv
+
+
 def _usage(
     recorder: Any, inv: Invocation, generation_id: str = "g1", *, input_tokens: int = 10, output_tokens: int = 5
 ) -> None:
@@ -133,10 +151,7 @@ class TestPendingDraftLifecycle:
         assert summary["billing_owner"] == "unresolved"
 
     def test_seal_freezes_choice_and_timing_at_message_end_before_tools(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         # Tool execution starts AFTER message_end; it must not duplicate or
         # alter the sealed choice parts.
         inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
@@ -150,10 +165,7 @@ class TestPendingDraftLifecycle:
         assert draft["ended_at_unix_ns"] is None
 
     def test_end_happens_exactly_once_after_late_usage_and_resolution(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         # Late usage lands after seal but before terminal resolution.
         _usage(recorder, inv)
         _total(recorder, inv)
@@ -166,36 +178,24 @@ class TestPendingDraftLifecycle:
         assert _summary(inv)["drafts"][0]["ended"] is True
 
     def test_terminal_result_path_drains(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         inv.observe(ResultEvent(structured_output=None, continuation=None))
         inv.finish()
         assert _summary(inv)["drafts"][0]["ended"] is True
 
     def test_cancel_and_error_paths_drain(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         inv.mark_aborted("wall_budget_exceeded")
         inv.finish()
         assert _summary(inv)["drafts"][0]["ended"] is True
 
-        recorder2 = make_recorder(tmp_path)
-        inv2 = _iq(recorder2)
-        inv2.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv2.observe(_end_event())
+        _, inv2 = _sealed_invocation(tmp_path)
         inv2.mark_errored("error_max_turns")
         inv2.finish()
         assert _summary(inv2)["drafts"][0]["ended"] is True
 
     def test_no_age_limit_rejects_395_second_case(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv)
         _total(recorder, inv)
         inv.finish()
@@ -209,10 +209,7 @@ class TestNativeTimingValidation:
     """Decision 4: non-bool bounded int ms, exact ns conversion, explicit fallbacks."""
 
     def test_exact_ns_conversion(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         draft = _summary(inv)["drafts"][0]
         assert draft["native_started_at_unix_ms"] == NATIVE_START_MS
         assert draft["native_started_at_unix_ns"] == NATIVE_START_NS
@@ -229,22 +226,16 @@ class TestNativeTimingValidation:
     def test_invalid_native_start_falls_back_explicitly(
         self, tmp_path: Path, native_start: int | bool | None, fallback: str
     ) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event(native_start_ms=native_start))
+        _, inv = _sealed_invocation(tmp_path, native_start_ms=native_start)
         draft = _summary(inv)["drafts"][0]
         assert draft["start_fallback"] == fallback
         assert draft["native_started_at_unix_ns"] is None  # never clamped
         assert draft["duration_ns"] is None
 
     def test_reversed_chronology_falls_back_explicitly(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
         # Native start AFTER the sealed host end is an explicit incomplete
         # boundary — never reordered, never clamped.
-        inv.observe(_end_event(native_start_ms=2_000_000_000, ended_at_ns=1_000_000_000))
+        _, inv = _sealed_invocation(tmp_path, native_start_ms=2_000_000_000, ended_at_ns=1_000_000_000)
         draft = _summary(inv)["drafts"][0]
         assert draft["start_fallback"] == "reversed"
         assert draft["duration_ns"] is None
@@ -294,10 +285,7 @@ class TestBillingOwnerResolution:
         assert [d["billed"] for d in summary["drafts"]] == [False, False]
 
     def test_partial_only_evidence_is_custom_nowhere_billed(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv)  # child usage, but NO authoritative attempt total
         inv.finish()
         summary = _summary(inv)
@@ -305,10 +293,7 @@ class TestBillingOwnerResolution:
         assert summary["drafts"][0]["billed"] is False
 
     def test_contradictory_totals_fail_closed_without_rewriting(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv, input_tokens=10, output_tokens=5)
         _total(recorder, inv, input_tokens=13, output_tokens=7)  # contradicts children
         inv.finish()
@@ -333,10 +318,7 @@ class TestBillingOwnerResolution:
         assert _summary(inv)["drafts"][0]["billed"] is False
 
     def test_incomplete_boundary_is_never_a_billed_child(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000, boundary_complete=False))
-        inv.observe(_end_event(boundary_complete=False))
+        recorder, inv = _sealed_invocation(tmp_path, boundary_complete=False)
         _usage(recorder, inv)
         _total(recorder, inv)
         inv.finish()
@@ -345,10 +327,7 @@ class TestBillingOwnerResolution:
         assert summary["drafts"][0]["billed"] is False
 
     def test_exact_duplicate_authoritative_total_is_idempotent(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv, input_tokens=10, output_tokens=5)
         _total(recorder, inv, input_tokens=10, output_tokens=5)
         _total(recorder, inv, input_tokens=10, output_tokens=5)  # exact duplicate: no-op
@@ -359,10 +338,7 @@ class TestBillingOwnerResolution:
         assert not any("contrad" in d for d in summary["diagnostics"])
 
     def test_contradictory_duplicate_totals_fail_closed_keep_first(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv, input_tokens=10, output_tokens=5)
         _total(recorder, inv, input_tokens=13, output_tokens=7)
         _total(recorder, inv, input_tokens=20, output_tokens=7)  # contradictory duplicate
@@ -508,10 +484,7 @@ class TestEventDispatchAndSummary:
         assert "generation_lifecycle" not in recorder._subtrajectories[-1]
 
     def test_subtrajectory_summary_surfaces_generation_lifecycle(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv)
         _total(recorder, inv)
         inv.finish()
@@ -521,10 +494,7 @@ class TestEventDispatchAndSummary:
         assert entry["drafts"][0]["ended"] is True
 
     def test_usage_never_invented(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(_end_event())
+        recorder, inv = _sealed_invocation(tmp_path)
         # No usage events at all: the record must not fabricate any numbers.
         inv.finish()
         draft = _summary(inv)["drafts"][0]

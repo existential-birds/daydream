@@ -142,185 +142,7 @@ class RunnerExecutionInput:
 
 @dataclass
 class RunConfig:
-    """Configuration for a daydream run.
-
-    Attributes:
-        target: Target directory path for the review. If None, prompts user.
-        stack: Review stack to use ("python", "react", "elixir", "go", "rust",
-            or "ios"). If None and shallow, prompts user.
-        cleanup: Remove review output file after completion. If None, prompts user.
-        quiet: Suppress verbose output from the agent.
-        start_at: Phase to start at ("review", "fix", "ttt", "per-stack", or
-            "merge"). parse/test are legacy shallow-loop stages with no mapping
-            in the unified pipeline and are rejected at the CLI.
-        pr_number: GitHub PR number stored as run metadata.
-        backend: Default backend to use ("claude" or "codex"). Default is None;
-            ``_resolve_backend`` falls back through the config file to ``"claude"``.
-        model: Global default model applied across phases when no explicit
-            per-phase model is set. Resolved by ``_resolved_model`` below the
-            per-phase field but above the config-file (phase then global) and
-            table sources. Default None.
-        reasoning_effort: Global default reasoning-effort override (e.g. "low",
-            "medium", "high"), resolved by ``_resolved_reasoning_effort``
-            (CLI > config-file phase > config-file global). Every backend
-            applies it through its native knob (Codex as ``-c
-            model_reasoning_effort=...``, Claude as ``--effort``, Pi as
-            ``--thinking``). Default None.
-        file_config: File-sourced configuration (``[tool.daydream]`` /
-            ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
-            as a low-precedence source. None is treated as an empty config.
-        review_backend: Override backend for the review phase. If None, uses backend.
-        fix_backend: Override backend for the fix phase. If None, uses backend.
-        test_backend: Override backend for the test phase. If None, uses backend.
-        review_model: Model override for the review phase. When None, the
-            resolver falls back to ``PHASE_DEFAULT_MODELS[backend_name]["review"]``
-            and then to the backend's own default.
-        parse_model: Model override for the parse phase. When None, resolves via
-            ``PHASE_DEFAULT_MODELS[backend_name]["parse"]`` then backend default.
-        fix_model: Model override for the fix phase. When None, resolves via
-            ``PHASE_DEFAULT_MODELS[backend_name]["fix"]`` then backend default.
-        test_model: Model override for the test phase. When None, resolves via
-            ``PHASE_DEFAULT_MODELS[backend_name]["test"]`` then backend default.
-        exploration_model: Model override for exploration subagents. When set, a separate
-            backend is created for the exploration phase using this model. Defaults to
-            :data:`config.DEFAULT_EXPLORATION_MODEL`.
-        ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
-            and surfaced in review prompts). Default is an empty list.
-        trajectory_path: Path to write the ATIF v1.7 trajectory JSON. Default-resolved
-            by run flows to ``<target>/.daydream/runs/<session_id>/trajectory.json``
-            when None.
-        pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
-            in deep (default) mode. Stored in trajectory metadata for eval linkage.
-        archive: Archive run artifacts to centralized store. Default True.
-        run_eval: Run deterministic evaluation on archived artifacts. Default True
-            (``analyze_session`` is file-based and cheap); ``--no-eval`` opts out.
-        branch: Specific branch to review. If None, uses cwd's HEAD.
-        base: Base ref to compare against. If None, auto-resolves.
-        output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
-            (review + post inline PR comments), ``"review"`` (review report only),
-            or ``"diagram"`` (issue #1113: the diagram-only flow, which runs
-            exploration plus the diagram phase and posts a standalone grounded
-            mermaid comment instead of a review).
-        findings_out: Path to write the Phase A findings artifact
-            (``--findings-out``; review mode only). Default None.
-        dump_artifacts: Directory to copy the full assembled run bundle into
-            (trajectory, review-output, deep artifacts, diffs, findings, manifest,
-            evaluation) so CI can upload it. Opt-in via ``--dump-artifacts`` because
-            the logs may contain sensitive data. Default None.
-        trajectory_hub_repo: HuggingFace dataset repo id (``owner/repo``) that each
-            run's archive bundle is uploaded to, keyed by session id. Opt-in via
-            ``--trajectory-hub-repo`` / ``DAYDREAM_TRAJECTORY_HUB_REPO``; requires
-            ``HF_TOKEN``. Default None (feature off).
-        force_worktree: Force ephemeral worktree even when ``branch`` is None.
-        shallow: Single-stack review (skip multi-stack auto-detection).
-        extra_copy: Extra paths to copy into ephemeral worktrees.
-        non_interactive: Run without prompting; take each prompt's safe default
-            without reading stdin.
-        assume: Forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
-            ``"no"``, or ``None``. Orthogonal to ``non_interactive``: it supplies a
-            pre-decided answer rather than controlling stdin access.
-        shallow_fanout_threshold: Max changed-file count that triggers the
-            tiny-diff short-circuit in deep mode (issue #172). ``None`` falls
-            through to ``file_config.shallow_fanout_threshold`` then
-            ``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` (precedence CLI > file > default,
-            mirroring ``_resolve_backend``). ``0`` disables the short-circuit.
-        precision_mode: Opt-in precision suppression (issue #232). When True, the
-            deep pipeline runs a skeptical LLM second opinion over borderline
-            (LOW-confidence / low-severity uncontested) findings after the arbiter
-            and drops any it cannot confirm (fail-closed). ``False`` falls through
-            to ``file_config.precision_mode`` then the built-in default ``False``
-            (precedence CLI > file > default, mirroring
-            ``shallow_fanout_threshold``; resolved by ``_precision_mode``), so the
-            suppression pass never runs and arbiter output is byte-identical.
-        approve_on_clean: Opt-in approval of clean deep reviews (issue #343). When
-            True, a deep review with zero high/medium findings posts
-            ``event: "APPROVE"`` (with a prepended approval line) instead of the
-            default ``event: "COMMENT"``, satisfying a repo's
-            ``required_approving_review_count`` without a human. ``False`` falls
-            through to ``file_config.approve_on_clean`` then the built-in default
-            ``False`` (precedence CLI > file > default, mirroring
-            ``precision_mode``; resolved by ``_approve_on_clean``), so the posted
-            event stays COMMENT unless a repo explicitly opts in.
-        scope_issue_filing: Opt-in filing of out-of-scope GitHub issues (issue
-            #1056). When True, out-of-scope findings and reverted post-fix edits
-            are filed as GitHub issues. ``False`` falls through to
-            ``file_config.scope_issue_filing`` then the built-in default
-            ``False`` (precedence CLI > file > default, mirroring
-            ``approve_on_clean``; resolved by ``_scope_issue_filing``), so no
-            out-of-scope issue is filed unless a repo explicitly opts in.
-        flow_name: Name of a registered flow to dispatch (``--flow``); built-in
-            names route to their dedicated helper, other registered names to the
-            generic custom-flow runner.
-        improve_effort: Improve audit *breadth* tier (quick, standard, or deep),
-            resolved to an ``EFFORT_TIERS`` entry that selects categories, audit
-            fanout concurrency, confidence filtering, and finding caps. It does
-            not select the model or reasoning effort — those are per-phase
-            (``PHASE_DEFAULT_MODELS`` / ``PHASE_DEFAULT_EFFORT``).
-        improve_focus: Optional improve focus mode.
-        improve_scope: Optional service name/root/glob to audit.
-        improve_plan_description: One-line request for ``daydream improve plan``;
-            switches the flow to single-request investigation mode.
-        improve_prune_name: Name of the ``-reanchor`` worktree to remove for the
-            ``daydream improve prune-reanchor`` sub-verb (only set there).
-        uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep (the
-            second-pass reviewer over diff files no per-stack reviewer read).
-            Resolved from the review-profile pipeline
-            (``pipeline.uncovered_sweep_enabled``, default True) by
-            ``_uncovered_sweep_enabled``; these fields no longer feed sweep
-            resolution after the profile-pipeline migration.
-        uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
-            are swept in one run; files beyond the cap are recorded in
-            ``coverage-stats.json`` as ``sweep_skipped_capacity`` rather than
-            silently dropped. Resolved from the review-profile pipeline
-            (``pipeline.uncovered_sweep_max_files``, default 10).
-        uncovered_sweep_min_hunk_lines: Issue #309. A file counts as sweepable
-            only when its hunks contain at least this many added/removed lines.
-            Resolved from the review-profile pipeline
-            (``pipeline.uncovered_sweep_min_hunk_lines``, default 5).
-        deep_shard_enabled: Issue #731. Toggle deep-review sharding, which splits
-            oversized non-structural language stacks into bounded,
-            dependency-aware shards that ride the existing ``stack_name``-keyed
-            pipeline. ``None`` falls through to ``file_config.deep_shard_enabled``
-            then the built-in default ``False``
-            (``DEFAULT_DEEP_SHARD_ENABLED``; precedence CLI > file > default,
-            resolved by ``_deep_shard_enabled``). Default-off preserves the
-            established single-agent-per-stack behavior.
-        deep_shard_max_files: Issue #731. Per-shard cap on the number of files a
-            stack may hold before it is split into shards. ``None`` falls through
-            to file config then ``DEFAULT_DEEP_SHARD_MAX_FILES`` (5).
-        deep_shard_max_bytes: Issue #731. Per-shard cap on the on-disk diff bytes
-            a stack may hold before it is split into shards. ``None`` falls
-            through to file config then ``DEFAULT_DEEP_SHARD_MAX_BYTES`` (12288).
-        deep_shard_fanout_cap: Issue #731. Upper bound on the total number of
-            sharded review tasks; stacks beyond the cap are kept unsplit (the
-            largest sharded stacks are unsplit first). ``None`` falls through to
-            file config then ``DEFAULT_DEEP_SHARD_FANOUT_CAP`` (16).
-        deep_shard_frontier_max: Issue #731. Cap on the cross-shard interface
-            file list surfaced to a shard as context (never part of its primary
-            review targets). ``None`` falls through to file config then
-            ``DEFAULT_DEEP_SHARD_FRONTIER_MAX`` (8).
-        review_profile_path: Explicit review-profile file path
-            (``--review-profile``), the highest-precedence source in the
-            four-source resolution order (R9: explicit > env > repo-committed
-            > packaged default). ``None`` falls through to the
-            ``DAYDREAM_REVIEW_PROFILE`` env var, then
-            ``file_config.review_profile``, then the packaged default. Resolved
-            once at the runner composition root onto ``review_profile``.
-        review_profile: The resolved per-run review profile (validated object +
-            source kind + digest), set exactly once by the runner composition
-            root (R1). Flows and prompt builders read this; they never re-read
-            profile files. ``None`` before resolution or when a direct caller
-            skips the composition-root seam.
-        diagram: Issue #1113. Grounded-diagram mode selector — one of
-            ``"auto"``, ``"sequence"``, ``"flowchart"``, ``"both"``, ``"off"``
-            (``config.DIAGRAM_MODES``). ``None`` means "no CLI request" and
-            falls through to ``file_config.diagram_mode`` then ``"auto"``
-            (precedence CLI > file > default). Carries the ``--diagram`` value in
-            the review paths and the ``--diagram-only`` value when
-            ``output_mode == "diagram"``; an explicit ``--diagram-only`` request
-            wins over a file-config ``mode = "off"``.
-
-    """
+    """Configuration for a run. Phase overrides take precedence over file defaults; see README for CLI fields."""
 
     target: str | None = None
     observability: ObservabilityConfig | None = None
@@ -594,24 +416,7 @@ def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
 
 
 def _resolve_review_profile(config: RunConfig) -> None:
-    """Resolve the run's review profile exactly once at the composition root (R1).
-
-    ``resolve_from_runconfig`` picks the highest-precedence source among the
-    explicit ``review_profile_path`` (CLI flag), the ``DAYDREAM_REVIEW_PROFILE``
-    env var, the repo-committed ``file_config.review_profile`` path, and the
-    packaged default. The validated result (profile + source kind + digest) is
-    stored on ``config.review_profile`` and handed into every ``FlowContext``
-    the run builds. Idempotent: a direct caller that already resolved (or
-    injected) the profile is left untouched.
-
-    R12 provenance: the resolved profile is also recorded onto the active
-    ``TrajectoryRecorder`` (when one is open at the call site) so
-    ``Trajectory.extra`` carries the ``profile_*`` keys on every real run.
-    Deep-flow dispatch resolves before its recorder opens (fail-closed
-    resolution must happen even for an empty-diff review that returns before
-    the recorder), so the deep spine re-enters this composition root from
-    inside its recorder scope — the re-entry is a no-op resolve that only records.
-    """
+    """Resolve and validate the review profile once at the runner composition root."""
     if config.review_profile is None:
         config.review_profile = resolve_from_runconfig(config)
     _record_review_profile(config)
@@ -911,40 +716,7 @@ def _resolve_backend(
     audit_workspace: AuditWorkspace | None = None,
     execution_input: BackendExecutionInput | None = None,
 ) -> Backend:
-    """Get or create the backend for a given phase, respecting all precedence tiers.
-
-    The backend kind, model, and reasoning effort are each resolved through the
-    source-tiered precedence ``CLI > config-file > default``:
-
-    - Backend kind via :func:`_resolved_backend_name`
-      (per-phase flag → ``config.backend`` → file-config phase →
-      file-config global → ``"claude"``).
-    - Model via :func:`_resolved_model`
-      (per-phase field → ``config.model`` → file-config phase →
-      file-config global → ``PHASE_DEFAULT_MODELS`` →
-      ``None``, where ``None`` falls through to the backend's own default).
-    - Reasoning effort via :func:`_resolved_reasoning_effort`
-      (``config.reasoning_effort`` → file-config phase → file-config global →
-      ``PHASE_DEFAULT_EFFORT`` → ``None``, where ``None`` falls through to the
-      backend's own default). All three backends apply the resolved value
-      through their native knob.
-
-    Args:
-        config: Run configuration with backend/model/reasoning-effort and
-            file-config sources.
-        phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
-            ``"intent"``, ``"wonder"``, ``"merge"``,
-            ``"exploration"``).
-        cache: Optional dict to cache backends by
-            ``(backend_name, model, reasoning_effort, audit_root)``. When provided,
-            backends are reused only when the backend kind, resolved model,
-            resolved reasoning effort, and canonical audit root all match — so
-            differing models, effort levels, or audit roots yield distinct
-            instances.
-        cwd: Target workspace used for backend-specific configuration.
-        execution_input: Optional immutable settings for native transports.
-            The owning FlowContext keeps the cache local to this input.
-    """
+    """Resolve one phase backend from CLI, file, and built-in defaults, reusing the optional cache."""
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
     resolved_effort = _resolved_reasoning_effort(config, phase)
@@ -1106,20 +878,7 @@ def _compute_diff_ref(cwd: Path) -> str:
 
 
 def _run_posts_to_github(config: RunConfig) -> bool:
-    """Return whether the selected run can write to GitHub.
-
-    This mirrors the mode dispatch's write-capable paths: an explicit
-    ``--flow deep`` and the default non-shallow loop both execute deep's
-    ``post-review`` step; ``--comment``
-    posts inline comments; and ``--diagram-only`` (issue #1113) posts a
-    standalone grounded-diagram issue comment, which IS its deliverable.
-    Improve is write-capable only when its repository
-    config enables automatic issue publication. ``--review``, shallow mode,
-    and generic custom flows are report-only from the runner's perspective, so
-    they retain the ambient ``gh`` identity. A custom flow that gains a GitHub
-    write must explicitly add its dispatch contract here before it can use App
-    credentials.
-    """
+    """Return whether this run posts to GitHub."""
     if config.flow_name is not None:
         if config.flow_name == "improve":
             return _file_config_or_empty(config).improve_github_publish_issues
@@ -1138,20 +897,7 @@ async def run(
     config: RunConfig | None = None, *, private_roots: PrivateRootLocations | None = None,
     execution: RunnerExecutionInput | None = None,
 ) -> int:
-    """Execute a daydream run end-to-end.
-
-    Opens the workspace via :func:`open_workspace` and dispatches to the single
-    deep flow based on ``config.output_mode`` / ``config.shallow`` (review /
-    comment / shallow modes, #330). Centralising workspace lifecycle means every
-    flow gets a real :class:`WorkContext` (in-place or ephemeral) with consistent base/branch resolution.
-
-    Args:
-        config: Optional configuration. Defaults to a fresh :class:`RunConfig`
-            (interactive prompts for target dir, skill, cleanup).
-        execution: Optional immutable execution capabilities for an embedded
-            caller. Backend transports and GitHub requests use its complete
-            environments. Omission preserves ordinary CLI inheritance.
-    """
+    """Open a workspace and execute the selected daydream flow."""
     if config is None:
         config = RunConfig()
 
@@ -1554,23 +1300,7 @@ async def _dispatch(
     github_execution: github_app.GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
 ) -> int:
-    """Verify the approved head, then route to the resolved flow.
-
-    Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
-    :func:`daydream.deep.orchestrator.run_deep`): ``--review`` / ``--comment``
-    run the review spine and stop after post-review, ``--diagram-only`` runs
-    the two-step ``diagram`` flow over the same preamble (issue #1113),
-    ``--shallow`` forces single-stack mode, and the default loop mode is
-    unchanged. An explicit ``flow_name`` (``--flow``) routes via
-    :func:`_dispatch_selected_flow`.
-
-    ``config.pr_number`` can be auto-detected from the current branch for
-    metadata (trajectory/archive) without changing dispatch.
-
-    Args:
-        config: Run configuration (``config.identity`` carries the resolved
-            GitHub identity set by :func:`run`).
-    """
+    """Verify the approved head and dispatch the selected flow."""
     if work.is_unborn:
         if config.flow_name != "improve" or config.approved_head_sha is not None:
             raise GitError("unborn checkout cannot satisfy a commit-anchored review")
@@ -1588,19 +1318,8 @@ async def _dispatch(
             backend_factory=backend_factory,
         )
 
-    # ``diagram`` joins comment/review in skipping ``_require_reviewable_branch``:
-    # it neither fixes nor commits, so a base-branch invocation is a legitimate
-    # (if empty) request rather than a ``WrongBranchError``.
-    if config.output_mode in ("comment", "review", "diagram"):
-        return await _run_loop_deep(
-            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_factory=backend_factory,
-        )
-
-    # output_mode == "loop" (default deep) and --shallow both fix against a
-    # base branch, so both must refuse to review the base branch against
-    # itself (the guard was shared by loop + shallow pre-collapse, #330).
-    _require_reviewable_branch(work, config)
+    if config.output_mode not in ("comment", "review", "diagram"):
+        _require_reviewable_branch(work, config)
     return await _run_loop_deep(
         work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
         backend_factory=backend_factory,
@@ -1613,22 +1332,9 @@ def _emit_diagram_findings(
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
-    """Write the Phase A findings artifact for a diagram-only run (issue #1113).
+    """Write a diagram artifact with no findings or mermaid render.
 
-    A diagram artifact declares ``kind="diagram"`` and carries an EMPTY
-    ``findings`` list: there is nothing to fingerprint, dedup, or minimize, and
-    the privileged poster branches on ``kind`` long before it reaches the
-    reconcile path. Its content is the ``diagram.json`` payload with the
-    rendered mermaid stripped -- Phase B re-renders from the specs.
-
-    Args:
-        target_dir: Repo root containing the PR checkout.
-        config: Run configuration; ``config.findings_out`` must be set.
-        payload: ``{"eligibility": ..., "results": ...}`` without ``mermaid``.
-
-    Returns:
-        ``0`` on success, ``1`` when no PR is resolvable or the artifact is
-        over the size cap.
+    Phase B re-renders mermaid from the grounded specs in ``payload``.
     """
     return _write_findings_for_parsed(
         target_dir, config, [], kind="diagram", diagrams=payload, auth=auth,
@@ -1646,23 +1352,7 @@ def _emit_findings_from_items(
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
-    """Write the Phase A findings artifact from canonical merged items.
-
-    Converts canonical merged items (``file``/``line`` already resolved) via
-    :func:`daydream.pr_review.parsed_issues_from_items` and routes them through
-    the shared PR-resolution + build + write path (:func:`_write_findings_for_parsed`).
-
-    Args:
-        target_dir: Repo root containing the PR checkout.
-        config: Run configuration; ``config.findings_out`` must be set.
-        items: Canonical merged finding dicts (may be empty).
-        diagrams: The run's grounded-diagram payload (issue #1113), or None.
-            Rides along on a ``kind="review"`` artifact so Phase B can render
-            the blocks into the posted review.
-
-    Returns:
-        ``0`` on success, ``1`` when no PR is resolvable.
-    """
+    """Write canonical review items; grounded diagrams ride along for Phase B rendering."""
     from daydream import pr_review
 
     parsed = pr_review.parsed_issues_from_items(items)
@@ -1683,23 +1373,10 @@ def _write_findings_for_parsed(
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
-    """Resolve the target PR and write the strict-schema findings artifact.
+    """Resolve a PR and write its strict findings artifact.
 
-    Resolves the target PR — via
-    :func:`daydream.pr_review.find_pr_by_number` when ``config.pr_number`` is
-    pinned, else :func:`daydream.pr_review.find_open_pr` — then writes the
-    artifact. The artifact must declare its target, so an unresolvable PR (or a
-    ``GitError`` from the lookup) is an actionable error, never a silently
-    absent artifact. An empty ``parsed`` list still writes an (empty) artifact
-    so Phase B can resolve all stale comments.
-
-    Args:
-        kind: Artifact kind (issue #1113) -- ``"review"`` or ``"diagram"``.
-        diagrams: The diagram payload for a ``"diagram"`` artifact, else None.
-
-    Returns:
-        ``0`` on success, ``1`` when no PR is resolvable or the rendered
-        artifact exceeds the size cap.
+    An unresolved PR is actionable because the artifact must declare a target.
+    Empty findings still produce an artifact so Phase B can clear stale comments.
     """
     from daydream import pr_review
     from daydream.findings import (
