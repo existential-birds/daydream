@@ -648,18 +648,21 @@ async def _run_agent(
             )
 
             for attempt in range(max_attempts + 1):
-                # Never dispatch an attempt once the deadline is spent: the
-                # ladder stops here and returns the partial output unchanged.
-                if effective_deadline is not None and clock.monotonic() >= effective_deadline:
-                    aborted_reason = "wall_budget_exceeded"
-                    break
-                # Reset accumulated state so a failed attempt's partial output
-                # does not leak into the next attempt's return value.
+                # Reset accumulated state BEFORE the deadline checks: a failed
+                # attempt's partial output must never leak into the invocation
+                # return when the pre-dispatch break (or the retry branch's
+                # pre-backoff break) ends the ladder, so the caller sees only
+                # output from the attempt that actually completed the turn.
                 output_parts = []
                 structured_result = None
                 result_continuation = None
                 tool_calls = 0
                 budget_reason: str | None = None
+                # Never dispatch an attempt once the deadline is spent: the
+                # ladder stops here with the reset state.
+                if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                    aborted_reason = "wall_budget_exceeded"
+                    break
                 # Guarded so the retry branch can charge the attempt's backend
                 # time before its backoff sleep, keeping that sleep out of
                 # backend_s (it is counted in backoff_s instead).
@@ -1005,14 +1008,26 @@ async def _run_agent(
                     )
                     if attempt < exception_max_retries and getattr(exc, "retryable", False):
                         # Spending the deadline ends the ladder before the next
-                        # backoff sleep: no attempt, no sleep, no raise.
+                        # backoff sleep: no attempt, no sleep, no raise. The
+                        # failed attempt's partials are discarded so they cannot
+                        # leak into the invocation return.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                            output_parts = []
+                            structured_result = None
+                            result_continuation = None
                             aborted_reason = "wall_budget_exceeded"
                             break
                         delay = min(
                             base_delay * (2 ** attempt) + random.uniform(0, 1),
                             max_delay,
                         )
+                        # Bound the backoff sleep by the time the effective
+                        # deadline has left: a retry storm must not overshoot
+                        # the invocation/group ceiling by up to one backoff
+                        # interval. A spent deadline then breaks at the top of
+                        # the next loop iteration.
+                        if effective_deadline is not None:
+                            delay = min(delay, max(effective_deadline - clock.monotonic(), 0.0))
                         retry_msg = (
                             f"Backend error ({type(exc).__name__}), retrying "
                             f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
@@ -1041,7 +1056,12 @@ async def _run_agent(
                     raise
                 finally:
                     if attempt_started_at is not None:
-                        backend_s += clock.monotonic() - attempt_started_at
+                        # Post-stop cleanup (the bounded backend aclose) is not
+                        # dispatched-attempt time: exclude it so backend_s keeps
+                        # its documented 'time inside dispatched attempts'
+                        # semantics and backend_s + backoff_s can never exceed
+                        # elapsed_s (which already subtracts cleanup_elapsed_s).
+                        backend_s += clock.monotonic() - attempt_started_at - cleanup_elapsed_s
 
             # One honest stop record when a time budget ended the invocation --
             # best-effort and recorder-optional, so a recorder failure never

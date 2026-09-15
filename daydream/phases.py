@@ -3322,8 +3322,14 @@ async def phase_fix_parallel(
         Checks ``budget.check()`` before each ``phase_fix`` call; on a budget
         stop, records it and returns without processing the remainder. Each
         call is also bounded mid-call by ``budget.deadline``; when the turn
-        reports a budget stop the group records a stop instead of progress.
-        The serial-item counter is bumped only once per completed call.
+        reports a budget stop the group records a stop instead of progress and
+        restores the group from the round snapshot, since the cut turn may
+        have left partial edits. A turn cut by its own per-turn wall budget
+        while the group ceiling still has time left
+        (``group_max_wall_s > DEFAULT_WALL_BUDGET_S``) is absorbed like the
+        batched path's other non-group reasons rather than stopping the group.
+        The serial-item counter is bumped once per consumed call slot (a
+        completed turn, or a turn absorbed under a non-group reason).
         """
         for item, item_num in grp:
             budget_reason = budget.check()
@@ -3342,8 +3348,33 @@ async def phase_fix_parallel(
                 deadline=budget.deadline,
             )
             if turn_reason == "wall_budget_exceeded":
+                if group_max_wall_s > DEFAULT_WALL_BUDGET_S and budget.remaining() > 0:
+                    # The invocation's own per-turn wall budget
+                    # (DEFAULT_WALL_BUDGET_S) cut the turn, not the group
+                    # ceiling: the group wall exceeds the per-turn budget, so
+                    # when this fires the group still has time left. Recording
+                    # a group stop here would mislabel the failure and return
+                    # early, skipping valid findings. Mirror the absorption
+                    # path below: the partial attempt keeps its slot and the
+                    # group continues.
+                    budget.record_item()
+                    successful_groups.add(fkey)
+                    continue
                 # The group's own wall ceiling ended the turn mid-call. Do NOT
                 # record the item as processed: the turn did not complete.
+                if budget.remaining() <= 0:
+                    # The cut turn may have left partial edits in the worktree;
+                    # restore the complete group from the round snapshot so the
+                    # half-applied change cannot reach fix-verify/test/commit,
+                    # mirroring the batched fallback recovery.
+                    try:
+                        git_ops.restore_group_worktree_from_snapshot(
+                            work.repo, round_snapshot, edit_scope
+                        )
+                    except Exception as restore_err:  # noqa: BLE001
+                        raise RuntimeError(
+                            "failed to restore the complete fix group after its wall budget cut"
+                        ) from restore_err
                 await _record_budget_stop(fkey, "group_wall_budget_exceeded", len(grp), budget)
                 return
             # Any other turn reason (a ``tool_vetoed:<tool>`` supervisor veto is

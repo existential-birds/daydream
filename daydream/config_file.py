@@ -509,6 +509,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # Per-file-group fix budgets (#201): tolerate junk by degrading to None (the
     # config.py default then applies). bool is excluded even though it subclasses
     # int/float — ``group_max_serial_items = true`` is never a meaningful count.
+    # The serial ceiling goes through _coerce_non_negative_int like the wall
+    # ceiling goes through _coerce_non_negative_float: a negative value would
+    # trip ``group_serial_item_limit`` on the first check and silently disable
+    # every group's fixes, so it degrades to DEFAULT_GROUP_MAX_SERIAL_ITEMS.
     return DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
@@ -519,7 +523,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         approve_on_clean=approve_on_clean,
         scope_issue_filing=scope_issue_filing,
         group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
-        group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
+        group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         uncovered_sweep=uncovered_sweep,
         uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
