@@ -49,8 +49,10 @@ from daydream.backends.pi import (
     _pi_retry_attempts,
     _pi_retry_base_delay,
     _pi_retry_max_delay,
+    _pi_retryable_for,
     _render_tool_result,
     _schema_instruction,
+    parse_pi_retry_hint,
 )
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.stub_backend import force_interactive as _force_interactive
@@ -1311,6 +1313,8 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
         ("Pi CLI exited with return code 1", "PROCESS_EXIT"),
         ("authentication required", "AUTH_CONFIG"),
         ("synthetic opaque failure", "UNKNOWN"),
+        ("model not found: gpt-5 (503)", "AUTH_CONFIG"),
+        ("response failed JSON schema validation: additionalProperties", "SCHEMA"),
     ],
     ids=[
         "rate-limit",
@@ -1322,6 +1326,8 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
         "process-exit",
         "auth-config",
         "unknown",
+        "permanent-beats-transient",
+        "schema",
     ],
 )
 def test_pi_error_categories_are_stable_host_codes(
@@ -1329,6 +1335,19 @@ def test_pi_error_categories_are_stable_host_codes(
     expected: str,
 ) -> None:
     assert _pi_error_category(message) == expected
+
+
+def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
+    """A server-provided hint reaches the retry policy as a numeric attribute."""
+    error = PiError(
+        "503 Service Unavailable; retry-after: 30",
+        retryable=_pi_retryable_for(category="SERVER_ERROR", message="503 Service Unavailable; retry-after: 30"),
+        category=_pi_error_category("503 Service Unavailable; retry-after: 30"),
+        retry_after=parse_pi_retry_hint("503 Service Unavailable; retry-after: 30"),
+    )
+
+    assert error.retry_after == 30.0
+    assert parse_pi_retry_hint("no hint here") is None
 
 
 @pytest.mark.parametrize(

@@ -73,6 +73,7 @@ from daydream.backends._transport import (
 )
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
+from daydream.retry_policy import classify_failure
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -301,9 +302,21 @@ def _pi_retry_max_delay() -> float:
     return value
 
 
-# Shared error-taxonomy tokens, used by both the retryable-message check and
-# the stable diagnostic category so the two views of the taxonomy cannot drift
-# out of sync.
+# Shared error-taxonomy tokens. The permanent set is deliberately checked
+# first by _pi_error_category so a permanent condition (an unreachable model, a
+# rejected credential, a schema violation) wins over a transient token in the
+# same message: "model not found: gpt-5 (503)" is AUTH_CONFIG, not SERVER_ERROR.
+_PERMANENT_TOKENS = (
+    "auth",
+    "credential",
+    "api key",
+    "api_key",
+    "configuration",
+    "not configured",
+    "provider",
+    "model not found",
+)
+_SCHEMA_TOKENS = ("schema validation", "additionalproperties", "structured output")
 _RATE_LIMIT_TOKENS = ("429", "rate limit", "rate_limit", "too many requests")
 _SERVER_ERROR_TOKENS = (
     "502",
@@ -369,8 +382,18 @@ def _is_retryable_exit_code(code: int) -> bool:
 
 
 def _pi_error_category(message: str) -> str:
-    """Classify Pi failures into stable host-owned diagnostic categories."""
+    """Classify Pi failures into stable host-owned diagnostic categories.
+
+    Permanent conditions are tested before the transient token sets: when one
+    message carries both (``"model not found: gpt-5 (503)"``) the permanent
+    condition decides, matching the shared classifier's permanent-beats-
+    transient rule in :mod:`daydream.retry_policy`.
+    """
     lower = message.casefold()
+    if any(token in lower for token in _PERMANENT_TOKENS):
+        return "AUTH_CONFIG"
+    if any(token in lower for token in _SCHEMA_TOKENS):
+        return "SCHEMA"
     if any(token in lower for token in _RATE_LIMIT_TOKENS):
         return "RATE_LIMIT"
     if any(token in lower for token in _SERVER_ERROR_TOKENS):
@@ -383,21 +406,48 @@ def _pi_error_category(message: str) -> str:
         return "STREAM_DROP"
     if "pi cli exited with return code" in lower:
         return "PROCESS_EXIT"
-    if any(
-        token in lower
-        for token in (
-            "auth",
-            "credential",
-            "api key",
-            "api_key",
-            "configuration",
-            "not configured",
-            "provider",
-            "model not found",
-        )
-    ):
-        return "AUTH_CONFIG"
     return "UNKNOWN"
+
+
+_RETRY_HINT_RE = re.compile(r"retry[- ]after[:\s]+([+-]?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def parse_pi_retry_hint(message: str) -> float | None:
+    """Extract a numeric-seconds ``retry-after`` hint from *message*.
+
+    Returns ``None`` for an absent, non-numeric, negative, or non-finite hint;
+    an unparseable hint degrades to jitter rather than to a fabricated delay.
+    """
+    if not message:
+        return None
+    match = _RETRY_HINT_RE.search(message)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+class _PiFailureFacts(Exception):
+    """Classifier probe carrying Pi's category + message and no opt-in flag."""
+
+    def __init__(self, message: str, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _pi_retryable_for(*, category: str, message: str) -> bool:
+    """Return the shared classifier's retry verdict for a Pi failure.
+
+    Uses the same :func:`daydream.retry_policy.classify_failure` path the retry
+    branch of :func:`daydream.agent.run_agent` uses, so the backend's
+    ``retryable`` attribute and the agent's decision cannot disagree.
+    """
+    return classify_failure(_PiFailureFacts(message, category)).retries_allowed
 
 
 class PiError(Exception):
@@ -409,10 +459,12 @@ class PiError(Exception):
         *,
         retryable: bool = False,
         category: str = "UNKNOWN",
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.retryable = retryable
         self.category = category
+        self.retry_after = retry_after
 
 
 def _render_tool_result(result: Any) -> str:
@@ -1019,10 +1071,12 @@ class PiBackend:
                         for terminal in terminal_events():
                             yield terminal
                         error_msg = msg.get("errorMessage") or "Unknown Pi error"
+                        category = _pi_error_category(error_msg)
                         raise PiError(
                             error_msg,
-                            retryable=_is_retryable_error_message(error_msg),
-                            category=_pi_error_category(error_msg),
+                            retryable=_pi_retryable_for(category=category, message=error_msg),
+                            category=category,
+                            retry_after=parse_pi_retry_hint(error_msg),
                         )
 
                 elif event_type == "agent_end":
