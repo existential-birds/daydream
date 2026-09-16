@@ -4508,6 +4508,24 @@ class ArtifactSession:
         os.close(self._repo_fd)
 
 
+def _routing_session(
+    repo: Path,
+    session: ArtifactSession | None,
+    *,
+    allow_standalone: bool,
+) -> ArtifactSession | None:
+    """Admit one session under the shared strict or standalone routing policy."""
+    if session is None:
+        if not allow_standalone:
+            raise ArtifactVisibilityError(
+                "an explicit artifact session is required for strict artifact routing"
+            )
+        session = _SESSION.get()
+    if session is not None:
+        session._route_repo(repo)
+    return session
+
+
 def artifact_dir_for(
     repo: Path,
     *,
@@ -4521,17 +4539,9 @@ def artifact_dir_for(
     only that path may consult the bound session before falling back to the
     public ``repo/.daydream`` location.
     """
+    session = _routing_session(repo, session, allow_standalone=allow_standalone)
     if session is not None:
-        session._route_repo(repo)
         return session.daydream_dir
-    if not allow_standalone:
-        raise ArtifactVisibilityError(
-            "an explicit artifact session is required for strict artifact routing"
-        )
-    bound = _SESSION.get()
-    if bound is not None:
-        bound._route_repo(repo)
-        return bound.daydream_dir
     return repo / _DAYDREAM
 
 
@@ -4547,17 +4557,9 @@ def review_output_path_for(
     allow_standalone: bool = False,
 ) -> Path:
     """Routed ``.review-output.md`` path for *repo* (see :func:`artifact_dir_for`)."""
+    session = _routing_session(repo, session, allow_standalone=allow_standalone)
     if session is not None:
-        session._route_repo(repo)
         return session.review_output
-    if not allow_standalone:
-        raise ArtifactVisibilityError(
-            "an explicit artifact session is required for strict artifact routing"
-        )
-    bound = _SESSION.get()
-    if bound is not None:
-        bound._route_repo(repo)
-        return bound.review_output
     return repo / _REVIEW_OUTPUT
 
 
