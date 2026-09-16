@@ -31,6 +31,22 @@ def test_permanent_condition_beats_transient_token_in_same_message() -> None:
     assert decision.retries_allowed is False
 
 
+def test_rate_limit_message_mentioning_provider_stays_transient() -> None:
+    """A bare 'provider' token is not a permanent condition.
+
+    The improve plan-writer's real-path rate limit (``category=RATE_LIMIT``,
+    ``retryable=True``) carries the message "provider rate limit"; a generic
+    'provider' substring must not veto an explicitly transient category and
+    strand the retry ladder on its first failure.
+    """
+    decision = classify_failure(
+        PiError("provider rate limit", retryable=True, category="RATE_LIMIT")
+    )
+
+    assert decision.failure_class is FailureClass.RATE_LIMIT
+    assert decision.retries_allowed is True
+
+
 def test_declared_class_wins_over_message_and_category() -> None:
     class _Declared(Exception):
         failure_class = FailureClass.PERMANENT

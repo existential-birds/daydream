@@ -62,12 +62,15 @@ _TRANSIENT_CATEGORY_CLASSES: dict[str, FailureClass] = {
 
 #: Message substrings that name a permanent condition. These win over any
 #: transient token in the same message: a 503 is irrelevant if the model does
-#: not exist.
+#: not exist. A bare "provider" is deliberately *not* listed: it is a generic
+#: noun that appears in transient failures too ("provider rate limit"), so a
+#: real provider config failure must arrive as the ``AUTH_CONFIG`` category
+#: (which :func:`classify_failure` honours) or carry an explicit
+#: "not configured"/"not authenticated" marker.
 _PERMANENT_CONDITION_RE = re.compile(
     r"credential"
     r"|api[ _-]?key"
     r"|not configured"
-    r"|provider"
     r"|model not found"
     r"|schema validation"
     r"|additionalproperties"
