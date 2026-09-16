@@ -50,6 +50,13 @@ def atomic_write_bytes(
       chmod is umask-immune and covers a pre-existing destination).
     - ``dir_fsync``: fsync the parent directory after the rename so the new
       name survives a crash.
+
+    The corpus/benchmark writers migrated by #1215 pass ``fsync``,
+    ``dir_fsync`` and ``mode`` **explicitly** to reproduce their prior
+    behaviour (``fsync=False`` everywhere; ``mode=0o644`` for the
+    umask-derived writers and ``mode=None``, i.e. mkstemp's ``0600``, for the
+    two that already used ``mkstemp``), so these knobs are load-bearing rather
+    than decorative.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
