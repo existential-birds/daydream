@@ -2906,6 +2906,7 @@ async def phase_fix(
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
     deadline: float | None = None,
+    retry_recovery_allowance_s: float | None = None,
 ) -> str | None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -2933,6 +2934,11 @@ async def phase_fix(
         deadline: Optional absolute monotonic deadline forwarded to
             ``run_agent``. The effective bound is the earliest of this and the
             invocation's ``wall_budget_s``.
+        retry_recovery_allowance_s: Cumulative retry-overhead allowance for
+            this fix call, forwarded unchanged to ``run_agent``. One value per
+            file group is resolved once by the caller; this leaf never
+            re-resolves it. ``None`` means the repo declared no allowance, so
+            ``run_agent`` applies the module default as an undeclared value.
 
     Returns:
         The fix turn's budget-stop reason (``str``) when a budget ceiling cut
@@ -2994,6 +3000,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         deadline=deadline,
+        retry_recovery_allowance_s=retry_recovery_allowance_s,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
@@ -3021,6 +3028,7 @@ async def phase_fix_batched(
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
     deadline: float | None = None,
+    retry_recovery_allowance_s: float | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -3055,6 +3063,11 @@ async def phase_fix_batched(
             ``run_agent`` (and to the single-item ``phase_fix`` delegation).
             The effective bound is the earliest of this, the scaled call budget,
             and any enclosing group deadline.
+        retry_recovery_allowance_s: Cumulative retry-overhead allowance for the
+            group, forwarded unchanged to ``run_agent`` and to the single-item
+            ``phase_fix`` delegation. Resolved once by the group's caller;
+            ``None`` leaves the value undeclared so ``run_agent`` applies the
+            module default.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -3068,6 +3081,7 @@ async def phase_fix_batched(
             test_map=test_map,
             run_context=run_context,
             deadline=deadline,
+            retry_recovery_allowance_s=retry_recovery_allowance_s,
         )
         return
 
@@ -3140,6 +3154,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         tool_call_budget=scaled_tool_budget,
         wall_budget_s=scaled_wall_budget,
         deadline=deadline,
+        retry_recovery_allowance_s=retry_recovery_allowance_s,
         progress_callback=progress_cb,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
@@ -3190,6 +3205,7 @@ async def phase_fix_parallel(
     intent_path: Path | None = None,
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    retry_recovery_allowance_s: float | None = None,
     exploration_dir: Path | None = None,
     test_map_path: Path | None = None,
     run_context: RunContext | None = None,
@@ -3231,6 +3247,11 @@ async def phase_fix_parallel(
             fix call so every fix carries the deliberate-intent guard.
         group_max_wall_s: Per-file-group wall-clock ceiling (#201).
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
+        retry_recovery_allowance_s: Cumulative retry-overhead allowance for
+            every fix call in every group. Resolved once by the caller and
+            forwarded unchanged to each ``phase_fix``/``phase_fix_batched``
+            call; children never re-resolve it. ``None`` leaves the value
+            undeclared so ``run_agent`` applies the module default.
         exploration_dir: Optional pre-scan directory forwarded to every fix
             call so prompts point at its deterministic ``affected_files.md``.
         test_map_path: Optional ``test-map.json`` forwarded to every fix call
@@ -3346,6 +3367,7 @@ async def phase_fix_parallel(
                 test_map=test_map,
                 run_context=run_context,
                 deadline=budget.deadline,
+                retry_recovery_allowance_s=retry_recovery_allowance_s,
             )
             if turn_reason == "wall_budget_exceeded":
                 if group_max_wall_s > DEFAULT_WALL_BUDGET_S and budget.remaining() > 0:
@@ -3444,6 +3466,7 @@ async def phase_fix_parallel(
                                             test_map=test_map,
                                             run_context=run_context,
                                             deadline=budget.deadline,
+                                            retry_recovery_allowance_s=retry_recovery_allowance_s,
                                         )
                                         budget.record_item()
                                         successful_groups.add(fkey)

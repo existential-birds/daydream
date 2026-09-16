@@ -6797,6 +6797,49 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
     assert all(e["metadata"]["reason"] == "group_wall_budget_exceeded" for e in events)
 
 
+async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """The file-config value reaches every run_agent call the fix group owns."""
+    from daydream.backends.pi import PiError
+    from daydream.config_file import load_file_config
+    from daydream.runner import run
+    from tests.harness.fake_clock import FakeClock
+
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    (multi_stack_target / ".daydream.toml").write_text(
+        "retry_recovery_allowance_s = 25\n", encoding="utf-8"
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.fix_retryable_failures = 20
+    stub.fix_retryable_error = PiError("503 Service Unavailable", retryable=True, category="SERVER_ERROR")
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = 20.0     # each retryable attempt burns 20 s of the allowance
+    traj = tmp_path / "trajectory.json"
+
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(
+            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+            file_config=load_file_config(multi_stack_target),
+        ))
+
+    assert isinstance(exit_code, int)
+    stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
+    assert stops, "the ladder stop was not recorded"
+    assert any(e["metadata"]["retry_stop_reason"] == "retry_recovery_allowance_exhausted" for e in stops)
+    # The original attempt is useful work and is not charged (Task 3's design);
+    # each retry is charged 20 s, so the ladder is cut at four dispatches after
+    # ~40 s of retries. The 300 s default (a missed threading site) would allow
+    # ~17 attempts, so this bound still distinguishes the configured value.
+    assert max(e["metadata"]["attempts"] for e in stops) <= 4
+    assert stub.completed_fix_files.count("api.py") == 0     # the group never applied a fix
+
+
 async def test_run_batches_same_file_findings_into_one_fix_turn(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
