@@ -1505,6 +1505,19 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
 # --- Issue #1214: transport-aware advisory-input budgeting -------------------
 
 
+def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_path: Path) -> None:
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+    from tests.harness.git_helpers import git
+
+    repo = build_large_cross_module_repo(tmp_path)
+    diff = git(repo, "diff", "--stat", "main...HEAD")
+    assert len(git(repo, "diff", "main...HEAD").splitlines()) > 20_000
+    assert sum(1 for _ in (repo / "pkg_a").rglob("*.py")) + sum(
+        1 for _ in (repo / "pkg_b").rglob("*.py")
+    ) >= 200
+    assert diff  # non-empty stat output, i.e. the branch really differs from main
+
+
 async def _session_test_ctx(tmp_path: Path) -> Any:
     """A FlowContext on an ACTIVE artifact session with realistic artifact sizes.
 
