@@ -11,6 +11,7 @@ import random
 import re
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -51,7 +52,9 @@ from daydream.retry_policy import (
     FailureClass,
     RetryRecoveryBudget,
     classify_failure,
+    decode_retry_recovery_allowance,
     parse_message_retry_hint,
+    undeclared_retry_allowance_message,
 )
 from daydream.run_context import (
     InteractionPolicy,
@@ -90,34 +93,269 @@ def _sample_retry_delay(cap: float) -> float:
     return random.uniform(0.0, cap)
 
 
+def _retry_delay_from_env(name: str, default: float) -> float:
+    """Read one non-negative finite delay knob from the environment, else *default*."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
+
+
+@dataclass(frozen=True)
+class _ResolvedRetrySettings:
+    """One invocation's fully-resolved retry ladder settings."""
+
+    max_attempts: int
+    base_delay_s: float
+    max_delay_s: float
+    allowance_s: float
+    allowance_declared: bool
+
+
+def _resolve_retry_settings(
+    backend: Backend, retry_recovery_allowance_s: float | None
+) -> _ResolvedRetrySettings:
+    """Resolve one invocation's retry ladder settings before any dispatch.
+
+    The whole input -> settings mapping lives here rather than inline in
+    :func:`_run_agent`: the attempt/delay tiers, the cumulative-allowance
+    precedence ladder and the contradiction checks. It is a pure callable of the
+    backend, the explicit argument and the ambient environment, so it is unit
+    testable without driving the retry loop.
+
+    Precedence for the cumulative allowance, highest first: the backend's
+    ``RetryPolicy.retry_recovery_allowance_s``, then a backend
+    ``retry_recovery_allowance_s`` attribute, then the explicit argument (only the
+    fix phase threads a config-file value), then
+    ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S``, then
+    ``DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. The ambient env var is consulted only
+    when the backend declares no ``RetryPolicy`` at all -- a declared policy
+    declares its retry settings completely (pinned by
+    ``test_run_agent_uses_backend_retry_policy_without_reading_ambient_environment``);
+    the embedded construction path materialises that env var into the policy it
+    builds instead. A single invalid value degrades to the default, observably.
+
+    Raises:
+        ValueError: ``base_delay > max_delay``, or a declared non-zero allowance
+            alongside ``max_attempts == 0`` (retries disabled). Both are refused
+            before any dispatch rather than coerced into a plausible bound.
+    """
+    retry_policy = getattr(backend, "retry_policy", None)
+    if retry_policy is not None:
+        max_attempts = retry_policy.attempts
+        base_delay = retry_policy.base_delay_s
+        max_delay = retry_policy.max_delay_s
+    else:
+        try:
+            default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
+        except ValueError:
+            default_attempts = 20
+        if default_attempts < 0:
+            default_attempts = 20
+        max_attempts = getattr(backend, "retry_attempts", default_attempts)
+        base_delay = getattr(
+            backend,
+            "retry_base_delay_s",
+            _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0),
+        )
+        max_delay = getattr(
+            backend,
+            "retry_max_delay_s",
+            _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0),
+        )
+    if max_attempts < 0:
+        raise ValueError("retry attempts must be >= 0")
+    if not math.isfinite(base_delay):
+        raise ValueError("retry base delay must be finite")
+    if base_delay < 0:
+        raise ValueError("retry base delay must be >= 0")
+    if not math.isfinite(max_delay):
+        raise ValueError("retry max delay must be finite")
+    if max_delay < 0:
+        raise ValueError("retry max delay must be >= 0")
+
+    allowance_source: tuple[str, Any] | None = None
+    if retry_policy is not None:
+        policy_allowance = getattr(retry_policy, "retry_recovery_allowance_s", None)
+        if policy_allowance is not None:
+            allowance_source = (
+                "RetryPolicy.retry_recovery_allowance_s",
+                policy_allowance,
+            )
+    if allowance_source is None:
+        backend_allowance = getattr(backend, "retry_recovery_allowance_s", None)
+        if backend_allowance is not None:
+            allowance_source = ("retry_recovery_allowance_s", backend_allowance)
+    if allowance_source is None and retry_recovery_allowance_s is not None:
+        allowance_source = ("retry_recovery_allowance_s", retry_recovery_allowance_s)
+    if allowance_source is None and retry_policy is None:
+        env_allowance = os.environ.get("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S")
+        if env_allowance is not None:
+            allowance_source = (
+                "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S",
+                env_allowance,
+            )
+    resolved_allowance = DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+    declared_allowance = False
+    if allowance_source is not None:
+        parsed_allowance = _coerce_retry_recovery_allowance(
+            allowance_source[1], allowance_source[0]
+        )
+        if parsed_allowance is not None:
+            resolved_allowance = parsed_allowance
+            declared_allowance = True
+
+    # Two declared values can each be valid and still contradict one another.
+    # Refuse the combination here, before any dispatch, with a message naming both
+    # keys -- never coerce it into a plausible bound. The allowance check fires
+    # only for a *declared* non-zero value: the default 300s must not turn
+    # ``retry_attempts = 0`` (a legitimate "no retries" declaration) into an error.
+    if base_delay > max_delay:
+        raise ValueError(
+            f"retry_base_delay_s ({base_delay}) must not exceed "
+            f"retry_max_delay_s ({max_delay})"
+        )
+    if declared_allowance and resolved_allowance > 0 and max_attempts == 0:
+        raise ValueError(
+            "retry_recovery_allowance_s "
+            f"({resolved_allowance}) cannot be non-zero while retries are "
+            "disabled (max_attempts == 0); set retry_recovery_allowance_s = 0 "
+            "to disable retry recovery explicitly"
+        )
+    return _ResolvedRetrySettings(
+        max_attempts=max_attempts,
+        base_delay_s=base_delay,
+        max_delay_s=max_delay,
+        allowance_s=resolved_allowance,
+        allowance_declared=declared_allowance,
+    )
+
+
+def _plan_retry_delay(
+    *,
+    attempt: int,
+    base_delay_s: float,
+    max_delay_s: float,
+    allowance_remaining_s: float | None,
+    deadline_remaining_s: float | None,
+    hint: float | None,
+) -> tuple[float, str | None]:
+    """Decide the next backoff delay, or the ladder stop that replaces it.
+
+    Returns ``(delay_s, stop_reason)``. ``stop_reason`` is
+    ``"retry_hint_exceeds_budget"`` when a server hint cannot fit inside the
+    remaining allowance/deadline -- the caller stops the ladder exactly as it does
+    on exhaustion -- and the delay is meaningless in that case. Otherwise the
+    delay is the hint, or a full-jitter sample whose cap is the smaller of the
+    exponential growth, the configured maximum, the remaining allowance and the
+    time the deadline has left, so a retry storm cannot overshoot either ceiling
+    by up to one backoff interval.
+    """
+    bounds = [
+        bound
+        for bound in (
+            allowance_remaining_s,
+            # ``max(..., 0.0)`` twice: a spent deadline is a spent bound, never a
+            # negative one that would invert the comparison below.
+            deadline_remaining_s,
+        )
+        if bound is not None
+    ]
+    cap = min(base_delay_s * (2 ** attempt), max_delay_s)
+    if bounds:
+        cap = min(cap, min(bounds))
+    cap = max(cap, 0.0)
+    if hint is not None and bounds and hint > min(bounds):
+        return 0.0, "retry_hint_exceeds_budget"
+    return min(hint if hint is not None else _sample_retry_delay(cap), cap), None
+
+
+@dataclass
+class _RetryTelemetry:
+    """Per-invocation retry counters, shared by the loop and its stop emitter.
+
+    One mutable object instead of the eight locals the stop emitter used to close
+    over, so the accounting it reports is locally checkable. Every field is
+    **retry-scoped**: ``retry_attempts`` counts only dispatched retry attempts and
+    ``retry_backend_s`` only time spent inside them, while ``backend_s`` keeps the
+    full dispatched-attempt total for the deadline-stop record and ``backoff_s``
+    is retry backoff sleep. The initial, useful-work attempt is therefore never
+    charged to the retry totals -- a zero-retry ladder stop reports zero retry
+    attempts and zero retry backend time instead of claiming the failed attempt
+    as retry overhead.
+    """
+
+    attempts_dispatched: int = 0
+    retry_attempts: int = 0
+    backend_s: float = 0.0
+    retry_backend_s: float = 0.0
+    backoff_s: float = 0.0
+    attempt_started_at: float | None = None
+    attempt_is_retry: bool = False
+
+    def start_attempt(self, now: float, *, retry: bool) -> None:
+        """Record one dispatched attempt; *retry* marks it as retry overhead."""
+        self.attempts_dispatched += 1
+        self.attempt_is_retry = retry
+        if retry:
+            self.retry_attempts += 1
+        self.attempt_started_at = now
+
+    def charge_attempt(self, now: float, *, cleanup_elapsed_s: float = 0.0) -> float:
+        """Close the in-flight attempt and return its charged backend seconds.
+
+        Returns ``0.0`` when no attempt is in flight. ``cleanup_elapsed_s`` is
+        excluded because post-stop cleanup (the bounded backend aclose) is not
+        dispatched-attempt time.
+        """
+        if self.attempt_started_at is None:
+            return 0.0
+        delta = now - self.attempt_started_at - cleanup_elapsed_s
+        self.backend_s += delta
+        if self.attempt_is_retry:
+            self.retry_backend_s += delta
+        self.attempt_started_at = None
+        return delta
+
+    def pending_s(self, now: float) -> float:
+        """The in-flight attempt's elapsed time, or ``0.0`` when none is running."""
+        if self.attempt_started_at is None:
+            return 0.0
+        return max(now - self.attempt_started_at, 0.0)
+
+    def pending_retry_s(self, now: float) -> float:
+        """The in-flight attempt's elapsed time when it is a retry, else ``0.0``."""
+        return self.pending_s(now) if self.attempt_is_retry else 0.0
+
+    @property
+    def spent_retry_overhead(self) -> bool:
+        """Whether the ladder spent anything on recovery: a dispatch or a sleep.
+
+        A ladder that slept through a backoff and then found its deadline gone
+        spent real retry overhead even though it never dispatched the retry, so
+        the deadline that ended it must still be reported as a ladder ending.
+        """
+        return self.retry_attempts > 0 or self.backoff_s > 0.0
+
+
 def _coerce_retry_recovery_allowance(raw: Any, source: str) -> float | None:
     """Validate one declared retry-recovery allowance, warning on an invalid value.
 
-    ``raw`` may be a number or a numeric string (the env shape). A bool, a
-    non-number, a non-finite value, or a negative value is refused as an
-    effective bound and degrades to the documented default, observably, rather
-    than becoming a bound. ``0`` is valid and disables retry recovery.
+    Thin logging wrapper over :func:`decode_retry_recovery_allowance`, which owns
+    the decode rule for every allowance source. ``raw`` may be a number or a
+    numeric string (the env shape). A bool, a non-number, a non-finite value, or
+    a negative value is refused as an effective bound and degrades to the
+    documented default, observably, rather than becoming a bound. ``0`` is valid
+    and disables retry recovery.
     """
-    value: float | None
-    if isinstance(raw, bool):
-        value = None
-    elif isinstance(raw, (int, float)):
-        value = float(raw)
-    elif isinstance(raw, str):
-        try:
-            value = float(raw)
-        except ValueError:
-            value = None
-    else:
-        value = None
-    if value is None or not math.isfinite(value) or value < 0:
+    value = decode_retry_recovery_allowance(raw)
+    if value is None:
         _logger.warning(
-            "daydream: invalid retry-recovery allowance %s=%r; using default %s",
-            source,
-            raw,
+            "daydream: %s; using default %s",
+            undeclared_retry_allowance_message(source, raw),
             DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
         )
-        return None
     return value
 
 
@@ -665,120 +903,11 @@ async def _run_agent(
             # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
             # here — only inv.observe()/inv.observe_user_step() against the recorder.
             recorder = get_current_recorder()
-            retry_policy = getattr(backend, "retry_policy", None)
-            if retry_policy is not None:
-                max_attempts = retry_policy.attempts
-                base_delay = retry_policy.base_delay_s
-                max_delay = retry_policy.max_delay_s
-            else:
-                try:
-                    _default_attempts = int(
-                        os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20")
-                    )
-                except ValueError:
-                    _default_attempts = 20
-                if _default_attempts < 0:
-                    _default_attempts = 20
-
-                def _retry_delay_from_env(name: str, default: float) -> float:
-                    try:
-                        value = float(os.environ.get(name, str(default)))
-                    except ValueError:
-                        return default
-                    return value if math.isfinite(value) and value >= 0 else default
-
-                _default_delay = _retry_delay_from_env(
-                    "DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0
-                )
-                _default_max_delay = _retry_delay_from_env(
-                    "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
-                )
-                max_attempts = getattr(backend, "retry_attempts", _default_attempts)
-                base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
-                max_delay = getattr(
-                    backend, "retry_max_delay_s", _default_max_delay
-                )
-            if max_attempts < 0:
-                raise ValueError("retry attempts must be >= 0")
-            if not math.isfinite(base_delay):
-                raise ValueError("retry base delay must be finite")
-            if base_delay < 0:
-                raise ValueError("retry base delay must be >= 0")
-            if not math.isfinite(max_delay):
-                raise ValueError("retry max delay must be finite")
-            if max_delay < 0:
-                raise ValueError("retry max delay must be >= 0")
-
-            # Resolve the cumulative retry-recovery allowance once, before any
-            # dispatch, respecting the declared precedence: a complete backend
-            # policy > a backend attribute > the explicit argument > the ambient
-            # env var > the documented default. An invalid single value degrades
-            # to the default with a warning (never an effective bound); the
-            # contradictory combinations below are refused outright.
-            allowance_source: tuple[str, Any] | None = None
-            if retry_policy is not None:
-                policy_allowance = getattr(
-                    retry_policy, "retry_recovery_allowance_s", None
-                )
-                if policy_allowance is not None:
-                    allowance_source = (
-                        "RetryPolicy.retry_recovery_allowance_s",
-                        policy_allowance,
-                    )
-            if allowance_source is None:
-                backend_allowance = getattr(
-                    backend, "retry_recovery_allowance_s", None
-                )
-                if backend_allowance is not None:
-                    allowance_source = ("retry_recovery_allowance_s", backend_allowance)
-            if allowance_source is None and retry_recovery_allowance_s is not None:
-                allowance_source = (
-                    "retry_recovery_allowance_s",
-                    retry_recovery_allowance_s,
-                )
-            if allowance_source is None and retry_policy is None:
-                # A backend that declares a RetryPolicy declares its retry settings
-                # completely: no ambient value is consulted for it (pinned by
-                # test_run_agent_uses_backend_retry_policy_without_reading_ambient_environment).
-                # The embedded construction path is not left out of the operator
-                # knob: BackendExecutionInput.from_environment materialises
-                # DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S into the policy it builds.
-                env_allowance = os.environ.get(
-                    "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
-                )
-                if env_allowance is not None:
-                    allowance_source = (
-                        "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S",
-                        env_allowance,
-                    )
-            resolved_allowance = DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-            declared_allowance = False
-            if allowance_source is not None:
-                parsed_allowance = _coerce_retry_recovery_allowance(
-                    allowance_source[1], allowance_source[0]
-                )
-                if parsed_allowance is not None:
-                    resolved_allowance = parsed_allowance
-                    declared_allowance = True
-
-            # Two declared values can each be valid and still contradict one
-            # another. Refuse the combination here, before any dispatch, with a
-            # message naming both keys -- never coerce it into a plausible bound.
-            # The allowance check fires only for a *declared* non-zero value: the
-            # default 300s must not turn ``retry_attempts = 0`` (a legitimate
-            # "no retries" declaration) into an error.
-            if base_delay > max_delay:
-                raise ValueError(
-                    f"retry_base_delay_s ({base_delay}) must not exceed "
-                    f"retry_max_delay_s ({max_delay})"
-                )
-            if declared_allowance and resolved_allowance > 0 and max_attempts == 0:
-                raise ValueError(
-                    "retry_recovery_allowance_s "
-                    f"({resolved_allowance}) cannot be non-zero while retries are "
-                    "disabled (max_attempts == 0); set retry_recovery_allowance_s = 0 "
-                    "to disable retry recovery explicitly"
-                )
+            settings = _resolve_retry_settings(backend, retry_recovery_allowance_s)
+            max_attempts = settings.max_attempts
+            base_delay = settings.base_delay_s
+            max_delay = settings.max_delay_s
+            resolved_allowance = settings.allowance_s
 
             # Derive ONE absolute effective deadline for the whole invocation,
             # before the retry loop: retries, attempt restarts and backoff all
@@ -810,40 +939,46 @@ async def _run_agent(
             # retry-recovery budget is a third, independent accumulator: its
             # charges are never added to backend_s or backoff_s, so the
             # backend_s + backoff_s <= elapsed_s invariant holds unchanged.
-            attempts_dispatched = 0
-            backend_s = 0.0
-            backoff_s = 0.0
+            telemetry = _RetryTelemetry()
             cleanup_elapsed_s = 0.0
-            attempt_started_at: float | None = None
+            # A deadline can end the ladder on either side of a dispatch. The two
+            # shapes are not interchangeable: an in-flight attempt keeps its
+            # partials, while the pre-dispatch (loop-top) and pre-backoff breaks
+            # reset them, and only the latter two misreport "kept".
+            partials_discarded_by_deadline = False
+            # Set when the invocation already emitted its one stop record, so the
+            # post-loop deadline emitter never writes a second, contradicting one.
+            stop_recorded = False
 
-            def _emit_ladder_stop(stop_reason: str) -> None:
+            def _emit_ladder_stop(
+                stop_reason: str, limit_expired: str = "retry_ladder"
+            ) -> None:
                 """Record one retry-ladder stop before its failure is raised.
 
                 Best-effort and recorder-optional, so telemetry can never change
                 the raised failure. Only durations and reason/state codes are
-                written -- never a monotonic value or the deadline.
+                written -- never a monotonic value or the deadline. The counters
+                are retry-scoped: the dispatched retry attempts (plus the in-flight
+                one when it is a retry) and the backend time and backoff sleep they
+                consumed, so every field of the record measures retry overhead and
+                the initial useful-work attempt is never folded in.
                 """
                 if recorder is None:
                     return
                 now = clock.monotonic()
-                pending = (
-                    max(now - attempt_started_at, 0.0)
-                    if attempt_started_at is not None
-                    else 0.0
-                )
+                pending = telemetry.pending_retry_s(now)
                 try:
                     recorder.emit_agent_budget_stop(
                         phase,
-                        limit_expired="retry_ladder",
+                        limit_expired=limit_expired,
                         elapsed_s=now - invocation_start,
-                        backend_s=backend_s + pending,
-                        backoff_s=backoff_s,
-                        attempts=attempts_dispatched,
+                        backend_s=telemetry.retry_backend_s + pending,
+                        backoff_s=telemetry.backoff_s,
+                        attempts=telemetry.retry_attempts,
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
                         circuit_state=run_context.outage_circuit.state(now),
-                        retry_recovery_spent_s=recovery.spent_s
-                        + (pending if charge_recovery else 0.0),
+                        retry_recovery_spent_s=recovery.spent_s + pending,
                         partial_edit_handling="discarded",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
@@ -872,16 +1007,25 @@ async def _run_agent(
                 # ladder stops here with the reset state.
                 if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                     aborted_reason = "wall_budget_exceeded"
+                    partials_discarded_by_deadline = True
+                    # A ladder that already spent retry overhead (a dispatched
+                    # retry or a backoff sleep) and now meets the spent deadline is
+                    # a retry-ladder ending, not a plain deadline: record that stop
+                    # so the manifest's retry summary carries the retry overhead
+                    # the ladder produced, instead of leaving a reason-less
+                    # deadline stop behind.
+                    if telemetry.spent_retry_overhead:
+                        _emit_ladder_stop(
+                            "retry_deadline_exhausted",
+                            limit_expired=limit_expired or "invocation_wall_budget",
+                        )
+                        stop_recorded = True
                     break
-                # Guarded so the retry branch can charge the attempt's backend
-                # time before its backoff sleep, keeping that sleep out of
-                # backend_s (it is counted in backoff_s instead).
-                attempt_started_at = clock.monotonic()
-                # Retry attempts' backend time is charged to the recovery budget;
-                # the attempt that produces the first retryable failure is not
-                # (activation happens after it).
-                charge_recovery = recovery.active
-                attempts_dispatched += 1
+                # Dispatch bookkeeping: the opening attempt is useful work, every
+                # later one is retry overhead. Retry attempts' backend time is
+                # charged to the recovery budget; the attempt that produces the
+                # first retryable failure is not (activation happens after it).
+                telemetry.start_attempt(clock.monotonic(), retry=recovery.active)
                 # Track tool names by id for log mode output
                 tool_names: dict[str, str] = {}
                 callback_text_parts: list[str] = []
@@ -1239,12 +1383,22 @@ async def _run_agent(
                         # Spending the deadline ends the ladder before the next
                         # backoff sleep: no attempt, no sleep, no raise. The
                         # failed attempt's partials are discarded so they cannot
-                        # leak into the invocation return.
+                        # leak into the invocation return, and the stop is
+                        # recorded as a ladder stop when the ladder already spent
+                        # retry overhead -- a reason-less deadline stop would erase
+                        # the retry summary the manifest is supposed to carry.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                             output_parts = []
                             structured_result = None
                             result_continuation = None
                             aborted_reason = "wall_budget_exceeded"
+                            partials_discarded_by_deadline = True
+                            if telemetry.spent_retry_overhead:
+                                _emit_ladder_stop(
+                                    "retry_deadline_exhausted",
+                                    limit_expired=limit_expired or "invocation_wall_budget",
+                                )
+                                stop_recorded = True
                             break
                         # Spending the recovery allowance ends the ladder too: no
                         # dispatch, no sleep, straight to the caller with the
@@ -1278,37 +1432,28 @@ async def _run_agent(
                         if not admission.allowed:
                             _emit_ladder_stop("circuit_open")
                             raise
-                        # Bound the backoff by the smaller of the exponential
-                        # growth, the configured maximum, the remaining allowance
-                        # and the time the effective deadline has left: a retry
-                        # storm must not overshoot either ceiling by up to one
-                        # backoff interval.
-                        cap = min(base_delay * (2 ** attempt), max_delay)
-                        if recovery.active:
-                            cap = min(cap, recovery.remaining())
-                        if effective_deadline is not None:
-                            cap = min(cap, max(effective_deadline - clock.monotonic(), 0.0))
-                        cap = max(cap, 0.0)
-                        # A server hint replaces jitter, but never extends either
-                        # budget: a hint longer than the remaining allowance or
-                        # the remaining deadline stops the ladder exactly as
-                        # exhaustion does. The outer min() below keeps an
-                        # over-large hint (and a hostile sample) inside the cap.
-                        hint = _retry_hint(exc)
-                        if hint is not None:
-                            budget_bounds = []
-                            if recovery.active:
-                                budget_bounds.append(recovery.remaining())
-                            if effective_deadline is not None:
-                                budget_bounds.append(
-                                    max(effective_deadline - clock.monotonic(), 0.0)
-                                )
-                            if budget_bounds and hint > min(budget_bounds):
-                                _emit_ladder_stop("retry_hint_exceeds_budget")
-                                raise
-                        delay = min(
-                            hint if hint is not None else _sample_retry_delay(cap), cap
+                        # The delay and the ladder's remaining bounds are decided
+                        # by one pure callable: a server hint replaces jitter but
+                        # never extends either budget, and a hint longer than the
+                        # remaining allowance or the remaining deadline stops the
+                        # ladder exactly as exhaustion does.
+                        delay, delay_stop = _plan_retry_delay(
+                            attempt=attempt,
+                            base_delay_s=base_delay,
+                            max_delay_s=max_delay,
+                            allowance_remaining_s=(
+                                recovery.remaining() if recovery.active else None
+                            ),
+                            deadline_remaining_s=(
+                                None
+                                if effective_deadline is None
+                                else max(effective_deadline - clock.monotonic(), 0.0)
+                            ),
+                            hint=_retry_hint(exc),
                         )
+                        if delay_stop is not None:
+                            _emit_ladder_stop(delay_stop)
+                            raise
                         retry_msg = (
                             f"Backend error ({type(exc).__name__}), retrying "
                             f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
@@ -1328,18 +1473,15 @@ async def _run_agent(
                         # backoff point: the sleep that follows is retry backoff
                         # (counted in backoff_s) and must not also land in
                         # backend_s, or backend_s + backoff_s would overcount.
-                        if attempt_started_at is not None:
-                            delta = clock.monotonic() - attempt_started_at
-                            backend_s += delta
-                            if charge_recovery:
-                                recovery.charge_attempt(delta)
-                            attempt_started_at = None
+                        charged = telemetry.charge_attempt(clock.monotonic())
+                        if telemetry.attempt_is_retry:
+                            recovery.charge_attempt(charged)
                         # The backoff sleep is retry overhead: charge it to the
                         # cumulative allowance before sleeping so a later
                         # failure sees the un-rebased remainder.
                         recovery.charge(delay)
                         await anyio.sleep(delay)
-                        backoff_s += delay
+                        telemetry.backoff_s += delay
                         # Re-check the circuit at the pre-dispatch decision point:
                         # a sibling that failed while this backoff was sleeping may
                         # have opened it, so a closed admission is not a licence to
@@ -1360,35 +1502,46 @@ async def _run_agent(
                         _emit_ladder_stop("retry_attempts_exhausted")
                     raise
                 finally:
-                    if attempt_started_at is not None:
+                    if telemetry.attempt_started_at is not None:
                         # Post-stop cleanup (the bounded backend aclose) is not
                         # dispatched-attempt time: exclude it so backend_s keeps
                         # its documented 'time inside dispatched attempts'
                         # semantics and backend_s + backoff_s can never exceed
                         # elapsed_s (which already subtracts cleanup_elapsed_s).
-                        delta = clock.monotonic() - attempt_started_at - cleanup_elapsed_s
-                        backend_s += delta
-                        if charge_recovery:
-                            recovery.charge_attempt(delta)
+                        charged = telemetry.charge_attempt(
+                            clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
+                        )
+                        if telemetry.attempt_is_retry:
+                            recovery.charge_attempt(charged)
 
             # One honest stop record when a time budget ended the invocation --
             # best-effort and recorder-optional, so a recorder failure never
-            # changes the returned (output, continuation, reason) tuple. Unlike
-            # a retry-ladder stop, the deadline keeps the attempt's partials.
-            if aborted_reason == "wall_budget_exceeded" and recorder is not None:
+            # changes the returned (output, continuation, reason) tuple. This
+            # branch serves the deadline that interrupted an in-flight attempt
+            # (whose partials survive) and the deadline that ended the ladder
+            # before a dispatch (whose partials were reset); those are the only
+            # two shapes left here, because a deadline that ended a ladder which
+            # had already dispatched a retry records its own ladder stop above.
+            if (
+                aborted_reason == "wall_budget_exceeded"
+                and not stop_recorded
+                and recorder is not None
+            ):
                 try:
                     recorder.emit_agent_budget_stop(
                         phase,
                         limit_expired=limit_expired or "invocation_wall_budget",
                         elapsed_s=clock.monotonic() - invocation_start - cleanup_elapsed_s,
-                        backend_s=backend_s,
-                        backoff_s=backoff_s,
-                        attempts=attempts_dispatched,
+                        backend_s=telemetry.backend_s,
+                        backoff_s=telemetry.backoff_s,
+                        attempts=telemetry.attempts_dispatched,
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
                         circuit_state=run_context.outage_circuit.state(clock.monotonic()),
                         retry_recovery_spent_s=recovery.spent_s,
-                        partial_edit_handling="kept",
+                        partial_edit_handling=(
+                            "discarded" if partials_discarded_by_deadline else "kept"
+                        ),
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
                     _logger.exception("failed to record agent budget stop")

@@ -113,6 +113,51 @@ class RetryDecision:
     retries_allowed: bool
 
 
+def decode_retry_recovery_allowance(raw: Any) -> float | None:
+    """Decode one declared retry-recovery allowance value, or ``None`` if refused.
+
+    The single decode rule shared by every allowance source -- a backend
+    ``RetryPolicy`` field, a backend attribute, ``run_agent``'s explicit argument,
+    the ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var, and the repo
+    ``retry_recovery_allowance_s`` config key -- so one value can never be
+    accepted on one path and refused on another. A numeric string (the env
+    shape) is accepted; a bool, a non-number, a non-finite value, or a negative
+    value is refused as ``None``, which means "not declared" and never becomes an
+    effective bound; ``0`` is a real declaration that disables retry recovery.
+
+    Callers keep their own logging surface, but should render the refusal with
+    :func:`undeclared_retry_allowance_message` so one rule reads the same way
+    everywhere. Never raises.
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    elif isinstance(raw, str):
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def undeclared_retry_allowance_message(source: str, raw: Any) -> str:
+    """One warning shape for a refused allowance value, shared by every source.
+
+    Names the source and the raw value and states the consequence: the value
+    stays undeclared, so the caller's own default applies downstream. The refused
+    value is never restated as if it were a bound.
+    """
+    return (
+        f"{source}={raw!r} is not a finite non-negative number; "
+        "the retry-recovery allowance stays undeclared"
+    )
+
+
 @dataclass
 class RetryRecoveryBudget:
     """Cumulative retry-overhead allowance for one invocation's ladder.

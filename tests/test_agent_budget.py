@@ -339,9 +339,12 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
     stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
     assert len(stops) == 1
     meta = stops[0]["metadata"]
+    # The deadline is the limit that expired, and the ladder had already flown one
+    # retry, so this is a retry-ladder stop: its counters are retry-scoped.
     assert meta["limit_expired"] == "caller_deadline"
-    assert meta["attempts"] == 2            # 5000 -> 5300 (attempt 1) -> 5600 (attempt 2), then spent
-    assert meta["elapsed_s"] == 600.0 and meta["backend_s"] == 600.0
+    assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
+    assert meta["attempts"] == 1            # 5000 -> 5300 (attempt 1) -> 5600 (retry), then spent
+    assert meta["elapsed_s"] == 600.0 and meta["backend_s"] == 300.0
     assert "5600.0" not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
 
 
@@ -413,6 +416,12 @@ async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
     assert "partial-output-sentinel-2" in output   # text emitted before expiry survives
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     assert _agent_step_with_stop_reason(traj)["extra"]["stop_reason"] == "wall_budget_exceeded"
+    # The deadline interrupted an in-flight attempt, so the stop record must say
+    # its partials were kept -- the two deadline shapes are not interchangeable.
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    assert stops[0]["metadata"]["partial_edit_handling"] == "kept"
+    assert stops[0]["metadata"]["retry_stop_reason"] is None
 
 
 async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
@@ -655,6 +664,134 @@ async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
     assert backend.calls == 2
 
 
+async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ladder cut by the deadline after a retry keeps its retry summary.
+
+    The deadline check runs before the allowance check inside the retry branch, so
+    a ladder that already flew a retry and then overran the group wall used to end
+    on a reason-less deadline stop: the manifest's retry summary was silently
+    erased even though real retry overhead had been spent. The stop is now a
+    retry-ladder stop naming the deadline, and the reducer folds it in.
+    """
+    from daydream.retry_policy import derive_retry_summary
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    # 5000 (+300 attempt 1) -> 5300 -> retry -> 5600 (+300 retry) -> deadline spent.
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
+    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            _, _, reason = await run_agent(
+                backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+                deadline=5_600.0, retry_recovery_allowance_s=300.0,
+            )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.calls == 2
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
+    assert meta["limit_expired"] == "caller_deadline"
+    # Retry-scoped counters: the one dispatched retry and its 300 s of backend
+    # time -- never the first, useful-work attempt.
+    assert meta["attempts"] == 1
+    assert meta["backend_s"] == 300.0
+    assert meta["backoff_s"] == 0.0
+    assert meta["retry_recovery_spent_s"] == 300.0
+    assert meta["partial_edit_handling"] == "discarded"
+
+    summary = derive_retry_summary(traj["extra"]["phase_events"])
+    assert summary is not None
+    assert summary["stops"] == {"retry_deadline_exhausted": 1}
+    assert summary["attempts"] == 1 and summary["backend_s"] == 300.0
+
+
+async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A backoff sleep that overruns the deadline is retry overhead too.
+
+    The ladder spent its allowance on a real backoff sleep and then found the
+    deadline gone before it could dispatch the retry: the stop must name that
+    ending rather than masquerading as a plain deadline stop that erased the
+    retry summary.
+    """
+    from daydream.retry_policy import derive_retry_summary
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    # 1000 (+300 attempt 1) -> 1300 -> 100 s backoff -> 1400 = the deadline.
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
+    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=100.0, max_delay_s=100.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            _, _, reason = await run_agent(
+                backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+                deadline=1_400.0, retry_recovery_allowance_s=300.0,
+            )
+
+    assert reason == "wall_budget_exceeded"
+    assert backend.calls == 1                  # the retry never got to dispatch
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
+    assert meta["attempts"] == 0               # no retry attempt was dispatched
+    assert meta["backend_s"] == 0.0
+    assert meta["backoff_s"] == 100.0          # the sleep is the retry overhead
+    assert meta["retry_recovery_spent_s"] == 100.0
+    assert meta["partial_edit_handling"] == "discarded"
+    assert derive_retry_summary(traj["extra"]["phase_events"]) is not None
+
+
+async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``allowance = 0`` stops the ladder on the first failure with no retry cost.
+
+    The stop still names its reason (the manifest must show why recovery ended),
+    but every counter is zero: the failed attempt is useful work, not retry
+    overhead, so the summary cannot claim a retry that never happened.
+    """
+    from tests.harness.fake_clock import FakeClock
+
+    fake = FakeClock(monotonic_value=2_000.0).install(monkeypatch)
+    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=250.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            with pytest.raises(_RetryableBackendError):
+                await run_agent(
+                    backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+                    wall_budget_s=10_000.0, retry_recovery_allowance_s=0.0,
+                )
+
+    assert backend.calls == 1
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["retry_stop_reason"] == "retry_recovery_allowance_exhausted"
+    assert meta["attempts"] == 0
+    assert meta["backend_s"] == 0.0 and meta["backoff_s"] == 0.0
+    assert meta["retry_recovery_spent_s"] == 0.0
+
+
 def _ending_backend(
     monkeypatch: pytest.MonkeyPatch, ending: str
 ) -> tuple[Any, _RetryableFailingBackend, RunContext]:
@@ -690,7 +827,11 @@ def _ending_backend(
 @pytest.mark.parametrize(
     ("ending", "expected_stop", "expected_partial"),
     [
-        pytest.param("deadline", None, "kept", id="deadline"),
+        # The 1800 s wall budget is spent by the first attempt's own advance, so
+        # the ladder ends before any retry is dispatched: the deadline stop is
+        # reason-less and the discarded-partials shape (the loop-top reset already
+        # wiped the failed attempt's partial output).
+        pytest.param("deadline", None, "discarded", id="deadline"),
         pytest.param("allowance", "retry_recovery_allowance_exhausted", "discarded", id="allowance"),
         pytest.param("attempts", "retry_attempts_exhausted", "discarded", id="attempts"),
         pytest.param("circuit", "circuit_open", "discarded", id="circuit"),

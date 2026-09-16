@@ -3209,10 +3209,16 @@ class TrajectoryRecorder:
 
         Only durations and a reason code are persisted; no raw monotonic
         deadline value is reusable across runs. A retry-ladder stop (allowance
-        exhaustion, hint-exceeds-budget, attempts exhaustion, an open circuit)
-        also records ``retry_stop_reason``, ``circuit_state`` and
-        ``retry_recovery_spent_s``, and discards the failed attempt's partials;
-        a deadline stop keeps them.
+        exhaustion, hint-exceeds-budget, attempts exhaustion, an open circuit, or
+        a deadline that ends a ladder which already spent retry overhead) also
+        records ``retry_stop_reason``, ``circuit_state`` and
+        ``retry_recovery_spent_s``; its counters are retry-scoped -- the retry
+        attempts it dispatched, the backend time spent inside them and their
+        backoff sleeps -- so the initial useful-work attempt is never reported as
+        retry overhead. ``partial_edit_handling`` states whether the stopped
+        attempt's partial output survived: a deadline that interrupts an in-flight
+        attempt keeps it, while a deadline that ends the ladder before a dispatch
+        -- like every retry-ladder stop -- discards it.
         """
         self._emit_phase_event(
             phase,

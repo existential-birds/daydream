@@ -7,6 +7,8 @@ production retry branch consumes it.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from daydream.agent import _ToolSupervisorFailure
@@ -181,3 +183,71 @@ def test_classify_failure_never_raises_on_non_string_category_or_message() -> No
 
     assert decision.failure_class is FailureClass.NOT_RETRYABLE
     assert decision.retries_allowed is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (5, 5.0),
+        (0, 0.0),
+        (42.5, 42.5),
+        ("42", 42.0),
+        ("0", 0.0),
+        (True, None),
+        (False, None),
+        (-1, None),
+        ("-1", None),
+        ("nonsense", None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (None, None),
+        ([], None),
+    ],
+)
+def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | None) -> None:
+    """One decode rule: numeric strings accepted, everything invalid refused."""
+    from daydream.retry_policy import decode_retry_recovery_allowance
+
+    assert decode_retry_recovery_allowance(raw) == expected
+
+
+def test_every_allowance_source_decodes_with_the_same_rule() -> None:
+    """The three decode sites cannot disagree about one value.
+
+    The config-file key, the explicit argument and the env var each used to carry
+    their own copy of the rule -- with three different warning texts and a real
+    drift hazard -- so agreement is pinned here rather than assumed.
+    """
+    from daydream.agent import _coerce_retry_recovery_allowance
+    from daydream.backends import BackendExecutionInput
+    from daydream.config_file import (
+        _coerce_retry_recovery_allowance as file_coerce,
+    )
+
+    for raw in (5, 0, 42.5, "42", "0", True, False, -1, "-1", "nonsense", None):
+        argument = _coerce_retry_recovery_allowance(raw, "retry_recovery_allowance_s")
+        file_value = file_coerce({"retry_recovery_allowance_s": raw})
+        assert argument == file_value, raw
+
+    # The env source only ever sees strings; it must agree with them too.
+    for raw in ("5", "0", "42.5", "nonsense", "-1", "nan", "inf"):
+        embedded = BackendExecutionInput.from_environment(
+            {"DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S": raw}, backend="pi"
+        ).retry_policy.retry_recovery_allowance_s
+        assert embedded == _coerce_retry_recovery_allowance(raw, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"), raw
+
+
+def test_a_refused_allowance_warning_names_the_source_and_the_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One shared warning shape: the source, the raw value, and no restated bound."""
+    import logging
+
+    from daydream.agent import _coerce_retry_recovery_allowance
+
+    with caplog.at_level(logging.WARNING):
+        assert _coerce_retry_recovery_allowance(-1, "retry_recovery_allowance_s") is None
+
+    message = caplog.records[-1].message
+    assert "retry_recovery_allowance_s=-1" in message
+    assert "stays undeclared" in message

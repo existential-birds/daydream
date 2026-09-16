@@ -784,3 +784,135 @@ async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None
 
     assert _retry_hint(_HostileHint("503")) is None  # no fabricated hint, no raise
     assert classify_failure(_HostileHint()).retries_allowed is True  # still classified
+
+
+def _resolver_backend(**attrs: Any) -> Any:
+    """A minimal backend stand-in for the pure retry-settings resolver.
+
+    Only the attributes the resolver reads are needed, so the extraction stays
+    testable without a full ``Backend`` (which would have to be driven to observe
+    the same values).
+    """
+    return SimpleNamespace(model="mock-model", **attrs)
+
+
+def test_the_extracted_settings_resolver_keeps_the_documented_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_retry_settings`` is the precedence ladder, testable on its own.
+
+    The retry branch's resolution used to be inline in ``_run_agent``; pinning it
+    here keeps the documented order (policy field > backend attribute > argument >
+    env > default) observable without driving a ladder.
+    """
+    from daydream.agent import _resolve_retry_settings
+    from daydream.backends import RetryPolicy
+    from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+
+    def _resolve(backend: Any, explicit: float | None = None) -> Any:
+        return _resolve_retry_settings(cast(Backend, backend), explicit)
+
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "10")
+
+    assert _resolve(_resolver_backend()).allowance_s == 10.0          # env tier
+    assert _resolve(_resolver_backend(), 20.0).allowance_s == 20.0    # argument wins
+    assert _resolve(_resolver_backend(), 20.0).allowance_declared is True
+
+    attributed = _resolver_backend(retry_recovery_allowance_s=30.0)
+    assert _resolve(attributed, 20.0).allowance_s == 30.0             # attribute wins
+
+    policed = _resolver_backend(
+        retry_policy=RetryPolicy(
+            attempts=3, base_delay_s=1.0, max_delay_s=2.0, retry_recovery_allowance_s=0.0
+        )
+    )
+    resolved = _resolve(policed, 20.0)
+    assert resolved.allowance_s == 0.0            # a declared policy is complete
+    assert resolved.allowance_declared is True
+    assert resolved.max_attempts == 3 and resolved.base_delay_s == 1.0
+
+    # Nothing declared anywhere: the documented default applies, undeclared.
+    monkeypatch.delenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S")
+    fallback = _resolve(_resolver_backend())
+    assert fallback.allowance_s == DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+    assert fallback.allowance_declared is False
+
+
+def test_the_extracted_settings_resolver_refuses_contradictions() -> None:
+    """Both documented contradictions are refused before any dispatch."""
+    from daydream.agent import _resolve_retry_settings
+    from daydream.backends import RetryPolicy
+
+    inverted = _resolver_backend(
+        retry_policy=RetryPolicy(attempts=3, base_delay_s=5.0, max_delay_s=1.0)
+    )
+    with pytest.raises(ValueError, match="must not exceed"):
+        _resolve_retry_settings(cast(Backend, inverted), None)
+
+    disabled = _resolver_backend(
+        retry_policy=RetryPolicy(
+            attempts=0, base_delay_s=1.0, max_delay_s=2.0, retry_recovery_allowance_s=60.0
+        )
+    )
+    with pytest.raises(ValueError, match="cannot be non-zero while retries are disabled"):
+        _resolve_retry_settings(cast(Backend, disabled), None)
+
+    # The default allowance must not turn a legitimate "no retries" declaration into
+    # an error: only a *declared* non-zero value contradicts `attempts = 0`.
+    plain = _resolver_backend(
+        retry_policy=RetryPolicy(attempts=0, base_delay_s=1.0, max_delay_s=2.0)
+    )
+    assert _resolve_retry_settings(cast(Backend, plain), None).max_attempts == 0
+
+
+def test_the_extracted_retry_delay_planner_clamps_to_every_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_plan_retry_delay`` decides the delay or the hint stop, on its own."""
+    from daydream.agent import _plan_retry_delay
+
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+
+    # Cap = min(exponential growth, max delay, remaining allowance, deadline time).
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=60.0, deadline_remaining_s=None, hint=None,
+    ) == (10.0, None)
+    assert _plan_retry_delay(
+        attempt=4, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=60.0, deadline_remaining_s=None, hint=None,
+    ) == (60.0, None)
+    assert _plan_retry_delay(
+        attempt=4, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=None, deadline_remaining_s=7.5, hint=None,
+    ) == (7.5, None)
+    # A spent deadline is a zero bound, not a negative one.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=None, deadline_remaining_s=0.0, hint=None,
+    ) == (0.0, None)
+
+    # A hint replaces jitter but never extends a budget: over-large stops the ladder.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=30.0, deadline_remaining_s=None, hint=31.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
+    # A hint inside the budget still never exceeds the computed cap.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=300.0, deadline_remaining_s=None, hint=7.0,
+    ) == (7.0, None)
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=300.0, deadline_remaining_s=None, hint=30.0,
+    ) == (10.0, None)
+    # No declared bound at all: the hint is honoured inside the cap, and nothing is
+    # fabricated when the server offers none.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=None, deadline_remaining_s=None, hint=45.0,
+    ) == (10.0, None)
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
+        allowance_remaining_s=None, deadline_remaining_s=None, hint=None,
+    ) == (10.0, None)

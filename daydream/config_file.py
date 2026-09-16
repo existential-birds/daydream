@@ -24,6 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+from daydream.retry_policy import (
+    decode_retry_recovery_allowance,
+    undeclared_retry_allowance_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -390,19 +394,20 @@ def _coerce_non_negative_float(raw: Any) -> float | None:
 def _coerce_retry_recovery_allowance(merged: dict[str, Any]) -> float | None:
     """Coerce ``retry_recovery_allowance_s``, warning when a declared value is invalid.
 
-    An absent key stays silent and degrades to ``None`` (the ``config.py``
+    Delegates the decode rule to :func:`decode_retry_recovery_allowance`, so this
+    source accepts exactly what the argument, backend-attribute and env sources
+    accept. An absent key stays silent and degrades to ``None`` (the ``config.py``
     default then applies). A present-but-invalid value -- negative, NaN, inf,
-    bool, or non-number -- also degrades to ``None`` but is logged, naming the
-    key, the raw value, and the default that applies, so an operator's typo is
-    observable rather than a silent no-op.
+    bool, or non-number -- also degrades to ``None`` but is logged with the rule's
+    shared wording, naming the key, the raw value, and the default that applies,
+    so an operator's typo is observable rather than a silent no-op.
     """
     raw = merged.get("retry_recovery_allowance_s")
-    value = _coerce_non_negative_float(raw)
+    value = None if raw is None else decode_retry_recovery_allowance(raw)
     if raw is not None and value is None:
         logger.warning(
-            "daydream config: retry_recovery_allowance_s = %r is invalid (must be "
-            "a finite non-negative number); using default %s",
-            raw,
+            "daydream config: %s; using default %s",
+            undeclared_retry_allowance_message("retry_recovery_allowance_s", raw),
             DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
         )
     return value

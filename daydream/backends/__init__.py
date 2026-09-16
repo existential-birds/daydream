@@ -37,6 +37,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union
 
+from daydream.retry_policy import (
+    decode_retry_recovery_allowance,
+    undeclared_retry_allowance_message,
+)
 from daydream.trajectory import now_iso
 
 logger = logging.getLogger(__name__)
@@ -51,9 +55,16 @@ class RetryPolicy:
     max_delay_s: float
     #: Cumulative retry-overhead allowance, in seconds, for one invocation.
     #: ``None`` means this backend declares none, so ``run_agent`` falls through
-    #: to its explicit argument, then ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S``,
-    #: then ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. ``0`` is a real
-    #: declaration ("no retry recovery"), distinct from ``None``.
+    #: to its backend-attribute tier, then its explicit argument, and -- only when
+    #: the backend declares no ``RetryPolicy`` at all -- the
+    #: ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var, then
+    #: ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. A declared policy is complete:
+    #: it suppresses every ambient ``DAYDREAM_PI_RETRY_*`` read, so a non-``None``
+    #: value here is the invocation's answer. ``0`` is a real declaration ("no
+    #: retry recovery"), distinct from ``None``. The embedded/benchmark
+    #: construction path materialises the env var into this field
+    #: (``BackendExecutionInput.from_environment``), which is why the env value
+    #: reaches those runs at this tier rather than the ambient one.
     retry_recovery_allowance_s: float | None = None
 
 
@@ -94,28 +105,23 @@ def _parsed_nonnegative_float(
     return value
 
 
-def _parsed_optional_nonnegative_float(
+def _parsed_optional_retry_allowance(
     environment: Mapping[str, str], name: str
 ) -> float | None:
-    """Parse an optional finite non-negative float; ``None`` when absent or invalid.
+    """Parse the optional retry-recovery allowance env knob.
 
-    Absent is silent (the caller's own default applies downstream). A present but
-    invalid value warns and degrades to ``None`` -- it never becomes an effective
-    bound, and it never masquerades as an operator declaration.
+    Delegates the decode rule to :func:`decode_retry_recovery_allowance` so the
+    env source accepts exactly what the argument, attribute and config-file
+    sources accept. ``None`` means absent (silent; the caller's default applies)
+    or present-but-invalid (warned, never an effective bound and never
+    masquerading as an operator declaration).
     """
     raw = environment.get(name)
     if raw is None:
         return None
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("%s=%r is not a valid float; ignoring it", name, raw)
-        return None
-    if not math.isfinite(value) or value < 0:
-        logger.warning(
-            "%s=%r is not a finite non-negative number; ignoring it", name, raw
-        )
-        return None
+    value = decode_retry_recovery_allowance(raw)
+    if value is None:
+        logger.warning("%s", undeclared_retry_allowance_message(name, raw))
     return value
 
 
@@ -209,7 +215,7 @@ class BackendExecutionInput:
                 # documented top precedence tier (RetryPolicy) before the env, so
                 # the operator knob must be materialised into the policy or it
                 # would be silently dropped on this path only.
-                retry_recovery_allowance_s=_parsed_optional_nonnegative_float(
+                retry_recovery_allowance_s=_parsed_optional_retry_allowance(
                     copied, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
                 ),
             ),
