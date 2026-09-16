@@ -1805,3 +1805,35 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     assert prompts[0].startswith("legacy:")
     assert str(ctx.data["diff_path"]) not in prompts[0]
     assert "exploration=None" in prompts[0]
+
+
+async def test_author_and_repair_turns_share_one_prepared_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+    from daydream.prompt_budget import SanctionedInputUnavailable
+
+    ctx = await _session_test_ctx(tmp_path)
+    seen: list[Any] = []
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("sanctioned_inputs"))
+        if len(seen) == 1:
+            # First turn grounds nothing, so the repair turn runs.
+            return {"participants": [{"name": "Ghost", "kind": "internal", "files": ["nope.py"]}]}, object(), None
+        return {"participants": []}, object(), None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
+    await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
+    )
+
+    assert len(seen) == 2, "the repair turn must have run"
+    assert seen[0] is seen[1] is not None, "both turns must reuse the same prepared set"
+    # mutate-before-repair: the same object revalidates fail-closed, the authority for both turns.
+    ctx.data["exploration_dir"].joinpath("summary.md").write_text("changed after capture\n", encoding="utf-8")
+    with pytest.raises(SanctionedInputUnavailable):
+        seen[1].revalidate(backend, ctx.work.repo, True)
