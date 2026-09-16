@@ -364,3 +364,35 @@ class TestCalibrationKnobs:
         for target, content, _kwargs in calls:
             assert target.read_bytes() == content
         assert sorted(p.name for p in config.out_dir.iterdir()) == ["calibration.json", "report.md"]
+
+
+class TestQueueKnobs:
+    def test_queue_calls_the_primitive_and_keeps_0600(self, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        _write_sessions(tmp_path)
+        state = tmp_path / "adj"
+        calls = _instrument(monkeypatch, "daydream.training.adjudication.cli")
+        assert cli._handle_corpus_command(
+            ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
+        ) == 0
+        [(target, content, kwargs)] = calls
+        assert target == state / "queue.json"
+        assert content == target.read_bytes()
+        # mode=None: this site already used mkstemp, so it stays 0600.
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": None}
+
+    def test_queue_failure_keeps_prior_bytes_and_leaves_no_temp(self, tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+        _write_sessions(tmp_path)
+        state = tmp_path / "adj"
+        assert cli._handle_corpus_command(
+            ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
+        ) == 0
+        prior = (state / "queue.json").read_bytes()
+        _fail_all_renames(monkeypatch)
+        with pytest.raises(OSError, match="No space left"):
+            cli._handle_corpus_command(
+                ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
+            )
+        assert (state / "queue.json").read_bytes() == prior
+        assert sorted(p.name for p in state.iterdir()) == ["queue.json"]
