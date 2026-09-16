@@ -12,12 +12,11 @@ candidate, write failure) instead of presenting silence.
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from pathlib import Path
 from typing import Any
 
 from daydream.benchmark.harbor import verifier_core as vc
+from daydream.json_utils import atomic_write_bytes
 from daydream.pr_review import extract_item_fields
 
 
@@ -174,21 +173,18 @@ def build_candidate_artifact(
 
 
 def write_candidate_artifact_atomic(dest: str | Path, artifact: dict[str, Any]) -> None:
-    """Write *artifact* to *dest* atomically (temp + rename).
+    """Write *artifact* to *dest* atomically (shared temp + rename).
 
-    Writes to a sibling ``.tmp-<uuid>`` file in the destination directory then
-    ``os.replace``s it into place, so a reader sees either the prior complete
-    artifact or the complete new artifact -- never a torn write. Any ``OSError``
-    raises ``CandidateError(kind="write_failure")``; a failure is never
-    silently discarded.
+    The shared :func:`daydream.json_utils.atomic_write_bytes` primitive supplies
+    the same-directory temp file, its cleanup, and the atomic rename, so a reader
+    sees either the prior complete artifact or the complete new artifact -- never
+    a torn write. Any ``OSError`` raises ``CandidateError(kind="write_failure")``;
+    a failure is never silently discarded.
     """
     dest = Path(dest)
     payload = json.dumps(artifact).encode("utf-8")
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.parent / (dest.name + f".tmp-{uuid.uuid4().hex}")
-        tmp.write_bytes(payload)
-        os.replace(tmp, dest)
+        atomic_write_bytes(dest, payload, fsync=False, dir_fsync=False, mode=0o644)
     except OSError as exc:
         raise CandidateError(
             f"cannot write candidate artifact {dest}: {exc}", kind="write_failure"

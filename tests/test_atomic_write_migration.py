@@ -366,6 +366,33 @@ class TestCalibrationKnobs:
         assert sorted(p.name for p in config.out_dir.iterdir()) == ["calibration.json", "report.md"]
 
 
+class TestCandidateKnobs:
+    def test_candidate_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = candidate.build_candidate_artifact("case-abc123def456", [])
+        dest = tmp_path / "review.json"
+        calls = _instrument(monkeypatch, "daydream.benchmark.harbor.candidate")
+        candidate.write_candidate_artifact_atomic(dest, artifact)
+        [(target, content, kwargs)] = calls
+        assert target == dest
+        assert content == json.dumps(artifact).encode("utf-8")
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+
+    def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+        # Isolate the destination so the autouse archive_dir fixture's tmp_path/archive
+        # does not pollute the "no temp survives" observation.
+        out = tmp_path / "out"
+        out.mkdir()
+        dest = out / "existing-dir"
+        dest.mkdir()                                   # a directory -> the rename cannot land
+        with pytest.raises(candidate.CandidateError) as failure:
+            candidate.write_candidate_artifact_atomic(dest, {"schema_version": 1, "findings": []})
+        assert failure.value.kind == "write_failure"
+        assert isinstance(failure.value.__cause__, OSError)
+        assert list(out.iterdir()) == [dest]           # no uuid temp survives the failure
+
+
 class TestQueueKnobs:
     def test_queue_calls_the_primitive_and_keeps_0600(self, tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
