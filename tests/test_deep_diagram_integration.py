@@ -1518,6 +1518,65 @@ def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_pat
     assert diff  # non-empty stat output, i.e. the branch really differs from main
 
 
+def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> None:
+    from daydream.deep.prompts import _files_by_module_block
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    huge = {f"pkg_{i:03d}": [f"pkg_{i:03d}/mod_{j:02d}.py" for j in range(30)] for i in range(60)}
+    first = _files_by_module_block(huge)
+    assert first == _files_by_module_block(huge)                       # stable
+    assert len(first.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "omitted to fit the prompt budget" in first
+    assert "pkg_059/mod_29.py" not in first                            # the tail is what goes
+    assert "pkg_000/mod_00.py" in first                                # the head is what stays
+
+
+def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> None:
+    from daydream.deep.prompts import _candidate_roots_block
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    roots = [
+        {"file": f"pkg/mod_{i:03d}.py", "name": f"handle_{i:03d}", "line": 1,
+         "end_line": 40, "branch_points": 5}
+        for i in range(200)
+    ]
+    block = _candidate_roots_block(roots, forced=True)
+    assert block == _candidate_roots_block(roots, forced=True)
+    assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "omitted to fit the prompt budget" in block
+
+
+async def test_large_pr_author_prompt_reports_the_capped_projection(
+    tmp_path: Path, fake_gh: FakeGh, review_run: Callable[..., Any]
+) -> None:
+    """Real path: a ~20,000-line PR writes a bounded files-by-module block and says so."""
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+    from tests.harness.git_helpers import commit, git
+
+    target = build_large_cross_module_repo(tmp_path)
+    # The committed fixture spans only two top-level modules, so its projection
+    # fits the shared budget. Add enough one-file packages to genuinely overflow
+    # the block while keeping every path a real, changed file the host groups.
+    for i in range(260):
+        module = target / f"extra_{i:03d}"
+        module.mkdir()
+        (module / "mod.py").write_text(f"def handle():\n    return {i}\n", encoding="utf-8")
+    git(target, "add", ".")
+    commit(target, "add extra modules")
+
+    # The diagram-only flow reaches the sequence author without the large PR's
+    # over-limit exact diff aborting an earlier TTT phase; the bounded
+    # files-by-module projection is the same one the full review author uses.
+    exit_code, stub = await review_run(
+        target, specs={"sequence": [dr.sequence_spec()]}, output_mode="diagram", diagram="sequence"
+    )
+
+    assert exit_code == 0
+    author_prompts = [call["prompt"] for call in stub.calls if "sequence-diagram author" in call["prompt"]]
+    assert author_prompts, "the sequence author turn must run"
+    assert "omitted to fit the prompt budget" in author_prompts[0]
+
+
 async def _session_test_ctx(tmp_path: Path) -> Any:
     """A FlowContext on an ACTIVE artifact session with realistic artifact sizes.
 
