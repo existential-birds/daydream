@@ -10,9 +10,12 @@ from typing import Any
 
 import pytest
 
+from daydream.config_file import load_file_config
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _scan_phase_events,
 )
+from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -27,6 +30,14 @@ from tests.test_deep_orchestrator import (
 )
 
 
+def _prepare_fix_stub(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute) -> StubBackend:
+    """Drive fix-cycle tests through the same interactive real-path setup."""
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    return _install_stub_backend(monkeypatch, target)
+
+
 async def test_supervise_rules_drops_deny_globbed_finding(
     multi_stack_target: Path,
     tmp_path: Path,
@@ -34,8 +45,6 @@ async def test_supervise_rules_drops_deny_globbed_finding(
     make_config: MakeConfig,
 ) -> None:
     """Rule supervision rewrites the canonical items before findings-out."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _pin_findings_pr(monkeypatch, multi_stack_target)
@@ -85,8 +94,6 @@ async def test_supervise_hold_excluded_but_rendered(
     mute_side_effects: Mute,
 ) -> None:
     """Held findings leave the actionable items but remain visible in the report."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -121,8 +128,6 @@ async def test_supervise_llm_drop_records_step(
     make_config: MakeConfig,
 ) -> None:
     """LLM supervision drops by canonical id and records its deep stage."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _pin_findings_pr(monkeypatch, multi_stack_target)
@@ -169,8 +174,6 @@ async def test_supervise_llm_edit_revises_severity(
     mute_side_effects: Mute,
 ) -> None:
     """LLM edit verdicts revise severity in canonical items and findings-out."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -207,8 +210,6 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
     mute_side_effects: Mute,
 ) -> None:
     """All findings may be dropped while findings-out still writes an empty artifact."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -238,8 +239,6 @@ async def test_supervise_off_byte_identical(
     mute_side_effects: Mute,
 ) -> None:
     """No config and explicit off produce the same canonical items bytes."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -280,8 +279,6 @@ async def test_supervise_dropped_finding_never_reaches_fix(
     mute_side_effects: Mute,
 ) -> None:
     """A dropped finding is absent from the real fix prompt and remains unmodified."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -317,7 +314,6 @@ async def test_run_deep_renders_prescan_summary_not_json(
     """Real-path: the pre-scan summary renders as a readable panel, not raw JSON."""
     from rich.console import Console
 
-    from daydream.runner import run
 
     # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
     # runs and its conventions reach the rendered summary).
@@ -347,12 +343,8 @@ async def test_parallel_fix_applies_all_disjoint_files(
     mute_side_effects: Mute,
 ) -> None:
     """AC#3: every disjoint-file group receives its own fixer dispatch."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
     _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
@@ -371,12 +363,8 @@ async def test_long_fix_is_not_turn_capped(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: a fix that needs many turns lands instead of dying on max_turns."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.fix_turns_needed = 200
     stub.merge_items = [
         _merge_item(1, "api.py", "high"),
@@ -417,12 +405,8 @@ async def test_parallel_fix_same_file_no_race(
     addresses every marker in severity order, while the other file's group runs concurrently. The
     read-modify-write append + anyio.sleep(0) makes any cross-file race deterministic; per-file partitioning
     keeps shared.py's markers ordered and intact."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     shared = multi_stack_target / "shared.py"
     _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py"])
     stub.fix_append_path = shared
@@ -446,12 +430,8 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     """A finding whose footprint intersects another group is dispatched to ONE
     agent owning both -- observable as ONE batched fix turn covering both files,
     not two per-file turns."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     _add_to_reviewed_diff(multi_stack_target, ["a.py", "b.py", "c.py"])
     stub.merge_items = [
         _merge_item(1, "a.py", "high"),
@@ -483,12 +463,8 @@ async def test_fix_verify_turn_is_read_only(
     """AC: verification is strictly read-only. The stub records ``read_only``
     per call (stub_backend.py:276), so the real-path run must show every
     fix-verify turn arriving with ``read_only=True``."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
@@ -504,8 +480,6 @@ async def test_fix_verify_uses_verify_backend_key_through_runner(
     mute_side_effects: Mute,
 ) -> None:
     """The registered fix-verify step deliberately resolves the verify model."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     (multi_stack_target / ".daydream.toml").write_text(
         '[phases.verify]\nmodel = "verify-model-sentinel"\n[phases.fix-verify]\nmodel = "registered-step-sentinel"\n'
@@ -542,12 +516,8 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
 ) -> None:
     """Spec: every dispatched finding has a recorded terminal outcome; all
     resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
@@ -572,12 +542,8 @@ async def test_fix_verify_loop_redispatch_resolves_second_round(
     """Spec AC#2: a partial first fix verifies unresolved, re-dispatches in a
     second round, verifies resolved -> the loop ran twice and the outcome is
     resolved."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 2  # round 1 -> unresolved, round 2 -> resolved
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
@@ -597,12 +563,8 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
 ) -> None:
     """Spec: a wrong_target retarget re-dispatches to the corrected file, but
     only inside the allowed edit set (#336 net never widens)."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     item = _merge_item(1, "api.py", "high")
     item["related_files"] = ["App.tsx"]
     stub.merge_items = [item]
@@ -631,12 +593,8 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
 ) -> None:
     """Spec: a finding still unresolved after the last round appears as
     attempted-not-fixed, never counted/shown as fixed."""
-    from daydream.runner import run
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
@@ -656,7 +614,6 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """AC#5: a failed fix group is isolated, surfaced, and exits nonzero."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)

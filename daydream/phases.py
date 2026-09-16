@@ -486,37 +486,7 @@ def _build_failure_summarizer_prompt(
     durable_changed_files: list[Path] | None = None,
     governed_input_labels: tuple[str, ...] | None = None,
 ) -> str:
-    """Build a read-only prompt for the failure-summarizer subagent.
-
-    The summarizer is instructed to produce a paste-ready handoff prompt
-    (single ``handoff_prompt`` JSON field) that the caller writes verbatim
-    to ``handoff.md``. The summarizer is strictly read-only and non-mutating
-    but MAY use read-only git history commands (``git log``/``show``/``blame``/
-    ``diff``) to *verify* any cause/history/blame claim before stating it as
-    fact. The handoff separates **Verified facts** (each cited) from
-    **Hypotheses (unverified)**, and quotes two tightly-scoped excerpts — the
-    failing assertion and the current source at the failing location — while
-    full diffs / whole files / trajectory dumps stay banned.
-
-    Args:
-        test_output: Raw failing test output to ground the summary.
-        trajectory_path: Live ``trajectory.json`` path if available.
-        trajectories_dir: Live ``trajectories/`` directory if available.
-        diff_path: Path to ``diff.patch`` if available.
-        manifest_path: Path to ``manifest.json`` if available.
-        deep_dir: Path to ``deep/`` if available.
-        changed_files: Paths readable relative to the current model cwd.
-        durable_changed_files: Public paths to serialize in the handoff;
-            ``None`` means ``changed_files`` are already durable.
-        governed_input_labels: Sanctioned artifact labels appended by the
-            common agent boundary. Any tuple (empty included) makes the public
-            artifact paths future references; ``None`` keeps on-disk reads.
-        has_trajectory: When False the summarizer must include the
-            literal ``> Note: trajectory unavailable for this run`` line.
-
-    Returns:
-        Prompt string demanding the JSON ``handoff_prompt`` field.
-    """
+    """Build a grounded handoff prompt from the durable run artifacts."""
     tail, truncated = _tail_test_output(test_output)
     if truncated:
         output_section = f"Tail of the failing test output:\n\n{tail}"
@@ -679,33 +649,7 @@ def _resolve_handoff_paths(
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
 ) -> tuple[Path, Path | None, Path | None, Path | None, Path | None, Path | None]:
-    """Return ``(handoff_path, trajectory_path, trajectories_dir, diff_path, manifest_path, deep_dir)``.
-
-    The returned handoff and artifact paths are public forward references
-    anchored on ``work.source`` so they survive ephemeral-worktree cleanup.
-    During an active artifact session the handoff bytes are written to the
-    corresponding private live path and projected only after model work ends.
-    The artifact reference paths point at locations that will exist when the
-    next agent reads the handoff:
-
-    * Session-managed runs: projected trajectory subtree under
-      ``<source>/.daydream/runs/<session_id>/`` (written by the recorder
-      and published by the host shortly after this function runs).
-    * Intentional standalone ephemeral runs with archiving enabled: archive
-      subtree under ``<archive_root>/runs/<session_id>/`` (populated by the
-      on_write callback after ``__aexit__``).
-    * Intentional standalone ephemeral runs with archiving disabled: live
-      paths, even though the worktree will be removed — best-effort, with no
-      persistent copy of the artifacts available.
-
-    When *recorder* is ``None``, ``handoff_path`` falls back to
-    ``<source>/.daydream/handoff-<ts>.md`` (no session id available) and
-    every other path is ``None``.
-
-    Returned artifact paths are not existence-checked: at handoff time
-    the trajectory has not been flushed yet and the archive bundle has
-    not been copied. The caller treats them as forward references.
-    """
+    """Resolve durable public handoff artifacts from the active run."""
     if artifact_session is None:
         if not allow_standalone:
             # Strict callers must supply the session even if a standalone
@@ -1395,29 +1339,7 @@ _PLACEHOLDER_EVIDENCE: frozenset[str] = frozenset({"n/a", "none", "-"})
 
 
 def _is_evidenced(item: dict[str, Any]) -> bool:
-    """Return True if the finding is grounded in evidence, False if speculative.
-
-    The structural evidence gate (issue #227): every finding Daydream emits must
-    carry a concrete, grounded citation. A finding is dropped as speculative when
-    ANY of the following hold:
-
-    - ``confidence`` is ``LOW`` (legacy tolerance for the collapsed HIGH/MEDIUM
-      enum before the sibling prompt-elimination issue lands, AC4);
-    - ``evidence`` is missing, blank, or a placeholder (``n/a`` / ``none`` / ``-``);
-    - ``rationale`` contains ``no exploration evidence`` (the exact string the
-      legacy LOW-confidence prompt language emitted) -- case-insensitive;
-    - there is no grounded citation: neither a real ``file`` + ``line`` > 0 nor a
-      ``path:line`` (path component + ``:`` + digits) token in the evidence string.
-
-    Items tagged ``lens="structural"`` are exempt from the grounded-citation
-    requirement: they are host-tagged, inherently whole-file findings (file-size
-    budgets, layering) that may legitimately carry ``line: 0`` with colon-free
-    evidence, so non-blank evidence is sufficient grounding for them.
-
-    Returns:
-        True when the finding is grounded and may reach ``merged-items.json``;
-        False when it is speculative and must be dropped.
-    """
+    """Require concrete evidence and a grounded citation except for host-tagged structural items."""
     # Legacy tolerance (AC4): the confidence enum collapsed to HIGH/MEDIUM, but
     # the sibling prompt-elimination issue still emits LOW today. Treat any
     # inbound LOW confidence as speculative so this gate is robust before that
@@ -1560,28 +1482,7 @@ def group_items_by_footprint(
     items: list[dict[str, Any]],
     footprint: AuthorizedFixFootprint,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Partition fix items by their normalized authorized footprints.
-
-    A finding's footprint is its primary ``file`` plus every ``related_files``
-    entry it carries. Any two groups whose footprints share a file are united
-    into one dispatch group (transitively), so a finding whose defect spans
-    sibling documents reaches a single agent that owns the whole overlapping
-    set. Grouping is widening-only: it unions intersecting footprints but never
-    splits a batch that already shares a primary file, preserving the
-    per-file read-modify-write race safety enforced by #170/#202.
-
-    Group emission order is first-appearance order of each group's earliest
-    item; within-group order is input order. The returned group key is the
-    group's representative primary file (the first item's ``file``, or
-    ``"<no-file>"``) -- sufficient for ``phase_fix_parallel``'s failures dict
-    and per-group budget. Items with a missing/None file bucket into a single
-    ``"<no-file>"`` group (cannot prove disjoint -> serialize for safety).
-
-    Pure: no I/O, no mutation of inputs.
-
-    Returns:
-        Ordered list of ``(file_key, items_for_group)`` tuples.
-    """
+    """Union overlapping authorized item footprints into ordered fix groups."""
     if not items:
         return []
 
@@ -1829,32 +1730,7 @@ def build_intent_prompt(
     inline_diff: str | None = None,
     inline_exploration_summary: str | None = None,
 ) -> str:
-    """Assemble the prompt for `phase_understand_intent`.
-
-    Args:
-        strategy: The profile-owned ``intent`` strategy content, rendered with
-            the runtime ``diff_path`` placeholder filled.
-        diff_path: Path to the diff file the agent should read.
-        branch: Branch name under review.
-        log: Commit log for the branch.
-        exploration_dir: Optional pre-scan exploration directory pointer.
-        pr_description: Optional author-supplied pull-request description. When
-            present (non-empty after strip), an authoritative-intent section is
-            prepended ahead of the diff-reading instructions. When ``None`` or
-            empty, the prompt is byte-identical to the no-PR-body case.
-        inline_diff: When supplied, the whole diff is inlined and the
-            read-the-file instruction is dropped. ``None`` (the default, and
-            what every over-budget caller passes) keeps the ``diff_path``
-            pointer text byte-identical.
-        inline_exploration_summary: When supplied, the pre-scan exploration
-            summary is inlined verbatim in place of the exploration directory
-            pointer. ``None`` (the default) keeps the pointer text
-            byte-identical. Read-only intent turns pass the inlined summary: a
-            read-only execution cwd (the Codex disposable clone) mirrors only
-            tracked and non-ignored untracked files, and target repos commonly
-            gitignore ``.daydream/``, so the on-disk summary may be absent
-            there.
-    """
+    """Ask for author intent using the diff and exploration context."""
     parts: list[str] = []
     if inline_exploration_summary is not None:
         parts.append(
@@ -2328,44 +2204,7 @@ async def phase_verify_recommendations(
     strategy: str | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Audit each non-structural item's recommendation against the codebase.
-
-    Loads the canonical merged item list (the single source of truth produced
-    by the cross-stack merge), filters to the language lenses
-    (``per-stack`` / ``cross-stack``), and runs a read-only verifier subagent
-    that decides, for every such item, whether the recommendation is
-    ``consistent`` with trait/interface specs and sibling implementations,
-    ``contradicts`` them, or is ``uncertain`` from the codebase alone.
-    Writes the result as ``recommendation-verdicts.json`` inside
-    ``deep_dir``. The fix gate reads the file and inlines per-item verdicts
-    into the ``phase_fix`` prompt; verdicts are advisory and keyed by the
-    canonical ``issue_id``.
-
-    Mirrors ``_run_setup_investigator`` in shape: small read-only contract
-    encoded in the verifier prompt, compact JSON schema, single ``run_agent``
-    call. Trajectory observability is handled by ``run_agent``'s recorder
-    integration via ``phase=DaydreamPhase.VERIFY``; no explicit ``fork`` at
-    this layer.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the verifier's cwd and the
-            repository root passed into the prompt.
-        merged_items_path: Path on disk to the canonical ``merged-items.json``.
-            Items tagged ``lens="structural"`` are filtered out in Python
-            before the prompt is built (see filter site below); only the
-            language-lens items are rendered for the verifier.
-        deep_dir: The ``.daydream/deep/`` artifacts directory for this run.
-            The verdicts JSON is written inside it via ``verdicts_path``.
-
-    Returns:
-        Tuple of (path, payload) where path is the verdicts JSON file written
-        inside ``deep_dir`` and payload is the already-parsed dict. The file
-        always exists on successful return; on parse failure, missing agent
-        output, or an empty filtered item list, ``{"verdicts": []}`` is
-        written so downstream code does not need to handle a missing file.
-
-    """
+    """Verify proposed recommendations against author intent and concrete evidence."""
     run_context = resolve_run_context(run_context)
     # Late imports avoid circular dependency with daydream.deep (which imports
     # from daydream.phases). Same pattern used by phase_per_stack_reviews and
@@ -2908,43 +2747,15 @@ async def phase_fix(
     deadline: float | None = None,
     retry_recovery_allowance_s: float | None = None,
 ) -> str | None:
-    """Phase 3: Apply a single fix for one feedback item.
+    """Apply one finding within explicit edit and read scopes; return any turn budget stop.
 
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the fix; ``work.repo`` is the agent cwd.
-        item: Feedback item containing description, file, and line
-        item_num: Current item number (1-indexed)
-        total: Total number of items
-        edit_scope: Exact transitive group paths the fixer may edit.
-        read_scope: Run-wide paths available as read-only context.
-        console_lock: Optional lock to serialize console writes across
-            concurrent callers.  Pass the same lock to every concurrent
-            ``phase_fix`` invocation; leave ``None`` for serial callers.
-        intent_path: Optional path to the confirmed author-intent file. When
-            present and readable, its text is injected as authoritative intent
-            with a rule forbidding fixes that undo a deliberate decision. The
-            read is best-effort enrichment: a missing or unreadable file is
-            skipped silently so an intent-read failure can never block the fix.
-        exploration_dir: Optional pre-scan directory whose deterministic
-            ``affected_files.md`` index is pointed out to the fixer.
-        test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
-            (built once by ``_parse_test_map`` at the fan-out root); ``None``
-            yields no hint. Invalid maps are ignored.
-        deadline: Optional absolute monotonic deadline forwarded to
-            ``run_agent``. The effective bound is the earliest of this and the
-            invocation's ``wall_budget_s``.
-        retry_recovery_allowance_s: Cumulative retry-overhead allowance for
-            this fix call, forwarded unchanged to ``run_agent``. One value per
-            file group is resolved once by the caller; this leaf never
-            re-resolves it. ``None`` means the repo declared no allowance, so
-            ``run_agent`` applies the module default as an undeclared value.
-
-    Returns:
-        The fix turn's budget-stop reason (``str``) when a budget ceiling cut
-        the turn short, else ``None``. Callers that ignore the return value
-        keep working; ``None`` always means the turn completed without a
-        budget stop.
+    ``deadline`` is an absolute monotonic bound shared with the enclosing fix
+    group: the effective bound is the earliest of it and the invocation's
+    ``wall_budget_s``. ``retry_recovery_allowance_s`` is the group's cumulative
+    retry-overhead allowance, forwarded unchanged; ``None`` means the repo
+    declared none, so ``run_agent`` applies its module default as an undeclared
+    value. Callers that ignore the return value keep working; ``None`` means the
+    turn completed without a budget stop.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -3030,44 +2841,14 @@ async def phase_fix_batched(
     deadline: float | None = None,
     retry_recovery_allowance_s: float | None = None,
 ) -> None:
-    """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
+    """Fix one authorized footprint group in a single agent turn, with scaled budgets.
 
-    ``items`` normally target the same file; the caller (``phase_fix_parallel``)
-    groups them (via ``group_items_by_footprint``). Batching collapses N
-    per-finding ``run_agent`` calls into one so the agent reads the file's
-    context once and produces a single coherent patch. A footprint group can
-    however span items from differing primary files (intersecting footprints);
-    the batched prompt still names each row's own resolved ``File:``. A
-    single-item group delegates straight to ``phase_fix`` — there is no batched
-    prompt to build.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the fix; ``work.repo`` is the agent cwd.
-        items: Feedback items, all targeting the same file.
-        item_nums: 1-based progress counters aligned with ``items``.
-        total: Total number of items across the whole fix run.
-        edit_scope: Exact transitive group paths the fixer may edit.
-        read_scope: Run-wide paths available as read-only context.
-        console_lock: Optional lock to serialize console writes across concurrent
-            callers. Pass the same lock to every concurrent invocation; leave
-            ``None`` for serial callers.
-        intent_path: Optional path to the confirmed author-intent file, injected
-            verbatim (same best-effort handling as ``phase_fix``).
-        exploration_dir: Optional pre-scan directory whose deterministic
-            ``affected_files.md`` index is pointed out to the fixer.
-        test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
-            (built once by ``_parse_test_map`` at the fan-out root); ``None``
-            yields no hint. Invalid maps are ignored.
-        deadline: Optional absolute monotonic deadline forwarded unchanged to
-            ``run_agent`` (and to the single-item ``phase_fix`` delegation).
-            The effective bound is the earliest of this, the scaled call budget,
-            and any enclosing group deadline.
-        retry_recovery_allowance_s: Cumulative retry-overhead allowance for the
-            group, forwarded unchanged to ``run_agent`` and to the single-item
-            ``phase_fix`` delegation. Resolved once by the group's caller;
-            ``None`` leaves the value undeclared so ``run_agent`` applies the
-            module default.
+    A single-item group delegates straight to ``phase_fix``. ``deadline`` is
+    forwarded unchanged to ``run_agent`` (and to that delegation); the effective
+    bound is the earliest of it, the scaled call budget, and any enclosing group
+    deadline. ``retry_recovery_allowance_s`` is the group's cumulative
+    retry-overhead allowance, forwarded unchanged as well; ``None`` leaves it
+    undeclared so ``run_agent`` applies its module default.
     """
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -3921,29 +3702,7 @@ async def phase_test_and_heal(
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> TestAndHealResult:
-    """Phase 4: Run tests and prompt user on failure for action.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for running tests; ``work.repo`` is the cwd.
-        feedback_items: Optional list of feedback items from the fix phase,
-            used to enrich the fix prompt with file context.
-        config: Optional ``RunConfig`` carrying the CLI ``--test-command``
-            flag and the merged file config. When a canonical test command is
-            configured it runs host-side via :func:`run_test_command` (issue
-            #726) — no TEST-phase agent turn and no prose detection. When
-            nothing is configured, the deprecated agent-run fallback applies
-            (see :func:`_canonical_test_cmd`).
-        session_id: Current fix-cycle session bound into every attempt.
-        capture_tree_key: Full stable-base delta identity callback, invoked
-            immediately before and after each actual test execution.
-        footprint: Run-wide authorization used as the healing edit scope.
-
-    Returns:
-        A typed result preserving the real verdict, explicit red override, and
-        identity evidence for every actual host or agent test attempt.
-
-    """
+    """Run bound test attempts and offer a bounded authorized heal after failure."""
     run_context = resolve_run_context(run_context)
     if session_id is None or capture_tree_key is None or footprint is None:
         raise TypeError(
@@ -4203,26 +3962,7 @@ async def phase_test_and_heal(
 def _stage_deterministic(
     work: WorkContext, preexisting_untracked: set[str],
 ) -> set[str] | None:
-    """Pre-stage exactly the daydream changes, excluding run artifacts.
-
-    Deterministic staging (issue #562/#543): everything changed from HEAD
-    minus the pre-run untracked snapshot is staged via ``stage_paths`` (never
-    ``git add --all``), so a user's pre-run scratch files can never be swept
-    into the daydream commit. Daydream's own mid-run artifacts under
-    ``.daydream/`` (recommended.patch, fix-failures, quality-gate/test
-    verdicts) are created after the snapshot and would otherwise be staged
-    and pushed alongside the fixes — they are run state, not user changes,
-    so they are excluded.
-
-    Returns:
-        The staged path set, or ``None`` when there is nothing to commit.
-
-    Raises:
-        GitError: If the changed-file enumeration or staging fails — the
-            strict enumerator must not silently degrade to an empty stage
-            (that would leave tracked fixes uncommitted behind a green final
-            pipeline result).
-    """
+    """Stage only retained authorized paths after checking the original index."""
     stage = set(
         git_ops.changed_files_against(
             work.repo, "HEAD", preexisting_untracked=preexisting_untracked,
@@ -4759,30 +4499,7 @@ async def phase_understand_intent(
     strategy: str | None = None,
     run_context: RunContext | None = None,
 ) -> str:
-    """Phase: Understand the intent of the PR through conversational confirmation.
-
-    The agent examines the diff, commit log, and branch name to understand
-    what the PR is trying to accomplish. The user confirms or corrects until
-    the understanding is accurate.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        diff_path: Path to the diff file on disk.
-        log: Git log output (main..HEAD --oneline).
-        branch: Current branch name.
-        exploration_dir: Optional directory of pre-scan exploration context.
-        pr_description: Optional author-written PR description body. When
-            present, it is threaded into the INITIAL intent proposal as the
-            authoritative statement of intent. It is deliberately NOT
-            re-injected into the interactive correction-loop rebuild: once a
-            human supplies a correction, that correction is the higher
-            authority.
-
-    Returns:
-        The confirmed intent summary string.
-
-    """
+    """Record author intent for later fix prompts."""
     run_context = resolve_run_context(run_context)
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
@@ -5051,46 +4768,7 @@ async def phase_per_stack_reviews(
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
-    """Run one review agent per detected stack concurrently (D-17).
-
-    Uses a capacity-limiter + task-group + default-arg closure capture pattern.
-    Per D-38, uses orchestrator-level parallelism -- never passes the ``agents``
-    kwarg (Codex does not support SDK-level sub-agent spawning).
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd / repo root.
-        stacks: Routed stack assignments (see daydream.deep.detection.detect_stacks).
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        exploration_dir: Optional pre-scan exploration directory.
-        diff_text: Issue #172 Fix B. The raw unified diff text. When supplied,
-            the per-stack / generic-fallback prompts inline the relevant hunks
-            for each stack (via ``_diff_blocks_for_files``) and drop the
-            ``Read it directly`` instruction. ``None`` falls back to the
-            diff_path pointer. The structural prompt is never inlined
-            (it roams repo-wide by design).
-        intent_authoritative: Issue #279. When True, the per-stack / structural /
-            generic-fallback prompts include the ``AUTHORITATIVE_INTENT_RULE``
-            precedence rule, because the intent phase was grounded by a fresh,
-            head-matched PR description.
-        strategies: Optional mapping of profile strategy contents resolved from
-            the flow context: ``discovery.per_stack``, ``discovery.structural``,
-            and ``discovery.generic_fallback``. When omitted, the packaged
-            default profile strategy is used for each stage (compatibility with
-            non-profile callers / forks).
-
-    Returns:
-        Tuple of ``(successes, failures)``:
-          - ``successes``: stack_name -> per-stack review output Path for stacks
-            that produced a review.
-          - ``failures``: stack_name -> "<ExceptionType>: <message>" for stacks
-            whose agent raised. Callers MUST surface this to the user and to the
-            merge agent so that missing coverage is visible instead of silently
-            dropped.
-
-    """
+    """Run scoped per-stack reviews under the backend fan-out limit and record each result."""
     run_context = resolve_run_context(run_context)
     # Every ``daydream.deep.*`` import in this module is function-local, and must
     # stay that way: ``daydream.deep.__init__`` imports ``orchestrator``, which
@@ -5499,36 +5177,7 @@ async def phase_supervise_review(
 
 
 def _index_records(records: list[dict[str, Any]], id_key: str) -> list[dict[str, Any]]:
-    """Tag *records* with fresh 1-based ids under *id_key* for an adjudication input artifact.
-
-    The positional *id_key* value (``arb_id`` / ``sup_id``) stays the token the
-    agent echoes back in ``ARBITER_SCHEMA`` / ``SUPPRESSION_SCHEMA``. That echo
-    is safe because the artifact this returns is written and the verdicts are
-    read back inside a single phase call, so the positional key cannot outlive
-    the list it indexes.
-
-    Each entry also carries the record's ``uid`` (issue #1111), which serves two
-    purposes that the positional id cannot:
-
-    - **Auditability.** ``arbiter-input.json`` / ``suppression-input.json``
-      become self-describing: ``arb_id: 3`` no longer requires re-deriving the
-      selection order to know which per-stack record it referred to.
-    - **Resolution.** A caller holding a verdict can go ``arb_id -> uid ->
-      record`` instead of ``arb_id -> offset -> list index``, which is the
-      surrogate that silently mis-targets whenever the record pool is
-      reordered or filtered between write and read.
-
-    These artifacts are agent *inputs* read from disk, not model-output
-    schemas, so adding a field costs nothing schema-side.
-
-    Args:
-        records: Selected per-stack records, in the order the agent will see.
-        id_key: Positional id field name (``arb_id`` or ``sup_id``).
-
-    Returns:
-        One projected dict per record, in input order. ``uid`` is ``""`` for a
-        record carrying no pre-merge identity.
-    """
+    """Index records by stable host identity for arbiter and merge use."""
     from daydream.deep.records import record_uid
 
     return [
@@ -5577,44 +5226,7 @@ async def phase_arbiter_review(
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
-    """Re-review high-severity / contested per-stack findings with the arbiter (#168).
-
-    Runs a single heavyweight (Opus by default) agent over only the findings the
-    cheaper per-stack reviewers flagged as high-severity or contested. The
-    arbiter adjudicates -- confirming, re-ranking, sharpening, or rejecting each
-    -- but never discovers new findings. The result re-keys onto the input by
-    ``arb_id`` so the caller can revise (keep), drop (explicit ``keep:false``), or
-    retain-unchanged (missing verdict) the originating records before the
-    cross-stack merge.
-
-    Args:
-        backend: The Backend to execute against (resolved via phase ``arbiter``).
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        selected_records: Per-stack records selected for arbitration. Each is
-            tagged with a fresh 1-based ``arb_id`` before being written to the
-            arbiter input artifact; the originals are left untouched.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        exploration_dir: Optional pre-scan exploration directory.
-        intent_authoritative: Issue #279. When True, the arbiter prompt includes
-            the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because the intent
-            phase was grounded by a fresh, head-matched PR description.
-        strategy: The profile-owned ``arbitration`` strategy content rendered by
-            the arbiter prompt. ``None`` (default) falls back to the packaged
-            default's arbitration strategy.
-
-    Returns:
-        ``(verdicts, continuation)``. ``verdicts`` maps ``arb_id`` -> adjudicated
-        finding dict with keys ``keep``, ``severity``, ``confidence``,
-        ``description``, ``rationale``. A missing ``arb_id`` (the agent dropped or
-        truncated a row) is fail-open: the caller retains the original record
-        unchanged with a warning, since arbitration targets are the high-severity
-        / contested findings worth protecting. ``continuation`` is the backend's
-        session token (``None`` when the backend mints none), so the cross-stack
-        merge can resume this conversation instead of paying for a cold prompt.
-
-    """
+    """Arbitrate high-severity or contested records before cross-stack merge."""
     run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import arbiter_input_path, deep_dir
 
@@ -5710,34 +5322,7 @@ async def phase_suppression_review(
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """Skeptical precision-mode second opinion over borderline findings (#232).
-
-    Runs a single cheaper (Sonnet by default) agent over ONLY the borderline
-    (LOW-confidence / low-severity uncontested) findings the arbiter never
-    scrutinizes. The reviewer's default stance is to DROP each finding unless it
-    can cite confirming evidence -- the inverse of the arbiter. The result re-keys
-    onto the input by ``sup_id`` so the caller can drop (missing verdict or
-    ``keep:false``) or retain (``keep:true``) the originating records before the
-    cross-stack merge. All targets are batched into a single agent call.
-
-    Args:
-        backend: The Backend to execute against (resolved via phase ``suppression``).
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        selected_records: Borderline per-stack records selected for suppression.
-            Each is tagged with a fresh 1-based ``sup_id`` before being written to
-            the suppression input artifact; the originals are left untouched.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        exploration_dir: Optional pre-scan exploration directory.
-
-    Returns:
-        Mapping of ``sup_id`` -> adjudicated finding dict with keys ``keep``,
-        ``severity``, ``confidence``, ``description``, ``rationale``, ``evidence``.
-        A missing ``sup_id`` is fail-CLOSED at the caller: the original record is
-        DROPPED (a borderline finding the reviewer never confirmed must not
-        survive on precision runs).
-    """
+    """Suppress unsupported borderline findings after scoped skeptical review."""
     run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import deep_dir, suppression_input_path
 
@@ -6025,53 +5610,7 @@ def _append_structural_and_write_merged(
     report_path: Path,
     canonical_path: Path,
 ) -> None:
-    """Append structural records to ``base_items`` and write the merged artifacts.
-
-    Single source of truth for the structural-tagging + write epilogue shared
-    by ``phase_cross_stack_merge`` (multi-stack) and
-    ``_write_single_stack_merged_items`` (tiny-diff bypass, issue #172), so the
-    merge-write contract lives in exactly one place instead of being copied.
-
-    Performs the shared sequence:
-      - parse ``structural_records_path`` with graceful degradation to ``[]``
-        on malformed/missing output (a prior agent run may have emitted bad
-        JSON -- degrade rather than crash);
-      - append structural findings tagged ``lens="structural"``, preserving
-        each record's reported confidence/severity (the anti-slop rubric
-        calibrates structural findings to medium/low, issue #314) and
-        defaulting to HIGH/high only for unlabeled records -- the structural
-        lens remains high-conviction by default and must not be demoted at
-        sort time;
-      - fold each structural finding that restates one of ``base_items`` into
-        the best-matching such item, keeping the stronger severity (never the
-        item the evidence gate is about to drop), so one defect seen through
-        both lenses posts once instead of twice or zero times (issue #1103);
-      - validate every finding ``file:line`` against the persisted hunk index
-        (snap-in-tolerance, demote-with-annotation beyond-tolerance; issue
-        #745), THEN normalize the combined list (fresh unique ids) and write
-        the canonical ``merged-items.json``;
-      - render ``review-output.md`` from the canonical items and copy it to
-        ``canonical_path`` (the deep artifact dir avoids sandbox write
-        restrictions on repo-root dotfiles).
-
-    Callers own the clear-stale step: each clears ``items_path`` /
-    ``report_path`` / ``canonical_path`` (and the ``dropped-speculative.json``
-    audit sidecar) at a point appropriate to its own
-    failure semantics (``phase_cross_stack_merge`` clears *before* the merge
-    agent runs so a crash leaves no stale output; the single-stack bypass has
-    no agent, so it clears immediately before this call). Keeping clear-stale
-    out of this helper preserves both error-handling contracts.
-
-    Args:
-        base_items: Non-structural records (merge-agent items or per-stack
-            records already tagged ``lens="per-stack"``).
-        structural_records_path: Optional path to the parsed structural
-            meta-stack records JSON. ``None`` when no structural review ran.
-        items_path: Canonical ``merged-items.json`` path.
-        report_path: Rendered report path inside the deep artifact dir.
-        canonical_path: Repo-root canonical report (``REVIEW_OUTPUT_FILE``).
-
-    """
+    """Append structural records, evidence-gate and normalize items, then write the merged artifact."""
     from daydream.deep.records import (
         RECORD_SOURCE_UIDS_KEY,
         record_uid,
@@ -6186,36 +5725,7 @@ def _write_single_stack_merged_items(
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
 ) -> None:
-    """Write the canonical ``merged-items.json`` for a tiny-diff run (issue #172).
-
-    Replaces ``phase_cross_stack_merge`` for single-stack-mode runs: there is
-    nothing to cross-stack-merge and nothing contested to arbitrate, so the
-    host writes the canonical item list directly. The structural-tagging +
-    write epilogue is shared with ``phase_cross_stack_merge`` via
-    ``_append_structural_and_write_merged`` so downstream consumers (fix gate,
-    verifier, PR posting) consume items unchanged (AC6).
-
-    Owns only the single-stack-specific steps ``phase_cross_stack_merge``
-    delegates to its merge agent:
-      - clears stale ``merged-items.json`` / ``review-output.md`` /
-        canonical ``REVIEW_OUTPUT_FILE`` so a failed prior run can't leave
-        behind outdated content;
-      - tags per-stack records with ``lens="per-stack"`` (the merge agent
-        normally does this; in single-stack mode the host does it);
-      - delegates the structural append + normalize + render + copy to
-        ``_append_structural_and_write_merged``.
-
-    Args:
-        repo: Repository root (``work.repo``); the canonical report is written
-            alongside the deep artifact directory.
-        deep_dir_path: Deep artifact directory (``target / .daydream / deep``).
-        all_records: Non-structural parsed per-stack records (already
-            partitioned by the caller). Carries ``severity`` / ``confidence``
-            / ``rationale`` from ``PER_STACK_RECORD_SCHEMA`` but no ``lens``.
-        structural_records_path: Optional path to the parsed structural
-            meta-stack records JSON. ``None`` when no structural review ran.
-
-    """
+    """Normalize single-stack records and structural findings into the merged artifact."""
     from daydream.deep.artifacts import merged_items_path, merged_report_path
     from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
 

@@ -1038,6 +1038,26 @@ def _external_verdict(
             elapsed_seconds=elapsed,
             stable_polls=max(stable_polls, 0),
         )
+    return _unobserved_verdict(
+        status=status,
+        reason=reason,
+        target=target,
+        diagnostic=diagnostic,
+        stable_polls=max(stable_polls, 0),
+        elapsed_seconds=elapsed,
+    )
+
+
+def _unobserved_verdict(
+    *,
+    status: RemoteCIStatus,
+    reason: str,
+    target: RemoteCITarget | None,
+    diagnostic: str | None = None,
+    stable_polls: int = 0,
+    elapsed_seconds: float = 0.0,
+) -> RemoteCIVerdict:
+    """Construct a verdict without claiming a completed CI observation."""
     return RemoteCIVerdict(
         status=status,
         reason=reason,
@@ -1053,8 +1073,8 @@ def _external_verdict(
         missing_contexts=(),
         urls=(),
         diagnostic=diagnostic,
-        stable_polls=max(stable_polls, 0),
-        elapsed_seconds=elapsed,
+        stable_polls=stable_polls,
+        elapsed_seconds=elapsed_seconds,
     )
 
 
@@ -1080,22 +1100,11 @@ def unavailable_remote_ci_verdict(
     safe_diagnostic = None
     if diagnostic:
         safe_diagnostic = redact_structured_text(diagnostic)[:limit]
-    return RemoteCIVerdict(
+    return _unobserved_verdict(
         status="unavailable",
         reason=safe_reason,
         target=target,
-        binding=None,
-        policy=None,
-        active_workflow_count=None,
-        evidence_sha=None,
-        required_observations=(),
-        advisory_observations=(),
-        failing_contexts=(),
-        pending_contexts=(),
-        missing_contexts=(),
-        urls=(),
         diagnostic=safe_diagnostic,
-        stable_polls=0,
         elapsed_seconds=elapsed_seconds,
     )
 
@@ -1110,24 +1119,7 @@ def pending_remote_ci_verdict(
     safe_reason = redact_structured_text(_required_text(reason, "pending reason"))[
         :2_000
     ]
-    return RemoteCIVerdict(
-        status="pending",
-        reason=safe_reason,
-        target=target,
-        binding=None,
-        policy=None,
-        active_workflow_count=None,
-        evidence_sha=None,
-        required_observations=(),
-        advisory_observations=(),
-        failing_contexts=(),
-        pending_contexts=(),
-        missing_contexts=(),
-        urls=(),
-        diagnostic=None,
-        stable_polls=0,
-        elapsed_seconds=0.0,
-    )
+    return _unobserved_verdict(status="pending", reason=safe_reason, target=target)
 
 
 def _deadline_verdict(
@@ -1193,6 +1185,48 @@ async def wait_for_remote_ci(
     bound_head = False
     cancelled_error = anyio.get_cancelled_exc_class()
 
+    def publish(verdict: RemoteCIVerdict) -> RemoteCIVerdict:
+        on_snapshot(verdict)
+        return verdict
+
+    def deadline_verdict(now: float, first_reason: str) -> RemoteCIVerdict:
+        elapsed = max(0.0, now - started)
+        if last_snapshot is not None:
+            return _deadline_verdict(
+                last_snapshot,
+                elapsed=elapsed,
+                stable_polls=stable_polls,
+                registered=registered,
+                limits=limits,
+            )
+        return _external_verdict(
+            target,
+            status="unavailable",
+            reason=first_reason,
+            detail=None,
+            elapsed=elapsed,
+            stable_polls=stable_polls,
+            prior=last_verdict,
+            limit=limits.diagnostic_chars,
+        )
+
+    def interrupted(reason: str) -> None:
+        verdict = _external_verdict(
+            target,
+            status="cancelled",
+            reason=reason,
+            detail=None,
+            elapsed=max(0.0, monotonic() - started),
+            stable_polls=stable_polls,
+            prior=last_verdict,
+            limit=limits.diagnostic_chars,
+        )
+        with anyio.CancelScope(shield=True):
+            try:
+                on_snapshot(verdict)
+            except BaseException:  # noqa: BLE001 - the original cancellation or interrupt must win
+                pass
+
     try:
         now = started
         while now < completion_deadline:
@@ -1201,27 +1235,7 @@ async def wait_for_remote_ci(
                 raise ValueError("remote CI monotonic clock must remain finite")
             active_deadline = completion_deadline if registered else discovery_deadline
             if now >= active_deadline:
-                if last_snapshot is None:
-                    verdict = _external_verdict(
-                        target,
-                        status="unavailable",
-                        reason="remote CI deadline expired before one complete poll",
-                        detail=None,
-                        elapsed=max(0.0, now - started),
-                        stable_polls=stable_polls,
-                        prior=last_verdict,
-                        limit=limits.diagnostic_chars,
-                    )
-                else:
-                    verdict = _deadline_verdict(
-                        last_snapshot,
-                        elapsed=max(0.0, now - started),
-                        stable_polls=stable_polls,
-                        registered=registered,
-                        limits=limits,
-                    )
-                on_snapshot(verdict)
-                return verdict
+                return publish(deadline_verdict(now, "remote CI deadline expired before one complete poll"))
 
             budget = GitHubRequestBudget(
                 deadline=active_deadline,
@@ -1231,28 +1245,7 @@ async def wait_for_remote_ci(
             try:
                 snapshot = await fetcher.fetch(target, budget=budget)
             except DeadlineExpired:
-                now = monotonic()
-                if last_snapshot is None:
-                    verdict = _external_verdict(
-                        target,
-                        status="unavailable",
-                        reason="remote CI deadline expired during the first poll",
-                        detail=None,
-                        elapsed=max(0.0, now - started),
-                        stable_polls=stable_polls,
-                        prior=None,
-                        limit=limits.diagnostic_chars,
-                    )
-                else:
-                    verdict = _deadline_verdict(
-                        last_snapshot,
-                        elapsed=max(0.0, now - started),
-                        stable_polls=stable_polls,
-                        registered=registered,
-                        limits=limits,
-                    )
-                on_snapshot(verdict)
-                return verdict
+                return publish(deadline_verdict(monotonic(), "remote CI deadline expired during the first poll"))
             except RemoteCIIdentityMismatch as exc:
                 verdict = _external_verdict(
                     target,
@@ -1264,18 +1257,11 @@ async def wait_for_remote_ci(
                     prior=last_verdict,
                     limit=limits.diagnostic_chars,
                 )
-                on_snapshot(verdict)
-                return verdict
+                return publish(verdict)
             except GitError as exc:
                 now = monotonic()
                 if last_snapshot is not None and now >= active_deadline:
-                    verdict = _deadline_verdict(
-                        last_snapshot,
-                        elapsed=max(0.0, now - started),
-                        stable_polls=stable_polls,
-                        registered=registered,
-                        limits=limits,
-                    )
+                    verdict = deadline_verdict(now, "remote CI deadline expired")
                 else:
                     verdict = _external_verdict(
                         target,
@@ -1287,8 +1273,7 @@ async def wait_for_remote_ci(
                         prior=last_verdict,
                         limit=limits.diagnostic_chars,
                     )
-                on_snapshot(verdict)
-                return verdict
+                return publish(verdict)
 
             now = monotonic()
             if not isfinite(now):
@@ -1305,8 +1290,7 @@ async def wait_for_remote_ci(
                     status="superseded",
                     reason="the pull request head changed after binding to the pushed commit",
                 )
-                on_snapshot(verdict)
-                return verdict
+                return publish(verdict)
             if snapshot.binding.head_sha == target.pushed_sha:
                 bound_head = True
 
@@ -1329,20 +1313,11 @@ async def wait_for_remote_ci(
             else:
                 registered = bound_head and bool(relevant_observations)
             if verdict.status != "pending":
-                on_snapshot(verdict)
-                return verdict
+                return publish(verdict)
 
             active_deadline = completion_deadline if registered else discovery_deadline
             if now >= active_deadline:
-                verdict = _deadline_verdict(
-                    snapshot,
-                    elapsed=max(0.0, now - started),
-                    stable_polls=stable_polls,
-                    registered=registered,
-                    limits=limits,
-                )
-                on_snapshot(verdict)
-                return verdict
+                return publish(deadline_verdict(now, "remote CI deadline expired"))
             on_snapshot(verdict)
             delay = min(limits.poll_seconds, active_deadline - now)
             if delay <= 0 or not isfinite(delay):
@@ -1358,43 +1333,12 @@ async def wait_for_remote_ci(
             prior=last_verdict,
             limit=limits.diagnostic_chars,
         )
-        on_snapshot(verdict)
-        return verdict
+        return publish(verdict)
     except cancelled_error:
-        now = monotonic()
-        verdict = _external_verdict(
-            target,
-            status="cancelled",
-            reason="remote CI verification was cancelled",
-            detail=None,
-            elapsed=max(0.0, now - started),
-            stable_polls=stable_polls,
-            prior=last_verdict,
-            limit=limits.diagnostic_chars,
-        )
-        with anyio.CancelScope(shield=True):
-            try:
-                on_snapshot(verdict)
-            except BaseException:  # noqa: BLE001 - the original cancellation must win
-                pass
+        interrupted("remote CI verification was cancelled")
         raise
     except KeyboardInterrupt:
-        now = monotonic()
-        verdict = _external_verdict(
-            target,
-            status="cancelled",
-            reason="remote CI verification was interrupted",
-            detail=None,
-            elapsed=max(0.0, now - started),
-            stable_polls=stable_polls,
-            prior=last_verdict,
-            limit=limits.diagnostic_chars,
-        )
-        with anyio.CancelScope(shield=True):
-            try:
-                on_snapshot(verdict)
-            except BaseException:  # noqa: BLE001 - the original interrupt must win
-                pass
+        interrupted("remote CI verification was interrupted")
         raise
 
 

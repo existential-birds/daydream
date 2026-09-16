@@ -882,6 +882,26 @@ class _ScriptedFetcher:
         return action
 
 
+async def _run_scripted_waiter(
+    target: RemoteCITarget,
+    actions: list[RemoteCISnapshot | BaseException | Callable[[GitHubRequestBudget], RemoteCISnapshot]],
+    *,
+    limits: RemoteCILimits = RemoteCILimits(),
+) -> tuple[RemoteCIVerdict, _Clock, _ScriptedFetcher, list[RemoteCIVerdict]]:
+    clock = _Clock()
+    fetcher = _ScriptedFetcher(actions)
+    emitted: list[RemoteCIVerdict] = []
+    verdict = await wait_for_remote_ci(
+        target,
+        fetcher=fetcher,
+        limits=limits,
+        monotonic=clock,
+        sleep=clock.sleep,
+        on_snapshot=emitted.append,
+    )
+    return verdict, clock, fetcher, emitted
+
+
 @pytest.mark.asyncio
 async def test_waiter_delayed_registration_and_success_switches_absolute_budget(
     tmp_path: Path,
@@ -891,17 +911,10 @@ async def test_waiter_delayed_registration_and_success_switches_absolute_budget(
     policy = RequiredPolicy((RequiredContext("Build", 10),), True)
     pending = _snapshot(target, policy=policy, head=(_observation("Build", "pending"),))
     passed = _snapshot(target, policy=policy, head=(_observation("Build", "pass"),))
-    fetcher = _ScriptedFetcher([empty, pending, passed, passed])
-    clock = _Clock()
-    emitted: list[RemoteCIVerdict] = []
-
-    verdict = await wait_for_remote_ci(
+    verdict, _, fetcher, emitted = await _run_scripted_waiter(
         target,
-        fetcher=fetcher,
+        [empty, pending, passed, passed],
         limits=RemoteCILimits(poll_seconds=10, discovery_seconds=120, completion_seconds=1800),
-        monotonic=clock,
-        sleep=clock.sleep,
-        on_snapshot=emitted.append,
     )
 
     assert verdict.status == "passed"
@@ -998,16 +1011,10 @@ async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(tmp_path
     )
 
     for actions in ([green_a, green_b, green_b], [merge_a, merge_b, merge_b]):
-        fetcher = _ScriptedFetcher(list(actions))
-        clock = _Clock()
-        emitted: list[RemoteCIVerdict] = []
-        verdict = await wait_for_remote_ci(
+        verdict, _, _, emitted = await _run_scripted_waiter(
             target,
-            fetcher=fetcher,
+            list(actions),
             limits=RemoteCILimits(poll_seconds=1),
-            monotonic=clock,
-            sleep=clock.sleep,
-            on_snapshot=emitted.append,
         )
         assert verdict.status == "passed"
         assert [item.status for item in emitted] == ["pending", "pending", "passed"]
@@ -1018,27 +1025,17 @@ async def test_waiter_allows_initial_stale_head_then_supersedes_after_binding(tm
     target = _target(tmp_path)
     stale = _snapshot(target, binding=_binding(target, head_sha="4" * 40))
     green = _snapshot(target, head=(_observation("Build", "pass"),))
-    clock = _Clock()
-    emitted: list[RemoteCIVerdict] = []
-    verdict = await wait_for_remote_ci(
+    verdict, _, _, _ = await _run_scripted_waiter(
         target,
-        fetcher=_ScriptedFetcher([stale, green, green]),
+        [stale, green, green],
         limits=RemoteCILimits(poll_seconds=1),
-        monotonic=clock,
-        sleep=clock.sleep,
-        on_snapshot=emitted.append,
     )
     assert verdict.status == "passed"
 
-    clock = _Clock()
-    emitted = []
-    verdict = await wait_for_remote_ci(
+    verdict, _, _, emitted = await _run_scripted_waiter(
         target,
-        fetcher=_ScriptedFetcher([green, stale]),
+        [green, stale],
         limits=RemoteCILimits(poll_seconds=1),
-        monotonic=clock,
-        sleep=clock.sleep,
-        on_snapshot=emitted.append,
     )
     assert verdict.status == "superseded"
     assert verdict.binding is not None
@@ -1072,19 +1069,14 @@ async def test_waiter_classifies_exact_deadlines_from_last_complete_snapshot(
         ),
     ]
     for snapshot, expected_deadline, expected_status in cases:
-        clock = _Clock()
-        fetcher = _ScriptedFetcher([snapshot] * 100)
-        verdict = await wait_for_remote_ci(
+        verdict, clock, fetcher, _ = await _run_scripted_waiter(
             target,
-            fetcher=fetcher,
+            [snapshot] * 100,
             limits=RemoteCILimits(
                 poll_seconds=60,
                 discovery_seconds=120,
                 completion_seconds=1800,
             ),
-            monotonic=clock,
-            sleep=clock.sleep,
-            on_snapshot=lambda _verdict: None,
         )
         assert verdict.status == expected_status
         assert clock.value == expected_deadline
@@ -1102,16 +1094,10 @@ async def test_waiter_advisory_observation_does_not_extend_missing_required_disc
         policy=RequiredPolicy((RequiredContext("Build", 10),), False),
         head=(_observation("Advisory", "pending", app_id=11),),
     )
-    clock = _Clock()
-    fetcher = _ScriptedFetcher([snapshot, snapshot])
-
-    verdict = await wait_for_remote_ci(
+    verdict, _, fetcher, _ = await _run_scripted_waiter(
         target,
-        fetcher=fetcher,
+        [snapshot, snapshot],
         limits=RemoteCILimits(poll_seconds=60),
-        monotonic=clock,
-        sleep=clock.sleep,
-        on_snapshot=lambda _verdict: None,
     )
 
     assert verdict.status == "missing"
