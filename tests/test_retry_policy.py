@@ -47,6 +47,16 @@ def test_rate_limit_message_mentioning_provider_stays_transient() -> None:
     assert decision.retries_allowed is True
 
 
+def test_tool_policy_stop_attribute_is_permanent_and_never_retryable() -> None:
+    class _ToolPolicyStop(Exception):
+        tool_policy_stop = True
+
+    decision = classify_failure(_ToolPolicyStop("veto:Write"))
+
+    assert decision.failure_class is FailureClass.TOOL_POLICY
+    assert decision.retries_allowed is False
+
+
 def test_declared_class_wins_over_message_and_category() -> None:
     class _Declared(Exception):
         failure_class = FailureClass.PERMANENT
@@ -74,6 +84,16 @@ def test_transient_failures_map_to_their_family(error: PiError, expected: Failur
     assert decision.retries_allowed is True
 
 
+def test_permanent_attribute_beats_retryable_flag_and_transient_category() -> None:
+    class _Permanent(Exception):
+        permanent = True
+
+    decision = classify_failure(_Permanent("429 rate limit exceeded"))
+
+    assert decision.failure_class is FailureClass.PERMANENT
+    assert decision.retries_allowed is False
+
+
 def test_category_only_transient_failure_without_retryable_flag_is_retryable() -> None:
     class _CategoryOnly(Exception):
         category = "RATE_LIMIT"
@@ -89,6 +109,65 @@ def test_plain_exception_is_not_retryable() -> None:
 
     assert decision.failure_class is FailureClass.NOT_RETRYABLE
     assert decision.retries_allowed is False
+
+
+def test_derive_retry_summary_ignores_deadline_only_stops() -> None:
+    """A deadline stop's attempts/backend_s are useful work, not retry overhead."""
+    from daydream.retry_policy import derive_retry_summary
+
+    events = [
+        {
+            "event": "agent_budget_stop",
+            "metadata": {
+                "retry_stop_reason": None,
+                "attempts": 1,
+                "backend_s": 1_700.0,
+                "backoff_s": 0.0,
+                "circuit_state": "closed",
+            },
+        },
+        {
+            "event": "agent_budget_stop",
+            "metadata": {
+                "retry_stop_reason": "retry_recovery_allowance_exhausted",
+                "attempts": 4,
+                "backend_s": 12.0,
+                "backoff_s": 30.0,
+                "retry_recovery_spent_s": 42.0,
+                "circuit_state": "open",
+            },
+        },
+    ]
+
+    summary = derive_retry_summary(events)
+
+    assert summary == {
+        "stops": {"retry_recovery_allowance_exhausted": 1},
+        "attempts": 4,
+        "backoff_s": 30.0,
+        "backend_s": 12.0,
+        "retry_recovery_spent_s": 42.0,
+        "circuit_states": ["open"],
+    }
+
+
+def test_derive_retry_summary_is_none_when_only_a_deadline_stopped() -> None:
+    """No retry-ladder stop means no summary, so a legacy manifest stays byte-identical."""
+    from daydream.retry_policy import derive_retry_summary
+
+    events = [
+        {
+            "event": "agent_budget_stop",
+            "metadata": {
+                "retry_stop_reason": None,
+                "attempts": 1,
+                "backend_s": 1_700.0,
+                "backoff_s": 0.0,
+            },
+        }
+    ]
+
+    assert derive_retry_summary(events) is None
 
 
 def test_classify_failure_never_raises_on_non_string_category_or_message() -> None:

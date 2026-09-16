@@ -73,7 +73,7 @@ from daydream.backends._transport import (
 )
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
-from daydream.retry_policy import classify_failure
+from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -329,6 +329,27 @@ _SERVER_ERROR_TOKENS = (
     "service unavailable",
     "server error",
 )
+# Ambiguous overload/throttle wording. Unlike the high-precision literals above,
+# these need positive overload/capacity meaning and an explicit rejection of
+# negated or planning contexts: "not overloaded" and "capacity planning" are
+# healthy messages that must not be read as transient failures.
+_NEGATED_OVERLOAD_RE = re.compile(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b")
+_OVERLOAD_RE = re.compile(r"\boverloaded?\b|\boverload(?:ed|ing)?\b")
+_CAPACITY_RE = re.compile(
+    r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b"
+)
+_THROTTLE_RE = re.compile(r"\bthrottl(?:e|ed|ing)\b")
+
+
+def _is_transient_overload_message(lower: str) -> bool:
+    """Return True for an overload/throttle/capacity message that a retry may help."""
+    if _NEGATED_OVERLOAD_RE.search(lower):
+        return False
+    return bool(
+        _OVERLOAD_RE.search(lower)
+        or _CAPACITY_RE.search(lower)
+        or _THROTTLE_RE.search(lower)
+    )
 
 
 def _is_stream_truncation_message(normalized_message: str) -> bool:
@@ -339,45 +360,18 @@ def _is_stream_truncation_message(normalized_message: str) -> bool:
 
 
 def _is_retryable_error_message(message: str) -> bool:
-    """Return True if the error message signals a transient overload or rate-limit.
+    """Return the shared classifier's verdict for a Pi ``errorMessage``.
 
-    High-precision literals (429, rate limit/rate_limit, too many requests,
-    502/503, bad gateway, service unavailable, server error) are matched as
-    plain substrings — they are extremely unlikely to appear in a non-transient
-    context. Ambiguous
-    terms require positive overload/capacity wording and explicitly reject
-    negated or planning contexts.
+    Kept as a thin delegation so the text taxonomy has exactly one
+    implementation: :func:`_pi_error_category` produces the category and
+    :func:`daydream.retry_policy.classify_failure` decides, the same path
+    :class:`PiError` construction and the agent retry branch use. A message
+    heuristic maintained here could otherwise disagree with the production
+    classifier (the pre-#734 drift this module exists to prevent).
     """
-    lower = message.lower()
-    # Unambiguous literals — plain substring is safe.
-    if any(token in lower for token in _RATE_LIMIT_TOKENS + _SERVER_ERROR_TOKENS):
-        return True
-    if _is_stream_truncation_message(lower):
-        return True
-    if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
-        return True
-    if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
-        return False
-    if bool(
-        re.search(r"\boverloaded?\b|\boverload(?:ed|ing)?\b", lower)
-        or re.search(r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b", lower)
-        or re.search(r"\bthrottl(?:e|ed|ing)\b", lower)
-    ):
-        return True
-    # Stream-drop signatures (terminated, econnreset, premature close, ...).
-    #
-    # Unlike daydream/benchmark/daydream_run.py:_is_transient — which scans raw
-    # stdout and therefore gates STREAM_DROP_SIGNATURES behind
-    # _ERROR_CONTEXT_MARKERS so the substrings only count when daydream actually
-    # errored — this function is only ever invoked on a PiError `errorMessage`
-    # (see the turn_end / stopReason == "error" call site below), where error
-    # context is already implied by construction. The asymmetry is deliberate:
-    # the benchmark's _ERROR_CONTEXT_MARKERS gate is the harness's own concern
-    # for stdout scanning, not a contract production must mirror. Matching these
-    # signatures unconditionally here is therefore safe and correct.
-    if any(sig in lower for sig in STREAM_DROP_SIGNATURES):
-        return True
-    return False
+    return _pi_retryable_for(
+        category=_pi_error_category(message), message=message
+    )
 
 
 def _is_retryable_exit_code(code: int) -> bool:
@@ -402,6 +396,8 @@ def _pi_error_category(message: str) -> str:
         return "RATE_LIMIT"
     if any(token in lower for token in _SERVER_ERROR_TOKENS):
         return "SERVER_ERROR"
+    if _is_transient_overload_message(lower):
+        return "SERVER_ERROR"
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return "TIMEOUT"
     if _is_stream_truncation_message(lower):
@@ -413,27 +409,17 @@ def _pi_error_category(message: str) -> str:
     return "UNKNOWN"
 
 
-_RETRY_HINT_RE = re.compile(r"retry[- ]after[:\s]+([+-]?\d+(?:\.\d+)?)", re.IGNORECASE)
-
-
 def parse_pi_retry_hint(message: str) -> float | None:
     """Extract a numeric-seconds ``retry-after`` hint from *message*.
 
-    Returns ``None`` for an absent, non-numeric, negative, or non-finite hint;
-    an unparseable hint degrades to jitter rather than to a fabricated delay.
+    Thin alias for :func:`daydream.retry_policy.parse_message_retry_hint`, the
+    single implementation shared by the agent retry branch and every backend: a
+    second copy of the pattern would have to be kept in sync or the two views of
+    the hint would drift. Returns ``None`` for an absent, non-numeric, negative,
+    or non-finite hint; an unparseable hint degrades to jitter rather than to a
+    fabricated delay.
     """
-    if not message:
-        return None
-    match = _RETRY_HINT_RE.search(message)
-    if match is None:
-        return None
-    try:
-        value = float(match.group(1))
-    except ValueError:
-        return None
-    if not math.isfinite(value) or value < 0:
-        return None
-    return value
+    return parse_message_retry_hint(message)
 
 
 class _PiFailureFacts(Exception):

@@ -49,6 +49,12 @@ class RetryPolicy:
     attempts: int
     base_delay_s: float
     max_delay_s: float
+    #: Cumulative retry-overhead allowance, in seconds, for one invocation.
+    #: ``None`` means this backend declares none, so ``run_agent`` falls through
+    #: to its explicit argument, then ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S``,
+    #: then ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. ``0`` is a real
+    #: declaration ("no retry recovery"), distinct from ``None``.
+    retry_recovery_allowance_s: float | None = None
 
 
 def _parsed_nonnegative_int(
@@ -85,6 +91,31 @@ def _parsed_nonnegative_float(
     if value < 0:
         logger.warning("%s=%r is negative; using default %g", name, raw, default)
         return default
+    return value
+
+
+def _parsed_optional_nonnegative_float(
+    environment: Mapping[str, str], name: str
+) -> float | None:
+    """Parse an optional finite non-negative float; ``None`` when absent or invalid.
+
+    Absent is silent (the caller's own default applies downstream). A present but
+    invalid value warns and degrades to ``None`` -- it never becomes an effective
+    bound, and it never masquerades as an operator declaration.
+    """
+    raw = environment.get(name)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a valid float; ignoring it", name, raw)
+        return None
+    if not math.isfinite(value) or value < 0:
+        logger.warning(
+            "%s=%r is not a finite non-negative number; ignoring it", name, raw
+        )
+        return None
     return value
 
 
@@ -172,6 +203,14 @@ class BackendExecutionInput:
                 ),
                 max_delay_s=_parsed_nonnegative_float(
                     copied, "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
+                ),
+                # Parsed here, not in run_agent: this is the construction path
+                # every embedded caller uses, and ``run_agent`` resolves the
+                # documented top precedence tier (RetryPolicy) before the env, so
+                # the operator knob must be materialised into the policy or it
+                # would be silently dropped on this path only.
+                retry_recovery_allowance_s=_parsed_optional_nonnegative_float(
+                    copied, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
                 ),
             ),
             _parsed_positive_int(copied, fanout_name, fanout_default),

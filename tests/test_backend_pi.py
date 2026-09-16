@@ -1339,6 +1339,47 @@ def test_pi_error_categories_are_stable_host_codes(
     assert _pi_error_category(message) == expected
 
 
+@pytest.mark.parametrize(
+    "message",
+    ["Service is currently overloaded", "capacity exceeded", "Request throttled"],
+)
+def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) -> None:
+    """Regression: an overload/throttle/capacity response must stay retryable.
+
+    These conditions are classified through the category vocabulary, so losing the
+    category branch (or letting a generic permanent token win) would silently strip
+    retry coverage from a real provider-throttle response.
+    """
+    from daydream.backends.pi import _pi_retryable_for
+
+    category = _pi_error_category(message)
+
+    assert category == "SERVER_ERROR"
+    assert _pi_retryable_for(category=category, message=message) is True
+
+
+def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: Path) -> None:
+    """The embedded path materialises the operator's env knob into the RetryPolicy."""
+    from daydream.backends import BackendExecutionInput
+
+    source = {"HOME": str(tmp_path), "PATH": "/run/bin"}
+
+    undeclared = BackendExecutionInput.from_environment(source, backend="pi")
+    # Undeclared is None (fall through to the default), never a declared 0.
+    assert undeclared.retry_policy.retry_recovery_allowance_s is None
+
+    declared = BackendExecutionInput.from_environment(
+        {**source, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S": "42"}, backend="pi"
+    )
+    assert declared.retry_policy.retry_recovery_allowance_s == 42.0
+
+    for junk in ("nonsense", "-1", "nan", "inf"):
+        invalid = BackendExecutionInput.from_environment(
+            {**source, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S": junk}, backend="pi"
+        )
+        assert invalid.retry_policy.retry_recovery_allowance_s is None, junk
+
+
 def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
     """A server-provided hint reaches the retry policy as a numeric attribute."""
     error = PiError(

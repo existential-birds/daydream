@@ -1966,7 +1966,7 @@ def _finalize_minimal_run(
     from daydream.artifact_visibility import (
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
-        _manifest,
+        manifest_tree,
     )
     from daydream.run_snapshot import (
         ArchiveRunSnapshot,
@@ -2041,7 +2041,7 @@ def _finalize_minimal_run(
             session_id=session_id,
             workspace_key="workspace",
             root=target,
-            manifest=_manifest(target),
+            manifest=manifest_tree(target),
             destinations=(),
         ),
         artifact_provenance=ArtifactEvidenceProvenance(
@@ -2099,7 +2099,7 @@ def test_the_manifest_carries_a_retry_and_circuit_summary(archive_run_with_retry
 
     summary = manifest["retry_summary"]
     assert summary["stops"] == {"retry_recovery_allowance_exhausted": 1, "circuit_open": 1}
-    assert summary["attempts"] >= 2 and summary["backoff_s"] > 0.0
+    assert summary["attempts"] == 3 and summary["backoff_s"] == 1.75
     assert summary["circuit_states"] == ["open"]
     assert "deadline" not in json.dumps(summary)      # durations and counts only
 

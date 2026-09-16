@@ -463,11 +463,11 @@ The same allowance is configurable per run through environment variables. The re
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DAYDREAM_PI_RETRY_ATTEMPTS` | `20` | Retry attempts for a backend that declares no `RetryPolicy`. |
-| `DAYDREAM_PI_RETRY_BASE_DELAY_S` | `2.0` | Base of the exponential backoff. |
+| `DAYDREAM_PI_RETRY_BASE_DELAY_S` | `10.0` | Base of the exponential backoff for pi (`2.0` for claude/codex). |
 | `DAYDREAM_PI_RETRY_MAX_DELAY_S` | `120.0` | Maximum delay a single backoff may reach. |
-| `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S` | `300` | Cumulative retry-overhead budget, in seconds. |
+| `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S` | `300` | Cumulative retry-overhead budget, in seconds. Applies on the plain-CLI path directly and on the embedded path through the `RetryPolicy` built by `BackendExecutionInput.from_environment`. |
 
-Resolution precedence, highest first, is: a backend `RetryPolicy.retry_recovery_allowance_s`, then a backend `retry_recovery_allowance_s` attribute, then the config-file value, then `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`, then the `300` default. Only the fix phase threads a configured allowance; every other phase uses the default.
+Resolution precedence, highest first, is: a backend `RetryPolicy.retry_recovery_allowance_s`, then a backend `retry_recovery_allowance_s` attribute, then the explicit argument (only the fix phase threads a config-file value), then `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`, then the `300` default. A backend that declares a `RetryPolicy` declares its retry settings *completely*: no ambient `DAYDREAM_PI_RETRY_*` value is consulted for it. The embedded/benchmark construction path is not excluded from the operator knob — `BackendExecutionInput.from_environment` materialises `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S` into the `RetryPolicy` it builds, so the env value reaches those runs through the top precedence tier (an invalid value warns and stays undeclared).
 
 The unit is seconds. An invalid value degrades to the default with a warning, never silently becoming an effective bound. Contradictory combinations are refused before dispatch — a non-zero allowance with retries disabled (`retry_recovery_allowance_s > 0` alongside `retry_attempts = 0`), or a base delay above the maximum delay. Permanent failures — authentication, schema, and tool-policy vetoes — retry zero times regardless of the allowance, and ladder exhaustion still surfaces the last failure unchanged.
 

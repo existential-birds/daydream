@@ -737,3 +737,50 @@ async def test_retry_recovery_allowance_argument_outranks_environment(
     with pytest.raises(_HintError):
         await run_agent(env_backend, tmp_path, "go", phase=DaydreamPhase.FIX)
     assert env_backend.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_retry_policy_allowance_field_governs_the_ladder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The documented top precedence tier is a real field with real effect.
+
+    A policy that declares ``retry_recovery_allowance_s = 0`` ends the ladder after
+    one dispatch, and — because a declared ``RetryPolicy`` is complete — the ambient
+    env override cannot re-grant recovery behind its back.
+    """
+    from daydream.backends import RetryPolicy
+
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "600")
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    backend = ScriptedBackend(
+        events=[_HintError("503")],
+        retry_policy=RetryPolicy(
+            attempts=5,
+            base_delay_s=0.0,
+            max_delay_s=0.0,
+            retry_recovery_allowance_s=0.0,
+        ),
+    )
+
+    with pytest.raises(_HintError):
+        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX)
+
+    assert backend.call_count == 1  # the policy's 0 ended the ladder before dispatch 2
+
+
+@pytest.mark.asyncio
+async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None:
+    """``_retry_hint`` guards ``str(exc)`` exactly like the shared classifier does."""
+    from daydream.agent import _retry_hint
+    from daydream.retry_policy import classify_failure
+
+    class _HostileHint(RuntimeError):
+        retryable = True
+
+        def __str__(self) -> str:
+            raise RuntimeError("no string for you")
+
+    assert _retry_hint(_HostileHint("503")) is None  # no fabricated hint, no raise
+    assert classify_failure(_HostileHint()).retries_allowed is True  # still classified

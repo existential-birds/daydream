@@ -184,11 +184,14 @@ def _numeric(value: Any) -> float:
 def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
     """Reduce frozen phase events into a retry/circuit summary.
 
-    Counts every ``agent_budget_stop``'s ``retry_stop_reason`` (omitting
-    ``None``), sums the duration/count fields, and collects the distinct
-    non-``None`` ``circuit_state`` values in first-seen order. Returns ``None``
-    when no event carries a retry-ladder stop reason, so a run without retry
-    activity produces no summary and its manifest stays byte-identical.
+    Counts every retry-ladder stop's ``retry_stop_reason`` (omitting ``None``),
+    sums the duration/count fields over those events only, and collects the
+    distinct non-``None`` ``circuit_state`` values in first-seen order. A
+    deadline stop carries an ``agent_budget_stop`` payload but no retry reason,
+    so it is skipped entirely: its ``attempts``/``backend_s`` are useful-work
+    time, not retry overhead. Returns ``None`` when no event carries a
+    retry-ladder stop reason, so a run without retry activity produces no
+    summary and its manifest stays byte-identical.
 
     The reducer is total: a malformed container or payload degrades to
     ``None``/zero contributions instead of raising on the archive write path.
@@ -211,8 +214,12 @@ def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
         if not isinstance(metadata, Mapping):
             metadata = {}
         reason = metadata.get("retry_stop_reason")
-        if isinstance(reason, str) and reason:
-            stops[reason] = stops.get(reason, 0) + 1
+        if not isinstance(reason, str) or not reason:
+            # Not a retry-ladder stop (e.g. a plain deadline stop): its attempts,
+            # backend_s and circuit_state describe useful work, so folding them
+            # in would let non-retry time dominate the retry totals.
+            continue
+        stops[reason] = stops.get(reason, 0) + 1
         state = metadata.get("circuit_state")
         if isinstance(state, str) and state and state not in circuit_states:
             circuit_states.append(state)

@@ -770,6 +770,84 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     assert run_context.outage_circuit.state(fake.monotonic_value) in {"open", "half_open"}
 
 
+async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ladder granted the half-open probe must not re-open the circuit itself.
+
+    The probe has not dispatched yet when the grant is made, so recording that
+    same failure as a *failed probe* re-opens the circuit on the spot, clears the
+    probe token (letting a concurrent ladder fly a second probe) and restarts the
+    interval — the documented "exactly one probe per interval" contract could then
+    never execute. ``RETRY_CIRCUIT_PROBE_INTERVAL_S = 0`` isolates the grant from
+    the interval wait: an open circuit admits a probe on the very next retry.
+    """
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.config.RETRY_CIRCUIT_PROBE_INTERVAL_S", 0.0)
+    run_context = RunContext(InteractionPolicy(interactive=False))
+    # Open the circuit up front, then let the first ladder's retry be the probe.
+    from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
+
+    for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
+        run_context.outage_circuit.record_failure(fake.monotonic_value)
+
+    probe_ladder = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
+    probe_ladder.retry_policy = RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0)
+    recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with recorder:
+            with contextlib.suppress(Exception):
+                await run_agent(
+                    probe_ladder,
+                    tmp_path,
+                    "go",
+                    phase=DaydreamPhase.FIX,
+                    retry_recovery_allowance_s=60.0,
+                    run_context=run_context,
+                )
+
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    meta = stops[0]["metadata"]
+    assert meta["retry_stop_reason"] == "retry_attempts_exhausted"
+    # The half-open grant survives its own dispatch: the probe is still outstanding,
+    # so the state reported at the next stop is the probe's, not a re-opened circuit.
+    assert meta["circuit_state"] == "half_open"
+
+    # While that probe is outstanding, a second ladder gets no probe of its own.
+    sibling = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
+    sibling.retry_policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    sibling_recorder = _make_recorder(tmp_path)
+
+    with anyio.fail_after(5):
+        async with sibling_recorder:
+            with contextlib.suppress(Exception):
+                await run_agent(
+                    sibling,
+                    tmp_path,
+                    "go",
+                    phase=DaydreamPhase.FIX,
+                    retry_recovery_allowance_s=60.0,
+                    run_context=run_context,
+                )
+
+    sibling_stops = [
+        e
+        for e in json.loads(sibling_recorder.path.read_text(encoding="utf-8"))["extra"][
+            "phase_events"
+        ]
+        if e["event"] == "agent_budget_stop"
+    ]
+    assert sibling_stops[0]["metadata"]["retry_stop_reason"] == "circuit_open"
+    assert sibling.calls == 1  # suppressed before its own probe could dispatch
+
+
 async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
     assert (
         RunContext(InteractionPolicy(interactive=False)).outage_circuit.state(0.0)

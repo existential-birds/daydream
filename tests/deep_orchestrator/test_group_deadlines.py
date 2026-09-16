@@ -246,10 +246,25 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
+    # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
+    # otherwise fold into api.py and make it a two-item batched group, whose fix
+    # fan-out runs one batched ladder plus per-finding serial fallback ladders
+    # (up to three) instead of the single ladder the comments below describe.
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "medium", "confidence": "MEDIUM",
+            "file": "web.ts", "line": 1,
+            "description": "Structural maintainability concern",
+        },
+    }
+    stub.fix_retryable_file = "api.py"  # only api.py's ladder may fail: web.ts must succeed, or its
+    # retryable failures would share the run-scoped circuit and cut both
+    # ladders before the allowance binds
     stub.fix_retryable_failures = 20
     stub.fix_retryable_error = PiError("503 Service Unavailable", retryable=True, category="SERVER_ERROR")
     stub.clock_advance = fake.advance
     stub.clock_advance_per_event_s = 20.0     # each retryable attempt burns 20 s of the allowance
+    mute_side_effects()
     traj = tmp_path / "trajectory.json"
 
     with anyio.fail_after(30):
@@ -264,8 +279,12 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     assert any(e["metadata"]["retry_stop_reason"] == "retry_recovery_allowance_exhausted" for e in stops)
     # The original attempt is useful work and is not charged (Task 3's design);
     # each retry is charged 20 s, so the ladder is cut at four dispatches after
-    # ~40 s of retries. The 300 s default (a missed threading site) would allow
-    # ~17 attempts, so this bound still distinguishes the configured value.
+    # ~40 s of retries (the refusal fires check-then-charge inside the
+    # just-failed attempt's handler). The 300 s default (a missed threading
+    # site) would not stretch that to ~17 attempts: the run-scoped circuit
+    # (threshold 3) bounds any failing ladder at ~4 dispatches, so the
+    # configured value shows up in the stop reason asserted above, not in this
+    # attempt count.
     assert max(e["metadata"]["attempts"] for e in stops) <= 4
     assert stub.completed_fix_files.count("api.py") == 0     # the group never applied a fix
 

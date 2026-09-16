@@ -45,7 +45,7 @@ from daydream.config import BUDGET_CLEANUP_GRACE_S, DEFAULT_RETRY_RECOVERY_ALLOW
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
-from daydream.outage_circuit import CIRCUIT_CLOSED
+from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.retry_policy import (
     FailureClass,
@@ -131,7 +131,14 @@ def _retry_hint(exc: BaseException) -> float | None:
     """
     attribute = getattr(exc, "retry_after", None)
     if attribute is None:
-        return parse_message_retry_hint(str(exc))
+        # ``str(exc)`` is guarded exactly like the classifier's: a retryable
+        # exception with a broken ``__str__`` must not raise a secondary error
+        # that masks the real backend failure.
+        try:
+            message = str(exc)
+        except Exception:  # noqa: BLE001 - a broken __str__ must not break retrying
+            return None
+        return parse_message_retry_hint(message)
     if isinstance(attribute, bool) or not isinstance(attribute, (int, float)):
         return None
     value = float(attribute)
@@ -730,6 +737,12 @@ async def _run_agent(
                     retry_recovery_allowance_s,
                 )
             if allowance_source is None and retry_policy is None:
+                # A backend that declares a RetryPolicy declares its retry settings
+                # completely: no ambient value is consulted for it (pinned by
+                # test_run_agent_uses_backend_retry_policy_without_reading_ambient_environment).
+                # The embedded construction path is not left out of the operator
+                # knob: BackendExecutionInput.from_environment materialises
+                # DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S into the policy it builds.
                 env_allowance = os.environ.get(
                     "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
                 )
@@ -829,7 +842,8 @@ async def _run_agent(
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
                         circuit_state=run_context.outage_circuit.state(now),
-                        retry_recovery_spent_s=recovery.spent_s,
+                        retry_recovery_spent_s=recovery.spent_s
+                        + (pending if charge_recovery else 0.0),
                         partial_edit_handling="discarded",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
@@ -1246,7 +1260,21 @@ async def _run_agent(
                         # attribute intact.
                         circuit_now = clock.monotonic()
                         admission = run_context.outage_circuit.admit_retry(circuit_now)
-                        opened_here = run_context.outage_circuit.record_failure(circuit_now)
+                        # A freshly granted half-open probe is not a *failed*
+                        # probe: it has not dispatched yet. Counting it here
+                        # would re-open the circuit on the spot, clear the probe
+                        # token (so concurrent ladders could each fly their own
+                        # probe) and restart the probe interval -- the documented
+                        # "exactly one probe per interval" contract could then
+                        # never execute. The probe's real outcome is recorded when
+                        # its own attempt reports back; a suppressed ladder still
+                        # counts its failure, which is what re-opens the circuit.
+                        opened_here = (
+                            False
+                            if admission.allowed
+                            and admission.state == CIRCUIT_HALF_OPEN
+                            else run_context.outage_circuit.record_failure(circuit_now)
+                        )
                         if not admission.allowed:
                             _emit_ladder_stop("circuit_open")
                             raise
