@@ -253,6 +253,11 @@ class Manifest:
     # succeeded/failed/partial/absent/unknown. ``None``/omitted for legacy
     # manifests.
     phase_states: dict[str, Any] | None = None
+    # Per-run retry/circuit summary reduced from the frozen ``agent_budget_stop``
+    # phase events (retry-stop reason counts, attempts/backoff/backend/recovery
+    # totals, distinct circuit states). ``None``/omitted when the run recorded no
+    # retry-ladder stop, keeping a legacy manifest byte-identical.
+    retry_summary: dict[str, Any] | None = None
     # Executable provenance: the immutable Daydream executable that produced
     # this run (vendor ``ExecutableProvenance``). Never merged into the
     # target-repo ``git.*`` / ``code_context.*`` blocks.
@@ -346,6 +351,7 @@ class Manifest:
             **_omit_falsy(
                 daydream=self.daydream.to_dict() if self.daydream is not None else None,
                 phase_states=self.phase_states,
+                retry_summary=self.retry_summary,
             ),
             "run": {
                 "flow": self.run_flow,
@@ -424,6 +430,7 @@ def build_manifest_from_snapshot(
     recommended_capture: str | None = None,
     pipeline_status: str = "unknown",
     phase_states: Mapping[str, Any] | None = None,
+    retry_summary: Mapping[str, Any] | None = None,
     provenance: ExecutableProvenance | None = None,
 ) -> Manifest:
     """Construct a manifest from captured identity and frozen trajectory bytes."""
@@ -465,6 +472,7 @@ def build_manifest_from_snapshot(
         archive_status=status,
         pipeline_status=pipeline_status,
         phase_states=dict(phase_states) if phase_states is not None else None,
+        retry_summary=dict(retry_summary) if retry_summary is not None else None,
         daydream=provenance,
         review_only=identity.review_only,
         deep=identity.deep,

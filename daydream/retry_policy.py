@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -167,6 +168,66 @@ class RetryRecoveryBudget:
     def remaining(self) -> float:
         """Seconds of recovery allowance left, clamped at zero."""
         return max(0.0, self.allowance_s - self._spent_s)
+
+
+def _numeric(value: Any) -> float:
+    """Coerce one serialized numeric field, defaulting malformed values to zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    as_float = float(value)
+    return as_float if math.isfinite(as_float) else 0.0
+
+
+def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
+    """Reduce frozen phase events into a retry/circuit summary.
+
+    Counts every ``agent_budget_stop``'s ``retry_stop_reason`` (omitting
+    ``None``), sums the duration/count fields, and collects the distinct
+    non-``None`` ``circuit_state`` values in first-seen order. Returns ``None``
+    when no event carries a retry-ladder stop reason, so a run without retry
+    activity produces no summary and its manifest stays byte-identical.
+
+    The reducer is total: a malformed container or payload degrades to
+    ``None``/zero contributions instead of raising on the archive write path.
+    Only durations, counts and reason/state codes are emitted -- never an
+    absolute or monotonic deadline value.
+    """
+    if not isinstance(phase_events, Sequence) or isinstance(phase_events, (str, bytes, bytearray)):
+        return None
+
+    stops: dict[str, int] = {}
+    circuit_states: list[str] = []
+    attempts = 0
+    backoff_s = 0.0
+    backend_s = 0.0
+    retry_recovery_spent_s = 0.0
+    for event in phase_events:
+        if not isinstance(event, Mapping) or event.get("event") != "agent_budget_stop":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        reason = metadata.get("retry_stop_reason")
+        if isinstance(reason, str) and reason:
+            stops[reason] = stops.get(reason, 0) + 1
+        state = metadata.get("circuit_state")
+        if isinstance(state, str) and state and state not in circuit_states:
+            circuit_states.append(state)
+        attempts += int(_numeric(metadata.get("attempts")))
+        backoff_s += _numeric(metadata.get("backoff_s"))
+        backend_s += _numeric(metadata.get("backend_s"))
+        retry_recovery_spent_s += _numeric(metadata.get("retry_recovery_spent_s"))
+
+    if not stops:
+        return None
+    return {
+        "stops": stops,
+        "attempts": attempts,
+        "backoff_s": round(backoff_s, 6),
+        "backend_s": round(backend_s, 6),
+        "retry_recovery_spent_s": round(retry_recovery_spent_s, 6),
+        "circuit_states": circuit_states,
+    }
 
 
 def _decide(failure_class: FailureClass) -> RetryDecision:

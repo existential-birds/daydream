@@ -1916,3 +1916,195 @@ async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_s
         manifest["metrics"]["grounding_rate"]
         == evaluation["grounding"]["grounding_rate"]
     )
+
+
+# --- retry / circuit manifest summary (issue #734 must-have 15) ---
+
+
+def _retry_stop_event(
+    *,
+    reason: str,
+    attempts: int,
+    backoff_s: float,
+    backend_s: float,
+    retry_recovery_spent_s: float,
+    circuit_state: str,
+) -> dict[str, Any]:
+    """One serialized ``agent_budget_stop`` retry-ladder event."""
+    return {
+        "phase": "fix",
+        "event": "agent_budget_stop",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "metadata": {
+            "limit_expired": "retry_ladder",
+            "elapsed_s": backend_s + backoff_s,
+            "backend_s": backend_s,
+            "backoff_s": backoff_s,
+            "attempts": attempts,
+            "retry_stop_reason": reason,
+            "circuit_state": circuit_state,
+            "retry_recovery_spent_s": retry_recovery_spent_s,
+            "partial_edit_handling": "discarded",
+        },
+    }
+
+
+def _finalize_minimal_run(
+    *,
+    archive_dir: Path,
+    tmp_path: Path,
+    session_id: str,
+    phase_events: list[dict[str, Any]],
+) -> Path:
+    """Write one manifest through the production ``finalize_archive_run`` path.
+
+    Only the backend seam is absent here by construction: the reducer reads the
+    frozen phase events and the strict finalizer emits the manifest.
+    """
+    from daydream.archive import finalize_archive_run
+    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+    from daydream.artifact_visibility import (
+        ArtifactEvidenceProvenance,
+        ArtifactTreeSnapshot,
+        _manifest,
+    )
+    from daydream.run_snapshot import (
+        ArchiveRunSnapshot,
+        ManifestRunIdentity,
+        RunPhaseCapabilities,
+    )
+    from daydream.runner import RunConfig
+    from daydream.trajectory import (
+        DaydreamRunFlow,
+        RunWriteSnapshot,
+        TrajectoryDocumentSnapshot,
+    )
+
+    target = tmp_path / f"target-{session_id}"
+    target.mkdir()
+    payload = {
+        "session_id": session_id,
+        "trajectory_id": session_id,
+        "steps": [],
+        "final_metrics": {
+            "total_prompt_tokens": 10,
+            "total_completion_tokens": 5,
+            "total_cached_tokens": 0,
+            "total_cost_usd": 0.01,
+        },
+        "extra": {"phase_events": phase_events},
+    }
+    write_snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id=session_id,
+                path=Path("/frozen/trajectory.json"),
+                json_bytes=json.dumps(payload).encode(),
+            ),
+        ),
+    )
+    identity = ManifestRunIdentity(
+        flow_name=None,
+        skill="python",
+        model=None,
+        backend="claude",
+        review_backend=None,
+        fix_backend="claude",
+        test_backend="claude",
+        per_stack_review_backend="claude",
+        per_stack_review_model="sonnet",
+        review_only=False,
+        deep=True,
+        profile=None,
+        phases=RunPhaseCapabilities(
+            per_stack_review=True,
+            merge=True,
+            fix=True,
+            test=True,
+            push=True,
+            remote_ci=True,
+        ),
+    )
+    finalize_archive_run(
+        run=ArchiveRunSnapshot(
+            recorder_provenance=archive_recorder_provenance_from_snapshot(
+                write_snapshot=write_snapshot,
+                run_flow=DaydreamRunFlow.NORMAL,
+            ),
+            identity=identity,
+            trajectories=write_snapshot,
+        ),
+        artifacts=ArtifactTreeSnapshot(
+            session_id=session_id,
+            workspace_key="workspace",
+            root=target,
+            manifest=_manifest(target),
+            destinations=(),
+        ),
+        artifact_provenance=ArtifactEvidenceProvenance(
+            workspace_key="workspace",
+            session_id=session_id,
+            public_source=target,
+            live_root=target,
+        ),
+        config=RunConfig(target=str(target), archive=True, run_eval=False),
+        work=None,
+        upload=False,
+    )
+    return archive_dir / "runs" / session_id
+
+
+@pytest.fixture
+def archive_run_with_retry_stops(archive_dir: Path, tmp_path: Path) -> Path:
+    return _finalize_minimal_run(
+        archive_dir=archive_dir,
+        tmp_path=tmp_path,
+        session_id="retry-stops-0000-0000-0000-000000000001",
+        phase_events=[
+            _retry_stop_event(
+                reason="retry_recovery_allowance_exhausted",
+                attempts=2,
+                backoff_s=1.5,
+                backend_s=3.0,
+                retry_recovery_spent_s=5.0,
+                circuit_state="open",
+            ),
+            _retry_stop_event(
+                reason="circuit_open",
+                attempts=1,
+                backoff_s=0.25,
+                backend_s=1.0,
+                retry_recovery_spent_s=5.25,
+                circuit_state="open",
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def legacy_archive_run(archive_dir: Path, tmp_path: Path) -> Path:
+    return _finalize_minimal_run(
+        archive_dir=archive_dir,
+        tmp_path=tmp_path,
+        session_id="legacy-run-0000-0000-0000-000000000002",
+        phase_events=[],
+    )
+
+
+def test_the_manifest_carries_a_retry_and_circuit_summary(archive_run_with_retry_stops: Path) -> None:
+    manifest = json.loads((archive_run_with_retry_stops / "manifest.json").read_text(encoding="utf-8"))
+
+    summary = manifest["retry_summary"]
+    assert summary["stops"] == {"retry_recovery_allowance_exhausted": 1, "circuit_open": 1}
+    assert summary["attempts"] >= 2 and summary["backoff_s"] > 0.0
+    assert summary["circuit_states"] == ["open"]
+    assert "deadline" not in json.dumps(summary)      # durations and counts only
+
+
+def test_a_run_without_retry_events_has_no_retry_summary(legacy_archive_run: Path) -> None:
+    manifest = json.loads((legacy_archive_run / "manifest.json").read_text(encoding="utf-8"))
+
+    assert "retry_summary" not in manifest
