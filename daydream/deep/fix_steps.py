@@ -1122,6 +1122,20 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 group_max_serial_items=_resolve_config_value(
                     config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS
                 ),
+                # One cumulative retry-overhead allowance per file group,
+                # resolved once here and forwarded unchanged into every fix
+                # call the group owns. Resolved by a direct file-config read
+                # rather than ``_resolve_config_value``: that helper
+                # substitutes the module default, but the allowance is
+                # tri-state. An unset key must stay undeclared (None) so
+                # ``run_agent`` applies the default without mistaking it for an
+                # operator's explicit value -- which would refuse a backend
+                # that deliberately disabled retries.
+                retry_recovery_allowance_s=(
+                    config.file_config.retry_recovery_allowance_s
+                    if config.file_config is not None
+                    else None
+                ),
                 exploration_dir=exploration_dir,
                 test_map_path=test_map_path,
                 footprint=state.footprint,

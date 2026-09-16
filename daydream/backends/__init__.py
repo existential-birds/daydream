@@ -37,6 +37,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union
 
+from daydream.retry_policy import (
+    decode_retry_recovery_allowance,
+    undeclared_retry_allowance_message,
+)
 from daydream.trajectory import now_iso
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,19 @@ class RetryPolicy:
     attempts: int
     base_delay_s: float
     max_delay_s: float
+    #: Cumulative retry-overhead allowance, in seconds, for one invocation.
+    #: ``None`` means this backend declares none, so ``run_agent`` falls through
+    #: to its backend-attribute tier, then its explicit argument, and -- only when
+    #: the backend declares no ``RetryPolicy`` at all -- the
+    #: ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var, then
+    #: ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. A declared policy is complete:
+    #: it suppresses every ambient ``DAYDREAM_PI_RETRY_*`` read, so a non-``None``
+    #: value here is the invocation's answer. ``0`` is a real declaration ("no
+    #: retry recovery"), distinct from ``None``. The embedded/benchmark
+    #: construction path materialises the env var into this field
+    #: (``BackendExecutionInput.from_environment``), which is why the env value
+    #: reaches those runs at this tier rather than the ambient one.
+    retry_recovery_allowance_s: float | None = None
 
 
 def _parsed_nonnegative_int(
@@ -85,6 +102,26 @@ def _parsed_nonnegative_float(
     if value < 0:
         logger.warning("%s=%r is negative; using default %g", name, raw, default)
         return default
+    return value
+
+
+def _parsed_optional_retry_allowance(
+    environment: Mapping[str, str], name: str
+) -> float | None:
+    """Parse the optional retry-recovery allowance env knob.
+
+    Delegates the decode rule to :func:`decode_retry_recovery_allowance` so the
+    env source accepts exactly what the argument, attribute and config-file
+    sources accept. ``None`` means absent (silent; the caller's default applies)
+    or present-but-invalid (warned, never an effective bound and never
+    masquerading as an operator declaration).
+    """
+    raw = environment.get(name)
+    if raw is None:
+        return None
+    value = decode_retry_recovery_allowance(raw)
+    if value is None:
+        logger.warning("%s", undeclared_retry_allowance_message(name, raw))
     return value
 
 
@@ -172,6 +209,14 @@ class BackendExecutionInput:
                 ),
                 max_delay_s=_parsed_nonnegative_float(
                     copied, "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
+                ),
+                # Parsed here, not in run_agent: this is the construction path
+                # every embedded caller uses, and ``run_agent`` resolves the
+                # documented top precedence tier (RetryPolicy) before the env, so
+                # the operator knob must be materialised into the policy or it
+                # would be silently dropped on this path only.
+                retry_recovery_allowance_s=_parsed_optional_retry_allowance(
+                    copied, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
                 ),
             ),
             _parsed_positive_int(copied, fanout_name, fanout_default),

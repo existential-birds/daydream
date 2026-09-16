@@ -32,3 +32,23 @@ class FakeClock:
     def advance(self, seconds: float) -> None:
         """Move the clock forward by ``seconds``."""
         self.monotonic_value += seconds
+
+
+def patch_retry_sleep(
+    monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> list[float]:
+    """Replace the retry backoff sleep with a recording, clock-advancing stub.
+
+    Patches ``daydream.agent.anyio.sleep`` so a retry ladder consumes injected
+    time instead of wall time: each call appends the delay to the returned list
+    and advances *clock* by the same amount. The list is the assertion seam for
+    deterministic backoff tests.
+    """
+    delays: list[float] = []
+
+    async def _sleeper(delay: float) -> None:
+        delays.append(delay)
+        clock.advance(delay)
+
+    monkeypatch.setattr("daydream.agent.anyio.sleep", _sleeper)
+    return delays

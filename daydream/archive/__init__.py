@@ -135,6 +135,7 @@ def _manifest_state(
     malformed artifacts, so this can never abort an archive.
     """
     from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+    from daydream.retry_policy import derive_retry_summary
 
     recorder_provenance = run.recorder_provenance
     phases = run.identity.phases
@@ -170,6 +171,7 @@ def _manifest_state(
         "fix_quality_gate": _read_fix_quality_gate(target_dir, session_id) if runs_fix else None,
         "recommended_capture": (recommended or {}).get("capture_point"),
         "phase_states": phase_states,
+        "retry_summary": derive_retry_summary(frozen_extra.get("phase_events")),
         "pipeline_status": derive_pipeline_status(
             status,
             fix_failures,
