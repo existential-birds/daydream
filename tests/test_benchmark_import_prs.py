@@ -62,6 +62,22 @@ _REPO_VIEW = {
 }
 
 
+def _seed_empty_rest(fake_gh: FakeGh) -> None:
+    """Serve a PR with no reviews or comments from every REST evidence endpoint."""
+    for endpoint in (
+        "repos/o/r/pulls/101/reviews",
+        "repos/o/r/pulls/101/comments",
+        "repos/o/r/issues/101/comments",
+    ):
+        fake_gh.set_response("GET", endpoint, [])
+
+
+def _fetch_workspace(tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    return ws
+
+
 def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
@@ -82,17 +98,14 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, f
 def test_fetch_persists_complete_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     header = dict(_PR_HEADER)
     header["body"] = "fixes the cache\n\nand tests"
     header["html_url"] = "https://github.com/o/r/pull/101"
     header["merged_at"] = "2026-01-02T00:00:00Z"
     header["closed_at"] = "2026-01-02T00:00:00Z"
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-               "repos/o/r/issues/101/comments"):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     pr = doc.pull_request
     assert pr.body == "fixes the cache\n\nand tests"
@@ -109,8 +122,7 @@ def test_fetch_changed_files_persists_complete_rename_union(
 ) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     header = {**_PR_HEADER, "changed_files": 2}
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
     fake_gh.set_response(
@@ -125,12 +137,7 @@ def test_fetch_changed_files_persists_complete_rename_union(
             },
         ],
     )
-    for ep in (
-        "repos/o/r/pulls/101/reviews",
-        "repos/o/r/pulls/101/comments",
-        "repos/o/r/issues/101/comments",
-    ):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
 
     doc = gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
 
@@ -161,16 +168,10 @@ def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
 ) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", {**_PR_HEADER, "changed_files": count})
     fake_gh.set_response("GET", "repos/o/r/pulls/101/files", rows)
-    for ep in (
-        "repos/o/r/pulls/101/reviews",
-        "repos/o/r/pulls/101/comments",
-        "repos/o/r/issues/101/comments",
-    ):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
         gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
 
@@ -180,15 +181,9 @@ def test_final_only_fetch_does_not_request_changed_files(
 ) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    for ep in (
-        "repos/o/r/pulls/101/reviews",
-        "repos/o/r/pulls/101/comments",
-        "repos/o/r/issues/101/comments",
-    ):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     assert doc.pull_request.changed_files is None
     assert fake_gh.calls("GET", "repos/o/r/pulls/101/files") == []
@@ -239,14 +234,11 @@ def test_import_only_snapshot_records_requested_base_sha(tmp_path: Path, fake_gh
 def test_import_body_shape_preserved(tmp_path: Path, fake_gh: FakeGh, body_field: Any, expected: str) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     header = dict(_PR_HEADER)
     header["body"] = body_field
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-               "repos/o/r/issues/101/comments"):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     assert doc.pull_request.body == expected
     assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
@@ -267,16 +259,13 @@ def test_import_merged_state_distinction(
 ) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     header = dict(_PR_HEADER)
     header["state"] = state
     header["merged_at"] = merged_at
     header["closed_at"] = closed_at
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-               "repos/o/r/issues/101/comments"):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     pr = doc.pull_request
     assert pr.state == state
@@ -287,14 +276,11 @@ def test_import_merged_state_distinction(
 def test_import_no_comments_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     header = dict(_PR_HEADER)
     header["body"] = "no comments here"
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-               "repos/o/r/issues/101/comments"):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     assert doc.evidence == [] and doc.pull_request.body == "no comments here"
 
@@ -309,9 +295,7 @@ def test_payload_digest_spans_header_and_evidence(tmp_path: Path, fake_gh: FakeG
         header["title"] = title
         header["body"] = "b"
         fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-        for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-                   "repos/o/r/issues/101/comments"):
-            fake_gh.set_response("GET", ep, [])
+        _seed_empty_rest(fake_gh)
         return gi.fetch_and_normalize(ws, "o/r", 101)
     a = fetch_with("Fix cache")
     b = fetch_with("Fix cache EDITED")            # header-only change, same evidence
@@ -323,8 +307,7 @@ def test_payload_digest_spans_header_and_evidence(tmp_path: Path, fake_gh: FakeG
 def test_fetch_normalizes_all_rest_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response(
         "GET",
@@ -384,8 +367,7 @@ def test_review_thread_queries_request_only_schema_fields() -> None:
 def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     # REST comments for db 10 (root) and 11 (reply to 10)
@@ -431,8 +413,7 @@ def test_rest_inline_normalization_retains_original_range(tmp_path: Path, fake_g
     """REST anchor fields original_commit_id/original_start_line/original_line survive normalization."""
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     # one REST comment carrying the authoring-time range: original line 5, start 4,
@@ -463,8 +444,7 @@ def test_graphql_thread_maps_original_start_line(tmp_path: Path, fake_gh: FakeGh
     """GraphQL thread originalStartLine survives mapping to the canonical record."""
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
@@ -823,8 +803,7 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.schema import Location
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response(
         "GET",
@@ -1066,8 +1045,7 @@ def test_rate_limit_retries_three_then_fails_pr(
 
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     attempts = {"n": 0}
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
@@ -2426,12 +2404,9 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(
 def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-               "repos/o/r/issues/101/comments"):
-        fake_gh.set_response("GET", ep, [])
+    _seed_empty_rest(fake_gh)
     comments = [{"id": f"c{i}", "databaseId": 2000 + i, "body": f"reply {i}",
                  "author": {"login": "eve", "type": "User"},
                  "createdAt": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
@@ -2454,8 +2429,7 @@ def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeG
 def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     # review id 5 with state DISMISSED (dismissal source for comment 10)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
@@ -2500,8 +2474,7 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: Fa
 def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     # REST-only comments with distinct database ids + timestamps
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
@@ -2535,8 +2508,7 @@ def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh:
 def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     # REST copy of comment 40 is OUTDATED via the joined GraphQL thread state
@@ -2575,8 +2547,7 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
 def test_fixture_matrix_evidence_preserved_and_historical(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
+    ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
         {"id": 1, "node_id": "PRR_1", "user": {"login": "cr[bot]", "type": "Bot"},

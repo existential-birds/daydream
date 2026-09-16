@@ -129,7 +129,7 @@ This is the standard reviewers hold PRs to, and the one the agent-facing
 Read these before writing your first test — they are the reference
 implementations of the real-path standard:
 
-- `tests/test_deep_orchestrator.py`:
+- `tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py`:
   `test_apply_fixes_gate_non_interactive_takes_safe_default` and
   `test_apply_fixes_gate_eof_declines_cleanly_no_crash` — the non-interactive /
   EOF gate tests, exercising `runner.run` against a real worktree with only the

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,12 @@ from daydream.backends import (
 from daydream.eval.analyzer import _records_issues_or_empty
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
+
+
+class _StubRetryableError(RuntimeError):
+    """Default transport-shaped failure for ``fix_retryable_failures``."""
+
+    retryable = True
 
 
 class StubBackend:
@@ -128,15 +134,47 @@ class StubBackend:
         # The per-finding retries ("Fix this issue") for that file then succeed.
         self.fail_batched_fix_file: str | None = None
         # When set, ONLY the batched fix turn for the matching file emits a slow
-        # runaway burst (real per-event sleep, never a ResultEvent) so run_agent's
-        # OWN per-invocation WALL budget trips and returns a budget_reason -- the
-        # batched call then raises and phase_fix_parallel falls back to per-finding
-        # fixes. Unlike fail_batched_fix_file (a synchronous stub raise), this
-        # exercises the real budget_reason -> raise path AND burns real wall-time
-        # that carries into the fallback via the shared FileGroupBudget (#201).
-        # Per-finding fallback turns for that file are NOT runaway.
+        # runaway burst (never a ResultEvent) so run_agent's OWN per-invocation
+        # WALL budget trips and returns a budget_reason -- the batched call then
+        # raises and phase_fix_parallel falls back to per-finding fixes. Unlike
+        # fail_batched_fix_file (a synchronous stub raise), this exercises the
+        # real budget_reason -> raise path AND consumes time that carries into
+        # the fallback via the shared FileGroupBudget (#201): a real per-event
+        # sleep when no clock is injected, or ``clock_advance`` per event when
+        # one is (see ``clock_advance_per_event_s`` below). Per-finding fallback
+        # turns for that file are NOT runaway.
         self.runaway_batched_fix_file: str | None = None
         self.runaway_batched_sleep_s: float = 0.05
+        # When set, ONLY a single-item "Fix this issue" turn naming this file
+        # emits the same never-a-ResultEvent burst as ``runaway_fix`` -- a
+        # one-call group whose own turn burns the shared group clock, so a test
+        # can prove a single-item group is cut without a fallback loop (#734).
+        self.runaway_single_fix_file: str | None = None
+        # When set, a runaway burst waits -- yielding nothing and
+        # ``anyio.sleep(0)``-ing -- until this gate returns truthy; only then
+        # does the burst begin. Lets a test make a sibling group's completion a
+        # deterministic precondition instead of a timing race (#734).
+        self.runaway_gate: Callable[[], bool] | None = None
+        # Basenames of files whose fix turn ran to completion (a ResultEvent was
+        # consumed and the generator returned). The sentinel files are removed by
+        # the fix-footprint guard, so this is the surviving proof a sibling's fix
+        # turn finished when a concurrent group's deadline fires (#734).
+        self.completed_fix_files: list[str] = []
+        # When set, ``clock_advance`` is called once per emitted event with
+        # ``clock_advance_per_event_s`` seconds, charging an injected fake clock
+        # instead of sleeping real wall time. The clock-advance path takes
+        # precedence over ``runaway_*_sleep_s`` so a test never both sleeps and
+        # jumps; the stub enforces no deadline itself (that belongs to run_agent).
+        self.clock_advance: Callable[[float], None] | None = None
+        self.clock_advance_per_event_s: float = 0.0
+        # Raise ``fix_retryable_error`` (or a default retryable error) for the
+        # first N fix turns for each file, then apply the normal fix. Models a
+        # retry ladder that must be bounded by the group deadline rather than
+        # exhausted; each failed attempt charges one ``clock_advance_per_event_s``
+        # step for the backend time it burns before raising.
+        self.fix_retryable_failures: int = 0
+        self.fix_retryable_error: Exception | None = None
+        self._fix_retry_counts: dict[str, int] = {}
         # When set, the fix branch WRITES a broken partial edit to the matching
         # file and THEN raises MaxTurnsError -- simulating an agent that mutated
         # the tree before exhausting its turn budget, so a test can assert the
@@ -166,7 +204,9 @@ class StubBackend:
         self.runaway_fix: bool = False
         # Real per-event sleep for the runaway burst (default 0.0 == anyio.sleep(0),
         # an interleave point with no wall time). A small positive value lets the
-        # wall-clock budget trip before the tool-call budget in the wall real-path test.
+        # wall-clock budget trip before the tool-call budget in the wall real-path
+        # test. When ``clock_advance`` is set the burst advances the injected clock
+        # instead and never sleeps.
         self.runaway_fix_sleep_s: float = 0.0
         # When True, the test-suite branch emits a Postgres-unreachable signature
         # (infra down, not a code bug) so phase_test_and_heal's
@@ -375,6 +415,16 @@ class StubBackend:
         if m is None:
             return []
         return [part.strip() for part in m.group(1).split(",") if part.strip()]
+
+    def _tick(self) -> None:
+        """Charge one emitted event's worth of injected clock time, if configured.
+
+        A no-op unless a test installed :attr:`clock_advance`; the runaway
+        branches call it in place of a real sleep so the shared group clock
+        advances deterministically.
+        """
+        if self.clock_advance is not None:
+            self.clock_advance(self.clock_advance_per_event_s)
 
     def _is_runaway(self, prompt: str, pl: str) -> bool:
         """Whether this turn should emit the unbounded budget-tripping burst."""
@@ -982,7 +1032,10 @@ class StubBackend:
                 # tool-call budget exists to cut; the budget breaks the loop.
                 for n in range(500):
                     yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
-                    await anyio.sleep(self.runaway_fix_sleep_s)
+                    if self.clock_advance is not None:
+                        self._tick()
+                    else:
+                        await anyio.sleep(self.runaway_fix_sleep_s)
                 return
             # Single-finding prompts carry "File: <path>"; batched prompts name the
             # one target file in their "Fix these N issues in <path>:" header.
@@ -993,6 +1046,35 @@ class StubBackend:
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
+            # A retry ladder for this file: fail the first N turns retryably so
+            # run_agent's retry loop is bounded by the invocation deadline rather
+            # than exhausting every attempt. Charge one event's worth of clock for
+            # the failed attempt before raising (the backend time a real failure
+            # burns), then let subsequent turns apply the normal fix.
+            if self._fix_retry_counts.get(fixed_name, 0) < self.fix_retryable_failures:
+                self._fix_retry_counts[fixed_name] = self._fix_retry_counts.get(fixed_name, 0) + 1
+                self._tick()
+                raise self.fix_retryable_error or _StubRetryableError(
+                    f"stub: retryable fix failure for {fixed_name}"
+                )
+            # Runaway ONLY the single-item turn for the marked file: same burst
+            # shape as the batched runaway below, but for a group with exactly
+            # one finding (no "Fix these N issues" header).
+            if (
+                self.runaway_single_fix_file is not None
+                and m is not None
+                and batched_hdr is None
+                and fixed_name == self.runaway_single_fix_file
+            ):
+                while self.runaway_gate is not None and not self.runaway_gate():
+                    await anyio.sleep(0)
+                for n in range(500):
+                    yield ToolStartEvent(id=f"stc-{n}", name="Bash", input={"command": "find /"})
+                    if self.clock_advance is not None:
+                        self._tick()
+                    else:
+                        await anyio.sleep(self.runaway_fix_sleep_s)
+                return
             # Runaway ONLY the batched turn for the marked file: burn real wall so
             # run_agent's per-invocation wall budget trips, returns a budget_reason,
             # and phase_fix_batched raises into the per-finding fallback (#201).
@@ -1003,7 +1085,10 @@ class StubBackend:
             ):
                 for n in range(500):
                     yield ToolStartEvent(id=f"btc-{n}", name="Bash", input={"command": "find /"})
-                    await anyio.sleep(self.runaway_batched_sleep_s)
+                    if self.clock_advance is not None:
+                        self._tick()
+                    else:
+                        await anyio.sleep(self.runaway_batched_sleep_s)
                 return
             # Fail ONLY the batched turn for the marked file so the group falls
             # back to per-finding fixes (the #186 pattern under budget test).
@@ -1037,9 +1122,12 @@ class StubBackend:
                         name="Write",
                         input={"file_path": str(edit_target), "content": "backend resumed"},
                     )
+                    self._tick()
                     edit_target.write_text("backend resumed")
                 yield TextEvent(text="Applied the deferred writes.")
+                self._tick()
                 yield ResultEvent(structured_output=None, continuation=None)
+                self.completed_fix_files.append(fixed_name)
                 return
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
@@ -1060,7 +1148,10 @@ class StubBackend:
                 await anyio.sleep(0)  # deterministic interleave point
                 self.fix_append_path.write_text(cur + "".join(t + "\n" for t in toks))
             yield TextEvent(text="Applied the fix.")
+            self._tick()
             yield ResultEvent(structured_output=None, continuation=None)
+            self._tick()
+            self.completed_fix_files.append(fixed_name)
             return
 
         # Recommendation verifier (#83). Discriminator is the verifier's role

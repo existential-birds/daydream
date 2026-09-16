@@ -32,6 +32,8 @@ top-level ``TARGET`` positional):
   training pipeline (stage0 offline gate → stage1 SFT → stage2 RFT →
   stage3 adapter) and write a stage manifest (``--dry-run`` is the GPU-free
   CI path)
+- ``daydream benchmark`` — curate and run private PR evaluation cases
+- ``daydream setup`` — register the GitHub App and install review workflows
 - ``daydream ext validate`` — load the ``daydream_ext`` extension and
   resolve-check the registry (flows, phases, prompts)
 """
@@ -2631,36 +2633,11 @@ def _shutdown_and_exit(console: Console, title: str, message: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the CLI entry point.
+    """Run the verb-first CLI, using ``sys.argv[1:]`` when *argv* is absent.
 
-    ``argv`` defaults to ``sys.argv[1:]``; tests may pass an explicit list.
-
-    Dispatch is verb-first (see :func:`_first_verb` and :data:`KNOWN_VERBS`):
-    the leading token selects a verb, and anything that is not an explicit
-    verb — a bare target path, a leading flag, or empty argv — routes through
-    the default ``review`` shim. Each non-``review`` verb owns its own parser
-    and exit code; ``review`` flows into :func:`_parse_args`.
-
-    Verbs:
-        - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
-        - ``summarize`` — print run-info markdown for a trajectory
-        - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label`` /
-          ``hydrate-hub``)
-        - ``train`` — four-stage training pipeline (``--dry-run`` for GPU-free CI)
-        - ``post-findings`` — validate a findings artifact and post new
-          findings to the PR (privileged Phase B poster; unattended)
-        - ``setup`` — register the review-bot GitHub App, deposit credentials,
-          and land the workflows via a PR (``--verify`` for the doctor)
-        - ``ext`` — extension namespace (``validate`` loads the
-          ``daydream_ext`` extension and resolve-checks the registry)
-        - ``improve`` — repository audit + advisory plans; sub-verbs
-          ``prune-reanchor`` / ``list-reanchor`` short-circuit to sync
-          filesystem cleanup, everything else runs the async audit flow
-
-    Raises:
-        SystemExit: Always raised with exit code 0 on success, 130 on keyboard
-            interrupt, or 1 on fatal error.
-
+    Each verb owns its parser and exit code. The default review path accepts
+    a bare target or leading flag. This entry point exits 0 on success, 130
+    on keyboard interrupt, and 1 on fatal errors.
     """
     _install_signal_handlers()
 
@@ -2685,29 +2662,18 @@ def main(argv: list[str] | None = None) -> None:
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
 
-        # ``corpus`` namespaces the data-pipeline sub-verbs; all sync (SQLite +
-        # filesystem, no agent work), so short-circuit before anyio.run.
-        if verb == "corpus":
-            sys.exit(_handle_corpus_command(argv[1:]))
-
-        # ``train`` is sync (filesystem-only coordination, no agent work and
-        # no GPU on the dry path), so short-circuit before anyio.run.
-        if verb == "train":
-            sys.exit(_handle_train_command(argv[1:]))
-
-        if verb == "benchmark":
-            sys.exit(_handle_benchmark_command(argv[1:]))
-
-        if verb == "post-findings":
-            sys.exit(_handle_post_findings_command(argv[1:]))
-
-        if verb == "setup":
-            sys.exit(_handle_setup_command(argv[1:]))
-
-        # ``ext`` is sync (registry build + resolve-check, no agent work), so
-        # short-circuit before anyio.run.
-        if verb == "ext":
-            sys.exit(_handle_ext_command(argv[1:]))
+        # These verbs own synchronous parsers and do not start an agent flow.
+        # Resolve handlers at call time so tests and extensions can patch them.
+        sync_handlers = {
+            "corpus": _handle_corpus_command,
+            "train": _handle_train_command,
+            "benchmark": _handle_benchmark_command,
+            "post-findings": _handle_post_findings_command,
+            "setup": _handle_setup_command,
+            "ext": _handle_ext_command,
+        }
+        if handler := sync_handlers.get(verb):
+            sys.exit(handler(argv[1:]))
 
         # ``improve prune-reanchor`` / ``list-reanchor`` are pure filesystem
         # cleanup (no agent work), so short-circuit to a sync handler instead of

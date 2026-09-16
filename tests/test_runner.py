@@ -34,6 +34,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
@@ -2319,209 +2320,53 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     )
 
 
-def test_open_recorder_resolves_backend_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("config", "flow", "expected"),
+    [
+        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.NORMAL,
+                     ("codex", "codex", "pi", "codex"), id="normal-phase-overrides"),
+        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
+            phases={"per_stack_review": {"backend": "pi"}})), DaydreamRunFlow.NORMAL,
+                     ("pi", "pi", "claude", "claude"), id="per-stack-review-phase"),
+        pytest.param(RunConfig(backend="codex"), DaydreamRunFlow.IMPROVE,
+                     ("codex", "codex", "", ""), id="improve-omits-fix-test"),
+        pytest.param(RunConfig(backend="codex"), DaydreamRunFlow.TTT,
+                     ("codex", "codex", "", ""), id="review-omits-fix-test"),
+        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.CUSTOM,
+                     ("codex", "codex", "", ""), id="custom-omits-fix-test"),
+        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.DIAGRAM,
+                     ("codex", "codex", "", ""), id="diagram-omits-fix-test"),
+        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
+            phases={"diagram": {"backend": "pi"}})), DaydreamRunFlow.DIAGRAM,
+                     ("pi", "pi", "", ""), id="diagram-phase-override"),
+        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
+            phases={"recon": {"backend": "pi"}})), DaydreamRunFlow.IMPROVE,
+                     ("pi", "pi", "", ""), id="improve-recon-phase"),
+        pytest.param(RunConfig(review_backend="codex"), DaydreamRunFlow.PR,
+                     ("codex", "codex", "claude", ""), id="pr-omits-test"),
+        pytest.param(RunConfig(), DaydreamRunFlow.NORMAL,
+                     ("claude", "claude", "claude", "claude"), id="backend-fallback"),
+    ],
+)
+def test_open_recorder_backend_identity(
+    tmp_path: Path, config: RunConfig, flow: DaydreamRunFlow,
+    expected: tuple[str, str, str, str],
+) -> None:
+    """Each flow records only backend identities for phases it can run."""
     from daydream.runner import _open_recorder
+
     target_dir = tmp_path / "project"
     target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
+    config.target = str(target_dir)
+    config.run_eval = False
     recorder = _open_recorder(
         allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
+        config=config, target_dir=target_dir, work=None, flow_kind=flow,
     )
-    assert recorder.backend_name == "codex"
-    assert recorder.review_backend_name == "codex"
-    assert recorder.fix_backend_name == "pi"
-    assert recorder.test_backend_name == "codex"
-
-
-def test_open_recorder_resolves_backend_via_per_stack_review(tmp_path: Path) -> None:
-    """The representative backend follows per_stack_review, not the review phase.
-
-    The deep flow's actual review fan-out runs on ``per_stack_review``; a
-    per-phase override on ``per_stack_review`` must win for the run's backend
-    identity.
-    """
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(
-        target=str(target_dir),
-        run_eval=False,
-        review_backend="codex",
-        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
-    )
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
-    )
-    assert recorder.backend_name == "pi"
-    assert recorder.review_backend_name == "pi"
-    assert recorder.fix_backend_name == "claude"
-    assert recorder.test_backend_name == "claude"
-
-
-def test_open_recorder_improve_omits_fix_test_backend(tmp_path: Path) -> None:
-    """Improve trajectories carry no fix/test backend identity: the improve flow
-    never runs those phases, so serializing them would mislabel the run."""
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), backend="codex", run_eval=False)
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.IMPROVE,
-    )
-    assert recorder.backend_name == "codex"
-    assert recorder.review_backend_name == "codex"
-    assert recorder.fix_backend_name == ""
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_review_only_omits_fix_test_backend(tmp_path: Path) -> None:
-    """Review-only (TTT) trajectories carry no fix/test backend identity.
-
-    ``--review``/``--comment`` stop the deep spine after post-review, so their
-    flow never runs the fix cycle; emitting fix/test labels would mislabel them.
-    """
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), backend="codex", run_eval=False)
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.TTT,
-    )
-    assert recorder.backend_name == "codex"
-    assert recorder.review_backend_name == "codex"
-    assert recorder.fix_backend_name == ""
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_custom_omits_fix_test_backend(tmp_path: Path) -> None:
-    """Custom (fork) flows carry no fix/test backend identity.
-
-    A fork-defined CUSTOM flow's composition is unknowable at recorder-open
-    time — review-only forks are explicitly supported — so labeling it
-    unconditionally would mislabel runs that never run the fix/test phases.
-    Even an explicit ``fix_backend`` must not leak onto a CUSTOM run.
-    """
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.CUSTOM,
-    )
-    assert recorder.backend_name == "codex"
-    assert recorder.review_backend_name == "codex"
-    assert recorder.fix_backend_name == ""
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_diagram_omits_fix_test_backend(tmp_path: Path) -> None:
-    """#1113: diagram-only trajectories carry no fix/test backend identity.
-
-    The ``diagram`` flow is exploration -> diagram -> post-diagram; it never
-    runs the fix cycle, so emitting fix/test labels would mislabel it. Even an
-    explicit ``--fix-backend`` must not leak onto a diagram-only run.
-    """
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.DIAGRAM,
-    )
-    assert recorder.backend_name == "codex"
-    assert recorder.review_backend_name == "codex"
-    assert recorder.fix_backend_name == ""
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_diagram_resolves_backend_via_the_diagram_phase(tmp_path: Path) -> None:
-    """#1113: the diagram flow's representative backend follows its only agent
-    phase, so a ``[tool.daydream.phases.diagram]`` backend override wins over
-    the never-run ``review`` phase."""
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(
-        target=str(target_dir),
-        run_eval=False,
-        review_backend="codex",
-        file_config=DaydreamFileConfig(phases={"diagram": {"backend": "pi"}}),
-    )
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.DIAGRAM,
-    )
-    assert recorder.backend_name == "pi"
-    assert recorder.review_backend_name == "pi"
-    assert recorder.fix_backend_name == ""
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_improve_resolves_backend_via_recon(tmp_path: Path) -> None:
-    """The improve flow's representative backend follows its advisory phases.
-
-    The improve flow runs exclusively on recon/audit/vet/plan_write steps (no
-    review step), so a file-config override on ``recon`` — its first advisory
-    phase — must win for the run's backend identity instead of the never-run
-    ``review`` phase.
-    """
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(
-        target=str(target_dir),
-        run_eval=False,
-        review_backend="codex",
-        file_config=DaydreamFileConfig(phases={"recon": {"backend": "pi"}}),
-    )
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.IMPROVE,
-    )
-    assert recorder.backend_name == "pi"
-    assert recorder.review_backend_name == "pi"
-    assert recorder.fix_backend_name == ""
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_pr_flow_resolves_fix_omits_test(tmp_path: Path) -> None:
-    """PR trajectories retain their historical fix-without-test backend metadata."""
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), review_backend="codex", run_eval=False)
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.PR,
-    )
-    assert recorder.backend_name == "codex"
-    assert recorder.review_backend_name == "codex"
-    assert recorder.fix_backend_name == "claude"
-    assert recorder.test_backend_name == ""
-
-
-def test_open_recorder_backend_falls_back_to_claude(tmp_path: Path) -> None:
-    from daydream.runner import _open_recorder
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config = RunConfig(target=str(target_dir), run_eval=False)
-    recorder = _open_recorder(
-        allow_standalone=True,
-        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
-    )
-    assert recorder.backend_name == "claude"
-    assert recorder.review_backend_name == "claude"
-    assert recorder.fix_backend_name == "claude"
-    assert recorder.test_backend_name == "claude"
+    assert (
+        recorder.backend_name, recorder.review_backend_name,
+        recorder.fix_backend_name, recorder.test_backend_name,
+    ) == expected
 
 
 def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> Manifest:
@@ -2583,33 +2428,16 @@ def test_manifest_normal_records_fix_and_test_backend(tmp_path: Path) -> None:
     assert run["test_backend"] == "osprey"
 
 
-def test_manifest_review_only_omits_fix_test_backend(tmp_path: Path) -> None:
-    """Review-only (TTT) manifests omit fix/test backend keys entirely.
-
-    ``--review``/``--comment`` never run the fix or test phases, so
-    ``fix_backend``/``test_backend`` resolve empty and the ``or None`` omission
-    in ``build_manifest`` drops the keys rather than mislabeling the run.
-    """
+@pytest.mark.parametrize("flow", [DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE])
+def test_manifest_nonfix_flows_omit_fix_test_backend(tmp_path: Path, flow: DaydreamRunFlow) -> None:
+    """Flows without a fix cycle omit fix/test backend keys entirely."""
     config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
-    m = _build_manifest(config, DaydreamRunFlow.TTT, tmp_path)
-    assert m.backend == "codex"
-    assert m.review_backend is None
-    assert m.fix_backend is None
-    assert m.test_backend is None
-    run = m.to_dict()["run"]
-    assert "fix_backend" not in run
-    assert "test_backend" not in run
-
-
-def test_manifest_improve_omits_fix_test_backend(tmp_path: Path) -> None:
-    """Improve manifests omit fix/test backend keys (those phases never run)."""
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
-    m = _build_manifest(config, DaydreamRunFlow.IMPROVE, tmp_path)
-    assert m.backend == "codex"
-    assert m.review_backend is None
-    assert m.fix_backend is None
-    assert m.test_backend is None
-    run = m.to_dict()["run"]
+    manifest = _build_manifest(config, flow, tmp_path)
+    assert manifest.backend == "codex"
+    assert manifest.review_backend is None
+    assert manifest.fix_backend is None
+    assert manifest.test_backend is None
+    run = manifest.to_dict()["run"]
     assert "fix_backend" not in run
     assert "test_backend" not in run
 

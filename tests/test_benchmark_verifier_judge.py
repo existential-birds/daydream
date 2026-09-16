@@ -10,9 +10,15 @@ injected fake HTTP client against ``tmp_path``.
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+
+def _http_response(status: int, body: Any = None, *, text: str = "ok", **attrs: Any) -> Any:
+    """An httpx-like response for the injected judge transport."""
+    return SimpleNamespace(status_code=status, text=text, json=lambda: body, **attrs)
 
 
 def test_spike_template_loads_with_bare_import(sr_module: Any) -> None:
@@ -76,17 +82,10 @@ async def test_anthropic_client_posts_messages_and_returns_verdict(sr_module: An
     class FakeClient:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             calls.append((url, headers, json, timeout))
-            return type(
-                "R",
-                (),
-                {
-                    "status_code": 200,
-                    "text": "ok",
-                    "json": lambda self: {
-                        "content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}]
-                    },
-                },
-            )()
+            return _http_response(
+                200,
+                {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}]},
+            )
 
     client = sr.AnthropicJudgeClient(api_key="sk-ant-x", model="claude-x", http=FakeClient())
     raw = await client.complete_json(user="<prompt>")
@@ -110,17 +109,10 @@ async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_modul
     class FakeClient:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             calls.append((url, headers, json, timeout))
-            return type(
-                "R",
-                (),
-                {
-                    "status_code": 200,
-                    "text": "ok",
-                    "json": lambda self: {
-                        "choices": [{"message": {"content": '{"match": false, "confidence": 0.2, "reasoning": "no"}'}}]
-                    },
-                },
-            )()
+            return _http_response(
+                200,
+                {"choices": [{"message": {"content": '{"match": false, "confidence": 0.2, "reasoning": "no"}'}}]},
+            )
 
     client = sr.OpenAIJudgeClient(
         api_key="sk-or-abc",
@@ -162,17 +154,10 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
             attempts.append(1)
             if len(attempts) < 3:
                 raise TimeoutError("timed out")
-            return type(
-                "R",
-                (),
-                {
-                    "status_code": 200,
-                    "text": "ok",
-                    "json": lambda self: {
-                        "content": [{"type": "text", "text": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}]
-                    },
-                },
-            )()
+            return _http_response(
+                200,
+                {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}]},
+            )
 
     raw = await sr._complete_json_with_http(
         FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"],
@@ -186,7 +171,7 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
     class Always5xx:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             attempts.append(1)
-            return type("R", (), {"status_code": 503, "text": "down"})()
+            return _http_response(503, text="down")
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(
@@ -204,35 +189,15 @@ async def test_retry_policy_retries_openrouter_error_envelope(sr_module: Any) ->
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             attempts.append(1)
             if len(attempts) < 3:
-                return type(
-                    "R",
-                    (),
-                    {
-                        "status_code": 200,
-                        "text": "upstream error",
-                        "json": lambda self: {
-                            "error": {
-                                "code": 502,
-                                "message": "Upstream provider temporarily overloaded",
-                            }
-                        },
-                    },
-                )()
-            return type(
-                "R",
-                (),
-                {
-                    "status_code": 200,
-                    "text": "ok",
-                    "json": lambda self: {
-                        "choices": [{
-                            "message": {
-                                "content": '{"match": true, "confidence": 0.8, "reasoning": "x"}'
-                            }
-                        }]
-                    },
-                },
-            )()
+                return _http_response(
+                    200,
+                    {"error": {"code": 502, "message": "Upstream provider temporarily overloaded"}},
+                    text="upstream error",
+                )
+            return _http_response(
+                200,
+                {"choices": [{"message": {"content": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}}]},
+            )
 
     raw = await sr._complete_json_with_http(
         FlakyOpenRouter(),
@@ -254,7 +219,7 @@ async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejecte
     class BadRequest:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             attempts.append(1)
-            return type("R", (), {"status_code": 400, "text": "bad"})()
+            return _http_response(400, text="bad")
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(
@@ -264,16 +229,7 @@ async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejecte
 
     class Redirect:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            return type(
-                "R",
-                (),
-                {
-                    "status_code": 302,
-                    "headers": {"location": "https://evil.example/x"},
-                    "text": "",
-                    "json": lambda self: {},
-                },
-            )()
+            return _http_response(302, {}, text="", headers={"location": "https://evil.example/x"})
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(

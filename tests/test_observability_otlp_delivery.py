@@ -37,6 +37,7 @@ from daydream.observability.exporters import (
     langsmith_exporter,
     otlp_exporter,
 )
+from daydream.observability.otlp_compat import classify_http_ack
 from tests.harness.otlp import ScriptedResponse, otlp_collector, scripted_otlp_collector
 
 # The private requests-session credential provider settings the whole-operation
@@ -83,7 +84,7 @@ def _partial_response(rejected: int) -> ScriptedResponse:
 
 
 def test_http_zero_byte_protobuf_200_is_canonical_full_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Binding decision 8: 200 + protobuf content type + empty body = full success."""
+    """200 + protobuf content type + empty body = full success (the canonical ack)."""
     content_types: list[str | None] = []
     with scripted_otlp_collector([ScriptedResponse()], capture_content_type=content_types) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
@@ -97,15 +98,36 @@ def test_http_zero_byte_protobuf_200_is_canonical_full_success(monkeypatch: pyte
         assert content_types == ["application/x-protobuf"]
 
 
-def test_http_wrong_content_type_is_terminal(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    with scripted_otlp_collector([ScriptedResponse(headers={"Content-Type": "application/json"})]) as receiver:
+def test_http_empty_body_200_no_content_type_is_full_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LangSmith canonical ack: 200 + zero-length body + no Content-Type = full success."""
+    content_types: list[str | None] = []
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={})], capture_content_type=content_types
+    ) as receiver:  # ScriptedResponse defaults: status=200, body=b"" — headers empty ⇒ no CT sent
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # terminal: no retry
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+        assert snapshot["delivered"] == 1
+        assert snapshot["accepted"] == 0  # no counts are invented from a non-conforming ack
+        assert snapshot["unverified"] == 0
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # no retry
+        assert content_types == [None]
+
+
+def test_http_wrong_content_type_with_empty_body_is_success_any_ct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M1/M6: empty-body 200 short-circuits before the content-type guard, for any CT."""
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"})]
+    ) as receiver:  # default empty body
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        exporter.shutdown()
+        assert len(receiver.requests) == 1
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1 and snapshot["unverified"] == 0
 
 
 def test_http_undecodable_body_is_terminal_and_never_logged(
@@ -119,6 +141,79 @@ def test_http_undecodable_body_is_terminal_and_never_logged(
         assert len(receiver.requests) == 1
         assert b"opaque-garbage-body".decode("latin-1", "ignore") not in caplog.text
         assert "opaque-garbage" not in caplog.text
+
+
+def test_http_vendor_json_success_ack_is_accepted_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HoneyHive shape: 200 + application/json + {"success": true} = accepted with warning."""
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": true}')]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1
+        assert snapshot["warning"] is True
+        assert snapshot["unverified"] == 0
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # never retried
+
+
+def test_http_json_ack_with_error_indication_is_terminal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false, "error": "boom"}')]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # terminal, never retried
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+        assert "boom" not in caplog.text  # body text is never logged
+
+
+def test_http_json_ack_success_false_without_error_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented HoneyHive inverse {"success": false} is an explicit vendor failure.
+
+    The accept path reads the vendor-documented "success" flag: an explicitly
+    falsy success with no "error" key is still error-indicating JSON and stays
+    terminal OTLP_MALFORMED_ACK — never recorded as delivered.
+    """
+    with scripted_otlp_collector(
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false}')]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # terminal, never retried
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+
+
+def test_http_vendor_json_ack_success_content_type_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 9110 media types are case-insensitive: Application/JSON; charset=utf-8."""
+    with scripted_otlp_collector(
+        [
+            ScriptedResponse(
+                headers={"Content-Type": "Application/JSON; charset=utf-8"}, body=b'{"success": true}'
+            )
+        ]
+    ) as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1 and snapshot["warning"] is True
+        exporter.shutdown()
+        assert len(receiver.requests) == 1  # never retried
 
 
 def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,6 +395,27 @@ def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch
 
 
 # ------------------------------------------------------------------ credential-provider rejection
+
+
+def test_classify_http_ack_incomplete_empty_read_is_not_success() -> None:
+    """M5: a zero-length *incomplete* read must not be graded full success."""
+    verdict, accepted, rejected = classify_http_ack(status=200, content_type=None, body=b"", complete=False)
+    assert (verdict, accepted, rejected) == ("oversized", 0, 0)
+
+
+def test_classify_http_ack_none_body_is_not_success() -> None:
+    verdict, accepted, rejected = classify_http_ack(
+        status=200, content_type="application/x-protobuf", body=None, complete=True
+    )
+    assert (verdict, accepted, rejected) == ("malformed", 0, 0)
+
+
+def test_classify_http_ack_json_without_positive_success_is_malformed() -> None:
+    """A JSON ack with no truthy success flag is never graded delivered."""
+    verdict, accepted, rejected = classify_http_ack(
+        status=200, content_type="application/json", body=b'{"ok": false}', complete=True
+    )
+    assert (verdict, accepted, rejected) == ("malformed", 0, 0)
 
 
 @pytest.mark.parametrize("env_var", _CREDENTIAL_PROVIDER_VARS)

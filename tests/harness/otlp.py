@@ -34,8 +34,10 @@ class ScriptedResponse:
         reason: str | None = None,
         delay_s: float = 0.0,
     ) -> None:
+        # Default to the canonical protobuf ack content type; an explicitly empty
+        # headers mapping sends no Content-Type at all (the LangSmith ack shape).
+        self.headers = dict(headers) if headers is not None else {"Content-Type": "application/x-protobuf"}
         self.status = status
-        self.headers = dict(headers or {})
         self.body = body
         self.reason = reason
         self.delay_s = delay_s
@@ -120,7 +122,7 @@ def scripted_otlp_collector(
     The plain ``otlp_collector`` always answers 200 with an empty protobuf body,
     which cannot exercise acknowledgment classification. This variant scripts
     the exact status/content-type/body sequence per request and records each
-    request's Content-Type for the strict acknowledgment tests. Bodies that are
+    ack's Content-Type for the strict acknowledgment tests. Bodies that are
     valid protobuf requests are additionally decoded through the normal
     capture path so partial-success bodies stay observable.
     """
@@ -131,9 +133,10 @@ def scripted_otlp_collector(
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             headers = {key.lower(): value for key, value in self.headers.items()}
-            if capture_content_type is not None:
-                capture_content_type.append(self.headers.get("Content-Type"))
             response = responses[min(len(collector.requests), len(responses) - 1)]
+            if capture_content_type is not None:
+                # Record the ack's Content-Type, exactly as the exporter observes it.
+                capture_content_type.append(response.headers.get("Content-Type"))
             if response.delay_s > 0:
                 time.sleep(response.delay_s)
             # One entry per request; decode only when the body is a protobuf request.
@@ -148,7 +151,9 @@ def scripted_otlp_collector(
             with collector._lock:
                 collector.requests.append(entry)
             self.send_response(response.status, message=response.reason)
-            self.send_header("Content-Type", response.headers.get("Content-Type", "application/x-protobuf"))
+            ack_content_type = response.headers.get("Content-Type")
+            if ack_content_type is not None:
+                self.send_header("Content-Type", ack_content_type)
             self.send_header("Content-Length", str(len(response.body)))
             for key, value in response.headers.items():
                 if key != "Content-Type":

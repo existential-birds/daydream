@@ -1151,6 +1151,13 @@ class Redactor:
             return None
         return redact_structured_text(value)
 
+    def _redact_text_parts(self, parts: Sequence[Any]) -> list[Any]:
+        """Redact text parts in a message or observation, preserving non-text parts."""
+        return [
+            part.model_copy(update={"text": self._redact_optional_text(part.text)}) if part.type == "text" else part
+            for part in parts
+        ]
+
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Redact every value inside a ToolCall.arguments dict (native walk).
 
@@ -1182,14 +1189,7 @@ class Redactor:
                 except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                     new_content = "[REDACTION_FAILED]"
             elif isinstance(r.content, list):
-                new_content = [
-                    (
-                        part.model_copy(update={"text": self._redact_optional_text(part.text)})
-                        if part.type == "text"
-                        else part
-                    )
-                    for part in r.content
-                ]
+                new_content = self._redact_text_parts(r.content)
             new_results.append(r.model_copy(update={"content": new_content}))
         return observation.model_copy(update={"results": new_results})
 
@@ -1211,14 +1211,7 @@ class Redactor:
             if isinstance(step.message, str):
                 updates["message"] = self._redact_optional_text(step.message)
             elif isinstance(step.message, list):
-                updates["message"] = [
-                    (
-                        part.model_copy(update={"text": self._redact_optional_text(part.text)})
-                        if part.type == "text"
-                        else part
-                    )
-                    for part in step.message
-                ]
+                updates["message"] = self._redact_text_parts(step.message)
             if step.reasoning_content is not None:
                 updates["reasoning_content"] = self._redact_optional_text(step.reasoning_content)
             if step.tool_calls is not None:
@@ -2362,14 +2355,7 @@ class Invocation:
         the host Step. The replacement is redacted again because the new
         ObservationResult content has not yet been run through the redactor.
         """
-        existing = self.steps[closed_index]
-        if existing.observation is None:
-            new_observation = Observation(results=[result])
-        else:
-            new_observation = existing.observation.model_copy(
-                update={"results": [*existing.observation.results, result]}
-            )
-        updated = existing.model_copy(update={"observation": new_observation})
+        updated = self._with_observation_result(self.steps[closed_index], result)
         self.steps[closed_index] = self.recorder.redactor.redact_step(updated)
 
     def _fold_metrics_into_closed_last_step(self, event: Any, incoming: Metrics) -> None:
@@ -2467,9 +2453,9 @@ class Invocation:
     def _with_observation_result(step: Step, result: ObservationResult) -> Step:
         """Return a copy of *step* with *result* appended to its observation.
 
-        Non-mutating twin of ``_amend_closed_step_observation`` for the
-        signal-safe snapshot path. No re-redaction pass needed: the Step is
-        already a redacted copy and the marker content is fixed ASCII.
+        Shared by closed-step amendment and the signal-safe snapshot path.
+        Amendment re-redacts a new external result; the snapshot's fixed ASCII
+        interruption marker needs no second pass.
         """
         if step.observation is None:
             observation = Observation(results=[result])
@@ -2528,24 +2514,11 @@ class Invocation:
 
 @dataclass
 class PhaseEvent:
-    """Explicit phase-boundary event (``phase_start`` / ``phase_end``).
+    """Phase boundary or host event used for explicit per-phase timing.
 
-    Emitted by :meth:`TrajectoryRecorder.emit_phase_start` /
-    :meth:`TrajectoryRecorder.emit_phase_end` and serialized into
-    ``Trajectory.extra["phase_events"]`` so a per-phase wall-clock breakdown can
-    be reconstructed without inferring invocation→phase membership from step
-    timestamps (issue #203).
-
-    Attributes:
-        phase: The :class:`DaydreamPhase` this event brackets.
-        event: ``"phase_start"`` or ``"phase_end"``.
-        timestamp: ISO 8601 UTC timestamp (via :func:`now_iso`).
-        session_id: Run identity for new lifecycle events.
-        scope_id: Unique identity pairing one start with one terminal event.
-        status: Closed terminal status, present on identified end events.
-        reason_code: Optional closed, low-cardinality terminal reason.
-        metadata: Optional structured metadata (e.g. ``{"stage": "review"}``
-            for the deep orchestrator's sub-stages).
+    Identified events pair start and terminal records with a run-scoped
+    ``session_id`` and unique ``scope_id``. Optional metadata carries stage
+    detail without inferring phase membership from step timestamps.
     """
 
     phase: DaydreamPhase
@@ -3153,21 +3126,10 @@ class TrajectoryRecorder:
         )
 
     def record_profile(self, *, schema_version: int, name: str, source_kind: str, digest: str) -> None:
-        """Record the resolved review-profile provenance for this run (R12).
+        """Record the resolved review profile's name, source, and canonical digest.
 
-        Called exactly once at the runner composition root (issue #885) with
-        the run's resolved profile: schema version, human-readable name,
-        source kind (explicit/env/repo/default), and the canonical digest.
-        Serialized into ``Trajectory.extra`` as ``profile_schema_version`` /
-        ``profile_name`` / ``profile_source_kind`` / ``profile_digest`` so a
-        future optimizer can attribute results to the exact policy tested.
-        Required on new runs; older trajectories simply omit the keys.
-
-        Args:
-            schema_version: Profile ``schema_version`` (1).
-            name: Human-readable profile name.
-            source_kind: One of ``explicit``/``env``/``repo``/``default``.
-            digest: Canonical SHA-256 digest of the profile value.
+        Runner sets this once so results can be attributed to the exact policy.
+        New runs include these ``Trajectory.extra`` keys; older records omit them.
         """
         self._profile = {
             "profile_schema_version": schema_version,
@@ -3203,29 +3165,56 @@ class TrajectoryRecorder:
         self._emit_phase_event(phase, "phase_end", **metadata)
 
     def emit_file_group_budget_exceeded(
-        self, *, file: str, reason: str, items_processed: int, items_skipped: int
+        self,
+        *,
+        file: str,
+        reason: str,
+        items_processed: int,
+        items_skipped: int,
+        elapsed_s: float | None = None,
     ) -> None:
-        """Record a ``file_group_budget_exceeded`` event for the FIX phase (#201).
+        """Record the FIX file group, tripped ceiling, and processed/skipped counts.
 
-        Emitted by ``phase_fix_parallel`` when a per-file-group aggregate budget
-        fires, so future perf triage of a runaway file group (the #186 pattern)
-        is mechanical: the trajectory names the file, the ceiling that tripped,
-        and how many findings were processed vs. skipped. Serialized into
-        ``Trajectory.extra["phase_events"]`` alongside the phase boundaries.
+        Optional *elapsed_s* is omitted when absent to preserve the earlier
+        four-key metadata shape.
+        """
+        metadata: dict[str, Any] = {
+            "file": file,
+            "reason": reason,
+            "items_processed": items_processed,
+            "items_skipped": items_skipped,
+        }
+        if elapsed_s is not None:
+            metadata["elapsed_s"] = elapsed_s
+        self._emit_phase_event(
+            DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata
+        )
 
-        Args:
-            file: File-group key whose budget was exceeded (or ``"<no-file>"``).
-            reason: Which ceiling tripped (e.g. ``"group_serial_item_limit"``).
-            items_processed: Findings fixed before the budget fired.
-            items_skipped: Remaining findings in the group left unfixed.
+    def emit_agent_budget_stop(
+        self,
+        phase: DaydreamPhase,
+        *,
+        limit_expired: str,
+        elapsed_s: float,
+        backend_s: float,
+        backoff_s: float,
+        attempts: int,
+        cleanup_elapsed_s: float | None = None,
+    ) -> None:
+        """Record the expired invocation limit and spent durations once.
+
+        Only durations and a reason code are persisted; no raw monotonic
+        deadline value is reusable across runs.
         """
         self._emit_phase_event(
-            DaydreamPhase.FIX,
-            "file_group_budget_exceeded",
-            file=file,
-            reason=reason,
-            items_processed=items_processed,
-            items_skipped=items_skipped,
+            phase,
+            "agent_budget_stop",
+            limit_expired=limit_expired,
+            elapsed_s=elapsed_s,
+            backend_s=backend_s,
+            backoff_s=backoff_s,
+            attempts=attempts,
+            cleanup_elapsed_s=cleanup_elapsed_s,
         )
 
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
