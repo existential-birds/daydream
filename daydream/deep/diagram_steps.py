@@ -561,6 +561,7 @@ async def _run_diagram_kind(
         },
         "omit_reasons": omit_reasons,
         "mermaid": mermaid,
+        "advisory": selection.to_dict() if selection is not None else None,
     }
 
 

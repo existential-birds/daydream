@@ -1591,3 +1591,31 @@ async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_over
 
     assert prompts, "the author turn must be reached — no preflight abort"
     assert result["status"] != "failed", result.get("reason")
+
+
+async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+    diff_path = ctx.data["diff_path"]
+    diff_path.write_text("+" + ("x" * 1_100_000) + "\n", encoding="utf-8")   # > 1 MiB per-file limit
+    ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
+    prompts: list[str] = []
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    result = await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=SimpleNamespace(model="fake"),
+    )
+
+    assert prompts, "an EXACT_PATHS run must reach the author turn with the diff omitted, not aborted"
+    assert [item["label"] for item in result["advisory"]["omitted"]] == ["diff"]
+    assert result["advisory"]["transport"] == "exact_paths"
