@@ -312,6 +312,10 @@ class StubBackend:
         self.diagram_fail: frozenset[str] = frozenset()
         # Turn counter per kind, so the repair turn reads the next queued spec.
         self.diagram_turns: dict[str, int] = {}
+        # Transport-capability flag the sanctioned-input resolver reads
+        # (``getattr(backend, "sandbox", False)``). Set True to force the INLINE
+        # transport independent of the disposable-clone read-only flag.
+        self.sandbox: bool = False
 
     @staticmethod
     def _prompt_record_uid_groups(prompt: str) -> list[list[str]]:
