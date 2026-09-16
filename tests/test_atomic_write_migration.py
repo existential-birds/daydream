@@ -15,11 +15,13 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream import cli
 from daydream.benchmark.harbor import candidate
+from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import write_export_rows
 from daydream.training.adjudication.final_bundle import build_final_bundle
@@ -56,6 +58,24 @@ def _fail_all_renames(monkeypatch: pytest.MonkeyPatch) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(os, "replace", failing)
+
+
+def _instrument(monkeypatch: pytest.MonkeyPatch, module: str) -> list[tuple[Path, bytes, dict[str, Any]]]:
+    """Record the primitive's calls at *module*'s binding, delegating to the real one.
+
+    Not a mock: the real ``json_utils.atomic_write_bytes`` runs, so the file, its mode
+    and its temp-cleanup behaviour are all genuine. Only the kwargs each site chose are
+    captured -- which is exactly the contract this migration is about.
+    """
+    calls: list[tuple[Path, bytes, dict[str, Any]]] = []
+    real = atomic_write_bytes
+
+    def spy(path: Path, content: bytes, **kwargs: Any) -> None:
+        calls.append((Path(path), content, kwargs))
+        real(path, content, **kwargs)
+
+    monkeypatch.setattr(f"{module}.atomic_write_bytes", spy)
+    return calls
 
 
 class TestWriterCharacterization:
@@ -181,3 +201,33 @@ class TestWriterCharacterization:
         with pytest.raises(OSError, match="No space left"):
             run_calibration(config)
         assert list(config.out_dir.iterdir()) == []   # its try/finally already unlinks both temps
+
+
+class TestExportKnobs:
+    def test_export_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = _instrument(monkeypatch, "daydream.training.adjudication.export")
+        root, state = _seed_adjudicated(tmp_path)
+        out = tmp_path / "export.jsonl"
+        assert cli._handle_corpus_command(
+            ["adjudicate", "export", "--index-root", str(root),
+             "--state-dir", str(state), "--out", str(out)]
+        ) == 0
+        [(target, content, kwargs)] = calls
+        assert target == out
+        assert content == out.read_bytes()          # the site hands over exactly what lands on disk
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+
+    def test_export_failure_keeps_prior_bytes_and_leaves_no_temp(self, tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        root, state = _seed_adjudicated(tmp_path)
+        out = tmp_path / "export.jsonl"
+        out.write_bytes(b"prior\n")
+        _fail_all_renames(monkeypatch)
+        with pytest.raises(OSError, match="No space left"):
+            cli._handle_corpus_command(
+                ["adjudicate", "export", "--index-root", str(root),
+                 "--state-dir", str(state), "--out", str(out)]
+            )
+        assert out.read_bytes() == b"prior\n"
+        assert list(tmp_path.glob("export.jsonl*")) == [out]
