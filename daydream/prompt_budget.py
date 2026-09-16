@@ -9,7 +9,7 @@ import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from daydream.artifact_visibility import ArtifactVisibilityError
 from daydream.backends import AUDIT_ROOT_ISOLATION
@@ -21,6 +21,9 @@ SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES = INLINE_DIFF_BUDGET_BYTES
 SANCTIONED_EXACT_INPUT_MAX_FILES = 512
 SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES = 1_048_576
 SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 4_194_304
+
+_SANCTIONED_INLINE_HEADER = "Sanctioned phase inputs (captured verbatim):"
+_SANCTIONED_INLINE_CLOSE_TAG = "</sanctioned-input>"
 
 
 class SanctionedInputUnavailable(ArtifactVisibilityError):
@@ -66,9 +69,9 @@ class PreparedSanctionedInputs:
             lines = ["Sanctioned phase inputs (read only these exact files):"]
             lines.extend(f"- {item.label}: {item.path}" for item in self.inputs)
             return "\n".join(lines)
-        blocks = ["Sanctioned phase inputs (captured verbatim):"]
+        blocks = [_SANCTIONED_INLINE_HEADER]
         for item in self.inputs:
-            blocks += [f'<sanctioned-input label="{item.label}">', item.text or "", "</sanctioned-input>"]
+            blocks += [_sanctioned_inline_open_tag(item.label), item.text or "", _SANCTIONED_INLINE_CLOSE_TAG]
         return "\n".join(blocks)
 
     def render_prompt(self, prompt: str) -> str:
@@ -280,3 +283,42 @@ def prepare_sanctioned_inputs(
 def fits_inline_diff_budget(text: str) -> bool:
     """Whether ``text`` fits the UTF-8 byte budget for an inlined diff."""
     return len(text.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+
+
+def _sanctioned_inline_open_tag(label: str) -> str:
+    return f'<sanctioned-input label="{label}">'
+
+
+def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
+    """Exact UTF-8 byte length of the INLINE render for these captured inputs.
+
+    ``entries`` pairs each ``(label, content_bytes)`` exactly as
+    :meth:`PreparedSanctionedInputs.render` receives them, so callers can size
+    the emitted block — header, tags, newline separators, and content — before
+    capturing anything. ``()`` is the header alone.
+    """
+    sizes = [len(_SANCTIONED_INLINE_HEADER.encode("utf-8"))]
+    for label, content_bytes in entries:
+        sizes.append(len(_sanctioned_inline_open_tag(label).encode("utf-8")))
+        sizes.append(content_bytes)
+        sizes.append(len(_SANCTIONED_INLINE_CLOSE_TAG.encode("utf-8")))
+    return sum(sizes) + max(len(sizes) - 1, 0)
+
+
+def truncate_utf8_to_budget(text: str, budget_bytes: int, marker: str = "") -> str:
+    """Byte-exact prefix of ``text`` that, with ``marker``, fits ``budget_bytes``.
+
+    Returns ``text`` unchanged when it plus ``marker`` already fits. Otherwise
+    slices ``text.encode("utf-8")`` (never ``str`` indices) and decodes the
+    prefix with ``errors="ignore"`` so a split multibyte sequence is dropped
+    rather than replaced, keeping the result ``<= budget_bytes`` UTF-8 bytes.
+    A marker larger than the budget is itself truncated rather than raising.
+    """
+    marker_bytes = marker.encode("utf-8")
+    encoded = text.encode("utf-8")
+    if len(encoded) + len(marker_bytes) <= budget_bytes:
+        return text
+    if len(marker_bytes) >= budget_bytes:
+        return marker_bytes[:budget_bytes].decode("utf-8", errors="ignore")
+    keep = budget_bytes - len(marker_bytes)
+    return encoded[:keep].decode("utf-8", errors="ignore") + marker
