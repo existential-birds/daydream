@@ -231,3 +231,30 @@ class TestExportKnobs:
             )
         assert out.read_bytes() == b"prior\n"
         assert list(tmp_path.glob("export.jsonl*")) == [out]
+
+
+class TestMaterializeKnobs:
+    def test_materialize_calls_the_primitive_for_both_artifacts(self, tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = _instrument(monkeypatch, "daydream.training.adjudication.materialize")
+        run_materialize(_index(tmp_path), tmp_path / "mat", pin=_PIN)
+        by_target = {target: (content, kwargs) for target, content, kwargs in calls}
+        assert set(by_target) == {tmp_path / "mat" / "sessions.jsonl",
+                                  tmp_path / "mat" / "preview-manifest.json"}
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+                   for _content, kwargs in by_target.values())
+        for target, (content, _kwargs) in by_target.items():
+            assert target.read_bytes() == content
+
+    def test_materialize_failure_leaves_no_stray_temp(self, tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        out = tmp_path / "mat"
+        _fail_all_renames(monkeypatch)
+        with pytest.raises(OSError, match="No space left"):
+            run_materialize(_index(tmp_path), out, pin=_PIN)
+        assert list(out.iterdir()) == []
+
+    def test_materialize_dry_run_still_writes_nothing(self, tmp_path: Path) -> None:
+        out = tmp_path / "mat"
+        run_materialize(_index(tmp_path), out, pin=_PIN, dry_run=True)
+        assert not out.exists()

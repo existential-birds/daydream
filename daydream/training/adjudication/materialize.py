@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any, cast, get_args
 
 from daydream.archive.hydrate import HubUnavailableError
+from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
@@ -48,14 +48,6 @@ _CONFLICTED_DISPOSITION = "ambiguous"
 
 def _canonical(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _write_atomic(out_path: Path, payload: str) -> None:
-    """Temp-file + ``os.replace`` write, mirroring ``export.write_export_rows``."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = out_path.with_name(out_path.name + ".tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
-    os.replace(tmp_path, out_path)
 
 
 def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
@@ -498,12 +490,21 @@ def run_materialize(
     if dry_run:
         return summary
 
-    _write_atomic(
+    atomic_write_bytes(
         out_dir / _SESSIONS_OUT_FILENAME,
-        "".join(_canonical(r) + "\n" for r in records),
+        "".join(_canonical(r) + "\n" for r in records).encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=0o644,
     )
     manifest: dict[str, Any] = dict(pin)
     manifest["snapshot_id"] = id_digest
     manifest["index_revision"] = index_revision
-    _write_atomic(out_dir / _MANIFEST_FILENAME, _canonical(manifest))
+    atomic_write_bytes(
+        out_dir / _MANIFEST_FILENAME,
+        _canonical(manifest).encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=0o644,
+    )
     return summary
