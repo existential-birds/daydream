@@ -449,6 +449,37 @@ The fix-phase anti-degradation quality gate prevents a fix from degrading a file
 
 The gate is fail-open. A flagged file surfaces as a warning plus a manifest record. It never aborts a run. Daydream clamps the thresholds to finite non-negative numbers. An invalid value degrades to the named default.
 
+### Retry recovery
+
+A retry may spend only the recovery budget it was given, never the invocation's useful-work time. The allowance is a **cumulative retry-overhead budget**, measured in seconds. It is **additional to the invocation deadline** (the per-turn wall budget), it starts at the **first retryable failure** of an invocation, and it then charges every backoff sleep plus the backend time of every retry against itself. A spent allowance re-raises the current failure without dispatching again. Because it only bounds retry overhead, it **never caps** an otherwise healthy invocation: a 300 s allowance does not shorten a healthy 1800 s fix turn, since no retryable failure ever activates it. The retry decides its delay from a server `Retry-After` hint when one is present (numeric seconds only), otherwise from full jitter whose per-failure cap is the smaller of the configured maximum delay and the remaining allowance/deadline — so the allowance is **clamped** by the invocation deadline and by the fix file-group budget rather than re-basing either one.
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `retry_recovery_allowance_s` | `300` | Cumulative retry-overhead budget, in seconds, for one invocation. `0` disables retry recovery: the first retryable failure ends the ladder, without disabling attempts. The default is not yet tuned against outage data. |
+| `group_max_wall_s` | `600` | Per-file-group wall-clock ceiling for the fix phase. The allowance composes with it by clamping: a retry can never spend past the group's remaining wall time. |
+
+The same allowance is configurable per run through environment variables. The retry ladder's other knobs are env-only:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DAYDREAM_PI_RETRY_ATTEMPTS` | `20` | Retry attempts for a backend that declares no `RetryPolicy`. |
+| `DAYDREAM_PI_RETRY_BASE_DELAY_S` | `2.0` | Base of the exponential backoff. |
+| `DAYDREAM_PI_RETRY_MAX_DELAY_S` | `120.0` | Maximum delay a single backoff may reach. |
+| `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S` | `300` | Cumulative retry-overhead budget, in seconds. |
+
+Resolution precedence, highest first, is: a backend `RetryPolicy.retry_recovery_allowance_s`, then a backend `retry_recovery_allowance_s` attribute, then the config-file value, then `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`, then the `300` default. Only the fix phase threads a configured allowance; every other phase uses the default.
+
+The unit is seconds. An invalid value degrades to the default with a warning, never silently becoming an effective bound. Contradictory combinations are refused before dispatch — a non-zero allowance with retries disabled (`retry_recovery_allowance_s > 0` alongside `retry_attempts = 0`), or a base delay above the maximum delay. Permanent failures — authentication, schema, and tool-policy vetoes — retry zero times regardless of the allowance, and ladder exhaustion still surfaces the last failure unchanged.
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+retry_recovery_allowance_s = 120
+
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+retry_recovery_allowance_s = 120
+```
+
 ### Diagrams
 
 A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived.
