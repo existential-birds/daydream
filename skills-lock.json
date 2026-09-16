@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "honeyhive-evaluate": {
+      "source": "honeyhiveai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/honeyhive-evaluate/SKILL.md",
+      "computedHash": "266a1f55200d1310d5582c676c3e8ab87ac7b4330c12db33936f1c70d571f377"
+    }
+  }
+}
