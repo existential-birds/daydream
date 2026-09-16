@@ -1315,6 +1315,7 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
         ("synthetic opaque failure", "UNKNOWN"),
         ("model not found: gpt-5 (503)", "AUTH_CONFIG"),
         ("response failed JSON schema validation: additionalProperties", "SCHEMA"),
+        ("provider rate limit", "RATE_LIMIT"),
     ],
     ids=[
         "rate-limit",
@@ -1327,6 +1328,7 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
         "auth-config",
         "unknown",
         "permanent-beats-transient",
+        "provider-noun-is-not-permanent",
         "schema",
     ],
 )

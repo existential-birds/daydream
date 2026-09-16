@@ -306,6 +306,11 @@ def _pi_retry_max_delay() -> float:
 # first by _pi_error_category so a permanent condition (an unreachable model, a
 # rejected credential, a schema violation) wins over a transient token in the
 # same message: "model not found: gpt-5 (503)" is AUTH_CONFIG, not SERVER_ERROR.
+# A bare "provider" is deliberately absent: it is a generic noun that also
+# appears in transient failures ("provider rate limit"), so naming a provider is
+# not evidence of a permanent condition (see daydream/retry_policy.py). Provider
+# credential faults still land here through "auth"/"credential"/"api key"/
+# "configuration"/"not configured".
 _PERMANENT_TOKENS = (
     "auth",
     "credential",
@@ -313,7 +318,6 @@ _PERMANENT_TOKENS = (
     "api_key",
     "configuration",
     "not configured",
-    "provider",
     "model not found",
 )
 _SCHEMA_TOKENS = ("schema validation", "additionalproperties", "structured output")
