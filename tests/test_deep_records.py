@@ -1,6 +1,6 @@
 """Unit tests for per-record and merged-item referential identity (issue #1111).
 
-These are supplementary to the real-path coverage in ``tests/test_deep_orchestrator.py``
+These are supplementary to the real-path coverage in ``tests/deep_orchestrator/``
 that drives ``runner.run`` end to end; what they pin here are the exact
 guarantees the rest of the pipeline is allowed to rely on, because six call
 sites key destructive decisions (dedup drops, arbitration verdicts, disk

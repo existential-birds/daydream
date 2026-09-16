@@ -5,7 +5,7 @@ yes/no answer, e.g. ``--yes``) and *interactivity* (may we block on
 stdin?) — into a single decision: ``True``/``False`` to use directly, or
 ``None`` to fall back to an interactive prompt. This is a fast pure unit
 test that *supplements* the real-path fix-gate test in
-``test_deep_orchestrator.py`` (it never replaces it).
+``deep_orchestrator/test_fix_gate_cleanup_and_precision.py`` (it never replaces it).
 """
 
 from __future__ import annotations

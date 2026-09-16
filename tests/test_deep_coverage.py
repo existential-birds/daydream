@@ -2,7 +2,7 @@
 
 Covers ``daydream/deep/coverage.py``: coverage computation against a crafted
 ``.daydream`` dir, the hunk-size + capacity budget filter, and the sweep prompt
-builder. The real-path sweep behavior lives in ``tests/test_deep_orchestrator.py``.
+builder. The real-path sweep behavior lives in ``tests/deep_orchestrator/``.
 """
 from __future__ import annotations
 
