@@ -312,37 +312,76 @@ def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
     return {"clone_mode", "inline_exploration", "inline_dependencies"} <= params.keys()
 
 
+_PRIVATE_ARTIFACT_PLACEHOLDER = "sanctioned artifact storage"
+
+
+def _redact_private_artifacts(
+    prompt: str, diff_path: Path, exploration_dir: Path | None
+) -> str:
+    """Replace the private artifact paths an INLINE builder may have printed.
+
+    The builtin INLINE builders suppress the pointers they own, but a fork
+    override written before the inline kwargs still receives ``diff_path`` and
+    may echo it. This call site knows exactly three host-private paths — the
+    diff, its sibling hunk index, and the exploration directory — and replaces
+    each with the neutral phrase :meth:`PreparedSanctionedInputs.render_prompt`
+    already uses. Repository paths under ``ctx.work.repo`` are never touched.
+    """
+    private_paths: tuple[Path | None, ...] = (
+        diff_path,
+        diff_path.parent / "hunk-index.json",
+        exploration_dir,
+    )
+    for private in private_paths:
+        if private is not None:
+            prompt = prompt.replace(str(private), _PRIVATE_ARTIFACT_PLACEHOLDER)
+    return prompt
+
+
 def _diagram_author_prompt(
-    ctx: FlowContext, kind: str, eligibility: Eligibility, backend: Any, *, inline_artifacts: bool = False
+    ctx: FlowContext,
+    kind: str,
+    eligibility: Eligibility,
+    backend: Any,
+    *,
+    inline_transport: SanctionedInputTransport | None = None,
 ) -> str:
     """Build one kind's first-turn author prompt through the registry.
 
-    On backends whose read-only profile executes in a disposable clone (the
-    protocol-level ``read_only_disposable_clone`` capability) the host-only
-    ``.daydream/`` artifact paths the pointer blocks name would dangle, so
-    the prompt is made self-sufficient: exploration summary and dependency
-    edges are inlined under the untrusted boundary (best-effort reads, shared
-    prompt budget) and the diff is handed to the builder un-truncated — the
-    builder owns clone-mode truncation. Other backends keep the budget-gated
+    The builder's self-sufficiency flag follows the *resolved transport*, never
+    the disposable-clone capability: on an INLINE transport (a strict audit
+    root, a read-only disposable clone, or a sandboxed backend) the host-only
+    ``.daydream/`` artifact paths the pointer blocks name would dangle, so the
+    prompt is made self-sufficient — the diff is inlined by the builder (with
+    an explicit marker when over budget) and the exploration pointers are
+    suppressed, with whatever exploration context was admitted travelling in
+    the sanctioned-input section the caller appends. EXACT_PATHS keeps the
     pointer path byte-for-byte.
 
-    The clone-mode kwargs are only passed when the registered builder accepts
+    The inline kwargs are only passed when the registered builder accepts
     them: fork overrides written against the documented extension contract
-    predate the inline kwargs, and splatting them in would raise ``TypeError``
-    on every disposable-clone run, degrading the kind to failed. A legacy
-    override keeps the documented kwarg set; on a clone run its
-    ``exploration_dir`` arrives as ``None`` rather than the dangling host path.
+    predate them, and splatting them in would raise ``TypeError`` on every
+    INLINE run, degrading the kind to failed. A legacy override keeps the
+    documented kwarg set — ``exploration_dir`` arrives as ``None`` rather than
+    a dangling host path — and, because such a builder may print the paths it
+    was handed, the assembled prompt is redacted of every private artifact
+    path this call site knows before it leaves this function.
     """
     deep_state = DeepState(ctx.data)
     diff_path: Path = deep_state.diff_path
     inline_diff = _ttt_diff_text(ctx)
     exploration_dir: Path | None = deep_state.exploration_dir_or_none
-    clone_mode = bool(getattr(backend, "read_only_disposable_clone", False))
+    transport = (
+        inline_transport
+        if inline_transport is not None
+        else sanctioned_transport_for(backend, ctx.work.repo, read_only=True)
+    )
+    inline = transport is SanctionedInputTransport.INLINE
     builder = get_registry().prompt(
         "diagram_sequence" if kind == "sequence" else "diagram_flowchart"
     )
     inline_kwargs: dict[str, Any]
-    if clone_mode and _prompt_builder_accepts_inline_kwargs(builder):
+    if inline and _prompt_builder_accepts_inline_kwargs(builder):
         # A live artifact session routes the pre-scan through sanctioned inputs
         # instead of inlining it here.
         legacy = _inline_exploration_text(exploration_dir) if ctx.artifacts is None else (None, None)
@@ -353,13 +392,12 @@ def _diagram_author_prompt(
             "inline_dependencies": legacy[1],
         }
     else:
-        # A legacy override keeps its documented kwarg set, but a clone run
-        # must not name the host-only exploration_dir: the path dangles in
-        # the disposable clone, so it arrives as ``None`` there and untouched
-        # otherwise.
-        inline_kwargs = {"exploration_dir": None if clone_mode or inline_artifacts else exploration_dir}
+        # A legacy override keeps its documented kwarg set, but an INLINE run
+        # must not name the host-only exploration_dir: the path dangles on the
+        # transport, so it arrives as ``None`` there and untouched otherwise.
+        inline_kwargs = {"exploration_dir": None if inline else exploration_dir}
     if kind == "sequence":
-        return str(
+        prompt = str(
             builder(
                 diff_path=diff_path,
                 inline_diff=inline_diff,
@@ -369,17 +407,19 @@ def _diagram_author_prompt(
                 **inline_kwargs,
             )
         )
-    return str(
-        builder(
-            diff_path=diff_path,
-            inline_diff=inline_diff,
-            candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
-            forced=eligibility.flowchart.rule == "forced",
-            cwd=ctx.work.repo,
-            schema=FLOWCHART_SPEC_SCHEMA,
-            **inline_kwargs,
+    else:
+        prompt = str(
+            builder(
+                diff_path=diff_path,
+                inline_diff=inline_diff,
+                candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
+                forced=eligibility.flowchart.rule == "forced",
+                cwd=ctx.work.repo,
+                schema=FLOWCHART_SPEC_SCHEMA,
+                **inline_kwargs,
+            )
         )
-    )
+    return _redact_private_artifacts(prompt, diff_path, exploration_dir) if inline else prompt
 
 
 async def _run_diagram_kind(
@@ -471,7 +511,12 @@ async def _run_diagram_kind(
         if selection is not None
         else None
     )
-    inline_artifacts = transport is SanctionedInputTransport.INLINE
+    # The prompt is shaped and rendered to its final, private-path-free form
+    # here, so the bytes this call site decides on are the bytes the backend
+    # receives; run_agent re-applies the renderer idempotently for revalidation.
+    prompt = _diagram_author_prompt(ctx, kind, eligibility, backend, inline_transport=transport)
+    if sanctioned_inputs is not None:
+        prompt = sanctioned_inputs.render_prompt(prompt)
 
     async with maybe_fork(
         recorder, f"diagram-{kind}", dispatch=dispatch
@@ -479,7 +524,7 @@ async def _run_diagram_kind(
         structured, continuation, budget_reason = await run_agent(
             backend,
             ctx.work.repo,
-            _diagram_author_prompt(ctx, kind, eligibility, backend, inline_artifacts=inline_artifacts),
+            prompt,
             phase=DaydreamPhase.DIAGRAM,
             output_schema=schema,
             read_only=True,

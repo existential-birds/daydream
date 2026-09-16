@@ -1663,3 +1663,77 @@ async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
     ]
     assert [item["label"] for item in result["advisory"]["omitted"]] == ["exploration-affected-files"]
     assert result["advisory"]["omitted"][0]["bytes"] == 23_684
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        SimpleNamespace(audit_root_isolation="claude-pretooluse", model="fake"),
+        SimpleNamespace(sandbox=True, model="fake"),
+    ],
+    ids=["strict-audit-inline", "sandbox-inline"],
+)
+async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: Any
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+    backend.audit_root = ctx.work.repo.resolve() if hasattr(backend, "audit_root_isolation") else None
+    prompts: list[str] = []
+
+    async def _fake_run_agent(b: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
+    )
+
+    prompt = prompts[0]
+    for private in (
+        str(ctx.data["diff_path"]),
+        str(ctx.data["diff_path"].parent / "hunk-index.json"),
+        str(ctx.data["exploration_dir"]),
+    ):
+        assert private not in prompt, f"INLINE prompt leaked {private}"
+    assert "inlined below" in prompt                      # the diff itself is still grounded
+    assert "Sanctioned phase inputs" in prompt
+
+
+async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Req 10 × req 4: a fork override written before the inline kwargs keeps its
+    documented kwarg set AND must not be handed a private host path to print."""
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+    from daydream.extensions.registry import Registry as _Registry
+
+    def _legacy_sequence_builder(*, diff_path: Path, inline_diff: str | None,
+                                files_by_module: dict[str, list[str]], cwd: Path,
+                                exploration_dir: Path | None, schema: dict[str, Any]) -> str:
+        return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+    registry = _Registry()
+    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    monkeypatch.setattr(deep, "get_registry", lambda: registry)
+    ctx = await _session_test_ctx(tmp_path)
+    prompts: list[str] = []
+
+    async def _fake_run_agent(b: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=SimpleNamespace(sandbox=True, model="fake"),
+    )
+    assert prompts[0].startswith("legacy:")
+    assert str(ctx.data["diff_path"]) not in prompts[0]
+    assert "exploration=None" in prompts[0]

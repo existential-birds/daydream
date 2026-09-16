@@ -80,6 +80,12 @@ class PreparedSanctionedInputs:
         Builders suppress the pointers they own, but one still names artifacts
         it did not sanction (a sibling under the same private root), so the
         inputs' common parent is scrubbed too.
+
+        Idempotent: a caller may render the prompt it shapes and then let the
+        agent layer re-apply this renderer on its way to the backend. An
+        already-appended section is returned unchanged rather than duplicated;
+        the scrub still runs first, so a path that survived an earlier render
+        is still hidden.
         """
         if self.transport is SanctionedInputTransport.INLINE and self.inputs:
             for item in self.inputs:
@@ -88,7 +94,11 @@ class PreparedSanctionedInputs:
             if common_parent and common_parent != os.path.sep:
                 prompt = prompt.replace(common_parent, "sanctioned artifact storage")
         rendered = self.render()
-        return f"{prompt}\n\n{rendered}" if rendered else prompt
+        if not rendered:
+            return prompt
+        if prompt.endswith(rendered):
+            return prompt
+        return f"{prompt}\n\n{rendered}"
 
     def revalidate(self, backend: object, cwd: Path, read_only: bool) -> None:
         """Fail closed if call identity or any captured file changed."""
