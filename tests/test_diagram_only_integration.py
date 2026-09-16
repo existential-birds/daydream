@@ -84,15 +84,23 @@ def diagram_run(
         emit_reads: bool = True,
         session_id: str | None = None,
         fail: frozenset[str] = frozenset(),
+        inline_transport: bool = False,
         **config_overrides: Any,
     ) -> tuple[int, StubBackend]:
         from daydream.runner import run
 
-        stub = install_stub_backend(monkeypatch, target)
+        stub = install_stub_backend(monkeypatch, target, enable_exploration=inline_transport)
         stub.diagram_specs = specs or {}
         stub.diagram_emit_reads = emit_reads
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
+        if inline_transport:
+            # ``sandbox`` resolves the sanctioned-input transport to INLINE,
+            # independent of the disposable-clone read-only capability. The
+            # real pre-scan then writes the advisory exploration trio the
+            # selection has to budget, which is what an overflow diagnostic
+            # is made of; without it the INLINE candidate set is empty.
+            stub.sandbox = True
         config = make_config(
             target, output_mode="diagram", diagram=diagram, **config_overrides
         )
@@ -638,6 +646,78 @@ async def test_agent_error_in_diagram_only_mode_exits_one(
     end = _diagram_phase_end(target)
     assert end["status"] == "failed"
     assert end["reason_code"] == "all_children_failed"
+
+
+async def test_advisory_overflow_in_diagram_only_mode_exits_zero(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
+) -> None:
+    """Advisory context was lost, but the diagram was authored: exit 0.
+
+    ``dr.sequence_spec()`` cites the canonical ``build_cross_module_repo`` paths
+    and does not ground against this generated fixture, so the kind records
+    ``omitted`` rather than ``rendered``. That is not a failure, which is exactly
+    what this test is about — do not assert on the rendered mermaid here.
+    """
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+
+    target = build_large_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+
+    exit_code, _ = await diagram_run(
+        target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]},
+        inline_transport=True,
+    )
+
+    assert exit_code == 0
+    result = _artifact(target)["results"]["sequence"]
+    assert result["status"] != "failed"
+    assert [item["label"] for item in result["advisory"]["omitted"]], "the overflow must be recorded"
+    assert _diagram_phase_end(target)["status"] != "failed"
+
+
+async def test_advisory_overflow_with_a_real_failure_still_exits_one(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
+) -> None:
+    """The advisory diagnostic must not mask a genuine authoring failure."""
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+
+    target = build_large_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+
+    exit_code, _ = await diagram_run(
+        target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]},
+        inline_transport=True, fail=frozenset({"sequence"}),
+    )
+
+    assert exit_code == 1
+    result = _artifact(target)["results"]["sequence"]
+    assert result["status"] == "failed"
+    assert result["reason"]
+    assert [item["label"] for item in result["advisory"]["omitted"]]  # both facts survive
+    assert _diagram_phase_end(target)["status"] == "failed"
+
+
+async def test_findings_artifact_carries_the_advisory_omission_diagnostic(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
+) -> None:
+    """The operator-readable artifact says which advisory inputs were dropped."""
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+
+    target = build_large_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+    out = tmp_path / "diagram-findings.json"
+
+    exit_code, _ = await diagram_run(
+        target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]},
+        inline_transport=True, findings_out=str(out),
+    )
+
+    assert exit_code == 0
+    artifact = json.loads(out.read_text(encoding="utf-8"))
+    result = artifact["diagrams"]["results"]["sequence"]
+    assert result["status"] != "failed"
+    assert [item["label"] for item in result["advisory"]["omitted"]]
+    assert result["advisory"]["admitted_bytes"] < result["advisory"]["allowance_bytes"]
 
 
 def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(

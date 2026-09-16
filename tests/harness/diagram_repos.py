@@ -1,6 +1,6 @@
 """Real git fixture repositories for the grounded-diagram tests (issue #1113).
 
-Four shapes, each built to satisfy (or deliberately miss) one deterministic
+Six shapes, each built to satisfy (or deliberately miss) one deterministic
 eligibility rule, plus the canonical grounded specs that go with them. Shared by
 ``tests/test_deep_diagram_integration.py`` (the review paths) and
 ``tests/test_diagram_only_integration.py`` (the ``--diagram-only`` flow), which
@@ -62,6 +62,86 @@ def build_cross_module_repo(root: Path) -> Path:
         "def normalize(text):\n    return text.strip()\n", encoding="utf-8"
     )
     (repo / "pkg_b" / "client.py").write_text(CLIENT_PY, encoding="utf-8")
+    return _finish(repo)
+
+
+def _large_core_body(marker: str, lines: int) -> str:
+    """``pkg_a/core.py`` with a ``handle`` definition and ``lines`` total lines."""
+    body = [f"    # pkg_a/core.py {marker} line {i:03d}" for i in range(lines - 2)]
+    return "\n".join(["def handle(payload):", *body, "    return payload"]) + "\n"
+
+
+def _large_module_body(module: str, marker: str, lines: int) -> str:
+    """A generic generated module: every line carries the version marker."""
+    return "\n".join(f"# {module} {marker} line {i:03d}" for i in range(lines)) + "\n"
+
+
+def _large_client_body(marker: str, lines: int) -> str:
+    """``pkg_b/client.py``: imports ``handle`` from ``pkg_a.core`` (the edge)."""
+    body = [f"# pkg_b/client.py {marker} line {i:03d}" for i in range(lines - 2)]
+    return (
+        "\n".join(
+            [
+                "from pkg_a.core import handle",
+                *body,
+                "def call_handle(payload):",
+                "    return handle(payload)",
+            ]
+        )
+        + "\n"
+    )
+
+
+def build_large_cross_module_repo(
+    root: Path, *, modules: int = 220, lines: int = 110
+) -> Path:
+    """A cross-module fixture far beyond the advisory-input budget.
+
+    Same ``init_repo`` / commit / ``checkout -b feature`` sequence as
+    :func:`build_cross_module_repo`, but generated instead of literal: the
+    initial tree has ``modules // 2`` files under ``pkg_a/`` (including
+    ``core.py`` with a ``handle`` function) and the rest under ``pkg_b/``
+    (including ``client.py``, which imports ``handle`` so one cross-module edge
+    exists), each ``lines`` long. The feature commit rewrites every file, so the
+    whole ``modules x lines`` diff is changed and total diff bytes exceed
+    ``SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES``.
+
+    Contents depend only on the generated module name, the version marker and
+    ``lines`` -- never on *root* -- so byte assertions are deterministic. It
+    deliberately does not reproduce the canonical ``build_cross_module_repo``
+    paths' grounding targets: callers assert on status/omission/advisory facts,
+    not on a rendered mermaid.
+    """
+    repo = root / "large_cross_module"
+    pkg_a_count = modules // 2
+    pkg_b_count = modules - pkg_a_count
+    pkg_a_names = ["core.py", *(f"mod_{i:03d}.py" for i in range(1, pkg_a_count))]
+    pkg_b_names = ["client.py", *(f"mod_{i:03d}.py" for i in range(1, pkg_b_count))]
+
+    def _write(marker: str) -> None:
+        for name in pkg_a_names:
+            body = (
+                _large_core_body(marker, lines)
+                if name == "core.py"
+                else _large_module_body(f"pkg_a/{name}", marker, lines)
+            )
+            (repo / "pkg_a" / name).write_text(body, encoding="utf-8")
+        for name in pkg_b_names:
+            body = (
+                _large_client_body(marker, lines)
+                if name == "client.py"
+                else _large_module_body(f"pkg_b/{name}", marker, lines)
+            )
+            (repo / "pkg_b" / name).write_text(body, encoding="utf-8")
+
+    (repo / "pkg_a").mkdir(parents=True)
+    (repo / "pkg_b").mkdir(parents=True)
+    _write("initial")
+    init_repo(repo)
+    git(repo, "add", ".")
+    commit(repo, "init")
+    git(repo, "checkout", "-b", "feature")
+    _write("feature")
     return _finish(repo)
 
 

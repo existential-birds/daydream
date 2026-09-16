@@ -23,7 +23,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from daydream.phases import (
     _confidence_and_convention_instructions,
@@ -32,7 +32,11 @@ from daydream.phases import (
     _render_bash_allowlist,
     _settled_decisions_block,
 )
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
+from daydream.prompt_budget import (  # noqa: F401
+    INLINE_DIFF_BUDGET_BYTES,
+    fits_inline_diff_budget,
+    truncate_utf8_to_budget,
+)
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.prompts.wire_contract import (
@@ -1378,6 +1382,7 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
     prompt past ``INLINE_DIFF_BUDGET_BYTES`` — unless ``clone_mode`` is set,
     in which case there is no on-disk fallback: an over-budget diff is inlined
     truncated with an explicit marker, and a missing diff is omitted entirely.
+    The banner, truncated text, and marker together stay within the budget.
     """
     if inline_diff and fits_inline_diff_budget(inline_diff):
         head = (
@@ -1392,14 +1397,12 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
     if clone_mode:
         if not inline_diff:
             return ""
-        truncated = inline_diff.encode("utf-8")[:INLINE_DIFF_BUDGET_BYTES].decode(
-            "utf-8", errors="ignore"
+        head = "The PR diff (base..HEAD) is inlined below:\n\n"
+        marker = "\n[diff truncated to fit the prompt budget]\n\n"
+        truncated = truncate_utf8_to_budget(
+            inline_diff.rstrip(), INLINE_DIFF_BUDGET_BYTES - len(head.encode("utf-8")), marker
         )
-        return (
-            "The PR diff (base..HEAD) is inlined below:\n\n"
-            f"{truncated}\n"
-            "[diff truncated to fit the prompt budget]\n\n"
-        )
+        return f"{head}{truncated}"
     return f"{_full_diff_pointer(diff_path)}\n{_hunk_index_authority(diff_path)}"
 
 
@@ -1443,24 +1446,93 @@ def _diagram_exploration_block(
     )
 
 
-def _files_by_module_block(files_by_module: dict[str, list[str]]) -> str:
-    """Render the changed code files grouped by module/service."""
+def _bounded_projection(
+    full_text: str,
+    lines: list[str],
+    render: Callable[[list[str], str], str],
+    count_entry: Callable[[str], bool],
+    noun: str,
+    budget_bytes: int,
+) -> str:
+    """Bound a prompt projection to ``budget_bytes`` with an exact omission count.
+
+    Returns ``full_text`` byte-identically when it already fits. Otherwise the
+    emitted body is a prefix of ``lines`` in declared order (never a sample and
+    never a re-sort) and the first line that would push the block past the
+    budget ends the body; the final notice names exactly how many entries were
+    dropped. ``count_entry`` decides which lines are counted in that notice
+    (structural module headers are not files). Pure and deterministic.
+    """
+    if len(full_text.encode("utf-8")) <= budget_bytes:
+        return full_text
+    total = sum(1 for line in lines if count_entry(line))
+    kept_entries = 0
+    best_text: str | None = None
+    for keep in range(len(lines) + 1):
+        if keep > 0 and count_entry(lines[keep - 1]):
+            kept_entries += 1
+        dropped = total - kept_entries
+        notice = f"- ({dropped} more {noun} omitted to fit the prompt budget)" if dropped else ""
+        text = render(lines[:keep], notice)
+        if len(text.encode("utf-8")) <= budget_bytes:
+            best_text = text
+        else:
+            break
+    if best_text is not None:
+        return best_text
+    # Even an empty body cannot carry the header plus the notice: keep the
+    # notice truncated so the caller still learns why the projection is empty.
+    return truncate_utf8_to_budget(
+        f"- ({total} more {noun} omitted to fit the prompt budget)", budget_bytes
+    )
+
+
+def _files_by_module_block(
+    files_by_module: dict[str, list[str]],
+    *,
+    budget_bytes: int = INLINE_DIFF_BUDGET_BYTES,
+) -> str:
+    """Render the changed code files grouped by module/service.
+
+    The prompt-side projection is bounded: the emitted body stays inside
+    ``budget_bytes`` and a truncated body ends with an exact omitted-file
+    count. The complete grouping stays host-side in the eligibility artifact,
+    so grounding is unaffected.
+    """
     lines: list[str] = []
     for module in sorted(files_by_module):
         lines.append(f"- {module}")
         for path in files_by_module[module]:
             lines.append(f"    - {path}")
     body = "\n".join(lines) or "- (no changed code files)"
-    return (
+    header = (
         "Changed code files grouped by module/service. Participants must align "
         "with these real boundaries: every `internal` participant owns at least "
         "one of these paths, and no participant may be invented for a component "
-        "that owns none of them.\n" + body
+        "that owns none of them.\n"
+    )
+    return _bounded_projection(
+        f"{header}{body}",
+        lines,
+        lambda kept, notice: header + "\n".join(kept) + (f"\n{notice}" if notice else ""),
+        lambda line: line.startswith("    - "),
+        "changed files",
+        budget_bytes,
     )
 
 
-def _candidate_roots_block(candidate_roots: list[dict[str, Any]], *, forced: bool) -> str:
-    """Render the flowchart candidate-root list with ranges and branch counts."""
+def _candidate_roots_block(
+    candidate_roots: list[dict[str, Any]],
+    *,
+    forced: bool,
+    budget_bytes: int = INLINE_DIFF_BUDGET_BYTES,
+) -> str:
+    """Render the flowchart candidate-root list with ranges and branch counts.
+
+    The prompt-side projection is bounded like :func:`_files_by_module_block`:
+    the model may only pick a root it was shown, while ``ground_flowchart``
+    still validates against the full ``eligibility.candidate_roots``.
+    """
     lines = [
         f"- `{root.get('name')}` in {root.get('file')}, lines {root.get('line')}-{root.get('end_line')}, "
         f"{root.get('branch_points')} changed branch point(s)"
@@ -1481,7 +1553,14 @@ def _candidate_roots_block(candidate_roots: list[dict[str, Any]], *, forced: boo
             "and if none of them has a real decision point, return the nodes you "
             "can actually ground rather than inventing branches to fill the shape."
         )
-    return f"{header}\n{body}"
+    return _bounded_projection(
+        f"{header}\n{body}",
+        lines,
+        lambda kept, notice: f"{header}\n" + "\n".join(kept) + (f"\n{notice}" if notice else ""),
+        lambda line: True,
+        "candidate roots",
+        budget_bytes,
+    )
 
 
 _SEQUENCE_SPEC_RULES = (

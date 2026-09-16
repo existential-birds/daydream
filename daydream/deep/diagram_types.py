@@ -29,7 +29,14 @@ from typing import Any, TypeAlias
 #      "grounding": {"elements": [...], "summary": {...},
 #                    "capped": {...}, "root_range": [int, int] | None} | None,
 #      "omit_reasons": list[str],
-#      "mermaid": str | None}         # dropped in the findings artifact
+#      "mermaid": str | None,        # dropped in the findings artifact
+#      "advisory": {                # the kind's input-omission diagnostic, or None
+#          "transport": "inline" | "exact_paths",
+#          "allowance_bytes": int,
+#          "admitted_bytes": int,
+#          "admitted": [{"label": str, "bytes": int}, ...],
+#          "omitted": [{"label": str, "bytes": int, "reason": str}, ...],
+#      } | None}
 #
 # Deliberately a plain ``dict[str, Any]`` rather than a ``TypedDict``: four
 # modules produce and consume it, several keys are meaningful only for some

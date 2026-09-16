@@ -255,7 +255,10 @@ exploration pre-scan (cached across runs)
   `diagram.md`. Eligibility re-runs `detect_stacks()` itself rather than reading `ctx.data["stacks"]`, which
   is post-tiny-diff-collapse and would read a two-language diff as non-code. Per-kind failure is **fail-open
   in every review mode** (warn, record `status="failed"`, review continues) and **exit 1** under
-  `--diagram-only`, after the artifact is written. The `diagram` flow is
+  `--diagram-only`, after the artifact is written. The author prompt follows the turn's **resolved
+  sanctioned-input transport**, never the disposable-clone capability: an INLINE run inlines the diff
+  and exploration context (the diff truncated with an explicit marker when over budget) and names no
+  host-private artifact path, while EXACT_PATHS keeps the budget-gated pointer path. The `diagram` flow is
   `exploration -> diagram -> post-diagram` and reuses the deep preamble, but the spine's fresh-run
   `rmtree(.daydream/deep/)` is skipped in that mode — a diagram-only run must not delete a prior review's
   artifacts — so it writes no `diff-key` either. Its recorder/manifest label is `DaydreamRunFlow.DIAGRAM`,

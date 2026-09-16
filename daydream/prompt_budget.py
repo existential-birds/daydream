@@ -1,4 +1,4 @@
-"""Dependency-neutral prompt-size and sanctioned-input policy."""
+"""Dependency-neutral prompt-size, sanctioned-input, and advisory-selection policy."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from daydream.artifact_visibility import ArtifactVisibilityError
 from daydream.backends import AUDIT_ROOT_ISOLATION
@@ -21,6 +21,9 @@ SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES = INLINE_DIFF_BUDGET_BYTES
 SANCTIONED_EXACT_INPUT_MAX_FILES = 512
 SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES = 1_048_576
 SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 4_194_304
+
+_SANCTIONED_INLINE_HEADER = "Sanctioned phase inputs (captured verbatim):"
+_SANCTIONED_INLINE_CLOSE_TAG = "</sanctioned-input>"
 
 
 class SanctionedInputUnavailable(ArtifactVisibilityError):
@@ -66,9 +69,9 @@ class PreparedSanctionedInputs:
             lines = ["Sanctioned phase inputs (read only these exact files):"]
             lines.extend(f"- {item.label}: {item.path}" for item in self.inputs)
             return "\n".join(lines)
-        blocks = ["Sanctioned phase inputs (captured verbatim):"]
+        blocks = [_SANCTIONED_INLINE_HEADER]
         for item in self.inputs:
-            blocks += [f'<sanctioned-input label="{item.label}">', item.text or "", "</sanctioned-input>"]
+            blocks += [_sanctioned_inline_open_tag(item.label), item.text or "", _SANCTIONED_INLINE_CLOSE_TAG]
         return "\n".join(blocks)
 
     def render_prompt(self, prompt: str) -> str:
@@ -77,15 +80,29 @@ class PreparedSanctionedInputs:
         Builders suppress the pointers they own, but one still names artifacts
         it did not sanction (a sibling under the same private root), so the
         inputs' common parent is scrubbed too.
+
+        Idempotent: a caller may render the prompt it shapes and then let the
+        agent layer re-apply this renderer on its way to the backend. An
+        already-appended section is returned unchanged rather than duplicated;
+        the scrub still runs first, so a path that survived an earlier render
+        is still hidden. The appended section is scrubbed too, because captured
+        content can itself embed a private pathname, and scrubbing both sides
+        keeps the idempotence check stable across re-renders.
         """
+        rendered = self.render()
         if self.transport is SanctionedInputTransport.INLINE and self.inputs:
             for item in self.inputs:
                 prompt = prompt.replace(str(item.path), f"sanctioned input '{item.label}'")
+                rendered = rendered.replace(str(item.path), f"sanctioned input '{item.label}'")
             common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
             if common_parent and common_parent != os.path.sep:
                 prompt = prompt.replace(common_parent, "sanctioned artifact storage")
-        rendered = self.render()
-        return f"{prompt}\n\n{rendered}" if rendered else prompt
+                rendered = rendered.replace(common_parent, "sanctioned artifact storage")
+        if not rendered:
+            return prompt
+        if prompt.endswith(rendered):
+            return prompt
+        return f"{prompt}\n\n{rendered}"
 
     def revalidate(self, backend: object, cwd: Path, read_only: bool) -> None:
         """Fail closed if call identity or any captured file changed."""
@@ -113,6 +130,55 @@ class PreparedSanctionedInputs:
             aggregate += current.size
             if current != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
+
+
+@dataclass(frozen=True)
+class AdvisoryCandidate:
+    """One declared advisory input that is admitted whole or omitted whole.
+
+    ``size`` is filled by :func:`select_advisory_inputs` from the file it sized;
+    callers declare only a label and a path.
+    """
+
+    label: str
+    path: Path
+    size: int = 0
+
+
+@dataclass(frozen=True)
+class OmittedAdvisoryInput:
+    """One advisory input that did not fit the active transport's allowance."""
+
+    label: str
+    size: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class AdvisorySelection:
+    """The whole-artifact split one advisory set resolves to on one transport."""
+
+    transport: SanctionedInputTransport
+    admitted: tuple[AdvisoryCandidate, ...]
+    omitted: tuple[OmittedAdvisoryInput, ...]
+    admitted_bytes: int
+    allowance_bytes: int
+
+    def selected_paths(self) -> dict[str, Path]:
+        """The admitted mapping :func:`prepare_sanctioned_inputs` consumes."""
+        return {candidate.label: candidate.path for candidate in self.admitted}
+
+    def to_dict(self) -> dict[str, object]:
+        """JSON-safe omission diagnostic, admitted entries in declared order."""
+        return {
+            "transport": self.transport.value,
+            "allowance_bytes": self.allowance_bytes,
+            "admitted_bytes": self.admitted_bytes,
+            "admitted": [{"label": c.label, "bytes": c.size} for c in self.admitted],
+            "omitted": [
+                {"label": o.label, "bytes": o.size, "reason": o.reason} for o in self.omitted
+            ],
+        }
 
 
 def _canonical_cwd(cwd: Path) -> Path:
@@ -248,6 +314,68 @@ def sanctioned_transport_for(
     return _sanctioned_transport(backend, cwd, read_only=read_only)
 
 
+def select_advisory_inputs(
+    backend: object,
+    cwd: Path,
+    candidates: Sequence[AdvisoryCandidate],
+    *,
+    read_only: bool,
+) -> AdvisorySelection:
+    """Split advisory inputs whole by the transport's real remaining allowance.
+
+    Resolves the transport once with the same resolver and canonical cwd the
+    capture path uses, then walks ``candidates`` in the order given, admitting a
+    whole candidate while its cost fits and omitting it whole otherwise. INLINE
+    costs account for the exact bytes :meth:`PreparedSanctionedInputs.render`
+    emits for that candidate, so an admitted set always renders inside the
+    shared aggregate; EXACT_PATHS reuses the capture path's per-file/aggregate
+    arithmetic. A missing or unreadable candidate is omitted as ``unavailable``;
+    transport-resolution failures propagate untouched (fail closed).
+    """
+    canonical_cwd = _canonical_cwd(cwd)
+    transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
+    inline = transport is SanctionedInputTransport.INLINE
+    allowance_bytes = (
+        SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES if inline else SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES
+    )
+    admitted: list[AdvisoryCandidate] = []
+    omitted: list[OmittedAdvisoryInput] = []
+    admitted_bytes = 0
+    aggregate = 0
+    for candidate in candidates:
+        try:
+            size = candidate.path.lstat().st_size
+        except OSError:
+            omitted.append(OmittedAdvisoryInput(candidate.label, 0, "unavailable"))
+            continue
+        if inline:
+            entries = [(item.label, item.size) for item in admitted]
+            entries.append((candidate.label, size))
+            emitted = inline_section_emitted_bytes(entries)
+            if emitted <= allowance_bytes:
+                admitted.append(AdvisoryCandidate(candidate.label, candidate.path, size))
+                admitted_bytes += size
+                aggregate = emitted
+            else:
+                omitted.append(OmittedAdvisoryInput(candidate.label, size, "exceeds-byte-budget"))
+            continue
+        max_bytes, aggregate_limit, _ = _transport_allowance(transport, aggregate)
+        if size <= max_bytes:
+            admitted.append(AdvisoryCandidate(candidate.label, candidate.path, size))
+            admitted_bytes += size
+            aggregate += size
+        else:
+            reason = "exceeds-byte-budget" if aggregate_limit else "exceeds-file-limit"
+            omitted.append(OmittedAdvisoryInput(candidate.label, size, reason))
+    return AdvisorySelection(
+        transport=transport,
+        admitted=tuple(admitted),
+        omitted=tuple(omitted),
+        admitted_bytes=admitted_bytes,
+        allowance_bytes=allowance_bytes,
+    )
+
+
 def prepare_sanctioned_inputs(
     backend: object,
     cwd: Path,
@@ -280,3 +408,44 @@ def prepare_sanctioned_inputs(
 def fits_inline_diff_budget(text: str) -> bool:
     """Whether ``text`` fits the UTF-8 byte budget for an inlined diff."""
     return len(text.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+
+
+def _sanctioned_inline_open_tag(label: str) -> str:
+    return f'<sanctioned-input label="{label}">'
+
+
+def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
+    """Exact UTF-8 byte length of the INLINE render for these captured inputs.
+
+    ``entries`` pairs each ``(label, content_bytes)`` exactly as
+    :meth:`PreparedSanctionedInputs.render` receives them, so callers can size
+    the emitted block — header, tags, newline separators, and content — before
+    capturing anything. ``()`` matches the renderer's empty result: zero bytes.
+    """
+    if not entries:
+        return 0
+    sizes = [len(_SANCTIONED_INLINE_HEADER.encode("utf-8"))]
+    for label, content_bytes in entries:
+        sizes.append(len(_sanctioned_inline_open_tag(label).encode("utf-8")))
+        sizes.append(content_bytes)
+        sizes.append(len(_SANCTIONED_INLINE_CLOSE_TAG.encode("utf-8")))
+    return sum(sizes) + max(len(sizes) - 1, 0)
+
+
+def truncate_utf8_to_budget(text: str, budget_bytes: int, marker: str = "") -> str:
+    """Byte-exact prefix of ``text`` that, with ``marker``, fits ``budget_bytes``.
+
+    Returns ``text`` unchanged when it plus ``marker`` already fits. Otherwise
+    slices ``text.encode("utf-8")`` (never ``str`` indices) and decodes the
+    prefix with ``errors="ignore"`` so a split multibyte sequence is dropped
+    rather than replaced, keeping the result ``<= budget_bytes`` UTF-8 bytes.
+    A marker larger than the budget is itself truncated rather than raising.
+    """
+    marker_bytes = marker.encode("utf-8")
+    encoded = text.encode("utf-8")
+    if len(encoded) + len(marker_bytes) <= budget_bytes:
+        return text
+    if len(marker_bytes) >= budget_bytes:
+        return marker_bytes[:budget_bytes].decode("utf-8", errors="ignore")
+    keep = budget_bytes - len(marker_bytes)
+    return encoded[:keep].decode("utf-8", errors="ignore") + marker

@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,9 +47,15 @@ from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_json
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
+    AdvisoryCandidate,
+    PreparedSanctionedInputs,
     SanctionedInputTransport,
+    SanctionedInputUnavailable,
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
+    sanctioned_transport_for,
+    select_advisory_inputs,
+    truncate_utf8_to_budget,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.trajectory import (
@@ -150,12 +156,16 @@ def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
 # not confirm is never drawn.
 
 
-def _diagram_result(status: str, reason: str | None) -> DiagramResult:
+def _diagram_result(
+    status: str, reason: str | None, *, advisory: dict[str, Any] | None = None
+) -> DiagramResult:
     """A no-spec result for a kind that never produced one.
 
     ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
     this shape: no spec, no grounding, no mermaid, and a reason the omission
-    notice and ``diagram.json`` can both render.
+    notice and ``diagram.json`` can both render. ``advisory`` is the kind's
+    resolved input-omission diagnostic (or ``None`` when no capture ran), so a
+    budget/authoring failure keeps both facts.
     """
     return {
         "status": status,
@@ -165,6 +175,7 @@ def _diagram_result(status: str, reason: str | None) -> DiagramResult:
         "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
+        "advisory": advisory,
     }
 
 
@@ -214,7 +225,8 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     ``OSError`` yields ``None`` — the block is omitted, never faked) and
     share one ``INLINE_DIFF_BUDGET_BYTES`` budget: the summary takes the
     first slice, the dependency edges fill the remainder. Each over-budget
-    piece is truncated with an explicit marker rather than dropped. The
+    piece is truncated with an explicit marker whose bytes count inside the
+    shared budget, so the emitted block never exceeds it. The
     summary is scrubbed first (``_scrub_exploration_summary``) so the
     standalone-artifact scaffolding the pre-scan writer emits cannot dangle
     in the inline rendering.
@@ -222,21 +234,15 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     if exploration_dir is None:
         return None, None
     budget = INLINE_DIFF_BUDGET_BYTES
+    marker = "\n[exploration summary truncated]\n"
     try:
         summary: str | None = (exploration_dir / "summary.md").read_text(encoding="utf-8")
     except OSError:
         summary = None
     if summary is not None:
         summary = _scrub_exploration_summary(summary)
-        encoded = summary.encode("utf-8")
-        if len(encoded) > budget:
-            truncated = encoded[:budget].decode("utf-8", errors="ignore")
-            summary = (
-                f"{truncated}\n[exploration summary truncated]\n" if truncated else None
-            )
-            encoded = summary.encode("utf-8") if summary is not None else b""
-        if summary is not None:
-            budget = max(budget - len(encoded), 0)
+        summary = truncate_utf8_to_budget(summary, budget, marker)
+        budget = max(budget - len(summary.encode("utf-8")), 0)
     try:
         dependencies: str | None = (exploration_dir / "dependencies.md").read_text(
             encoding="utf-8"
@@ -247,14 +253,7 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
         if budget <= 0:
             dependencies = None
         else:
-            encoded = dependencies.encode("utf-8")
-            if len(encoded) > budget:
-                truncated = encoded[:budget].decode("utf-8", errors="ignore")
-                dependencies = (
-                    f"{truncated}\n[exploration summary truncated]\n"
-                    if truncated
-                    else None
-                )
+            dependencies = truncate_utf8_to_budget(dependencies, budget, marker)
     return summary, dependencies
 
 
@@ -284,6 +283,36 @@ def _scrub_exploration_summary(summary: str) -> str:
     return "\n".join(kept)
 
 
+def _scrub_inline_exploration_summary(
+    prepared: PreparedSanctionedInputs | None,
+) -> PreparedSanctionedInputs | None:
+    """Strip summary.md's standalone-artifact scaffolding from captured text.
+
+    A live artifact session routes the pre-scan through sanctioned inputs, and
+    the INLINE render appends the captured summary verbatim. The sibling
+    artifacts the summary table names do not travel on an INLINE transport, so
+    those rows and the embedded boundary blockquote would dangle exactly as
+    they do on the disposable-clone path (:func:`_scrub_exploration_summary`).
+    The captured text is scrubbed before any render, so both
+    :meth:`~daydream.prompt_budget.PreparedSanctionedInputs.render` and the
+    idempotent re-render in ``run_agent`` emit the same clean section.
+
+    Only the captured ``text`` changes; ``(device, inode, size, mtime_ns)``
+    stay those of the on-disk file, so
+    :meth:`~daydream.prompt_budget.PreparedSanctionedInputs.revalidate` still
+    attests the exact file it captured.
+    """
+    if prepared is None or prepared.transport is not SanctionedInputTransport.INLINE:
+        return prepared
+    scrubbed = tuple(
+        replace(item, text=_scrub_exploration_summary(item.text))
+        if item.label == "exploration-summary" and item.text is not None
+        else item
+        for item in prepared.inputs
+    )
+    return replace(prepared, inputs=scrubbed)
+
+
 def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
     """Whether ``builder`` accepts the clone-mode inline kwargs.
 
@@ -304,37 +333,80 @@ def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
     return {"clone_mode", "inline_exploration", "inline_dependencies"} <= params.keys()
 
 
+_PRIVATE_ARTIFACT_PLACEHOLDER = "sanctioned artifact storage"
+
+
+def _redact_private_artifacts(
+    prompt: str, diff_path: Path, exploration_dir: Path | None
+) -> str:
+    """Replace the private artifact paths an INLINE builder may have printed.
+
+    The builtin INLINE builders suppress the pointers they own, but a fork
+    override written before the inline kwargs still receives ``diff_path`` and
+    may echo it. This call site knows exactly four host-private paths — the
+    diff, its sibling hunk index, the exploration directory, and the artifact
+    root that holds them — and replaces each with the neutral phrase
+    :meth:`PreparedSanctionedInputs.render_prompt` already uses. Repository
+    paths under ``ctx.work.repo`` are never touched. Longer paths are listed
+    first, so ``diff_path.parent`` cannot truncate a fuller path before it is
+    matched.
+    """
+    private_paths: tuple[Path | None, ...] = (
+        diff_path,
+        diff_path.parent / "hunk-index.json",
+        exploration_dir,
+        diff_path.parent,
+    )
+    for private in private_paths:
+        if private is not None:
+            prompt = prompt.replace(str(private), _PRIVATE_ARTIFACT_PLACEHOLDER)
+    return prompt
+
+
 def _diagram_author_prompt(
-    ctx: FlowContext, kind: str, eligibility: Eligibility, backend: Any, *, inline_artifacts: bool = False
+    ctx: FlowContext,
+    kind: str,
+    eligibility: Eligibility,
+    backend: Any,
+    *,
+    inline_transport: SanctionedInputTransport | None = None,
 ) -> str:
     """Build one kind's first-turn author prompt through the registry.
 
-    On backends whose read-only profile executes in a disposable clone (the
-    protocol-level ``read_only_disposable_clone`` capability) the host-only
-    ``.daydream/`` artifact paths the pointer blocks name would dangle, so
-    the prompt is made self-sufficient: exploration summary and dependency
-    edges are inlined under the untrusted boundary (best-effort reads, shared
-    prompt budget) and the diff is handed to the builder un-truncated — the
-    builder owns clone-mode truncation. Other backends keep the budget-gated
+    The builder's self-sufficiency flag follows the *resolved transport*, never
+    the disposable-clone capability: on an INLINE transport (a strict audit
+    root, a read-only disposable clone, or a sandboxed backend) the host-only
+    ``.daydream/`` artifact paths the pointer blocks name would dangle, so the
+    prompt is made self-sufficient — the diff is inlined by the builder (with
+    an explicit marker when over budget) and the exploration pointers are
+    suppressed, with whatever exploration context was admitted travelling in
+    the sanctioned-input section the caller appends. EXACT_PATHS keeps the
     pointer path byte-for-byte.
 
-    The clone-mode kwargs are only passed when the registered builder accepts
+    The inline kwargs are only passed when the registered builder accepts
     them: fork overrides written against the documented extension contract
-    predate the inline kwargs, and splatting them in would raise ``TypeError``
-    on every disposable-clone run, degrading the kind to failed. A legacy
-    override keeps the documented kwarg set; on a clone run its
-    ``exploration_dir`` arrives as ``None`` rather than the dangling host path.
+    predate them, and splatting them in would raise ``TypeError`` on every
+    INLINE run, degrading the kind to failed. A legacy override keeps the
+    documented kwarg set — ``exploration_dir`` arrives as ``None`` rather than
+    a dangling host path — and, because such a builder may print the paths it
+    was handed, the assembled prompt is redacted of every private artifact
+    path this call site knows before it leaves this function.
     """
     deep_state = DeepState(ctx.data)
     diff_path: Path = deep_state.diff_path
     inline_diff = _ttt_diff_text(ctx)
     exploration_dir: Path | None = deep_state.exploration_dir_or_none
-    clone_mode = bool(getattr(backend, "read_only_disposable_clone", False))
+    transport = (
+        inline_transport
+        if inline_transport is not None
+        else sanctioned_transport_for(backend, ctx.work.repo, read_only=True)
+    )
+    inline = transport is SanctionedInputTransport.INLINE
     builder = get_registry().prompt(
         "diagram_sequence" if kind == "sequence" else "diagram_flowchart"
     )
     inline_kwargs: dict[str, Any]
-    if clone_mode and _prompt_builder_accepts_inline_kwargs(builder):
+    if inline and _prompt_builder_accepts_inline_kwargs(builder):
         # A live artifact session routes the pre-scan through sanctioned inputs
         # instead of inlining it here.
         legacy = _inline_exploration_text(exploration_dir) if ctx.artifacts is None else (None, None)
@@ -345,13 +417,12 @@ def _diagram_author_prompt(
             "inline_dependencies": legacy[1],
         }
     else:
-        # A legacy override keeps its documented kwarg set, but a clone run
-        # must not name the host-only exploration_dir: the path dangles in
-        # the disposable clone, so it arrives as ``None`` there and untouched
-        # otherwise.
-        inline_kwargs = {"exploration_dir": None if clone_mode or inline_artifacts else exploration_dir}
+        # A legacy override keeps its documented kwarg set, but an INLINE run
+        # must not name the host-only exploration_dir: the path dangles on the
+        # transport, so it arrives as ``None`` there and untouched otherwise.
+        inline_kwargs = {"exploration_dir": None if inline else exploration_dir}
     if kind == "sequence":
-        return str(
+        prompt = str(
             builder(
                 diff_path=diff_path,
                 inline_diff=inline_diff,
@@ -361,17 +432,69 @@ def _diagram_author_prompt(
                 **inline_kwargs,
             )
         )
-    return str(
-        builder(
-            diff_path=diff_path,
-            inline_diff=inline_diff,
-            candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
-            forced=eligibility.flowchart.rule == "forced",
-            cwd=ctx.work.repo,
-            schema=FLOWCHART_SPEC_SCHEMA,
-            **inline_kwargs,
+    else:
+        prompt = str(
+            builder(
+                diff_path=diff_path,
+                inline_diff=inline_diff,
+                candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
+                forced=eligibility.flowchart.rule == "forced",
+                cwd=ctx.work.repo,
+                schema=FLOWCHART_SPEC_SCHEMA,
+                **inline_kwargs,
+            )
         )
-    )
+    return _redact_private_artifacts(prompt, diff_path, exploration_dir) if inline else prompt
+
+
+async def _diagram_turn(
+    ctx: FlowContext,
+    *,
+    descriptor: str,
+    prompt: str,
+    schema: dict[str, Any],
+    recorder: "TrajectoryRecorder | None",
+    backend: Any,
+    dispatch: "DispatchHandle | None",
+    continuation: Any = None,
+    sanctioned_inputs: PreparedSanctionedInputs | None = None,
+    advisory: dict[str, Any] | None = None,
+) -> tuple[Any, Any, str | None, Path | None] | DiagramResult:
+    """Run one diagram turn, mapping its failure modes to a kind result.
+
+    Shared by the author and repair turns so the two cannot drift. A
+    capture/revalidation failure is not an authoring outcome: it must reach
+    the caller's failure path unchanged, without being relabelled as an
+    advisory degradation, so ``SanctionedInputUnavailable`` propagates. Every
+    other exception fails the kind while keeping both facts -- the reason and
+    the advisory omission diagnostic (or ``None`` when every advisory input
+    fit). On success the turn's output, continuation, budget reason, and fork
+    path are returned.
+    """
+    try:
+        async with maybe_fork(recorder, descriptor, dispatch=dispatch) as fork:
+            output, token, budget_reason = await run_agent(
+                backend,
+                ctx.work.repo,
+                prompt,
+                phase=DaydreamPhase.DIAGRAM,
+                output_schema=schema,
+                continuation=continuation,
+                read_only=True,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                sanctioned_inputs=sanctioned_inputs,
+                run_context=ctx.run_context,
+            )
+    except SanctionedInputUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
+        return _diagram_result(
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            advisory=advisory if advisory and advisory["omitted"] else None,
+        )
+    return output, token, budget_reason, getattr(fork, "path", None)
 
 
 async def _run_diagram_kind(
@@ -425,55 +548,96 @@ async def _run_diagram_kind(
     diff_path: Path = deep_state.diff_path
     exploration_dir = deep_state.exploration_dir_or_none
     diagram_diff = _ttt_diff_text(ctx)
-    candidates: dict[str, Path] = {}
-    # A disposable clone can read neither host artifact; the prompt inlines the
-    # diff itself when it fits the budget.
-    if not getattr(backend, "read_only_disposable_clone", False):
-        candidates["hunk-index"] = diff_path.parent / "hunk-index.json"
-        if not diagram_diff or not fits_inline_diff_budget(diagram_diff):
-            candidates["diff"] = diff_path
-    if isinstance(exploration_dir, Path):
-        candidates |= {
-            "exploration-summary": exploration_dir / "summary.md",
-            "exploration-affected-files": exploration_dir / "affected_files.md",
-            "exploration-dependencies": exploration_dir / "dependencies.md",
-        }
-    sanctioned_inputs = (
-        prepare_sanctioned_inputs(
-            backend,
-            ctx.work.repo,
-            {label: path for label, path in candidates.items() if path.is_file()},
-            read_only=True,
-        )
-        if ctx.artifacts is not None
-        else None
-    )
-    inline_artifacts = (
-        sanctioned_inputs is not None and sanctioned_inputs.transport is SanctionedInputTransport.INLINE
-    )
+    # Bound before the guard: the repair turn and every failure path read both.
+    advisory: dict[str, Any] | None = None
+    sanctioned_inputs: PreparedSanctionedInputs | None = None
 
-    async with maybe_fork(
-        recorder, f"diagram-{kind}", dispatch=dispatch
-    ) as fork:
-        structured, continuation, budget_reason = await run_agent(
-            backend,
-            ctx.work.repo,
-            _diagram_author_prompt(ctx, kind, eligibility, backend, inline_artifacts=inline_artifacts),
-            phase=DaydreamPhase.DIAGRAM,
-            output_schema=schema,
-            read_only=True,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            sanctioned_inputs=sanctioned_inputs,
-            run_context=ctx.run_context,
+    try:
+        # One resolved transport decides both what is worth capturing and how the
+        # author prompt carries it: selection and prompt shaping read this value,
+        # never the backend's clone capability flag directly. Resolved inside the
+        # guard because a strict-audit backend whose audit root does not match the
+        # model cwd fails closed here, and that failure must take the
+        # ``SanctionedInputUnavailable`` path rather than the generic one.
+        transport = sanctioned_transport_for(backend, ctx.work.repo, read_only=True)
+        # Declared in semantic priority: exploration context degrades whole-artifact
+        # first, and only pointer transports can carry the host-private diff index.
+        candidates: list[AdvisoryCandidate] = []
+        if isinstance(exploration_dir, Path):
+            candidates += [
+                AdvisoryCandidate("exploration-summary", exploration_dir / "summary.md"),
+                AdvisoryCandidate("exploration-dependencies", exploration_dir / "dependencies.md"),
+                AdvisoryCandidate("exploration-affected-files", exploration_dir / "affected_files.md"),
+            ]
+        # A disposable clone can read neither host artifact; the prompt inlines the
+        # diff itself when it fits the budget, so neither is a candidate on INLINE.
+        if transport is SanctionedInputTransport.EXACT_PATHS:
+            candidates.append(AdvisoryCandidate("hunk-index", diff_path.parent / "hunk-index.json"))
+            if not diagram_diff or not fits_inline_diff_budget(diagram_diff):
+                candidates.append(AdvisoryCandidate("diff", diff_path))
+        selection = (
+            select_advisory_inputs(backend, ctx.work.repo, candidates, read_only=True)
+            if ctx.artifacts is not None
+            else None
         )
-    read_paths |= _diagram_read_paths(getattr(fork, "path", None))
+        sanctioned_inputs = (
+            prepare_sanctioned_inputs(
+                backend,
+                ctx.work.repo,
+                {
+                    label: path
+                    for label, path in (selection.selected_paths().items() if selection is not None else ())
+                    if path.is_file()
+                },
+                read_only=True,
+            )
+            if selection is not None
+            else None
+        )
+        sanctioned_inputs = _scrub_inline_exploration_summary(sanctioned_inputs)
+        # The prompt is shaped and rendered to its final, private-path-free form
+        # here, so the bytes this call site decides on are the bytes the backend
+        # receives; run_agent re-applies the renderer idempotently for revalidation.
+        prompt = _diagram_author_prompt(ctx, kind, eligibility, backend, inline_transport=transport)
+        if sanctioned_inputs is not None:
+            prompt = sanctioned_inputs.render_prompt(prompt)
+        advisory = selection.to_dict() if selection is not None else None
+
+        turn = await _diagram_turn(
+            ctx,
+            descriptor=f"diagram-{kind}",
+            prompt=prompt,
+            schema=schema,
+            recorder=recorder,
+            backend=backend,
+            dispatch=dispatch,
+            sanctioned_inputs=sanctioned_inputs,
+            advisory=advisory,
+        )
+        if not isinstance(turn, tuple):
+            return turn
+        structured, continuation, budget_reason, fork_path = turn
+    except SanctionedInputUnavailable:
+        # A capture/revalidation failure is not an authoring outcome: it must
+        # reach the caller's failure path unchanged, without being relabelled
+        # as an advisory degradation.
+        raise
+    except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
+        # Only a real omission is worth carrying on a failure: a kind whose
+        # advisory inputs all fit has nothing to report beyond its reason, and
+        # ``None`` is the documented "no omission diagnostic" value.
+        return _diagram_result(
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            advisory=advisory if advisory and advisory["omitted"] else None,
+        )
+    read_paths |= _diagram_read_paths(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
-        return _diagram_result("failed", f"budget exhausted: {budget_reason}")
+        return _diagram_result("failed", f"budget exhausted: {budget_reason}", advisory=advisory)
     if not isinstance(structured, dict):
-        return _diagram_result("failed", "no structured output produced")
+        return _diagram_result("failed", "no structured output produced", advisory=advisory)
 
     spec = coerce(structured)
     report = _ground(spec, read_paths)
@@ -494,23 +658,22 @@ async def _run_diagram_kind(
             ),
             schema=schema,
         )
-        async with maybe_fork(
-            recorder, f"diagram-{kind}-repair", dispatch=dispatch
-        ) as repair_fork:
-            repaired_output, _, repair_budget = await run_agent(
-                backend,
-                ctx.work.repo,
-                repair_prompt,
-                phase=DaydreamPhase.DIAGRAM,
-                output_schema=schema,
-                continuation=continuation,
-                read_only=True,
-                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                sanctioned_inputs=sanctioned_inputs,
-                run_context=ctx.run_context,
-            )
-        read_paths |= _diagram_read_paths(getattr(repair_fork, "path", None))
+        turn = await _diagram_turn(
+            ctx,
+            descriptor=f"diagram-{kind}-repair",
+            prompt=repair_prompt,
+            schema=schema,
+            recorder=recorder,
+            backend=backend,
+            dispatch=dispatch,
+            continuation=continuation,
+            sanctioned_inputs=sanctioned_inputs,
+            advisory=advisory,
+        )
+        if not isinstance(turn, tuple):
+            return turn
+        repaired_output, _, repair_budget, repair_fork_path = turn
+        read_paths |= _diagram_read_paths(repair_fork_path)
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
             report = _ground(spec, read_paths)
@@ -545,6 +708,7 @@ async def _run_diagram_kind(
         },
         "omit_reasons": omit_reasons,
         "mermaid": mermaid,
+        "advisory": advisory,
     }
 
 

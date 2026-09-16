@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -1069,6 +1071,7 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
         "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
+        "advisory": None,
     }
     assert results["sequence"]["status"] == "rendered"
     assert results["sequence"]["reason"] is None
@@ -1116,6 +1119,7 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
             "grounding": None,
             "omit_reasons": [],
             "mermaid": None,
+            "advisory": None,
         }
         for kind in ("sequence", "flowchart")
     }
@@ -1497,3 +1501,349 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
         backend=_Wall(),
     )
     assert result["status"] != "failed"  # authoring completed
+
+
+# --- Issue #1214: transport-aware advisory-input budgeting -------------------
+
+
+def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_path: Path) -> None:
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+    from tests.harness.git_helpers import git
+
+    repo = build_large_cross_module_repo(tmp_path)
+    diff = git(repo, "diff", "--stat", "main...HEAD")
+    assert len(git(repo, "diff", "main...HEAD").splitlines()) > 20_000
+    assert sum(1 for _ in (repo / "pkg_a").rglob("*.py")) + sum(
+        1 for _ in (repo / "pkg_b").rglob("*.py")
+    ) >= 200
+    assert diff  # non-empty stat output, i.e. the branch really differs from main
+
+
+def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> None:
+    from daydream.deep.prompts import _files_by_module_block
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    huge = {f"pkg_{i:03d}": [f"pkg_{i:03d}/mod_{j:02d}.py" for j in range(30)] for i in range(60)}
+    first = _files_by_module_block(huge)
+    assert first == _files_by_module_block(huge)                       # stable
+    assert len(first.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "omitted to fit the prompt budget" in first
+    assert "pkg_059/mod_29.py" not in first                            # the tail is what goes
+    assert "pkg_000/mod_00.py" in first                                # the head is what stays
+    kept = first.count("\n    - ")
+    total = sum(len(paths) for paths in huge.values())
+    match = re.search(r"\((\d+) more changed files omitted", first)
+    assert match is not None                                           # notice carries a numeric count
+    assert int(match.group(1)) == total - kept
+
+
+def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> None:
+    from daydream.deep.prompts import _candidate_roots_block
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    roots = [
+        {"file": f"pkg/mod_{i:03d}.py", "name": f"handle_{i:03d}", "line": 1,
+         "end_line": 40, "branch_points": 5}
+        for i in range(200)
+    ]
+    block = _candidate_roots_block(roots, forced=True)
+    assert block == _candidate_roots_block(roots, forced=True)
+    assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "omitted to fit the prompt budget" in block
+    kept = block.count("\n- `")
+    match = re.search(r"\((\d+) more candidate roots omitted", block)
+    assert match is not None                                           # notice carries a numeric count
+    assert int(match.group(1)) == len(roots) - kept
+
+
+async def test_large_pr_author_prompt_reports_the_capped_projection(
+    tmp_path: Path, fake_gh: FakeGh, review_run: Callable[..., Any]
+) -> None:
+    """Real path: a ~20,000-line PR writes a bounded files-by-module block and says so."""
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+    from tests.harness.git_helpers import commit, git
+
+    target = build_large_cross_module_repo(tmp_path)
+    # The committed fixture spans only two top-level modules, so its projection
+    # fits the shared budget. Add enough one-file packages to genuinely overflow
+    # the block while keeping every path a real, changed file the host groups.
+    for i in range(260):
+        module = target / f"extra_{i:03d}"
+        module.mkdir()
+        (module / "mod.py").write_text(f"def handle():\n    return {i}\n", encoding="utf-8")
+    git(target, "add", ".")
+    commit(target, "add extra modules")
+
+    # The diagram-only flow reaches the sequence author without the large PR's
+    # over-limit exact diff aborting an earlier TTT phase; the bounded
+    # files-by-module projection is the same one the full review author uses.
+    exit_code, stub = await review_run(
+        target, specs={"sequence": [dr.sequence_spec()]}, output_mode="diagram", diagram="sequence"
+    )
+
+    assert exit_code == 0
+    author_prompts = [call["prompt"] for call in stub.calls if "sequence-diagram author" in call["prompt"]]
+    assert author_prompts, "the sequence author turn must run"
+    assert "omitted to fit the prompt budget" in author_prompts[0]
+
+
+async def _session_test_ctx(tmp_path: Path) -> Any:
+    """A FlowContext on an ACTIVE artifact session with realistic artifact sizes.
+
+    The #1123 clone tests build a FlowContext without ``artifacts``, which is why
+    the production failing branch was never exercised. This one does not.
+
+    It deliberately leaves the session open for the test's duration (the
+    ``await cm.__aenter__()`` form was verified against this repo while writing
+    the plan). A test that needs teardown should use the ``async with`` form
+    instead.
+    """
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+    from tests.harness.git_helpers import commit, init_repo
+    from tests.harness.git_helpers import git as _git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    commit(repo, "base")
+    work = WorkContext(repo=repo, source=repo, base_branch="main", base_sha="",
+                      head_branch=None, head_sha="", is_ephemeral=False, run_id="session-test")
+    owner = resolve_private_workspace_owner(
+        repo, locations=private_root_locations(base=(tmp_path / "private").resolve())
+    )
+    session = await open_artifact_session(work, session_id="diagram-advisory", owner=owner).__aenter__()
+    dd = artifact_dir_for(repo, session=session, allow_standalone=True)
+    exploration = dd / "exploration"
+    exploration.mkdir(parents=True)
+    (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
+    (exploration / "dependencies.md").write_text("d" * 4_306, encoding="utf-8")
+    (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
+    deep_dir = dd / "deep"
+    deep_dir.mkdir(parents=True, exist_ok=True)
+    diff_path = deep_dir / "diff.patch"
+    diff_path.write_text("diff --git a/a.py b/a.py\n+line\n", encoding="utf-8")
+    (deep_dir / "hunk-index.json").write_text("{}", encoding="utf-8")
+    ctx = FlowContext(
+        config=RunConfig(target=str(repo)), work=work, registry=Registry(),
+        data={"diff_path": diff_path, "diff": diff_path.read_text(encoding="utf-8"),
+              "exploration_dir": exploration, "dd": dd},
+        artifacts=session,
+    )
+    return ctx
+
+
+@pytest.mark.parametrize(
+    "backend_factory",
+    [
+        lambda repo: SimpleNamespace(read_only_disposable_clone=True, model="fake"),
+        lambda repo: SimpleNamespace(audit_root_isolation="claude-pretooluse",
+                                     audit_root=repo.resolve(), model="fake"),
+        lambda repo: SimpleNamespace(sandbox=True, model="fake"),
+    ],
+    ids=["clone-like-inline", "strict-audit-inline", "sandbox-inline"],
+)
+async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+    prompts: list[str] = []
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    result = await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=backend_factory(ctx.work.repo),
+    )
+
+    assert prompts, "the author turn must be reached — no preflight abort"
+    assert result["status"] != "failed", result.get("reason")
+
+
+async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+    diff_path = ctx.data["diff_path"]
+    diff_path.write_text("+" + ("x" * 1_100_000) + "\n", encoding="utf-8")   # > 1 MiB per-file limit
+    ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
+    prompts: list[str] = []
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    result = await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=SimpleNamespace(model="fake"),
+    )
+
+    assert prompts, "an EXACT_PATHS run must reach the author turn with the diff omitted, not aborted"
+    assert [item["label"] for item in result["advisory"]["omitted"]] == ["diff"]
+    assert result["advisory"]["transport"] == "exact_paths"
+
+
+async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    result = await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=SimpleNamespace(read_only_disposable_clone=True, model="fake"),
+    )
+
+    assert result["status"] != "failed"
+    assert result["advisory"]["transport"] == "inline"
+    assert result["advisory"]["allowance_bytes"] == 12_288
+    assert result["advisory"]["admitted_bytes"] == 4_920
+    assert [item["label"] for item in result["advisory"]["admitted"]] == [
+        "exploration-summary", "exploration-dependencies"
+    ]
+    assert [item["label"] for item in result["advisory"]["omitted"]] == ["exploration-affected-files"]
+    assert result["advisory"]["omitted"][0]["bytes"] == 23_684
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        SimpleNamespace(audit_root_isolation="claude-pretooluse", model="fake"),
+        SimpleNamespace(sandbox=True, model="fake"),
+    ],
+    ids=["strict-audit-inline", "sandbox-inline"],
+)
+async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: Any
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+    backend.audit_root = ctx.work.repo.resolve() if hasattr(backend, "audit_root_isolation") else None
+    prompts: list[str] = []
+
+    async def _fake_run_agent(b: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
+    )
+
+    prompt = prompts[0]
+    for private in (
+        str(ctx.data["diff_path"]),
+        str(ctx.data["diff_path"].parent / "hunk-index.json"),
+        str(ctx.data["exploration_dir"]),
+    ):
+        assert private not in prompt, f"INLINE prompt leaked {private}"
+    assert "inlined below" in prompt                      # the diff itself is still grounded
+    assert "Sanctioned phase inputs" in prompt
+
+
+def test_clone_mode_diff_block_includes_its_banner_and_marker_in_the_budget() -> None:
+    from daydream.deep.prompts import _diagram_diff_block
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    block = _diagram_diff_block(Path("/nowhere/diff.patch"), "é" * 20_000, clone_mode=True)
+    assert "[diff truncated to fit the prompt budget]" in block
+    assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+
+
+async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Req 10 × req 4: a fork override written before the inline kwargs keeps its
+    documented kwarg set AND must not be handed a private host path to print."""
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+    from daydream.extensions.registry import Registry as _Registry
+
+    def _legacy_sequence_builder(*, diff_path: Path, inline_diff: str | None,
+                                files_by_module: dict[str, list[str]], cwd: Path,
+                                exploration_dir: Path | None, schema: dict[str, Any]) -> str:
+        return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+    registry = _Registry()
+    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    monkeypatch.setattr(deep, "get_registry", lambda: registry)
+    ctx = await _session_test_ctx(tmp_path)
+    prompts: list[str] = []
+
+    async def _fake_run_agent(b: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=SimpleNamespace(sandbox=True, model="fake"),
+    )
+    assert prompts[0].startswith("legacy:")
+    assert str(ctx.data["diff_path"]) not in prompts[0]
+    assert "exploration=None" in prompts[0]
+
+
+async def test_author_and_repair_turns_share_one_prepared_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+    from daydream.prompt_budget import SanctionedInputUnavailable
+
+    ctx = await _session_test_ctx(tmp_path)
+    seen: list[Any] = []
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("sanctioned_inputs"))
+        if len(seen) == 1:
+            # First turn grounds nothing, so the repair turn runs.
+            return {"participants": [{"name": "Ghost", "kind": "internal", "files": ["nope.py"]}]}, object(), None
+        return {"participants": []}, object(), None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
+    await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
+    )
+
+    assert len(seen) == 2, "the repair turn must have run"
+    assert seen[0] is seen[1] is not None, "both turns must reuse the same prepared set"
+    # mutate-before-repair: the same object revalidates fail-closed, the authority for both turns.
+    ctx.data["exploration_dir"].joinpath("summary.md").write_text("changed after capture\n", encoding="utf-8")
+    with pytest.raises(SanctionedInputUnavailable):
+        seen[1].revalidate(backend, ctx.work.repo, True)
