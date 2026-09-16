@@ -1,5 +1,6 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -62,186 +63,76 @@ def _default_strategy(stage: str) -> str:
     return _rp.build_default_profile().strategies[stage].content
 
 
-def test_per_stack_prompt_has_intent_pointer(tmp_path: Path) -> None:
-    """D-19: prompt references the intent path."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert str(p["intent_path"]) in out
+_REVIEW_BUILDERS: dict[str, Callable[..., str]] = {
+    "per_stack": build_per_stack_prompt,
+    "structural": build_structural_prompt,
+    "generic_fallback": build_generic_fallback_prompt,
+}
 
 
-def test_per_stack_prompt_has_alternatives_pointer(tmp_path: Path) -> None:
-    """D-19: prompt references the alternatives path."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert str(p["alternatives_path"]) in out
+def _review_prompt(name: str, tmp_path: Path, **overrides: Any) -> str:
+    """Build a real prompt with shared paths and explicit per-builder defaults."""
+    kwargs: dict[str, Any] = {
+        **_paths(tmp_path),
+        "strategy": _default_strategy(f"discovery.{name}"),
+        "files": ["config.yaml" if name == "generic_fallback" else "api.py"],
+    }
+    if name == "per_stack":
+        kwargs["stack_name"] = "python"
+    return _REVIEW_BUILDERS[name](**(kwargs | overrides))
 
 
-def test_per_stack_prompt_includes_no_skill_invocation(tmp_path: Path) -> None:
-    """D-19: the per-stack prompt carries the profile strategy, no skill token."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert _default_strategy("discovery.per_stack") in out
+@pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
+def test_review_prompt_has_artifact_pointers_and_profile_strategy(builder: str, tmp_path: Path) -> None:
+    out = _review_prompt(builder, tmp_path)
+    paths = _paths(tmp_path)
+    assert str(paths["intent_path"]) in out
+    assert str(paths["alternatives_path"]) in out
+    assert _default_strategy(f"discovery.{builder}") in out
     assert "/beagle-" not in out and "$review-" not in out
 
 
 def test_per_stack_prompt_scope_lists_only_stack_files(tmp_path: Path) -> None:
     """D-10: stack scope instruction lists only this stack's files."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py", "lib/util.py"],
-        **p,
-    )
+    out = _review_prompt("per_stack", tmp_path, files=["api.py", "lib/util.py"])
     assert "api.py" in out and "lib/util.py" in out
     assert "Do NOT review files from other stacks" in out
 
 
-def test_generic_fallback_prompt_has_no_skill(tmp_path: Path) -> None:
-    """Generic fallback omits any /beagle-* invocation."""
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p)
-    assert "/beagle-" not in out
-
-
-def test_generic_fallback_docs_notice(tmp_path: Path) -> None:
+@pytest.mark.parametrize("is_docs_only", [False, True])
+def test_generic_fallback_docs_notice(tmp_path: Path, is_docs_only: bool) -> None:
     """D-20: is_docs_only=True prepends the doc-review notice."""
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["README.md"],
-        is_docs_only=True,
-        **p)
-    assert DOC_REVIEW_NOTICE in out
-    # Notice must appear before other content
-    assert out.index(DOC_REVIEW_NOTICE) < out.index("Review these files")
+    overrides = {"is_docs_only": True, "files": ["README.md"]} if is_docs_only else {}
+    out = _review_prompt("generic_fallback", tmp_path, **overrides)
+    assert (DOC_REVIEW_NOTICE in out) is is_docs_only
+    if is_docs_only:
+        assert out.index(DOC_REVIEW_NOTICE) < out.index("Review these files")
 
 
-def test_generic_fallback_no_docs_notice_by_default(tmp_path: Path) -> None:
-    """Docs notice suppressed when is_docs_only=False."""
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p)
-    assert DOC_REVIEW_NOTICE not in out
-
-
-def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
+@pytest.mark.parametrize("builder", ["per_stack", "generic_fallback"])
+def test_prompts_embed_no_full_file_contents(tmp_path: Path, builder: str) -> None:
     """D-09: path-based prompts omit source bodies and retain the diff pointer."""
     p = _paths(tmp_path)
     source_body = "def api():\n    return 'source-only sentinel'\n" + ("x" * 1024)
     (tmp_path / "api.py").write_text(source_body)
 
-    prompts = (
-        build_per_stack_prompt(
-            strategy=_default_strategy("discovery.per_stack"),
-            stack_name="python",
-            files=["api.py"],
-            **p,
-        ),
-        build_generic_fallback_prompt(
-            strategy=_default_strategy("discovery.generic_fallback"),
-            files=["api.py"],
-            **p,
-        ),
-    )
-    for prompt in prompts:
-        assert f"The full PR diff (base..HEAD) is at {p['diff_path']}." in prompt
-        assert source_body not in prompt
+    prompt = _review_prompt(builder, tmp_path, files=["api.py"])
+    assert f"The full PR diff (base..HEAD) is at {p['diff_path']}." in prompt
+    assert source_body not in prompt
 
 
-def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
-    """Fallback (``inline_diff=None``): prompt references diff_path for agents
-    to read directly.
-
-    Issue #172 Fix B: with ``inline_diff`` supplied, the path pointer is
-    DROPPED (the hunks are inlined instead). The fallback contract — when the
-    byte budget is exceeded or the caller has no diff text — keeps the pointer
-    so the agent can still locate the full diff for whole-file context.
-    """
-    p = _paths(tmp_path)
-    # Default (inline_diff=None) → pointer present (fallback contract).
-    out_fallback = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert str(p["diff_path"]) in out_fallback
-    # inline_diff supplied → pointer absent (hunks inlined instead).
-    out_inline = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        inline_diff="diff --git a/api.py b/api.py\n+++ b/api.py\n@@ -1 +1 @@\n-x\n+y\n",
-        **p,
-    )
-    assert str(p["diff_path"]) not in out_inline
-    assert "Read it directly" not in out_inline
-    assert "-x" in out_inline and "+y" in out_inline  # hunks inlined
-
-
-def test_per_stack_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
-    """Prompt must NOT suggest `git diff -- <files>` without a base ref.
-
-    Without a base ref that command only shows uncommitted workspace changes;
-    on a clean PR branch it returns empty and hides every committed change.
-    """
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert "git diff --no-color -- api.py" not in out
-    assert "git diff -- api.py" not in out
-
-
-def test_generic_fallback_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
-    """Generic fallback must not embed the broken git-diff command either.
-
-    Issue #172 Fix B: with ``inline_diff`` supplied, the diff_path pointer is
-    DROPPED. The fallback (``inline_diff=None``) path still references
-    diff_path so the agent can locate the full diff.
-    """
-    p = _paths(tmp_path)
-    # Default (inline_diff=None) → pointer present (fallback contract).
-    out_fallback = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p)
-    assert "git diff --no-color -- config.yaml" not in out_fallback
-    assert "git diff -- config.yaml" not in out_fallback
-    assert str(p["diff_path"]) in out_fallback
-    # inline_diff supplied → pointer absent (hunks inlined instead).
-    out_inline = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        inline_diff="diff --git a/config.yaml b/config.yaml\n+++ b/config.yaml\n@@ -1 +1 @@\n-x\n+y\n",
-        **p,
-    )
-    assert str(p["diff_path"]) not in out_inline
-    assert "Read it directly" not in out_inline
+@pytest.mark.parametrize("builder,file", [("per_stack", "api.py"), ("generic_fallback", "config.yaml")])
+@pytest.mark.parametrize("inline", [False, True])
+def test_review_diff_transport(tmp_path: Path, builder: str, file: str, inline: bool) -> None:
+    """Inline hunks replace the pointer; bare git diff would hide committed changes."""
+    diff = f"diff --git a/{file} b/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-x\n+y\n"
+    out = _review_prompt(builder, tmp_path, **({"inline_diff": diff} if inline else {}))
+    assert "git diff --no-color -- " + file not in out
+    assert "git diff -- " + file not in out
+    assert (str(_paths(tmp_path)["diff_path"]) in out) is not inline
+    if inline:
+        assert "Read it directly" not in out
+        assert "-x" in out and "+y" in out
 
 
 def _merge_paths(tmp_path: Path) -> dict[str, Path | list[Path] | None]:
@@ -256,84 +147,20 @@ def _merge_paths(tmp_path: Path) -> dict[str, Path | list[Path] | None]:
     }
 
 
-def test_per_stack_prompt_includes_prior_commits(tmp_path: Path) -> None:
-    """prior_commits block appears in per-stack prompt when provided."""
-    p = _paths(tmp_path)
-    commits = "abc1234 fix: handle edge case\ndef5678 feat: add retry logic"
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        prior_commits=commits,
-        **p,
-    )
-    assert "Prior automated-review commits on this branch" in out
-    assert "abc1234 fix: handle edge case" in out
-    assert "def5678 feat: add retry logic" in out
-
-
-def test_per_stack_prompt_omits_prior_commits_when_none(tmp_path: Path) -> None:
-    """prior_commits block absent when prior_commits is None."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        prior_commits=None,
-        **p,
-    )
-    assert "Prior automated-review commits" not in out
-
-
-def test_per_stack_prompt_omits_prior_commits_when_empty(tmp_path: Path) -> None:
-    """prior_commits block absent when prior_commits is empty string."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        prior_commits="",
-        **p,
-    )
-    assert "Prior automated-review commits" not in out
-
-
-def test_generic_fallback_prompt_includes_prior_commits(tmp_path: Path) -> None:
-    """prior_commits block appears in generic-fallback prompt when provided."""
-    p = _paths(tmp_path)
-    commits = "abc1234 fix: handle edge case"
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        prior_commits=commits,
-        **p,
-    )
-    assert "Prior automated-review commits on this branch" in out
-    assert "abc1234 fix: handle edge case" in out
-
-
-def test_generic_fallback_prompt_omits_prior_commits_when_none(tmp_path: Path) -> None:
-    """prior_commits block absent from generic-fallback when prior_commits is None."""
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        prior_commits=None,
-        **p,
-    )
-    assert "Prior automated-review commits" not in out
-
-
-def test_generic_fallback_prompt_omits_prior_commits_when_empty(tmp_path: Path) -> None:
-    """prior_commits block absent from generic-fallback when prior_commits is empty."""
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        prior_commits="",
-        **p,
-    )
-    assert "Prior automated-review commits" not in out
+@pytest.mark.parametrize("builder", ["per_stack", "generic_fallback"])
+@pytest.mark.parametrize(
+    "commits",
+    [None, "", "abc1234 fix: handle edge case", "abc1234 fix: handle edge case\ndef5678 feat: add retry logic"],
+    ids=["none", "empty", "one", "multiple"],
+)
+def test_review_prompt_prior_commits(tmp_path: Path, builder: str, commits: str | None) -> None:
+    out = _review_prompt(builder, tmp_path, prior_commits=commits)
+    if commits:
+        assert "Prior automated-review commits on this branch" in out
+        for commit in commits.splitlines():
+            assert commit in out
+    else:
+        assert "Prior automated-review commits" not in out
 
 
 def test_merge_prompt_requires_structured_item_fields(tmp_path: Path) -> None:
@@ -663,31 +490,11 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
 # =============================================================================
 
 
-def test_per_stack_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
-    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
-
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
+@pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
+def test_review_prompt_contains_cwd_grounding(tmp_path: Path, builder: str) -> None:
+    out = _review_prompt(builder, tmp_path)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
     assert str(tmp_path) in out
-
-
-def test_structural_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_structural_prompt
-    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
-
-    p = _paths(tmp_path)
-    out = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api.py"],
-        **p,
-    )
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
 
 
 def test_arbiter_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
@@ -735,17 +542,6 @@ def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) 
     assert "never reject a finding merely for overlapping" in out
 
 
-def test_generic_fallback_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
-    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
-
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p)
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
-
-
 def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     from daydream.deep.prompts import build_verification_prompt
     from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
@@ -760,29 +556,19 @@ def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
 
 
-def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_structural_prompt
+@pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
+def test_review_prompt_includes_verification_protocol(tmp_path: Path, builder: str) -> None:
+    from daydream.deep.prompts import VERIFICATION_PROTOCOL_INSTRUCTION
 
-    p = _paths(tmp_path)
-    prompt = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api.py"],
-        **p,
-    )
+    prompt = _review_prompt(builder, tmp_path)
+    assert VERIFICATION_PROTOCOL_INSTRUCTION in prompt
     assert "verification gates" in prompt
     assert "anchor" in prompt
     assert "evidence" in prompt
-
-
-def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: Path) -> None:
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p)
-    assert "verification gates" in out
-    assert "anchor" in out
-    assert "evidence" in out
+    assert "SKILL.md" not in prompt
+    assert "/skill:" not in prompt
+    assert "/review-verification-protocol" not in prompt
+    assert "$review-verification-protocol" not in prompt
 
 
 def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> None:
@@ -799,32 +585,6 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
     assert "same-turn echo" in out or "file:line" in out
 
 
-def test_verification_protocol_is_inline_without_skill_tokens(tmp_path: Path) -> None:
-    """Protocol gates are inline and require no skill invocation or file read."""
-    from daydream.deep.prompts import build_structural_prompt
-
-    p = _paths(tmp_path)
-    prompts = [
-        build_structural_prompt(
-            strategy=_default_strategy("discovery.structural"),
-            files=["api.py"],
-            **p,
-        ),
-        build_generic_fallback_prompt(
-            strategy=_default_strategy("discovery.generic_fallback"),
-            files=["config.yaml"],
-            **p,
-        ),
-    ]
-
-    for prompt in prompts:
-        assert "verification gates" in prompt
-        assert "SKILL.md" not in prompt
-        assert "/skill:" not in prompt
-        assert "/review-verification-protocol" not in prompt
-        assert "$review-verification-protocol" not in prompt
-
-
 # =============================================================================
 # Issue #279 — Authoritative-intent rule gate in the deep prompt builders
 # =============================================================================
@@ -838,28 +598,8 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
     ``per_stack_records_paths`` and ``dedup_candidates_path``.
     """
     p = _paths(tmp_path)
-    if name == "per-stack":
-        return build_per_stack_prompt(
-            strategy=_default_strategy("discovery.per_stack"),
-            stack_name="python",
-            files=["api.py"],
-            intent_authoritative=intent_authoritative,
-            **p,
-        )
-    if name == "structural":
-        return build_structural_prompt(
-            strategy=_default_strategy("discovery.structural"),
-            files=["api.py"],
-            intent_authoritative=intent_authoritative,
-            **p,
-        )
-    if name == "generic-fallback":
-        return build_generic_fallback_prompt(
-            strategy=_default_strategy("discovery.generic_fallback"),
-            files=["config.yaml"],
-            intent_authoritative=intent_authoritative,
-            **p,
-        )
+    if name.replace("-", "_") in _REVIEW_BUILDERS:
+        return _review_prompt(name.replace("-", "_"), tmp_path, intent_authoritative=intent_authoritative)
     if name == "arbiter":
         return build_arbiter_prompt(
             strategy=_default_strategy("arbitration"),
@@ -977,66 +717,14 @@ def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
 # --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
 
 
-def test_per_stack_prompt_can_omit_alternatives(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_per_stack_prompt
-
-    p = _paths(tmp_path)
-    with_alts = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], **p, include_alternatives=True,
-    )
-    without = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], **p, include_alternatives=False,
-    )
-    assert "alternatives.json" in with_alts
-    assert "alternatives.json" not in without
-    assert "intent.md" in without  # ONLY the alternatives paragraph is dropped
-    assert build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], **p,
-    ) == with_alts  # default is True
-
-
-def test_structural_prompt_can_omit_alternatives(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_structural_prompt
-
-    p = _paths(tmp_path)
-    with_alts = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,
-        include_alternatives=True,
-    )
-    without = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,
-        include_alternatives=False,
-    )
+@pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
+def test_review_prompt_can_omit_alternatives(tmp_path: Path, builder: str) -> None:
+    with_alts = _review_prompt(builder, tmp_path, include_alternatives=True)
+    without = _review_prompt(builder, tmp_path, include_alternatives=False)
     assert "alternatives.json" in with_alts
     assert "alternatives.json" not in without
     assert "intent.md" in without
-    assert build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,
-    ) == with_alts
-
-
-def test_generic_fallback_prompt_can_omit_alternatives(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_generic_fallback_prompt
-
-    p = _paths(tmp_path)
-    with_alts = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"], **p, include_alternatives=True
-    )
-    without = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"], **p, include_alternatives=False
-    )
-    assert "alternatives.json" in with_alts
-    assert "alternatives.json" not in without
-    assert "intent.md" in without
-    assert build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p) == with_alts
+    assert _review_prompt(builder, tmp_path) == with_alts
 
 
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
@@ -1102,19 +790,8 @@ def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path)
 
 
 def test_per_stack_prompt_includes_test_quality_rubric(tmp_path: Path) -> None:
-    """#308: the per-stack review prompt ships the test-quality rubric.
-
-    The rubric targets test hunks in the diff: vacuous assertions,
-    internal-field/pointer-identity assertions, nondeterminism, canonical-path
-    bypasses, and portability breaks.
-    """
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
+    """#308: test quality includes behavior, determinism, and portability."""
+    out = _review_prompt("per_stack", tmp_path)
     assert "test-quality rubric" in out
     assert "vacuous assertions" in out
     assert "observable consequences" in out
@@ -1130,13 +807,7 @@ def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path)
     helper is NOT an internal-field assertion; the rubric only flags a seam when
     it bypasses the observable behavior the test claims to cover.
     """
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
+    out = _review_prompt("per_stack", tmp_path)
     assert "pure-function seams" in out
     assert "`build_driver_request`" in out
     assert "internal-field assertion" in out
@@ -1145,13 +816,7 @@ def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path)
 
 def test_per_stack_prompt_test_quality_rubric_follows_strategy(tmp_path: Path) -> None:
     """The test-quality rubric follows the per-stack review instructions."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
+    out = _review_prompt("per_stack", tmp_path)
     assert out.index("test-quality rubric") > out.index(_default_strategy("discovery.per_stack"))
 
 
@@ -1174,107 +839,27 @@ _ANTI_SLOP_ANCHORS = (
 )
 
 
-def _assert_anti_slop_anchors(out: str) -> None:
-    missing = [anchor for anchor in _ANTI_SLOP_ANCHORS if anchor not in out]
-    assert not missing, f"anti-slop rubric is missing pinned anchors: {missing}"
-
-
-def test_per_stack_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
-    """#314: the per-stack review prompt ships the anti-slop rubric.
-
-    The rubric targets the SlopCodeBench degradation patterns in the diff
-    hunks: complexity concentration into already-large functions, verbosity
-    (identity comprehensions, empty-list guards, single-use intermediates,
-    casts to dodge type checking, trivial wrappers, nested ladders), and
-    copy-pasted duplication.
-    """
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
+@pytest.mark.parametrize("builder", ["per_stack", "structural"])
+def test_review_prompt_includes_anti_slop_rubric(tmp_path: Path, builder: str) -> None:
+    """#314: both reviewers retain the complete maintainability rubric."""
+    out = _review_prompt(builder, tmp_path)
     assert "anti-slop rubric" in out
-    _assert_anti_slop_anchors(out)
+    _assert_anchors(out, _ANTI_SLOP_ANCHORS)
 
 
-def test_structural_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
-    """#314: the structural review prompt ships the anti-slop rubric.
-
-    The structural reviewer is the primary home for the erosion half of the
-    rubric (file-size budgets, layering, branching shape), so the same
-    self-contained instruction is appended there too.
-    """
-    p = _paths(tmp_path)
-    out = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api.py"],
-        **p,
-    )
-    assert "anti-slop rubric" in out
-    _assert_anti_slop_anchors(out)
+@pytest.mark.parametrize(
+    "builder,preceding", [("per_stack", "discovery.per_stack"), ("structural", "verification gates")],
+)
+def test_anti_slop_rubric_order(tmp_path: Path, builder: str, preceding: str) -> None:
+    out = _review_prompt(builder, tmp_path)
+    anchor = _default_strategy(preceding) if preceding.startswith("discovery.") else preceding
+    assert out.index("anti-slop rubric") > out.index(anchor)
 
 
-def test_per_stack_prompt_anti_slop_rubric_follows_strategy(tmp_path: Path) -> None:
-    """The anti-slop rubric follows the per-stack review instructions."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert out.index("anti-slop rubric") > out.index(_default_strategy("discovery.per_stack"))
-
-
-def test_structural_prompt_anti_slop_rubric_sits_after_verification_protocol(tmp_path: Path) -> None:
-    """#314: the rubric lands after the verification-protocol gates in the
-    structural prompt, so the reviewer applies the gates first, then the
-    anti-slop rubric to the hunks."""
-    p = _paths(tmp_path)
-    out = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api.py"],
-        **p,
-    )
-    assert out.index("anti-slop rubric") > out.index("verification gates")
-
-
-def test_anti_slop_rubric_severity_layering(tmp_path: Path) -> None:
-    """#314: severity is calibrated to medium/low, and pre-existing-and-growing
-    erosion is flagged as growth -- guards the over-application failure mode.
-
-    Without the layering awareness, a reviewer would re-flag the whole eroded
-    function on every PR instead of isolating the growth the diff introduces.
-    """
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert "medium/low" in out
-    assert "pre-existing-and-growing" in out
-    assert "flag the growth, not the whole function" in out
-
-
-def test_anti_slop_rubric_never_high_prohibition(tmp_path: Path) -> None:
-    """#314: the rubric separates severity from scope and prohibits high.
-
-    Anti-slop/maintainability findings are medium/low -- never high -- full
-    stop; the pre-existing-and-growing clause is NOT a severity-escalation
-    exception. It is a separate scope instruction: report only the growth the
-    diff introduces, not the whole function.
-    """
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
+@pytest.mark.parametrize("builder", ["per_stack", "structural"])
+def test_anti_slop_rubric_severity_and_scope(tmp_path: Path, builder: str) -> None:
+    """#314: pre-existing growth changes scope, never the medium/low ceiling."""
+    out = _review_prompt(builder, tmp_path)
     assert "never high" in out
     assert "unless the erosion is pre-existing-and-growing" not in out
     assert "medium/low" in out
@@ -1322,101 +907,28 @@ def _assert_anchors(out: str, anchors: tuple[str, ...]) -> None:
     assert not missing, f"missing pinned anchors: {missing}"
 
 
-def _build_structural_for_310(tmp_path: Path) -> str:
-    p = _paths(tmp_path)
-    return build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api.py"],
-        **p,
-    )
-
-
-def _build_per_stack_for_310(tmp_path: Path) -> str:
-    p = _paths(tmp_path)
-    return build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-
-
-def test_structural_prompt_includes_cross_file_symbol_existence(tmp_path: Path) -> None:
-    """#310: the repo-wide structural reviewer demands symbol-existence verification."""
-    out = _build_structural_for_310(tmp_path)
-    assert "Cross-file symbol existence check" in out
-    _assert_anchors(out, _CROSS_FILE_ANCHORS)
-
-
-def test_structural_prompt_includes_trust_model_check(tmp_path: Path) -> None:
-    """#310: trust boundaries are repo-wide, so the structural prompt carries the check."""
-    out = _build_structural_for_310(tmp_path)
-    assert "Trust-model check" in out
-    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
-
-
-def test_per_stack_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
-    """#310: per-stack reviewers trace plumbed config fields for silent drops /
-    double-resolves."""
-    out = _build_per_stack_for_310(tmp_path)
-    assert "Config/env flow trace" in out
-    _assert_anchors(out, _CONFIG_TRACE_ANCHORS)
-
-
-def test_per_stack_prompt_includes_trust_model_check(tmp_path: Path) -> None:
-    """#310: security markers appear in hunks, so the per-stack prompt carries the
-    check too."""
-    out = _build_per_stack_for_310(tmp_path)
-    assert "Trust-model check" in out
-    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
-
-
-def test_cross_file_instruction_stays_out_of_per_stack_prompt(tmp_path: Path) -> None:
-    """#310: symbol-existence verification is the structural reviewer's job; it must
-    not leak into the per-stack prompt."""
-    out = _build_per_stack_for_310(tmp_path)
-    leaked = [anchor for anchor in _CROSS_FILE_ANCHORS if anchor in out]
-    assert not leaked, f"cross-file anchors leaked into per-stack prompt: {leaked}"
-
-
-def test_config_trace_instruction_stays_out_of_structural_prompt(tmp_path: Path) -> None:
-    """#310: config-flow tracing is per-stack; it must not leak into the structural
-    prompt."""
-    out = _build_structural_for_310(tmp_path)
-    leaked = [anchor for anchor in _CONFIG_TRACE_ANCHORS if anchor in out]
-    assert not leaked, f"config-trace anchors leaked into structural prompt: {leaked}"
-
-
-def _build_generic_fallback_for_310(tmp_path: Path) -> str:
-    p = _paths(tmp_path)
-    return build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-        **p)
-
-
-def test_generic_fallback_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
-    """#310: config/env files without a stack land in the generic bucket, so the
-    fallback prompt carries the config-flow trace."""
-    out = _build_generic_fallback_for_310(tmp_path)
-    assert "Config/env flow trace" in out
-    _assert_anchors(out, _CONFIG_TRACE_ANCHORS)
-
-
-def test_generic_fallback_prompt_includes_trust_model_check(tmp_path: Path) -> None:
-    """#310: security-relevant markers appear in config/env files, so the fallback
-    prompt carries the trust-model check too."""
-    out = _build_generic_fallback_for_310(tmp_path)
-    assert "Trust-model check" in out
-    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
-
-
-def test_cross_file_instruction_stays_out_of_generic_fallback_prompt(tmp_path: Path) -> None:
-    """#310: symbol-existence verification is the structural reviewer's job; it must
-    not leak into the generic-fallback prompt."""
-    out = _build_generic_fallback_for_310(tmp_path)
-    leaked = [anchor for anchor in _CROSS_FILE_ANCHORS if anchor in out]
-    assert not leaked, f"cross-file anchors leaked into generic-fallback prompt: {leaked}"
+@pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
+@pytest.mark.parametrize(
+    "heading,anchors,owners",
+    [
+        ("Cross-file symbol existence check", _CROSS_FILE_ANCHORS, {"structural"}),
+        ("Config/env flow trace", _CONFIG_TRACE_ANCHORS, {"per_stack", "generic_fallback"}),
+        ("Trust-model check", _TRUST_MODEL_ANCHORS, set(_REVIEW_BUILDERS)),
+    ],
+    ids=["symbols", "config", "trust"],
+)
+def test_review_instruction_ownership(
+    tmp_path: Path, builder: str, heading: str, anchors: tuple[str, ...], owners: set[str],
+) -> None:
+    """#310: shared trust checks coexist with each reviewer's specific duties."""
+    out = _review_prompt(builder, tmp_path)
+    if builder in owners:
+        assert heading in out
+        _assert_anchors(out, anchors)
+    else:
+        assert heading not in out
+        leaked = [anchor for anchor in anchors if anchor in out]
+        assert not leaked, f"instruction anchors leaked into {builder}: {leaked}"
 
 
 def test_cross_file_additions_keep_existing_rubrics(tmp_path: Path) -> None:
@@ -1424,13 +936,13 @@ def test_cross_file_additions_keep_existing_rubrics(tmp_path: Path) -> None:
     constants still appear unchanged in the builders that own them, so #311 lands
     cleanly. The test-quality rubric is per-stack only; the anti-slop rubric runs
     in both builders."""
-    structural = _build_structural_for_310(tmp_path)
-    per_stack = _build_per_stack_for_310(tmp_path)
+    structural = _review_prompt("structural", tmp_path)
+    per_stack = _review_prompt("per_stack", tmp_path)
     assert TEST_QUALITY_RUBRIC_INSTRUCTION in per_stack
     assert TEST_QUALITY_RUBRIC_INSTRUCTION not in structural
     for out in (structural, per_stack):
         assert ANTI_SLOP_RUBRIC_INSTRUCTION in out
-        _assert_anti_slop_anchors(out)
+        _assert_anchors(out, _ANTI_SLOP_ANCHORS)
 
 
 def test_cross_file_instructions_contain_no_banned_words() -> None:
@@ -1479,17 +991,6 @@ def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
     )
     assert "shared/iface.py" in prompt
     assert "cross-shard" in prompt or "interface file" in prompt
-
-
-def test_per_stack_prompt_includes_verification_gate(tmp_path: Path) -> None:
-    """AC1: the per-stack builder emits the shared anti-confabulation gate."""
-    from daydream.deep.prompts import VERIFICATION_PROTOCOL_INSTRUCTION, build_per_stack_prompt
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], **p,
-    )
-    assert VERIFICATION_PROTOCOL_INSTRUCTION in out
 
 
 def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Path) -> None:

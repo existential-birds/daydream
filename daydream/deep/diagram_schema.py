@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from daydream.output_schema import strict_object
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
 )
@@ -52,152 +53,92 @@ _NODE_KINDS = ("start", "end", "process", "decision", "subroutine", "io")
 _LINE_SCHEMA: dict[str, Any] = {"type": "integer", "minimum": 1}
 
 # Branch/loop evidence: a location only, no symbol to check.
-_EVIDENCE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "file": _REPOSITORY_FILE_PATH_SCHEMA,
-        "line": _LINE_SCHEMA,
-    },
-    "required": ["file", "line"],
-    "additionalProperties": False,
-}
+_EVIDENCE_SCHEMA: dict[str, Any] = strict_object({
+    "file": _REPOSITORY_FILE_PATH_SCHEMA,
+    "line": _LINE_SCHEMA,
+})
 
 # Sequence-message evidence: ``symbol`` is the callee (call), the enclosing
 # function (reply) or the client method token (external call), and is always
 # required -- SYMBOL_NOT_ON_LINE is the check that makes a message verifiable.
-_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "file": _REPOSITORY_FILE_PATH_SCHEMA,
-        "line": _LINE_SCHEMA,
-        "symbol": {"type": "string"},
-    },
-    "required": ["file", "line", "symbol"],
-    "additionalProperties": False,
-}
+_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = strict_object({
+    "file": _REPOSITORY_FILE_PATH_SCHEMA,
+    "line": _LINE_SCHEMA,
+    "symbol": {"type": "string"},
+})
 
 # Flowchart-node evidence: only a ``subroutine`` node names a symbol, so the
 # field is nullable rather than absent (strict mode has no optional keys).
-_OPTIONAL_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "file": _REPOSITORY_FILE_PATH_SCHEMA,
-        "line": _LINE_SCHEMA,
-        "symbol": {"type": ["string", "null"]},
-    },
-    "required": ["file", "line", "symbol"],
-    "additionalProperties": False,
-}
+_OPTIONAL_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = strict_object({
+    "file": _REPOSITORY_FILE_PATH_SCHEMA,
+    "line": _LINE_SCHEMA,
+    "symbol": {"type": ["string", "null"]},
+})
 
-SEQUENCE_SPEC_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "participants": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "kind": {"type": "string", "enum": list(_PARTICIPANT_KINDS)},
-                    "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
-                    "service": {"type": ["string", "null"]},
-                },
-                "required": ["name", "kind", "files", "service"],
-                "additionalProperties": False,
-            },
-        },
-        "messages": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "from": {"type": "string"},
-                    "to": {"type": "string"},
-                    "label": {"type": "string"},
-                    "kind": {"type": "string", "enum": list(_MESSAGE_KINDS)},
-                    "changed": {"type": "boolean"},
-                    "evidence": _SYMBOL_EVIDENCE_SCHEMA,
-                },
-                "required": ["from", "to", "label", "kind", "changed", "evidence"],
-                "additionalProperties": False,
-            },
-        },
-        "blocks": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": list(_BLOCK_KINDS)},
-                    "branches": {
+SEQUENCE_SPEC_SCHEMA: dict[str, Any] = strict_object({
+    "participants": {
+        "type": "array",
+        "items": strict_object({
+            "name": {"type": "string"},
+            "kind": {"type": "string", "enum": list(_PARTICIPANT_KINDS)},
+            "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
+            "service": {"type": ["string", "null"]},
+        }),
+    },
+    "messages": {
+        "type": "array",
+        "items": strict_object({
+            "from": {"type": "string"},
+            "to": {"type": "string"},
+            "label": {"type": "string"},
+            "kind": {"type": "string", "enum": list(_MESSAGE_KINDS)},
+            "changed": {"type": "boolean"},
+            "evidence": _SYMBOL_EVIDENCE_SCHEMA,
+        }),
+    },
+    "blocks": {
+        "type": "array",
+        "items": strict_object({
+            "kind": {"type": "string", "enum": list(_BLOCK_KINDS)},
+            "branches": {
+                "type": "array",
+                "items": strict_object({
+                    "condition": {"type": "string"},
+                    "evidence": _EVIDENCE_SCHEMA,
+                    "messages": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "condition": {"type": "string"},
-                                "evidence": _EVIDENCE_SCHEMA,
-                                "messages": {
-                                    "type": "array",
-                                    "items": {"type": "integer", "minimum": 0},
-                                },
-                            },
-                            "required": ["condition", "evidence", "messages"],
-                            "additionalProperties": False,
-                        },
+                        "items": {"type": "integer", "minimum": 0},
                     },
-                },
-                "required": ["kind", "branches"],
-                "additionalProperties": False,
+                }),
             },
-        },
+        }),
     },
-    "required": ["participants", "messages", "blocks"],
-    "additionalProperties": False,
-}
+})
 
-FLOWCHART_SPEC_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "root": {
-            "type": "object",
-            "properties": {
-                "file": _REPOSITORY_FILE_PATH_SCHEMA,
-                "name": {"type": "string"},
-                "line": _LINE_SCHEMA,
-            },
-            "required": ["file", "name", "line"],
-            "additionalProperties": False,
-        },
-        "nodes": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "kind": {"type": "string", "enum": list(_NODE_KINDS)},
-                    "label": {"type": "string"},
-                    "evidence": _OPTIONAL_SYMBOL_EVIDENCE_SCHEMA,
-                },
-                "required": ["id", "kind", "label", "evidence"],
-                "additionalProperties": False,
-            },
-        },
-        "edges": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "from": {"type": "string"},
-                    "to": {"type": "string"},
-                    "label": {"type": ["string", "null"]},
-                },
-                "required": ["from", "to", "label"],
-                "additionalProperties": False,
-            },
-        },
+FLOWCHART_SPEC_SCHEMA: dict[str, Any] = strict_object({
+    "root": strict_object({
+        "file": _REPOSITORY_FILE_PATH_SCHEMA,
+        "name": {"type": "string"},
+        "line": _LINE_SCHEMA,
+    }),
+    "nodes": {
+        "type": "array",
+        "items": strict_object({
+            "id": {"type": "string"},
+            "kind": {"type": "string", "enum": list(_NODE_KINDS)},
+            "label": {"type": "string"},
+            "evidence": _OPTIONAL_SYMBOL_EVIDENCE_SCHEMA,
+        }),
     },
-    "required": ["root", "nodes", "edges"],
-    "additionalProperties": False,
-}
+    "edges": {
+        "type": "array",
+        "items": strict_object({
+            "from": {"type": "string"},
+            "to": {"type": "string"},
+            "label": {"type": ["string", "null"]},
+        }),
+    },
+})
 
 
 def _empty_sequence_spec() -> dict[str, Any]:
