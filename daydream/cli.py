@@ -326,6 +326,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        dest="log_mode",
+        help="Bypass Rich UI and emit redacted agent events as plain text to stdout; "
+             "on unexpected fatal errors, additionally write redacted chained "
+             "diagnostics to stderr."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--yes",
         action="store_const",
         const="yes",
@@ -707,6 +717,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
             args, "improve_plan_description", None
         ),
         improve_prune_name=getattr(args, "improve_prune_name", None),
+        log_mode=args.log_mode,
     )
 
 
@@ -813,14 +824,6 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         dest="diagram",
         help="Control grounded diagrams in the review paths (default: auto -- render "
              "every eligible kind). Use --diagram-only for the diagram-only mode."
-        if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--log",
-        action="store_true",
-        default=False,
-        dest="log_mode",
-        help="Bypass Rich UI and emit redacted agent events as plain text to stdout."
         if full_help else argparse.SUPPRESS,
     )
 
