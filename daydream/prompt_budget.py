@@ -1,4 +1,4 @@
-"""Dependency-neutral prompt-size and sanctioned-input policy."""
+"""Dependency-neutral prompt-size, sanctioned-input, and advisory-selection policy."""
 
 from __future__ import annotations
 
@@ -116,6 +116,55 @@ class PreparedSanctionedInputs:
             aggregate += current.size
             if current != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
+
+
+@dataclass(frozen=True)
+class AdvisoryCandidate:
+    """One declared advisory input that is admitted whole or omitted whole.
+
+    ``size`` is filled by :func:`select_advisory_inputs` from the file it sized;
+    callers declare only a label and a path.
+    """
+
+    label: str
+    path: Path
+    size: int = 0
+
+
+@dataclass(frozen=True)
+class OmittedAdvisoryInput:
+    """One advisory input that did not fit the active transport's allowance."""
+
+    label: str
+    size: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class AdvisorySelection:
+    """The whole-artifact split one advisory set resolves to on one transport."""
+
+    transport: SanctionedInputTransport
+    admitted: tuple[AdvisoryCandidate, ...]
+    omitted: tuple[OmittedAdvisoryInput, ...]
+    admitted_bytes: int
+    allowance_bytes: int
+
+    def selected_paths(self) -> dict[str, Path]:
+        """The admitted mapping :func:`prepare_sanctioned_inputs` consumes."""
+        return {candidate.label: candidate.path for candidate in self.admitted}
+
+    def to_dict(self) -> dict[str, object]:
+        """JSON-safe omission diagnostic, admitted entries in declared order."""
+        return {
+            "transport": self.transport.value,
+            "allowance_bytes": self.allowance_bytes,
+            "admitted_bytes": self.admitted_bytes,
+            "admitted": [{"label": c.label, "bytes": c.size} for c in self.admitted],
+            "omitted": [
+                {"label": o.label, "bytes": o.size, "reason": o.reason} for o in self.omitted
+            ],
+        }
 
 
 def _canonical_cwd(cwd: Path) -> Path:
@@ -249,6 +298,66 @@ def sanctioned_transport_for(
     capture, mirroring how the diff is excluded when it is inlined.
     """
     return _sanctioned_transport(backend, cwd, read_only=read_only)
+
+
+def select_advisory_inputs(
+    backend: object,
+    cwd: Path,
+    candidates: Sequence[AdvisoryCandidate],
+    *,
+    read_only: bool,
+) -> AdvisorySelection:
+    """Split advisory inputs whole by the transport's real remaining allowance.
+
+    Resolves the transport once with the same resolver and canonical cwd the
+    capture path uses, then walks ``candidates`` in the order given, admitting a
+    whole candidate while its cost fits and omitting it whole otherwise. INLINE
+    costs account for the exact bytes :meth:`PreparedSanctionedInputs.render`
+    emits for that candidate, so an admitted set always renders inside the
+    shared aggregate; EXACT_PATHS reuses the capture path's per-file/aggregate
+    arithmetic. A missing or unreadable candidate is omitted as ``unavailable``;
+    transport-resolution failures propagate untouched (fail closed).
+    """
+    canonical_cwd = _canonical_cwd(cwd)
+    transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
+    inline = transport is SanctionedInputTransport.INLINE
+    allowance_bytes = (
+        SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES if inline else SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES
+    )
+    admitted: list[AdvisoryCandidate] = []
+    omitted: list[OmittedAdvisoryInput] = []
+    admitted_bytes = 0
+    aggregate = inline_section_emitted_bytes(()) if inline else 0
+    for candidate in candidates:
+        try:
+            size = candidate.path.lstat().st_size
+        except OSError:
+            omitted.append(OmittedAdvisoryInput(candidate.label, 0, "unavailable"))
+            continue
+        if inline:
+            cost = inline_section_emitted_bytes(((candidate.label, size),)) - inline_section_emitted_bytes(())
+            if aggregate + cost <= allowance_bytes:
+                admitted.append(AdvisoryCandidate(candidate.label, candidate.path, size))
+                admitted_bytes += size
+                aggregate += cost
+            else:
+                omitted.append(OmittedAdvisoryInput(candidate.label, size, "exceeds-byte-budget"))
+            continue
+        max_bytes, aggregate_limit, _ = _transport_allowance(transport, aggregate)
+        if size <= max_bytes:
+            admitted.append(AdvisoryCandidate(candidate.label, candidate.path, size))
+            admitted_bytes += size
+            aggregate += size
+        else:
+            reason = "exceeds-byte-budget" if aggregate_limit else "exceeds-file-limit"
+            omitted.append(OmittedAdvisoryInput(candidate.label, size, reason))
+    return AdvisorySelection(
+        transport=transport,
+        admitted=tuple(admitted),
+        omitted=tuple(omitted),
+        admitted_bytes=admitted_bytes,
+        allowance_bytes=allowance_bytes,
+    )
 
 
 def prepare_sanctioned_inputs(
