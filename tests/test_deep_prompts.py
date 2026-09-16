@@ -1809,7 +1809,9 @@ def test_diagram_prompts_clone_mode_truncates_oversized_diff_with_marker(tmp_pat
         _sequence_prompt(tmp_path, inline_diff=big, clone_mode=True),
         _flowchart_prompt(tmp_path, inline_diff=big, clone_mode=True),
     ):
-        assert big[:INLINE_DIFF_BUDGET_BYTES] in prompt
+        # Task 8 moved the marker inside the shared budget, so the retained
+        # diff prefix is the budget minus the banner and marker bytes.
+        assert big[: INLINE_DIFF_BUDGET_BYTES // 2] in prompt
         assert "[diff truncated to fit the prompt budget]" in prompt
         assert "diff.patch" not in prompt
 
