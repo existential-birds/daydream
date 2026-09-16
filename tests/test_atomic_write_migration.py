@@ -348,3 +348,19 @@ class TestProjectorKnobs:
         assert content_by_name["_SUCCESS"] == b"ok\n"
         for target, content, _kwargs in calls:
             assert target.read_bytes() == content
+
+
+class TestCalibrationKnobs:
+    def test_calibration_calls_the_primitive_report_first(self, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _config(_build_fixture(tmp_path), tmp_path)
+        calls = _instrument(monkeypatch, "daydream.training.calibration")
+        run_calibration(config)
+        # M8: report.md is published before calibration.json, and both go through
+        # the primitive with the same explicit knobs.
+        assert [target.name for target, _c, _k in calls] == ["report.md", "calibration.json"]
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+                   for _t, _c, kwargs in calls)
+        for target, content, _kwargs in calls:
+            assert target.read_bytes() == content
+        assert sorted(p.name for p in config.out_dir.iterdir()) == ["calibration.json", "report.md"]
