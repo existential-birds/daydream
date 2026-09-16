@@ -47,9 +47,12 @@ from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_json
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
+    AdvisoryCandidate,
     SanctionedInputTransport,
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
+    sanctioned_transport_for,
+    select_advisory_inputs,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.trajectory import (
@@ -425,32 +428,45 @@ async def _run_diagram_kind(
     diff_path: Path = deep_state.diff_path
     exploration_dir = deep_state.exploration_dir_or_none
     diagram_diff = _ttt_diff_text(ctx)
-    candidates: dict[str, Path] = {}
-    # A disposable clone can read neither host artifact; the prompt inlines the
-    # diff itself when it fits the budget.
-    if not getattr(backend, "read_only_disposable_clone", False):
-        candidates["hunk-index"] = diff_path.parent / "hunk-index.json"
-        if not diagram_diff or not fits_inline_diff_budget(diagram_diff):
-            candidates["diff"] = diff_path
+    # One resolved transport decides both what is worth capturing and how the
+    # author prompt carries it: selection and prompt shaping read this value,
+    # never the backend's clone capability flag directly.
+    transport = sanctioned_transport_for(backend, ctx.work.repo, read_only=True)
+    # Declared in semantic priority: exploration context degrades whole-artifact
+    # first, and only pointer transports can carry the host-private diff index.
+    candidates: list[AdvisoryCandidate] = []
     if isinstance(exploration_dir, Path):
-        candidates |= {
-            "exploration-summary": exploration_dir / "summary.md",
-            "exploration-affected-files": exploration_dir / "affected_files.md",
-            "exploration-dependencies": exploration_dir / "dependencies.md",
-        }
+        candidates += [
+            AdvisoryCandidate("exploration-summary", exploration_dir / "summary.md"),
+            AdvisoryCandidate("exploration-dependencies", exploration_dir / "dependencies.md"),
+            AdvisoryCandidate("exploration-affected-files", exploration_dir / "affected_files.md"),
+        ]
+    # A disposable clone can read neither host artifact; the prompt inlines the
+    # diff itself when it fits the budget, so neither is a candidate on INLINE.
+    if transport is SanctionedInputTransport.EXACT_PATHS:
+        candidates.append(AdvisoryCandidate("hunk-index", diff_path.parent / "hunk-index.json"))
+        if not diagram_diff or not fits_inline_diff_budget(diagram_diff):
+            candidates.append(AdvisoryCandidate("diff", diff_path))
+    selection = (
+        select_advisory_inputs(backend, ctx.work.repo, candidates, read_only=True)
+        if ctx.artifacts is not None
+        else None
+    )
     sanctioned_inputs = (
         prepare_sanctioned_inputs(
             backend,
             ctx.work.repo,
-            {label: path for label, path in candidates.items() if path.is_file()},
+            {
+                label: path
+                for label, path in (selection.selected_paths().items() if selection is not None else ())
+                if path.is_file()
+            },
             read_only=True,
         )
-        if ctx.artifacts is not None
+        if selection is not None
         else None
     )
-    inline_artifacts = (
-        sanctioned_inputs is not None and sanctioned_inputs.transport is SanctionedInputTransport.INLINE
-    )
+    inline_artifacts = transport is SanctionedInputTransport.INLINE
 
     async with maybe_fork(
         recorder, f"diagram-{kind}", dispatch=dispatch

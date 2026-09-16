@@ -18,6 +18,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -1497,3 +1498,96 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
         backend=_Wall(),
     )
     assert result["status"] != "failed"  # authoring completed
+
+
+# --- Issue #1214: transport-aware advisory-input budgeting -------------------
+
+
+async def _session_test_ctx(tmp_path: Path) -> Any:
+    """A FlowContext on an ACTIVE artifact session with realistic artifact sizes.
+
+    The #1123 clone tests build a FlowContext without ``artifacts``, which is why
+    the production failing branch was never exercised. This one does not.
+
+    It deliberately leaves the session open for the test's duration (the
+    ``await cm.__aenter__()`` form was verified against this repo while writing
+    the plan). A test that needs teardown should use the ``async with`` form
+    instead.
+    """
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+    from tests.harness.git_helpers import commit, init_repo
+    from tests.harness.git_helpers import git as _git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    commit(repo, "base")
+    work = WorkContext(repo=repo, source=repo, base_branch="main", base_sha="",
+                      head_branch=None, head_sha="", is_ephemeral=False, run_id="session-test")
+    owner = resolve_private_workspace_owner(
+        repo, locations=private_root_locations(base=(tmp_path / "private").resolve())
+    )
+    session = await open_artifact_session(work, session_id="diagram-advisory", owner=owner).__aenter__()
+    dd = artifact_dir_for(repo, session=session, allow_standalone=True)
+    exploration = dd / "exploration"
+    exploration.mkdir(parents=True)
+    (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
+    (exploration / "dependencies.md").write_text("d" * 4_306, encoding="utf-8")
+    (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
+    deep_dir = dd / "deep"
+    deep_dir.mkdir(parents=True, exist_ok=True)
+    diff_path = deep_dir / "diff.patch"
+    diff_path.write_text("diff --git a/a.py b/a.py\n+line\n", encoding="utf-8")
+    (deep_dir / "hunk-index.json").write_text("{}", encoding="utf-8")
+    ctx = FlowContext(
+        config=RunConfig(target=str(repo)), work=work, registry=Registry(),
+        data={"diff_path": diff_path, "diff": diff_path.read_text(encoding="utf-8"),
+              "exploration_dir": exploration, "dd": dd},
+        artifacts=session,
+    )
+    return ctx
+
+
+@pytest.mark.parametrize(
+    "backend_factory",
+    [
+        lambda repo: SimpleNamespace(read_only_disposable_clone=True, model="fake"),
+        lambda repo: SimpleNamespace(audit_root_isolation="claude-pretooluse",
+                                     audit_root=repo.resolve(), model="fake"),
+        lambda repo: SimpleNamespace(sandbox=True, model="fake"),
+    ],
+    ids=["clone-like-inline", "strict-audit-inline", "sandbox-inline"],
+)
+async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+    prompts: list[str] = []
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    result = await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=backend_factory(ctx.work.repo),
+    )
+
+    assert prompts, "the author turn must be reached — no preflight abort"
+    assert result["status"] != "failed", result.get("reason")
