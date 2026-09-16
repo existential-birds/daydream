@@ -725,3 +725,53 @@ async def test_every_ladder_ending_records_one_budget_stop(
     assert meta["circuit_state"] in {"closed", "open", "half_open"}
     assert set(meta) >= {"attempts", "backend_s", "backoff_s", "elapsed_s"}
     assert str(fake.monotonic_value) not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
+
+
+async def _expect_retryable_failure(
+    backend: _RetryableFailingBackend, tmp_path: Path, run_context: RunContext
+) -> None:
+    """Drive one invocation to its circuit-suppressed failure."""
+    with pytest.raises(_RetryableBackendError):
+        await run_agent(
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX, run_context=run_context
+        )
+
+
+async def test_concurrent_invocations_share_one_run_scoped_circuit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Failing siblings coordinate on one circuit instead of one ladder each."""
+    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    # Yield to the event loop after each injected sleep so the sibling
+    # invocations actually interleave; without the checkpoint the first task
+    # would run its whole ladder before any sibling starts.
+    inner_sleeper = anyio.sleep
+
+    async def _yielding_sleeper(delay: float) -> None:
+        await inner_sleeper(delay)
+        await anyio.lowlevel.checkpoint()
+
+    monkeypatch.setattr("daydream.agent.anyio.sleep", _yielding_sleeper)
+    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    run_context = RunContext(InteractionPolicy(interactive=False))
+    backends = [
+        _RetryableFailingBackend(advance=fake.advance, advance_s=1.0) for _ in range(3)
+    ]
+
+    async with anyio.create_task_group() as tg:
+        for backend in backends:
+            tg.start_soon(_expect_retryable_failure, backend, tmp_path, run_context)
+
+    assert sum(b.calls for b in backends) <= 3 + 1  # threshold + the one probe
+    assert len(slept) <= 3
+    assert run_context.outage_circuit.state(fake.monotonic_value) in {"open", "half_open"}
+
+
+async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
+    assert (
+        RunContext(InteractionPolicy(interactive=False)).outage_circuit.state(0.0)
+        == "closed"
+    )

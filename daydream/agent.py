@@ -45,6 +45,7 @@ from daydream.config import BUDGET_CLEANUP_GRACE_S, DEFAULT_RETRY_RECOVERY_ALLOW
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
+from daydream.outage_circuit import CIRCUIT_CLOSED
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.retry_policy import (
     FailureClass,
@@ -1244,10 +1245,11 @@ async def _run_agent(
                         # raises the current failure with its retryable
                         # attribute intact.
                         circuit_now = clock.monotonic()
-                        if not run_context.outage_circuit.admit_retry(circuit_now).allowed:
+                        admission = run_context.outage_circuit.admit_retry(circuit_now)
+                        opened_here = run_context.outage_circuit.record_failure(circuit_now)
+                        if not admission.allowed:
                             _emit_ladder_stop("circuit_open")
                             raise
-                        run_context.outage_circuit.record_failure(circuit_now)
                         # Bound the backoff by the smaller of the exponential
                         # growth, the configured maximum, the remaining allowance
                         # and the time the effective deadline has left: a retry
@@ -1310,6 +1312,21 @@ async def _run_agent(
                         recovery.charge(delay)
                         await anyio.sleep(delay)
                         backoff_s += delay
+                        # Re-check the circuit at the pre-dispatch decision point:
+                        # a sibling that failed while this backoff was sleeping may
+                        # have opened it, so a closed admission is not a licence to
+                        # dispatch. A half-open probe was already granted a moment
+                        # ago and must not be re-consumed, and the invocation that
+                        # itself tripped the breaker keeps its one in-flight retry.
+                        if (
+                            not opened_here
+                            and admission.state == CIRCUIT_CLOSED
+                            and not run_context.outage_circuit.admit_retry(
+                                clock.monotonic()
+                            ).allowed
+                        ):
+                            _emit_ladder_stop("circuit_open")
+                            raise
                         continue
                     if classification.retries_allowed and exception_max_retries > 0:
                         _emit_ladder_stop("retry_attempts_exhausted")

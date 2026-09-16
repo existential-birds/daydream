@@ -49,8 +49,13 @@ class OutageCircuit:
         self._opened_at: float | None = None
         self._probe_outstanding = False
 
-    def record_failure(self, now: float) -> None:
-        """Count one consecutive retryable failure, opening at the threshold."""
+    def record_failure(self, now: float) -> bool:
+        """Count one consecutive retryable failure, opening at the threshold.
+
+        Returns ``True`` when this failure is what opened (or re-opened) the
+        circuit, so the caller knows its own retry was admitted before the trip
+        and can let that one in-flight retry finish.
+        """
         with self._lock:
             self._consecutive_failures += 1
             if self._state == CIRCUIT_HALF_OPEN:
@@ -58,12 +63,15 @@ class OutageCircuit:
                 self._state = CIRCUIT_OPEN
                 self._opened_at = now
                 self._probe_outstanding = False
-            elif self._state == CIRCUIT_CLOSED and (
+                return True
+            if self._state == CIRCUIT_CLOSED and (
                 self._consecutive_failures >= self._failure_threshold
             ):
                 self._state = CIRCUIT_OPEN
                 self._opened_at = now
                 self._probe_outstanding = False
+                return True
+            return False
 
     def record_success(self) -> None:
         """Close the circuit and clear the consecutive-failure count."""
