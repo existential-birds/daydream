@@ -1070,6 +1070,7 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
         "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
+        "advisory": None,
     }
     assert results["sequence"]["status"] == "rendered"
     assert results["sequence"]["reason"] is None
@@ -1117,6 +1118,7 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
             "grounding": None,
             "omit_reasons": [],
             "mermaid": None,
+            "advisory": None,
         }
         for kind in ("sequence", "flowchart")
     }
@@ -1619,3 +1621,32 @@ async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
     assert prompts, "an EXACT_PATHS run must reach the author turn with the diff omitted, not aborted"
     assert [item["label"] for item in result["advisory"]["omitted"]] == ["diff"]
     assert result["advisory"]["transport"] == "exact_paths"
+
+
+async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep import diagram_steps as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
+
+    ctx = await _session_test_ctx(tmp_path)
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    result = await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None,
+        backend=SimpleNamespace(read_only_disposable_clone=True, model="fake"),
+    )
+
+    assert result["status"] != "failed"
+    assert result["advisory"]["transport"] == "inline"
+    assert result["advisory"]["allowance_bytes"] == 12_288
+    assert result["advisory"]["admitted_bytes"] == 4_920
+    assert [item["label"] for item in result["advisory"]["admitted"]] == [
+        "exploration-summary", "exploration-dependencies"
+    ]
+    assert [item["label"] for item in result["advisory"]["omitted"]] == ["exploration-affected-files"]
+    assert result["advisory"]["omitted"][0]["bytes"] == 23_684

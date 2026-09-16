@@ -153,12 +153,16 @@ def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
 # not confirm is never drawn.
 
 
-def _diagram_result(status: str, reason: str | None) -> DiagramResult:
+def _diagram_result(
+    status: str, reason: str | None, *, advisory: dict[str, Any] | None = None
+) -> DiagramResult:
     """A no-spec result for a kind that never produced one.
 
     ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
     this shape: no spec, no grounding, no mermaid, and a reason the omission
-    notice and ``diagram.json`` can both render.
+    notice and ``diagram.json`` can both render. ``advisory`` is the kind's
+    resolved input-omission diagnostic (or ``None`` when no capture ran), so a
+    budget/authoring failure keeps both facts.
     """
     return {
         "status": status,
@@ -168,6 +172,7 @@ def _diagram_result(status: str, reason: str | None) -> DiagramResult:
         "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
+        "advisory": advisory,
     }
 
 
@@ -484,12 +489,13 @@ async def _run_diagram_kind(
             run_context=ctx.run_context,
         )
     read_paths |= _diagram_read_paths(getattr(fork, "path", None))
+    advisory = selection.to_dict() if selection is not None else None
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
-        return _diagram_result("failed", f"budget exhausted: {budget_reason}")
+        return _diagram_result("failed", f"budget exhausted: {budget_reason}", advisory=advisory)
     if not isinstance(structured, dict):
-        return _diagram_result("failed", "no structured output produced")
+        return _diagram_result("failed", "no structured output produced", advisory=advisory)
 
     spec = coerce(structured)
     report = _ground(spec, read_paths)
@@ -561,7 +567,7 @@ async def _run_diagram_kind(
         },
         "omit_reasons": omit_reasons,
         "mermaid": mermaid,
-        "advisory": selection.to_dict() if selection is not None else None,
+        "advisory": advisory,
     }
 
 
