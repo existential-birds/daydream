@@ -49,6 +49,7 @@ from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
     AdvisoryCandidate,
     SanctionedInputTransport,
+    SanctionedInputUnavailable,
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
     sanctioned_transport_for,
@@ -506,24 +507,39 @@ async def _run_diagram_kind(
     prompt = _diagram_author_prompt(ctx, kind, eligibility, backend, inline_transport=transport)
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
+    advisory = selection.to_dict() if selection is not None else None
 
-    async with maybe_fork(
-        recorder, f"diagram-{kind}", dispatch=dispatch
-    ) as fork:
-        structured, continuation, budget_reason = await run_agent(
-            backend,
-            ctx.work.repo,
-            prompt,
-            phase=DaydreamPhase.DIAGRAM,
-            output_schema=schema,
-            read_only=True,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            sanctioned_inputs=sanctioned_inputs,
-            run_context=ctx.run_context,
+    try:
+        async with maybe_fork(
+            recorder, f"diagram-{kind}", dispatch=dispatch
+        ) as fork:
+            structured, continuation, budget_reason = await run_agent(
+                backend,
+                ctx.work.repo,
+                prompt,
+                phase=DaydreamPhase.DIAGRAM,
+                output_schema=schema,
+                read_only=True,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                sanctioned_inputs=sanctioned_inputs,
+                run_context=ctx.run_context,
+            )
+    except SanctionedInputUnavailable:
+        # A capture/revalidation failure is not an authoring outcome: it must
+        # reach the caller's failure path unchanged, without being relabelled
+        # as an advisory degradation.
+        raise
+    except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
+        # Only a real omission is worth carrying on a failure: a kind whose
+        # advisory inputs all fit has nothing to report beyond its reason, and
+        # ``None`` is the documented "no omission diagnostic" value.
+        return _diagram_result(
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            advisory=advisory if advisory and advisory["omitted"] else None,
         )
     read_paths |= _diagram_read_paths(getattr(fork, "path", None))
-    advisory = selection.to_dict() if selection is not None else None
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
