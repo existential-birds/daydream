@@ -802,6 +802,16 @@ def _assembled(
     return assembled
 
 
+def _render_assembled_plan(assembled: dict[str, Any], head_sha: str) -> str:
+    return render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=head_sha,
+        planned_on=date(2024, 1, 1),
+        number=1,
+    )
+
+
 def _selection(
     repo: Path,
     *,
@@ -3016,13 +3026,7 @@ def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(
     assert quoted[0]["verbatim_excerpt"] == (
         "def test_placeholder():\n    assert True"
     )
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert (
         f"git add apps/catalog/api.py tests/test_catalog.py {collision}"
         in rendered
@@ -3136,13 +3140,7 @@ def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_s
         relocated,
         "README.md",
     }
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     for path in drift["related_paths"]:
         assert f"- `{path}:1-" in rendered
     assert "# Catalog service" in rendered
@@ -3187,13 +3185,7 @@ def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(
     ]
     assert quoted[0]["line_anchor"] == {"start_line": 1, "end_line": 1}
     assert quoted[0]["verbatim_excerpt"] == "# Catalog service"
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert (
         "git add apps/catalog/api.py tests/test_catalog.py README.md"
         in rendered
@@ -3244,13 +3236,7 @@ def test_undeclared_test_case_path_is_declared_new_when_absent_from_disk(
         "apps/catalog/api.py",
         "tests/test_catalog.py",
     ]
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert (
         f"git add apps/catalog/api.py tests/test_catalog.py {unlisted}"
         in rendered
@@ -3300,13 +3286,7 @@ def test_step_gate_scope_mismatch_falls_back_to_the_repository_wide_command(
 
     assembled = _assembled(repo, plan, commands=commands)
 
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     step_section = rendered.partition("### Step 1:")[2].partition("## Test plan")[0]
     assert "**Command**: `uv run pytest`" in step_section
     assert "uv run pytest apps/catalog" not in step_section
@@ -3338,13 +3318,7 @@ def test_command_scope_mismatch_without_a_repo_wide_command_renders_a_caveat(
 
     assembled = _assembled(repo, plan, commands=commands)
 
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "**Command**: `uv run pytest apps/billing`" in rendered
     assert (
         "**Why this gate**: Scope caveat from the host: this command's "
@@ -3378,13 +3352,7 @@ def test_scope_mismatched_ref_with_appended_args_keeps_its_command(
 
     assembled = _assembled(repo, plan, commands=commands)
 
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "**Command**: `uv run pytest apps/catalog -k batches`" in rendered
     assert (
         "**Why this gate**: Runs the focused catalog regression. Scope caveat "
@@ -3455,13 +3423,7 @@ def test_existing_coverage_mode_keeps_test_evidence_read_only(
     assert assembled["done_criteria"][-2]["description"] == (
         "The cited existing coverage passes: test_list_catalog_returns_items."
     )
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "**Mode**: `existing-coverage`" in rendered
     assert "### Existing coverage" in rendered
     assert "`tests/test_catalog.py::test_list_catalog_returns_items`" in rendered
@@ -3489,13 +3451,7 @@ def test_existing_coverage_command_is_scoped_to_read_only_test_evidence(
     assert [entry["path"] for entry in assembled["scope"]["existing_paths"]] == ["apps/catalog/api.py"]
     coverage = assembled["test_plan"]["existing_coverage"][0]
     assert coverage["verification"]["command"] == ("uv run pytest tests/test_catalog.py")
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "`uv run pytest tests/test_catalog.py`" in rendered
     assert "Retargeted by the host" not in rendered.partition("### Existing coverage")[2]
 
@@ -3617,13 +3573,7 @@ def test_deletion_only_plan_can_omit_test_code_when_non_behavioral(
     assembled = _assembled(repo, plan)
 
     assert all(criterion["kind"] != "test-gate" for criterion in assembled["done_criteria"])
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "**Mode**: `not-applicable`" in rendered
     assert "No test-code change is required" in rendered
     assert "(delete):" in rendered
@@ -3800,13 +3750,7 @@ def test_plan_must_cover_every_expected_aggregate_fingerprint(
         "fp-repeated-tests",
     }
     assert "Order is not significant" in PLAN_AUTHOR_SCHEMA["properties"]["covered_fingerprints"]["description"]
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "**Covered finding fingerprints**: `fp-fix-n-plus-one`, `fp-repeated-tests`" in rendered
 
 
@@ -3882,13 +3826,7 @@ def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(
         "The plan's intended outcome holds: list_catalog batches item "
         "loading while preserving results."
     )
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert (
         "- [ ] **done-1 (behavior)**: The plan's intended outcome holds: "
         "list_catalog batches item loading while preserving results."
@@ -3906,13 +3844,7 @@ def test_assemble_drops_out_of_range_stop_step_numbers_instead_of_blocking(
 
     false_assumption = assembled["stop_conditions"][3]
     assert false_assumption["related_step_ids"] == ["step-1"]
-    rendered = render_plan(
-        _finding(),
-        plan=assembled,
-        planned_at=head_sha,
-        planned_on=date(2024, 1, 1),
-        number=1,
-    )
+    rendered = _render_assembled_plan(assembled, head_sha)
     assert "step-7" not in rendered
 
 

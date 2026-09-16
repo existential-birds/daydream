@@ -317,30 +317,22 @@ async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
 INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ended]"
 
 
-async def test_finish_marks_in_flight_tool_on_open_step(tmp_path: Path) -> None:
-    """A tool call still in flight when the invocation ends gets a marker observation."""
-    inv, steps = await _record_events(
-        tmp_path,
-        ToolStartEvent(id="d1", name="shell", input={"command": "sleep 999"}),
-        ResultEvent(structured_output=None, continuation=None),
-    )
+@pytest.mark.parametrize("host_closed", [False, True], ids=["open-step", "closed-step"])
+async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host_closed: bool) -> None:
+    """Open and closed host steps both receive an incomplete-call marker."""
+    events: list[AgentEvent] = [
+        ToolStartEvent(
+            id="d2" if host_closed else "d1",
+            name="shell",
+            input={} if host_closed else {"command": "sleep 999"},
+        )
+    ]
+    if host_closed:
+        events.append(TurnEndEvent(message_id="m1"))
+    events.append(ResultEvent(structured_output=None, continuation=None))
+    _, steps = await _record_events(tmp_path, *events)
     result = _single_observation_result(steps, 0)
-    # No source_call_id: a marker must never derive as a completed tool call
-    # (deep/coverage._completed_read_paths keys on results' source_call_id).
-    assert result.source_call_id is None
-    assert result.content == INCOMPLETE_CONTENT
-    assert result.extra == {"is_error": True, "status": "interrupted"}
-
-
-async def test_finish_marks_in_flight_tool_on_closed_step(tmp_path: Path) -> None:
-    """An in-flight call whose host step closed still gets its marker, amended onto it."""
-    inv, steps = await _record_events(
-        tmp_path,
-        ToolStartEvent(id="d2", name="shell", input={}),
-        TurnEndEvent(message_id="m1"),
-        ResultEvent(structured_output=None, continuation=None),
-    )
-    result = _single_observation_result(steps, 0)
+    # A marker without source_call_id cannot derive as a completed read.
     assert result.source_call_id is None
     assert result.content == INCOMPLETE_CONTENT
     assert result.extra == {"is_error": True, "status": "interrupted"}
@@ -626,11 +618,10 @@ async def test_context_var_set_inside_and_cleared_after(tmp_path: Path) -> None:
     assert get_current_recorder() is None
 
 
-# Recorder-level Behavior F (CORE-08): Trajectory.agent identity baked in
+# Root ATIF v1.7 identity and one real assistant turn share the same recording path.
 
 
-async def test_trajectory_agent_identity_is_daydream(tmp_path: Path) -> None:
-    """Behavior F (CORE-08): agent.name='daydream', version non-empty, model_name passed-in."""
+async def test_root_trajectory_identity_and_agent_step_contract(tmp_path: Path) -> None:
     traj = await _drive(
         tmp_path,
         TextEvent(text="hi"),
@@ -639,33 +630,10 @@ async def test_trajectory_agent_identity_is_daydream(tmp_path: Path) -> None:
     assert traj["agent"]["name"] == "daydream"
     assert isinstance(traj["agent"]["version"], str) and traj["agent"]["version"]
     assert traj["agent"]["model_name"] == "opus"
-
-
-# Bonus: schema_version + session_id present and well-formed
-
-
-async def test_schema_version_and_session_id_present(tmp_path: Path) -> None:
-    """schema_version pinned to ATIF-v1.7; session_id and trajectory_id present."""
-    traj = await _drive(
-        tmp_path,
-        TextEvent(text="hi"),
-        ResultEvent(structured_output=None, continuation=None),
-    )
     assert traj["schema_version"] == "ATIF-v1.7"
-    assert isinstance(traj["session_id"], str)
-    assert len(traj["session_id"]) > 0
-    # v1.7: root trajectory carries a per-document trajectory_id. With no fork
-    # descriptor it equals the run-scoped session_id.
+    assert isinstance(traj["session_id"], str) and traj["session_id"]
+    # The root's per-document identity equals its run-scoped session ID.
     assert traj["trajectory_id"] == traj["session_id"]
-
-
-async def test_agent_step_carries_llm_call_count_one(tmp_path: Path) -> None:
-    """v1.7: a real assistant turn records llm_call_count == 1."""
-    traj = await _drive(
-        tmp_path,
-        TextEvent(text="Hello world"),
-        ResultEvent(structured_output=None, continuation=None),
-    )
     agent_steps = _agent_steps(traj)
     assert len(agent_steps) == 1
     assert agent_steps[0]["llm_call_count"] == 1

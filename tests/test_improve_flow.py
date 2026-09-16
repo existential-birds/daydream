@@ -380,50 +380,14 @@ class _AuditGitBoundaryBackend(ImproveStubBackend):
             yield event
 
 
-class _StagedDirectoryToFileBackend(ImproveStubBackend):
-    """Observe a staged path-type replacement in the real audit snapshot."""
+class _DirectoryToFileBackend(ImproveStubBackend):
+    """Observe staged and unstaged path replacements in real audit snapshots."""
 
-    def __init__(self, target: Path) -> None:
+    def __init__(self, target: Path, *, staged: bool) -> None:
         super().__init__(target, n_findings=0)
+        self.staged = staged
         self.audit_paths: list[Path] = []
         self.replacement_bytes: bytes | None = None
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
-        if cwd not in self.audit_paths:
-            self.audit_paths.append(cwd)
-        if self.replacement_bytes is None:
-            replacement = cwd / "x"
-            assert replacement.is_file()
-            self.replacement_bytes = replacement.read_bytes()
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
-            yield event
-
-
-class _UnstagedDirectoryToFileBackend(ImproveStubBackend):
-    """Observe an excluded untracked replacement without stale descendants."""
-
-    def __init__(self, target: Path) -> None:
-        super().__init__(target, n_findings=0)
-        self.audit_paths: list[Path] = []
         self.observed_status: str | None = None
 
     async def execute(
@@ -439,7 +403,11 @@ class _UnstagedDirectoryToFileBackend(ImproveStubBackend):
     ) -> AsyncIterator[AgentEvent]:
         if cwd not in self.audit_paths:
             self.audit_paths.append(cwd)
-        if self.observed_status is None:
+        if self.staged and self.replacement_bytes is None:
+            replacement = cwd / "x"
+            assert replacement.is_file()
+            self.replacement_bytes = replacement.read_bytes()
+        elif not self.staged and self.observed_status is None:
             assert not (cwd / "x").is_file()
             assert not (cwd / "x" / "child.txt").exists()
             self.observed_status = git(cwd, "status", "--short")
@@ -528,76 +496,48 @@ def _make_unborn_improve_repo(tmp_path: Path) -> Path:
 
 
 @pytest.mark.anyio
-async def test_full_improve_snapshots_staged_directory_to_file_change(
+@pytest.mark.parametrize("staged", [True, False], ids=["staged", "unstaged"])
+async def test_full_improve_snapshots_directory_to_file_change(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
+    staged: bool,
 ) -> None:
     repo = improve_monorepo_target
     nested = repo / "x"
     nested.mkdir()
-    (nested / "old.py").write_text("OLD = True\n", encoding="utf-8")
-    git(repo, "add", "x")
+    child = "old.py" if staged else "child.txt"
+    nested.joinpath(child).write_text("old child\n", encoding="utf-8")
+    git(repo, "add", f"x/{child}")
     commit(repo, "add tracked directory")
-    nested.joinpath("old.py").unlink()
+    nested.joinpath(child).unlink()
     nested.rmdir()
-    nested.write_bytes(b"replacement file\x00\xff")
-    git(repo, "add", "-A")
+    payload = b"replacement file\x00\xff" if staged else b"untracked replacement\x00\xff"
+    nested.write_bytes(payload)
+    if staged:
+        git(repo, "add", "-A")
     before_head = head_sha(repo)
     before_status = _git_status_porcelain(repo)
     before_patch = git_ops.staged_patch(repo)
     before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
     backend = install_capable_improve_backend(
-        monkeypatch, _StagedDirectoryToFileBackend(repo),
+        monkeypatch, _DirectoryToFileBackend(repo, staged=staged),
     )
 
     code = await run(make_config(repo, flow_name="improve"))
 
     assert code == 0
-    assert backend.replacement_bytes == b"replacement file\x00\xff"
+    if staged:
+        assert backend.replacement_bytes == payload
+    else:
+        assert backend.observed_status == "D x/child.txt"
     assert backend.audit_paths
     assert all(not path.exists() for path in backend.audit_paths)
     assert head_sha(repo) == before_head
     assert _git_status_porcelain(repo) == before_status
     assert git_ops.staged_patch(repo) == before_patch
     assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
-    assert (repo / "x").read_bytes() == b"replacement file\x00\xff"
-
-
-@pytest.mark.anyio
-async def test_full_improve_excludes_untracked_replacement_without_stale_child(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-) -> None:
-    repo = improve_monorepo_target
-    nested = repo / "x"
-    nested.mkdir()
-    (nested / "child.txt").write_text("old child\n", encoding="utf-8")
-    git(repo, "add", "x/child.txt")
-    commit(repo, "add tracked directory")
-    nested.joinpath("child.txt").unlink()
-    nested.rmdir()
-    nested.write_bytes(b"untracked replacement\x00\xff")
-    before_head = head_sha(repo)
-    before_status = _git_status_porcelain(repo)
-    before_patch = git_ops.staged_patch(repo)
-    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
-    backend = install_capable_improve_backend(
-        monkeypatch, _UnstagedDirectoryToFileBackend(repo),
-    )
-
-    code = await run(make_config(repo, flow_name="improve"))
-
-    assert code == 0
-    assert backend.observed_status == "D x/child.txt"
-    assert backend.audit_paths
-    assert all(not path.exists() for path in backend.audit_paths)
-    assert head_sha(repo) == before_head
-    assert _git_status_porcelain(repo) == before_status
-    assert git_ops.staged_patch(repo) == before_patch
-    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
-    assert (repo / "x").read_bytes() == b"untracked replacement\x00\xff"
+    assert (repo / "x").read_bytes() == payload
 
 
 @pytest.mark.anyio

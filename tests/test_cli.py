@@ -124,27 +124,23 @@ def test_run_config_flow_name_settable() -> None:
     assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
 
 
-def test_file_scope_issues_flag_reaches_runconfig(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = _cfg(monkeypatch, ["--file-scope-issues", "/tmp/project"])
-    assert cfg.scope_issue_filing is True
-
-
-def test_file_scope_issues_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = _cfg(monkeypatch, ["/tmp/project"])
-    assert cfg.scope_issue_filing is False
-
-
 def test_runconfig_scope_issue_filing_defaults_false() -> None:
     assert RunConfig(target="/t").scope_issue_filing is False
 
 
-def test_flow_flag_sets_flow_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = _cfg(monkeypatch, ["--flow", "ro-audit", "/tmp/project"])
-    assert cfg.flow_name == "ro-audit"
-
-
-def test_flow_default_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _cfg(monkeypatch, ["/tmp/project"]).flow_name is None
+@pytest.mark.parametrize(
+    ("argv", "field", "expected"),
+    [
+        pytest.param(["--file-scope-issues"], "scope_issue_filing", True, id="file-scope-issues"),
+        pytest.param([], "scope_issue_filing", False, id="file-scope-default"),
+        pytest.param(["--flow", "ro-audit"], "flow_name", "ro-audit", id="flow"),
+        pytest.param([], "flow_name", None, id="flow-default"),
+    ],
+)
+def test_runconfig_flag_values(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], field: str, expected: Any
+) -> None:
+    assert getattr(_cfg(monkeypatch, [*argv, "/tmp/project"]), field) == expected
 
 
 @pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
@@ -374,28 +370,20 @@ def test_pr_number_flag_populates_config(monkeypatch: pytest.MonkeyPatch) -> Non
     assert config.pr_number == 42
 
 
-def test_parse_args_worktree_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--worktree", "/tmp/repo"])
-    config = _parse_args()
-    assert config.force_worktree is True
-
-
-def test_parse_args_shallow_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--shallow", "/tmp/repo"])
-    config = _parse_args()
-    assert config.shallow is True
-
-
-def test_parse_args_non_interactive_sets_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--non-interactive", "/some/target"])
-    config = _parse_args()
-    assert config.non_interactive is True
-
-
-def test_parse_args_non_interactive_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/some/target"])
-    config = _parse_args()
-    assert config.non_interactive is False
+@pytest.mark.parametrize(
+    ("flag", "field", "expected"),
+    [
+        pytest.param("--worktree", "force_worktree", True, id="worktree"),
+        pytest.param("--shallow", "shallow", True, id="shallow"),
+        pytest.param("--non-interactive", "non_interactive", True, id="non-interactive"),
+        pytest.param(None, "non_interactive", False, id="non-interactive-default"),
+    ],
+)
+def test_parse_args_boolean_modifiers(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None, field: str, expected: bool
+) -> None:
+    argv = [flag] if flag is not None else []
+    assert getattr(_cfg(monkeypatch, [*argv, "/tmp/repo"]), field) is expected
 
 
 def test_parse_args_copy_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:
