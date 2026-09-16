@@ -284,3 +284,44 @@ class TestCanonicalKnobs:
         assert sorted(p.name for p in mat.iterdir()) == sorted(
             ["annotations.jsonl", "sessions.jsonl", "preview-manifest.json"]
         )
+
+
+class TestFinalBundleKnobs:
+    def test_final_bundle_routes_all_seven_files_through_the_primitive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+        calls = _instrument(monkeypatch, "daydream.training.adjudication.final_bundle")
+        out = tmp_path / "final-bundle"
+        build_final_bundle(
+            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
+        )
+        assert {target.name for target, _c, _k in calls} == {
+            "annotations.jsonl",
+            "sessions.jsonl",
+            "preview-manifest.json",
+            "policy-binding.json",
+            "label-observations.jsonl",
+            "coverage-report.json",
+            "lineage.json",
+        }
+        assert all(
+            kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+            for _t, _c, kwargs in calls
+        )
+        for target, content, _kwargs in calls:
+            assert target.read_bytes() == content
+
+    def test_final_bundle_failure_leaves_no_stray_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+        out = tmp_path / "final-bundle"
+        _fail_all_renames(monkeypatch)
+        with pytest.raises(OSError, match="No space left"):
+            build_final_bundle(
+                index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
+            )
+        assert list(out.iterdir()) == []
