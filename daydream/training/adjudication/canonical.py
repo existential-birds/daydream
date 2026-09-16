@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.index import append_label_observation
+from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.materialize import (
     _CONFLICTED_DISPOSITION,
     _SESSIONS_OUT_FILENAME,
@@ -363,12 +364,13 @@ def run_canonical_harvest(
         return record
 
     records_path = materialize_dir / _ANNOTATIONS_FILENAME
-    tmp_path = records_path.with_name(records_path.name + ".tmp")
-    tmp_path.write_text(
-        "".join(_canonical(_annotation_row(record)) + "\n" for record in merged_records),
-        encoding="utf-8",
+    atomic_write_bytes(
+        records_path,
+        "".join(_canonical(_annotation_row(record)) + "\n" for record in merged_records).encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=0o644,
     )
-    tmp_path.replace(records_path)
 
     return {
         "appended_sessions": appended_sessions,

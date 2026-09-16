@@ -258,3 +258,29 @@ class TestMaterializeKnobs:
         out = tmp_path / "mat"
         run_materialize(_index(tmp_path), out, pin=_PIN, dry_run=True)
         assert not out.exists()
+
+
+class TestCanonicalKnobs:
+    def test_canonical_harvest_calls_the_primitive(self, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+        calls = _instrument(monkeypatch, "daydream.training.adjudication.canonical")
+        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+        [(target, content, kwargs)] = calls
+        assert target == mat / "annotations.jsonl"
+        assert content == target.read_bytes()
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+        assert list(mat.glob("*.tmp")) == []
+
+    def test_canonical_failure_leaves_no_stray_temp(self, tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+        before = (mat / "annotations.jsonl").read_bytes()
+        _fail_all_renames(monkeypatch)
+        with pytest.raises(OSError, match="No space left"):
+            run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+        assert (mat / "annotations.jsonl").read_bytes() == before
+        assert sorted(p.name for p in mat.iterdir()) == sorted(
+            ["annotations.jsonl", "sessions.jsonl", "preview-manifest.json"]
+        )
