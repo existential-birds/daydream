@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from daydream.output_schema import strict_object
 from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
@@ -34,92 +35,57 @@ if TYPE_CHECKING:
 
 
 # JSON Schemas (mirror style of FEEDBACK_SCHEMA in daydream/phases.py)
-PATTERN_SCANNER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "conventions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "source": {"type": "string"},
-                },
-                "required": ["name", "description", "source"],
-                "additionalProperties": False,
-            },
-        },
-        "guidelines": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
+PATTERN_SCANNER_SCHEMA: dict[str, Any] = strict_object({
+    "conventions": {
+        "type": "array",
+        "items": strict_object({
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "source": {"type": "string"},
+        }),
     },
-    "required": ["conventions", "guidelines"],
-    "additionalProperties": False,
-}
+    "guidelines": {
+        "type": "array",
+        "items": {"type": "string"},
+    },
+})
 
-DEPENDENCY_TRACER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "affected_files": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "role": {
-                        "type": "string",
-                        "enum": ["modified", "imported_by", "imports", "test"],
-                    },
-                    "summary": {"type": "string"},
-                },
-                "required": ["path", "role", "summary"],
-                "additionalProperties": False,
+DEPENDENCY_TRACER_SCHEMA: dict[str, Any] = strict_object({
+    "affected_files": {
+        "type": "array",
+        "items": strict_object({
+            "path": {"type": "string"},
+            "role": {
+                "type": "string",
+                "enum": ["modified", "imported_by", "imports", "test"],
             },
-        },
-        "dependencies": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "source": {"type": "string"},
-                    "target": {"type": "string"},
-                    "relationship": {
-                        "type": "string",
-                        "enum": ["imports", "calls", "extends", "tests"],
-                    },
-                },
-                "required": ["source", "target", "relationship"],
-                "additionalProperties": False,
-            },
-        },
+            "summary": {"type": "string"},
+        }),
     },
-    "required": ["affected_files", "dependencies"],
-    "additionalProperties": False,
-}
+    "dependencies": {
+        "type": "array",
+        "items": strict_object({
+            "source": {"type": "string"},
+            "target": {"type": "string"},
+            "relationship": {
+                "type": "string",
+                "enum": ["imports", "calls", "extends", "tests"],
+            },
+        }),
+    },
+})
 
-TEST_MAPPER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "affected_files": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "role": {"type": "string", "enum": ["test"]},
-                    "summary": {"type": "string"},
-                    "source_file": {"type": "string"},
-                },
-                "required": ["path", "role", "summary", "source_file"],
-                "additionalProperties": False,
-            },
-        },
+TEST_MAPPER_SCHEMA: dict[str, Any] = strict_object({
+    "affected_files": {
+        "type": "array",
+        "items": strict_object({
+            "path": {"type": "string"},
+            "role": {"type": "string", "enum": ["test"]},
+            "summary": {"type": "string"},
+            "source_file": {"type": "string"},
+        }),
     },
-    "required": ["affected_files"],
-    "additionalProperties": False,
-}
+})
 
 
 def _schema_block(schema: dict[str, Any]) -> str:

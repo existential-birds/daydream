@@ -250,6 +250,7 @@ def _manifest_write_snapshot(
     session_id: str = "abcd1234-0000-0000-0000-000000000000",
     final_metrics: Mapping[str, Any] | None = None,
     extra: Mapping[str, Any] | None = None,
+    path: Path = Path("/frozen/trajectory.json"),
 ) -> RunWriteSnapshot:
     """Build explicit immutable root bytes for manifest-reducer tests."""
     snapshot_extra = dict(extra or {})
@@ -267,7 +268,7 @@ def _manifest_write_snapshot(
         documents=(
             TrajectoryDocumentSnapshot(
                 trajectory_id=session_id,
-                path=Path("/frozen/trajectory.json"),
+                path=path,
                 json_bytes=json.dumps(payload).encode(),
             ),
         ),
@@ -907,34 +908,58 @@ def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
     assert ordered == ["s-q2", "s-q1", "s-q3"]
 
 
-def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path) -> None:
-    """A pre-existing index.db without erosion/verbosity gains them via ALTER-ADD.
+@pytest.mark.parametrize(
+    ("fields", "old_version"),
+    [
+        pytest.param({"erosion": 0.42, "verbosity": 0.08}, 0, id="erosion-verbosity"),
+        pytest.param({"location_in_hunk_rate": 0.25, "shipped_duplicate_pairs": 4}, 7, id="location-duplication"),
+        pytest.param(
+            {"per_stack_review_backend": "codex", "per_stack_review_model": "gpt-psr"}, 0, id="review-identity",
+        ),
+        pytest.param({"fix_quality_gate": {"enabled": True, "rounds": []}}, 0, id="fix-quality-gate"),
+        pytest.param({"recommended_patch_capture": "pre_test"}, 0, id="recommended-patch"),
+    ],
+)
+def test_runs_columns_migrate_existing_db(
+    tmp_path: Path, fields: dict[str, Any], old_version: int,
+) -> None:
+    """Each additive migration preserves legacy rows and accepts new values."""
+    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
 
-    Mirrors the source_path/composite_reward additive migration: a legacy runs
-    table (no erosion/verbosity columns) must keep its rows and gain the
-    columns on the next production write, never dropping or rewriting data.
-    """
-    from daydream.archive.index import _CREATE_TABLE
-
-    legacy_ddl = _CREATE_TABLE.replace("    erosion REAL,\n    verbosity REAL,\n", "")
-    assert "erosion" not in legacy_ddl
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    conn.execute(legacy_ddl)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        ("legacy-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-run")),
+    legacy_ddl = "\n".join(
+        line for line in _CREATE_TABLE.splitlines()
+        if not any(line.strip().startswith(f"{field} ") for field in fields)
     )
-    conn.commit()
-    conn.close()
+    assert all(field not in legacy_ddl for field in fields)
+    conn = sqlite3.connect(tmp_path / "index.db")
+    try:
+        conn.execute(legacy_ddl)
+        conn.execute(
+            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+            ("legacy-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-run")),
+        )
+        if old_version == 7:
+            conn.execute("UPDATE runs SET erosion = 0.5")
+        conn.execute(f"PRAGMA user_version = {old_version}")
+        conn.commit()
 
-    # The production write path must ALTER-ADD the columns non-destructively.
-    upsert_run(tmp_path, make_manifest(session_id="s-mig-q", erosion=0.42, verbosity=0.08))
+        upsert_run(tmp_path, make_manifest(session_id="new-run", **fields))
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+        assert fields.keys() <= columns
+        if old_version == 7:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+    finally:
+        conn.close()
 
     legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-run",))[0]
-    assert legacy["erosion"] is None  # pre-existing row preserved, columns nullable
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-q",))[0]
-    assert row["erosion"] == pytest.approx(0.42)
-    assert row["verbosity"] == pytest.approx(0.08)
+    assert all(legacy[field] is None for field in fields)
+    if old_version == 7:
+        assert legacy["erosion"] == pytest.approx(0.5)
+    row = query_runs(tmp_path, where="session_id = ?", params=("new-run",))[0]
+    for field, expected in fields.items():
+        actual = json.loads(row[field]) if isinstance(expected, dict) else row[field]
+        assert actual == (pytest.approx(expected) if isinstance(expected, float) else expected)
 
 
 def test_build_manifest_projects_location_and_duplication_metrics(
@@ -1058,64 +1083,6 @@ def test_upsert_run_persists_location_and_duplication_metrics(tmp_path: Path) ->
     assert row["shipped_duplicate_pairs"] == 3
 
 
-def test_runs_location_duplication_columns_migrate_existing_db(tmp_path: Path) -> None:
-    """#1106: a real pre-existing v7 index.db gains both columns via ALTER-ADD.
-
-    Mirrors the erosion/verbosity additive migration: the legacy runs table (v7
-    DDL minus the two new columns, PRAGMA user_version = 7) keeps its rows and
-    gains the columns on the next production write, never dropping or
-    rewriting data.
-    """
-    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
-
-    legacy_ddl = _CREATE_TABLE.replace(
-        "    location_in_hunk_rate REAL,\n    shipped_duplicate_pairs INTEGER,\n", ""
-    )
-    assert "location_in_hunk_rate" not in legacy_ddl
-    assert "shipped_duplicate_pairs" not in legacy_ddl
-    db_path = tmp_path / "index.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(legacy_ddl)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path, erosion) VALUES (?, ?, ?, ?, ?)",
-        (
-            "legacy-loc-run",
-            "2026-01-01T00:00:00Z",
-            "normal",
-            str(tmp_path / "legacy-loc-run"),
-            0.5,
-        ),
-    )
-    conn.execute("PRAGMA user_version = 7")
-    conn.commit()
-    conn.close()
-
-    # The production write path must ALTER-ADD both columns non-destructively.
-    upsert_run(
-        tmp_path,
-        make_manifest(
-            session_id="s-mig-loc",
-            location_in_hunk_rate=0.25,
-            shipped_duplicate_pairs=4,
-        ),
-    )
-
-    conn = sqlite3.connect(str(db_path))
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
-    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    conn.close()
-    assert {"location_in_hunk_rate", "shipped_duplicate_pairs"} <= cols
-    assert user_version == SCHEMA_VERSION == 8
-
-    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-loc-run",))[0]
-    assert legacy["erosion"] == pytest.approx(0.5)  # pre-existing row preserved
-    assert legacy["location_in_hunk_rate"] is None  # new columns nullable
-    assert legacy["shipped_duplicate_pairs"] is None
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-loc",))[0]
-    assert row["location_in_hunk_rate"] == pytest.approx(0.25)
-    assert row["shipped_duplicate_pairs"] == 4
-
-
 def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
     """Issue #646: per-stack review identity round-trips through the index."""
     m = make_manifest(
@@ -1129,38 +1096,6 @@ def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
     assert row["per_stack_review_backend"] == "codex"
     assert row["per_stack_review_model"] == "gpt-psr"
     assert row["review_backend"] == "claude"
-
-
-def test_runs_per_stack_review_columns_migrate_existing_db(tmp_path: Path) -> None:
-    """A legacy index.db gains per_stack_review_* via ALTER-ADD, rows preserved."""
-    from daydream.archive.index import _CREATE_TABLE
-
-    legacy_ddl = _CREATE_TABLE.replace(
-        "    per_stack_review_backend TEXT,\n    per_stack_review_model TEXT,\n", ""
-    )
-    assert "per_stack_review_backend" not in legacy_ddl
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    conn.execute(legacy_ddl)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        ("legacy-psr", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-psr")),
-    )
-    conn.commit()
-    conn.close()
-
-    upsert_run(
-        tmp_path,
-        make_manifest(
-            session_id="s-psr-mig",
-            per_stack_review_backend="codex",
-            per_stack_review_model="gpt-psr",
-        ),
-    )
-    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-psr",))[0]
-    assert legacy["per_stack_review_backend"] is None   # pre-existing row preserved, nullable
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-psr-mig",))[0]
-    assert row["per_stack_review_backend"] == "codex"
-    assert row["per_stack_review_model"] == "gpt-psr"
 
 
 def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
@@ -1211,40 +1146,6 @@ def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
     assert json.loads(row["fix_quality_gate"]) == gate
 
 
-def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path) -> None:
-    """A pre-existing index.db without fix_quality_gate gains it via ALTER-ADD.
-
-    Mirrors the erosion/verbosity additive migration: a legacy runs table keeps
-    its rows and gains the column on the next production write, never dropping
-    or rewriting data.
-    """
-    from daydream.archive.index import _CREATE_TABLE
-
-    legacy_ddl = _CREATE_TABLE.replace("    fix_quality_gate TEXT,\n", "")
-    assert "fix_quality_gate" not in legacy_ddl
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    conn.execute(legacy_ddl)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        (
-            "legacy-gate-run",
-            "2026-01-01T00:00:00Z",
-            "normal",
-            str(tmp_path / "legacy-gate-run"),
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-    gate = {"enabled": True, "rounds": []}
-    upsert_run(tmp_path, make_manifest(session_id="s-mig-gate", fix_quality_gate=gate))
-
-    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-gate-run",))[0]
-    assert legacy["fix_quality_gate"] is None  # pre-existing row preserved, column nullable
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-gate",))[0]
-    assert json.loads(row["fix_quality_gate"]) == gate
-
-
 def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
     upsert_run(
         tmp_path,
@@ -1252,38 +1153,6 @@ def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
     )
     row = query_runs(tmp_path, where="session_id = ?", params=("s-cap",))[0]
     assert row["recommended_patch_capture"] == "post_test"
-
-
-def test_runs_recommended_patch_capture_column_migrates_existing_db(
-    tmp_path: Path,
-) -> None:
-    from daydream.archive.index import _CREATE_TABLE
-
-    legacy_ddl = _CREATE_TABLE.replace("    recommended_patch_capture TEXT,\n", "")
-    assert "recommended_patch_capture" not in legacy_ddl
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    conn.execute(legacy_ddl)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        (
-            "legacy-cap-run",
-            "2026-01-01T00:00:00Z",
-            "normal",
-            str(tmp_path / "legacy-cap-run"),
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-    upsert_run(
-        tmp_path,
-        make_manifest(session_id="s-mig-cap", recommended_patch_capture="pre_test"),
-    )
-
-    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-cap-run",))[0]
-    assert legacy["recommended_patch_capture"] is None  # pre-existing row preserved, column nullable
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-cap",))[0]
-    assert row["recommended_patch_capture"] == "pre_test"
 
 
 def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path) -> None:
@@ -3566,68 +3435,38 @@ def _merge_events(
     ]
 
 
-def test_current_merge_event_succeeds_despite_stale_failure_artifact(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("status", "artifact", "payload"),
+    [
+        pytest.param(
+            "succeeded", "per-stack-failures.json", {"__merge__": {"message": "prior failure"}},
+            id="success-despite-stale-failure",
+        ),
+        pytest.param("failed", "merged-items.json", {"items": [{"id": 1}]}, id="failure-despite-stale-success"),
+        pytest.param("partial", None, None, id="partial"),
+    ],
+)
+def test_current_merge_event_controls_pipeline_status(
+    tmp_path: Path, status: str, artifact: str | None, payload: Any,
 ) -> None:
     from daydream.archive import pipeline
 
-    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+    if artifact is not None:
+        _write_deep(tmp_path, artifact, payload)
 
     states = pipeline.derive_phase_states(
         tmp_path,
-        phase_events=_merge_events("current", "succeeded"),
+        phase_events=_merge_events("current", status),
         runs_merge=True,
         runs_fix=False,
         runs_test=False,
         session_id="current",
     )
 
-    assert states["merge"] == {"ran": True, "status": "succeeded"}
+    assert states["merge"] == {"ran": True, "status": status}
     assert pipeline.derive_pipeline_status(
         "complete", None, states, runs_merge=True
-    ) == "succeeded"
-
-
-def test_current_merge_event_failure_beats_stale_success_artifact(
-    tmp_path: Path,
-) -> None:
-    from daydream.archive import pipeline
-
-    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
-
-    states = pipeline.derive_phase_states(
-        tmp_path,
-        phase_events=_merge_events("current", "failed"),
-        runs_merge=True,
-        runs_fix=False,
-        runs_test=False,
-        session_id="current",
-    )
-
-    assert states["merge"] == {"ran": True, "status": "failed"}
-    assert pipeline.derive_pipeline_status(
-        "complete", None, states, runs_merge=True
-    ) == "failed"
-
-
-def test_current_merge_event_partial_produces_partial_pipeline(
-    tmp_path: Path,
-) -> None:
-    from daydream.archive import pipeline
-
-    states = pipeline.derive_phase_states(
-        tmp_path,
-        phase_events=_merge_events("current", "partial"),
-        runs_merge=True,
-        runs_fix=False,
-        runs_test=False,
-        session_id="current",
-    )
-
-    assert states["merge"] == {"ran": True, "status": "partial"}
-    assert pipeline.derive_pipeline_status(
-        "complete", None, states, runs_merge=True
-    ) == "partial"
+    ) == status
 
 
 def test_stale_merge_event_failure_does_not_override_current_success(
@@ -4587,26 +4426,8 @@ def test_snapshot_manifest_provenance_rejects_malformed_present_pr_metadata(
     extra: dict[str, Any],
     message: str,
 ) -> None:
-    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-
-    payload = {
-        "session_id": "session",
-        "trajectory_id": "session",
-        "steps": [],
-        "final_metrics": {},
-        "extra": extra,
-    }
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id="session",
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id="session",
-                path=tmp_path / "trajectory.json",
-                json_bytes=json.dumps(payload).encode(),
-            ),
-        ),
+    snapshot = _manifest_write_snapshot(
+        session_id="session", extra=extra, final_metrics={}, path=tmp_path / "trajectory.json",
     )
 
     with pytest.raises(ValueError, match=message):
@@ -4621,22 +4442,8 @@ def test_snapshot_manifest_provenance_rejects_unsafe_session_identity(
     tmp_path: Path,
     session_id: str,
 ) -> None:
-    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-
-    encoded = json.dumps(
-        {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id=session_id,
-        documents=(TrajectoryDocumentSnapshot(session_id, tmp_path / "root.json", encoded),),
+    snapshot = _manifest_write_snapshot(
+        session_id=session_id, final_metrics={}, path=tmp_path / "root.json",
     )
 
     with pytest.raises(ValueError, match="session_id"):
@@ -4646,55 +4453,37 @@ def test_snapshot_manifest_provenance_rejects_unsafe_session_identity(
         )
 
 
+def _finalizer_arguments(
+    tmp_path: Path, session_id: str, *, config: RunConfig, upload: bool = False,
+) -> dict[str, Any]:
+    """Freeze real trajectory bytes and bind the finalizer's independent roots."""
+    frozen = tmp_path / "frozen"
+    path = frozen / ".daydream" / "runs" / session_id / "trajectory.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = _manifest_write_snapshot(session_id=session_id, final_metrics={}, path=path)
+    path.write_bytes(snapshot.documents[0].json_bytes)
+    return dict(
+        run=_archive_snapshot(snapshot),
+        artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ()),
+        artifact_provenance=ArtifactEvidenceProvenance(
+            "workspace", session_id, tmp_path / "source", tmp_path / "live",
+        ),
+        config=config,
+        work=None,
+        upload=upload,
+    )
+
+
 def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The host finalizer cannot infer success from the legacy fail-open wrapper."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        _manifest,
-    )
 
     session_id = "strict-session"
-    frozen = tmp_path / "frozen"
-    run_dir = frozen / ".daydream" / "runs" / session_id
-    run_dir.mkdir(parents=True)
-    payload = {
-        "session_id": session_id,
-        "trajectory_id": session_id,
-        "steps": [],
-        "final_metrics": {},
-        "extra": {},
-    }
-    encoded = json.dumps(payload).encode()
-    (run_dir / "trajectory.json").write_bytes(encoded)
-    write_snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id=session_id,
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id=session_id,
-                path=run_dir / "trajectory.json",
-                json_bytes=encoded,
-            ),
-        ),
-    )
-    artifacts = ArtifactTreeSnapshot(
-        session_id=session_id,
-        workspace_key="workspace",
-        root=frozen,
-        manifest=_manifest(frozen),
-        destinations=(),
-    )
-    artifact_provenance = ArtifactEvidenceProvenance(
-        workspace_key="workspace",
-        session_id=session_id,
-        public_source=tmp_path / "source",
-        live_root=(tmp_path / "live"),
+    arguments = _finalizer_arguments(
+        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),
     )
     monkeypatch.setattr(
         "daydream.eval.analyzer.analyze_session",
@@ -4702,14 +4491,7 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
     )
 
     with pytest.raises(ArchiveFinalizationError, match="evaluation"):
-        finalize_archive_run(
-            run=_archive_snapshot(write_snapshot),
-            artifacts=artifacts,
-            artifact_provenance=artifact_provenance,
-            config=RunConfig(target=str(tmp_path), run_eval=True),
-            work=None,
-            upload=False,
-        )
+        finalize_archive_run(**arguments)
     assert not (get_archive_dir() / "runs" / session_id).exists()
 
 
@@ -4721,50 +4503,17 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
 ) -> None:
     """A code-running consumer cannot make archive bytes and manifest disagree."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        _manifest,
-    )
 
     session_id = "strict-mutated-evidence"
     frozen = tmp_path / "frozen"
-    source_run = frozen / ".daydream" / "runs" / session_id
-    source_run.mkdir(parents=True)
-    encoded = json.dumps(
-        {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    (source_run / "trajectory.json").write_bytes(encoded)
     receipt = frozen / ".daydream" / "deep" / "test-verdict.json"
     receipt.parent.mkdir(parents=True)
     receipt.write_text(
         json.dumps({"session_id": session_id, "passed": True}),
         encoding="utf-8",
     )
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id=session_id,
-        documents=(
-            TrajectoryDocumentSnapshot(
-                session_id,
-                source_run / "trajectory.json",
-                encoded,
-            ),
-        ),
-    )
-    artifacts = ArtifactTreeSnapshot(
-        session_id,
-        "workspace",
-        frozen,
-        _manifest(frozen),
-        (),
+    arguments = _finalizer_arguments(
+        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),
     )
     public_source = tmp_path / "source"
     public_source.mkdir()
@@ -4782,26 +4531,11 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
         mutate_frozen_receipt,
     )
 
-    arguments: dict[str, Any] = dict(
-        run=_archive_snapshot(snapshot),
-        artifacts=artifacts,
-        artifact_provenance=ArtifactEvidenceProvenance(
-            "workspace",
-            session_id,
-            public_source,
-            tmp_path / "live",
-        ),
-        config=RunConfig(target=str(tmp_path), run_eval=True),
-        work=None,
-        upload=False,
-    )
     if mutate:
         with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
             finalize_archive_run(**arguments)
     else:
-        finalize_archive_run(
-            **arguments,
-        )
+        finalize_archive_run(**arguments)
 
     archive_dir = get_archive_dir()
     rows = query_runs(archive_dir, "session_id = ?", (session_id,))
@@ -4826,31 +4560,11 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     discard a completed review without containing anything extra.
     """
     from daydream.archive import finalize_archive_run
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        _manifest,
-    )
 
     session_id = "strict-upload"
-    frozen = tmp_path / "frozen"
-    source_run = frozen / ".daydream" / "runs" / session_id
-    source_run.mkdir(parents=True)
-    encoded = json.dumps(
-        {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    (source_run / "trajectory.json").write_bytes(encoded)
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id=session_id,
-        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    arguments = _finalizer_arguments(
+        tmp_path, session_id,
+        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,
     )
     uploaded: list[tuple[Any, ...]] = []
 
@@ -4861,16 +4575,7 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", lambda _config: "private/repo")
     monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _refuse)
 
-    finalize_archive_run(
-        run=_archive_snapshot(snapshot),
-        artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ()),
-        artifact_provenance=ArtifactEvidenceProvenance(
-            "workspace", session_id, tmp_path / "source", tmp_path / "live"
-        ),
-        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
-        work=None,
-        upload=True,
-    )
+    finalize_archive_run(**arguments)
 
     assert len(uploaded) == 1, "the upload must still be attempted and refused by the callee"
     archive_dir = get_archive_dir()
@@ -4885,37 +4590,17 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
 ) -> None:
     """A frozen tree mutated after finalization starts is caught before the external upload."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        _manifest,
-    )
 
     session_id = "strict-upload-mutated"
-    frozen = tmp_path / "frozen"
-    source_run = frozen / ".daydream" / "runs" / session_id
-    source_run.mkdir(parents=True)
-    encoded = json.dumps(
-        {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    (source_run / "trajectory.json").write_bytes(encoded)
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id=session_id,
-        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    arguments = _finalizer_arguments(
+        tmp_path, session_id,
+        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,
     )
-    artifacts = ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ())
+    document = arguments["run"].trajectories.documents[0]
     uploads: list[Path] = []
 
     def mutate_then_resolve(_config: Any) -> str:
-        (source_run / "trajectory.json").write_bytes(encoded + b"\n")
+        document.path.write_bytes(document.json_bytes + b"\n")
         return "private/repo"
 
     def record_upload(run_dir: Path, *_args: Any, **_kwargs: Any) -> bool:
@@ -4926,16 +4611,7 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
     monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", record_upload)
 
     with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
-        finalize_archive_run(
-            run=_archive_snapshot(snapshot),
-            artifacts=artifacts,
-            artifact_provenance=ArtifactEvidenceProvenance(
-                "workspace", session_id, tmp_path / "source", tmp_path / "live"
-            ),
-            config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
-            work=None,
-            upload=True,
-        )
+        finalize_archive_run(**arguments)
 
     assert uploads == []
     assert not (get_archive_dir() / "runs" / session_id).exists()
@@ -4947,36 +4623,15 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
 ) -> None:
     """A refused secret scan publishes neither an archive nor dump bytes."""
     from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        _manifest,
-    )
+    from daydream.archive.scan import SEVERITY_BLOCKING, Finding, ScanResult
 
     session_id = "strict-dump"
-    frozen = tmp_path / "frozen"
-    source_run = frozen / ".daydream" / "runs" / session_id
-    source_run.mkdir(parents=True)
-    encoded = json.dumps(
-        {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "steps": [],
-            "final_metrics": {},
-            "extra": {},
-        }
-    ).encode()
-    (source_run / "trajectory.json").write_bytes(encoded)
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-09-06T00:00:00Z",
-        root_trajectory_id=session_id,
-        documents=(TrajectoryDocumentSnapshot(session_id, source_run / "trajectory.json", encoded),),
+    arguments = _finalizer_arguments(
+        tmp_path, session_id,
+        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True, dump_artifacts="requested"),
     )
     dump_stage = tmp_path / "late"
     dump_stage.mkdir()
-    from daydream.archive.scan import SEVERITY_BLOCKING, Finding, ScanResult
-
     monkeypatch.setattr(
         "daydream.archive.scan.scan_run_dir",
         lambda _path: ScanResult(
@@ -4994,21 +4649,7 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
     )
 
     with pytest.raises(ArchiveFinalizationError, match="secret scan"):
-        finalize_archive_run(
-            run=_archive_snapshot(snapshot),
-            artifacts=ArtifactTreeSnapshot(
-                session_id, "workspace", frozen, _manifest(frozen), ()
-            ),
-            artifact_provenance=ArtifactEvidenceProvenance(
-                "workspace", session_id, tmp_path / "source", tmp_path / "live"
-            ),
-            config=RunConfig(
-                target=str(tmp_path), run_eval=False, archive=True, dump_artifacts="requested"
-            ),
-            work=None,
-            upload=False,
-            dump_path=dump_stage,
-        )
+        finalize_archive_run(**arguments, dump_path=dump_stage)
 
     assert list(dump_stage.iterdir()) == []
     assert not (get_archive_dir() / "runs" / session_id).exists()
