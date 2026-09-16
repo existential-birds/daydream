@@ -69,6 +69,7 @@ from daydream.prompt_budget import (
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
     sanctioned_transport_for,
+    truncate_utf8_to_budget,
 )
 from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
@@ -4484,10 +4485,10 @@ async def phase_understand_intent(
         # Clone executions cannot fall back to the on-disk pointer (the
         # gitignored ``.daydream/`` artifacts are absent from the disposable
         # clone), so the inline is truncated to the shared prompt budget rather
-        # than dropped: still self-sufficient, never unbounded.
-        inline_diff = (
-            diff_text[:INLINE_DIFF_BUDGET_BYTES]
-            + "\n[diff truncated to fit the prompt budget]\n"
+        # than dropped: still self-sufficient, never unbounded. The marker is
+        # part of the emitted block, so it is counted inside the budget.
+        inline_diff = truncate_utf8_to_budget(
+            diff_text, INLINE_DIFF_BUDGET_BYTES, "\n[diff truncated to fit the prompt budget]\n"
         )
     else:
         inline_diff = _inlineable_diff(diff_text)
@@ -4501,12 +4502,9 @@ async def phase_understand_intent(
         except OSError:
             summary_text = None
         if summary_text is not None:
-            if not fits_inline_diff_budget(summary_text):
-                summary_text = (
-                    summary_text[:INLINE_DIFF_BUDGET_BYTES]
-                    + "\n[exploration summary truncated]\n"
-                )
-            inline_exploration_summary = summary_text
+            inline_exploration_summary = truncate_utf8_to_budget(
+                summary_text, INLINE_DIFF_BUDGET_BYTES, "\n[exploration summary truncated]\n"
+            )
     # Advisers are advisory: when an INLINE transport is active (strict audit
     # roots, read-only disposable clones, sandboxed Osprey), exploration files
     # that would overflow the shared inline AGGREGATE budget must not

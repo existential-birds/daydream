@@ -2767,13 +2767,58 @@ async def test_phase_understand_intent_codex_read_only_inlines_diff_and_explorat
     assert captured["read_only"] is True
     prompt = captured["prompt"]
     # The clone read-only execution still inlines the diff (never a dangled
-    # file pointer) but capped at the shared prompt budget (issue #336).
+    # file pointer) but capped at the shared prompt budget (issue #336). The
+    # truncation marker is part of the emitted block, so the content keeps
+    # budget minus the marker's bytes — not the character-index prefix.
+    marker = "\n[diff truncated to fit the prompt budget]\n"
     assert over_budget_diff not in prompt
-    assert over_budget_diff[:INLINE_DIFF_BUDGET_BYTES] in prompt
+    assert over_budget_diff[: INLINE_DIFF_BUDGET_BYTES - len(marker)] in prompt
+    assert over_budget_diff[:INLINE_DIFF_BUDGET_BYTES] not in prompt
     assert "[diff truncated to fit the prompt budget]" in prompt
     assert "Read the diff file at" not in prompt  # no dangled diff pointer
     assert "affected_files.md" in prompt  # the exploration summary is inlined
     assert "Pre-scan exploration results are available in" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_clone_inline_diff_is_byte_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext], silence_console: Callable[..., None],
+) -> None:
+    """The clone-mode inline diff is truncated by UTF-8 bytes and its marker is inside
+    the budget: character-index slicing emitted twice the cap for multibyte content."""
+    from daydream.phases import phase_understand_intent
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    diff_text = "diff --git a/a.py b/a.py\n" + "é" * 20_000
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text(diff_text, encoding="utf-8")
+    backend = ScriptedBackend(
+        events=[TextEvent(text="This PR adds a login page."), _RESULT],
+        read_only_disposable_clone=True,
+    )
+
+    await phase_understand_intent(
+        backend, work, diff_path=diff_file, log="abc1234 add login",
+        branch="feat/login", exploration_dir=None, diff_text=diff_text,
+    )
+
+    prompt = backend.last_prompt
+    assert "[diff truncated to fit the prompt budget]" in prompt
+    # Character-index slicing would have emitted this 2×-the-cap prefix verbatim.
+    char_sliced_prefix = diff_text[:INLINE_DIFF_BUDGET_BYTES].encode("utf-8")[
+        :INLINE_DIFF_BUDGET_BYTES
+    ]
+    assert char_sliced_prefix not in prompt.encode("utf-8")
 
 
 @pytest.mark.asyncio

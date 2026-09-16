@@ -1704,6 +1704,15 @@ async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
     assert "Sanctioned phase inputs" in prompt
 
 
+def test_clone_mode_diff_block_includes_its_banner_and_marker_in_the_budget() -> None:
+    from daydream.deep.prompts import _diagram_diff_block
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    block = _diagram_diff_block(Path("/nowhere/diff.patch"), "é" * 20_000, clone_mode=True)
+    assert "[diff truncated to fit the prompt budget]" in block
+    assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+
+
 async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

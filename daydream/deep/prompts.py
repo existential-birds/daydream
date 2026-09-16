@@ -32,7 +32,11 @@ from daydream.phases import (
     _render_bash_allowlist,
     _settled_decisions_block,
 )
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
+from daydream.prompt_budget import (  # noqa: F401
+    INLINE_DIFF_BUDGET_BYTES,
+    fits_inline_diff_budget,
+    truncate_utf8_to_budget,
+)
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.prompts.wire_contract import (
@@ -1378,6 +1382,7 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
     prompt past ``INLINE_DIFF_BUDGET_BYTES`` — unless ``clone_mode`` is set,
     in which case there is no on-disk fallback: an over-budget diff is inlined
     truncated with an explicit marker, and a missing diff is omitted entirely.
+    The banner, truncated text, and marker together stay within the budget.
     """
     if inline_diff and fits_inline_diff_budget(inline_diff):
         head = (
@@ -1392,14 +1397,12 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
     if clone_mode:
         if not inline_diff:
             return ""
-        truncated = inline_diff.encode("utf-8")[:INLINE_DIFF_BUDGET_BYTES].decode(
-            "utf-8", errors="ignore"
+        head = "The PR diff (base..HEAD) is inlined below:\n\n"
+        marker = "\n[diff truncated to fit the prompt budget]\n\n"
+        truncated = truncate_utf8_to_budget(
+            inline_diff.rstrip(), INLINE_DIFF_BUDGET_BYTES - len(head.encode("utf-8")), marker
         )
-        return (
-            "The PR diff (base..HEAD) is inlined below:\n\n"
-            f"{truncated}\n"
-            "[diff truncated to fit the prompt budget]\n\n"
-        )
+        return f"{head}{truncated}"
     return f"{_full_diff_pointer(diff_path)}\n{_hunk_index_authority(diff_path)}"
 
 

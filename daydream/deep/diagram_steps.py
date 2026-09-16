@@ -53,6 +53,7 @@ from daydream.prompt_budget import (
     prepare_sanctioned_inputs,
     sanctioned_transport_for,
     select_advisory_inputs,
+    truncate_utf8_to_budget,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.trajectory import (
@@ -222,7 +223,8 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     ``OSError`` yields ``None`` — the block is omitted, never faked) and
     share one ``INLINE_DIFF_BUDGET_BYTES`` budget: the summary takes the
     first slice, the dependency edges fill the remainder. Each over-budget
-    piece is truncated with an explicit marker rather than dropped. The
+    piece is truncated with an explicit marker whose bytes count inside the
+    shared budget, so the emitted block never exceeds it. The
     summary is scrubbed first (``_scrub_exploration_summary``) so the
     standalone-artifact scaffolding the pre-scan writer emits cannot dangle
     in the inline rendering.
@@ -230,21 +232,15 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     if exploration_dir is None:
         return None, None
     budget = INLINE_DIFF_BUDGET_BYTES
+    marker = "\n[exploration summary truncated]\n"
     try:
         summary: str | None = (exploration_dir / "summary.md").read_text(encoding="utf-8")
     except OSError:
         summary = None
     if summary is not None:
         summary = _scrub_exploration_summary(summary)
-        encoded = summary.encode("utf-8")
-        if len(encoded) > budget:
-            truncated = encoded[:budget].decode("utf-8", errors="ignore")
-            summary = (
-                f"{truncated}\n[exploration summary truncated]\n" if truncated else None
-            )
-            encoded = summary.encode("utf-8") if summary is not None else b""
-        if summary is not None:
-            budget = max(budget - len(encoded), 0)
+        summary = truncate_utf8_to_budget(summary, budget, marker)
+        budget = max(budget - len(summary.encode("utf-8")), 0)
     try:
         dependencies: str | None = (exploration_dir / "dependencies.md").read_text(
             encoding="utf-8"
@@ -255,14 +251,7 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
         if budget <= 0:
             dependencies = None
         else:
-            encoded = dependencies.encode("utf-8")
-            if len(encoded) > budget:
-                truncated = encoded[:budget].decode("utf-8", errors="ignore")
-                dependencies = (
-                    f"{truncated}\n[exploration summary truncated]\n"
-                    if truncated
-                    else None
-                )
+            dependencies = truncate_utf8_to_budget(dependencies, budget, marker)
     return summary, dependencies
 
 
