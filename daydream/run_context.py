@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     from daydream.backends import Backend
     from daydream.github_app import GitHubIdentity
+    from daydream.outage_circuit import OutageCircuit
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -46,9 +47,9 @@ _T = TypeVar("_T")
 
 
 class RunContext:
-    """Own the immutable policy and active backend counts for one run."""
+    """Own the immutable policy, active backends, and outage circuit for one run."""
 
-    __slots__ = ("_policy", "_run_token", "github_identity")
+    __slots__ = ("_policy", "_run_token", "github_identity", "_outage_circuit", "_circuit_lock")
 
     def __init__(
         self, policy: InteractionPolicy, *, github_identity: GitHubIdentity | None = None,
@@ -58,11 +59,35 @@ class RunContext:
         self._policy = policy
         self._run_token = object()
         self.github_identity = github_identity if github_identity is not None else GitHubIdentity("unknown")
+        self._outage_circuit: OutageCircuit | None = None
+        self._circuit_lock = RLock()
 
     @property
     def policy(self) -> InteractionPolicy:
         """Return this run's immutable interaction policy."""
         return self._policy
+
+    @property
+    def outage_circuit(self) -> OutageCircuit:
+        """Return this run's shared retry-outage circuit, constructing it lazily.
+
+        All concurrent invocations in a run share the same ``RunContext`` object,
+        so they share one circuit; a fresh context gets a fresh circuit.
+        """
+        if self._outage_circuit is None:
+            with self._circuit_lock:
+                if self._outage_circuit is None:
+                    from daydream.config import (
+                        RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                        RETRY_CIRCUIT_PROBE_INTERVAL_S,
+                    )
+                    from daydream.outage_circuit import OutageCircuit
+
+                    self._outage_circuit = OutageCircuit(
+                        failure_threshold=RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                        probe_interval_s=RETRY_CIRCUIT_PROBE_INTERVAL_S,
+                    )
+        return self._outage_circuit
 
     def confirm(
         self,

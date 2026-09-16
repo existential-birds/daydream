@@ -73,6 +73,7 @@ from daydream.backends._transport import (
 )
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
+from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -283,9 +284,25 @@ def _pi_retry_max_delay() -> float:
     return _pi_retry_delay("DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY)
 
 
-# Shared error-taxonomy tokens, used by both the retryable-message check and
-# the stable diagnostic category so the two views of the taxonomy cannot drift
-# out of sync.
+# Shared error-taxonomy tokens. The permanent set is deliberately checked
+# first by _pi_error_category so a permanent condition (an unreachable model, a
+# rejected credential, a schema violation) wins over a transient token in the
+# same message: "model not found: gpt-5 (503)" is AUTH_CONFIG, not SERVER_ERROR.
+# A bare "provider" is deliberately absent: it is a generic noun that also
+# appears in transient failures ("provider rate limit"), so naming a provider is
+# not evidence of a permanent condition (see daydream/retry_policy.py). Provider
+# credential faults still land here through "auth"/"credential"/"api key"/
+# "configuration"/"not configured".
+_PERMANENT_TOKENS = (
+    "auth",
+    "credential",
+    "api key",
+    "api_key",
+    "configuration",
+    "not configured",
+    "model not found",
+)
+_SCHEMA_TOKENS = ("schema validation", "additionalproperties", "structured output")
 _RATE_LIMIT_TOKENS = ("429", "rate limit", "rate_limit", "too many requests")
 _SERVER_ERROR_TOKENS = (
     "502",
@@ -294,6 +311,27 @@ _SERVER_ERROR_TOKENS = (
     "service unavailable",
     "server error",
 )
+# Ambiguous overload/throttle wording. Unlike the high-precision literals above,
+# these need positive overload/capacity meaning and an explicit rejection of
+# negated or planning contexts: "not overloaded" and "capacity planning" are
+# healthy messages that must not be read as transient failures.
+_NEGATED_OVERLOAD_RE = re.compile(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b")
+_OVERLOAD_RE = re.compile(r"\boverloaded?\b|\boverload(?:ed|ing)?\b")
+_CAPACITY_RE = re.compile(
+    r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b"
+)
+_THROTTLE_RE = re.compile(r"\bthrottl(?:e|ed|ing)\b")
+
+
+def _is_transient_overload_message(lower: str) -> bool:
+    """Return True for an overload/throttle/capacity message that a retry may help."""
+    if _NEGATED_OVERLOAD_RE.search(lower):
+        return False
+    return bool(
+        _OVERLOAD_RE.search(lower)
+        or _CAPACITY_RE.search(lower)
+        or _THROTTLE_RE.search(lower)
+    )
 
 
 def _is_stream_truncation_message(normalized_message: str) -> bool:
@@ -304,45 +342,18 @@ def _is_stream_truncation_message(normalized_message: str) -> bool:
 
 
 def _is_retryable_error_message(message: str) -> bool:
-    """Return True if the error message signals a transient overload or rate-limit.
+    """Return the shared classifier's verdict for a Pi ``errorMessage``.
 
-    High-precision literals (429, rate limit/rate_limit, too many requests,
-    502/503, bad gateway, service unavailable, server error) are matched as
-    plain substrings — they are extremely unlikely to appear in a non-transient
-    context. Ambiguous
-    terms require positive overload/capacity wording and explicitly reject
-    negated or planning contexts.
+    Kept as a thin delegation so the text taxonomy has exactly one
+    implementation: :func:`_pi_error_category` produces the category and
+    :func:`daydream.retry_policy.classify_failure` decides, the same path
+    :class:`PiError` construction and the agent retry branch use. A message
+    heuristic maintained here could otherwise disagree with the production
+    classifier (the pre-#734 drift this module exists to prevent).
     """
-    lower = message.lower()
-    # Unambiguous literals — plain substring is safe.
-    if any(token in lower for token in _RATE_LIMIT_TOKENS + _SERVER_ERROR_TOKENS):
-        return True
-    if _is_stream_truncation_message(lower):
-        return True
-    if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
-        return True
-    if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
-        return False
-    if bool(
-        re.search(r"\boverloaded?\b|\boverload(?:ed|ing)?\b", lower)
-        or re.search(r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b", lower)
-        or re.search(r"\bthrottl(?:e|ed|ing)\b", lower)
-    ):
-        return True
-    # Stream-drop signatures (terminated, econnreset, premature close, ...).
-    #
-    # Unlike daydream/benchmark/daydream_run.py:_is_transient — which scans raw
-    # stdout and therefore gates STREAM_DROP_SIGNATURES behind
-    # _ERROR_CONTEXT_MARKERS so the substrings only count when daydream actually
-    # errored — this function is only ever invoked on a PiError `errorMessage`
-    # (see the turn_end / stopReason == "error" call site below), where error
-    # context is already implied by construction. The asymmetry is deliberate:
-    # the benchmark's _ERROR_CONTEXT_MARKERS gate is the harness's own concern
-    # for stdout scanning, not a contract production must mirror. Matching these
-    # signatures unconditionally here is therefore safe and correct.
-    if any(sig in lower for sig in STREAM_DROP_SIGNATURES):
-        return True
-    return False
+    return _pi_retryable_for(
+        category=_pi_error_category(message), message=message
+    )
 
 
 def _is_retryable_exit_code(code: int) -> bool:
@@ -351,11 +362,23 @@ def _is_retryable_exit_code(code: int) -> bool:
 
 
 def _pi_error_category(message: str) -> str:
-    """Classify Pi failures into stable host-owned diagnostic categories."""
+    """Classify Pi failures into stable host-owned diagnostic categories.
+
+    Permanent conditions are tested before the transient token sets: when one
+    message carries both (``"model not found: gpt-5 (503)"``) the permanent
+    condition decides, matching the shared classifier's permanent-beats-
+    transient rule in :mod:`daydream.retry_policy`.
+    """
     lower = message.casefold()
+    if any(token in lower for token in _PERMANENT_TOKENS):
+        return "AUTH_CONFIG"
+    if any(token in lower for token in _SCHEMA_TOKENS):
+        return "SCHEMA"
     if any(token in lower for token in _RATE_LIMIT_TOKENS):
         return "RATE_LIMIT"
     if any(token in lower for token in _SERVER_ERROR_TOKENS):
+        return "SERVER_ERROR"
+    if _is_transient_overload_message(lower):
         return "SERVER_ERROR"
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return "TIMEOUT"
@@ -365,21 +388,38 @@ def _pi_error_category(message: str) -> str:
         return "STREAM_DROP"
     if "pi cli exited with return code" in lower:
         return "PROCESS_EXIT"
-    if any(
-        token in lower
-        for token in (
-            "auth",
-            "credential",
-            "api key",
-            "api_key",
-            "configuration",
-            "not configured",
-            "provider",
-            "model not found",
-        )
-    ):
-        return "AUTH_CONFIG"
     return "UNKNOWN"
+
+
+def parse_pi_retry_hint(message: str) -> float | None:
+    """Extract a numeric-seconds ``retry-after`` hint from *message*.
+
+    Thin alias for :func:`daydream.retry_policy.parse_message_retry_hint`, the
+    single implementation shared by the agent retry branch and every backend: a
+    second copy of the pattern would have to be kept in sync or the two views of
+    the hint would drift. Returns ``None`` for an absent, non-numeric, negative,
+    or non-finite hint; an unparseable hint degrades to jitter rather than to a
+    fabricated delay.
+    """
+    return parse_message_retry_hint(message)
+
+
+class _PiFailureFacts(Exception):
+    """Classifier probe carrying Pi's category + message and no opt-in flag."""
+
+    def __init__(self, message: str, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _pi_retryable_for(*, category: str, message: str) -> bool:
+    """Return the shared classifier's retry verdict for a Pi failure.
+
+    Uses the same :func:`daydream.retry_policy.classify_failure` path the retry
+    branch of :func:`daydream.agent.run_agent` uses, so the backend's
+    ``retryable`` attribute and the agent's decision cannot disagree.
+    """
+    return classify_failure(_PiFailureFacts(message, category)).retries_allowed
 
 
 class PiError(Exception):
@@ -391,10 +431,12 @@ class PiError(Exception):
         *,
         retryable: bool = False,
         category: str = "UNKNOWN",
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.retryable = retryable
         self.category = category
+        self.retry_after = retry_after
 
 
 def _render_tool_result(result: Any) -> str:
@@ -1001,10 +1043,12 @@ class PiBackend:
                         for terminal in terminal_events():
                             yield terminal
                         error_msg = msg.get("errorMessage") or "Unknown Pi error"
+                        category = _pi_error_category(error_msg)
                         raise PiError(
                             error_msg,
-                            retryable=_is_retryable_error_message(error_msg),
-                            category=_pi_error_category(error_msg),
+                            retryable=_pi_retryable_for(category=category, message=error_msg),
+                            category=category,
+                            retry_after=parse_pi_retry_hint(error_msg),
                         )
 
                 elif event_type == "agent_end":

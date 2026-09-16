@@ -3200,11 +3200,25 @@ class TrajectoryRecorder:
         backoff_s: float,
         attempts: int,
         cleanup_elapsed_s: float | None = None,
+        retry_stop_reason: str | None = None,
+        circuit_state: str | None = None,
+        retry_recovery_spent_s: float | None = None,
+        partial_edit_handling: str | None = None,
     ) -> None:
         """Record the expired invocation limit and spent durations once.
 
         Only durations and a reason code are persisted; no raw monotonic
-        deadline value is reusable across runs.
+        deadline value is reusable across runs. A retry-ladder stop (allowance
+        exhaustion, hint-exceeds-budget, attempts exhaustion, an open circuit, or
+        a deadline that ends a ladder which already spent retry overhead) also
+        records ``retry_stop_reason``, ``circuit_state`` and
+        ``retry_recovery_spent_s``; its counters are retry-scoped -- the retry
+        attempts it dispatched, the backend time spent inside them and their
+        backoff sleeps -- so the initial useful-work attempt is never reported as
+        retry overhead. ``partial_edit_handling`` states whether the stopped
+        attempt's partial output survived: a deadline that interrupts an in-flight
+        attempt keeps it, while a deadline that ends the ladder before a dispatch
+        -- like every retry-ladder stop -- discards it.
         """
         self._emit_phase_event(
             phase,
@@ -3215,6 +3229,10 @@ class TrajectoryRecorder:
             backoff_s=backoff_s,
             attempts=attempts,
             cleanup_elapsed_s=cleanup_elapsed_s,
+            retry_stop_reason=retry_stop_reason,
+            circuit_state=circuit_state,
+            retry_recovery_spent_s=retry_recovery_spent_s,
+            partial_edit_handling=partial_edit_handling,
         )
 
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:

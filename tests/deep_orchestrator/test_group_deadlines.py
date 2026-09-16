@@ -225,3 +225,122 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
     # budget event names ONLY the expired api.py group -- never the sibling.
     assert {e["metadata"]["file"] for e in events} == {"api.py"}
     assert all(e["metadata"]["reason"] == "group_wall_budget_exceeded" for e in events)
+
+
+async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """The file-config value reaches every run_agent call the fix group owns."""
+    from daydream.backends.pi import PiError
+    from daydream.config_file import load_file_config
+    from daydream.runner import run
+    from tests.harness.fake_clock import FakeClock
+
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    (multi_stack_target / ".daydream.toml").write_text(
+        "retry_recovery_allowance_s = 25\n", encoding="utf-8"
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
+    # otherwise fold into api.py and make it a two-item batched group, whose fix
+    # fan-out runs one batched ladder plus per-finding serial fallback ladders
+    # (up to three) instead of the single ladder the comments below describe.
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "medium", "confidence": "MEDIUM",
+            "file": "web.ts", "line": 1,
+            "description": "Structural maintainability concern",
+        },
+    }
+    stub.fix_retryable_file = "api.py"  # only api.py's ladder may fail: web.ts must succeed, or its
+    # retryable failures would share the run-scoped circuit and cut both
+    # ladders before the allowance binds
+    stub.fix_retryable_failures = 20
+    stub.fix_retryable_error = PiError("503 Service Unavailable", retryable=True, category="SERVER_ERROR")
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = 20.0     # each retryable attempt burns 20 s of the allowance
+    mute_side_effects()
+    traj = tmp_path / "trajectory.json"
+
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(
+            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+            file_config=load_file_config(multi_stack_target),
+        ))
+
+    assert isinstance(exit_code, int)
+    stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
+    assert stops, "the ladder stop was not recorded"
+    assert any(e["metadata"]["retry_stop_reason"] == "retry_recovery_allowance_exhausted" for e in stops)
+    # The original attempt is useful work and is not charged (Task 3's design);
+    # each retry is charged 20 s, so the ladder is cut at four dispatches after
+    # ~40 s of retries (the refusal fires check-then-charge inside the
+    # just-failed attempt's handler). The 300 s default (a missed threading
+    # site) would not stretch that to ~17 attempts: the run-scoped circuit
+    # (threshold 3) bounds any failing ladder at ~4 dispatches, so the
+    # configured value shows up in the stop reason asserted above, not in this
+    # attempt count.
+    assert max(e["metadata"]["attempts"] for e in stops) <= 4
+    assert stub.completed_fix_files.count("api.py") == 0     # the group never applied a fix
+
+
+async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_completed_work(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """A run-scoped circuit bounds the fix fan-out's ladders; a completed sibling is not restarted."""
+    from daydream.backends.pi import PiError
+    from daydream.runner import run
+    from tests.harness.fake_clock import FakeClock
+
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # api.py's fix ladder always fails retryably; App.tsx's fix succeeds. Distinct
+    # file groups, so both reach the fix fan-out.
+    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
+    # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
+    # otherwise fold into api.py and make it a batched group, whose fallback
+    # ladder would multiply the attempts the circuit is meant to bound.
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "medium", "confidence": "MEDIUM",
+            "file": "web.ts", "line": 1,
+            "description": "Structural maintainability concern",
+        },
+    }
+    stub.fix_retryable_file = "api.py"
+    stub.fix_retryable_failures = 20
+    stub.fix_retryable_error = PiError("503 Service Unavailable", retryable=True, category="SERVER_ERROR")
+    # Serialize the file groups. A concurrent healthy sibling's success can call
+    # record_success and reset the circuit mid-ladder, making the attempt total
+    # interleaving-dependent; the integration proof here is that both groups reach
+    # the SAME run-scoped circuit and that the circuit bounds the ladder. Task 8's
+    # _ending_backend unit test owns the concurrent-share proof.
+    stub.fanout_concurrency = 1
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = 1.0
+    traj = tmp_path / "trajectory.json"
+    mute_side_effects()
+
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes",
+                                         output_mode="loop"))
+
+    assert isinstance(exit_code, int)
+    stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
+    # One coordinated ladder, not one per sibling: total dispatches stay at the
+    # circuit threshold plus the single probe.
+    assert sum(e["metadata"]["attempts"] for e in stops) <= 3 + 1
+    assert {e["metadata"]["circuit_state"] for e in stops} <= {"open", "half_open"}
+    # The healthy group completed exactly once and was never re-dispatched when the
+    # circuit closed or the probe ran.
+    assert stub.completed_fix_files.count("App.tsx") == 1
+    assert len(_single_fix_calls_for(stub, "App.tsx")) <= 1
