@@ -325,3 +325,26 @@ class TestFinalBundleKnobs:
                 index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
             )
         assert list(out.iterdir()) == []
+
+
+class TestProjectorKnobs:
+    def test_projection_routes_every_member_through_the_primitive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bundle_dir = _write_bundle(tmp_path)
+        snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        out = tmp_path / "proj"
+        calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
+        build_frozen_corpus(_cfg(out, bundle_dir, snap))
+        assert {target.name for target, _c, _k in calls} >= {
+            "corpus.jsonl", "adjudication-report.json", "schema.json",
+            "lineage.json", "license-report.json", "_SUCCESS",
+        }
+        # mode=None keeps mkstemp's 0600: this site must NOT be widened to the
+        # umask-derived 0644 the other seven get.
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": None}
+                   for _t, _c, kwargs in calls)
+        content_by_name = {target.name: content for target, content, _k in calls}
+        assert content_by_name["_SUCCESS"] == b"ok\n"
+        for target, content, _kwargs in calls:
+            assert target.read_bytes() == content
