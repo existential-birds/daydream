@@ -68,6 +68,10 @@ class StubBackend:
     ) -> None:
         self.model = model
         self._target = target
+        # Mirrors the real Backend protocol's fan-out hint; the router reads it via
+        # ``effective_fanout_concurrency(ceiling, backend)``. Tests override it to
+        # force a deterministic file-group ordering (#734).
+        self.fanout_concurrency: int = 4
         # When set, every execute() call is also appended (model-tagged) to this
         # shared list so a per-(name, model) factory can capture which model ran
         # each phase even though backends are cached by (name, model) (#168).
@@ -174,6 +178,11 @@ class StubBackend:
         # step for the backend time it burns before raising.
         self.fix_retryable_failures: int = 0
         self.fix_retryable_error: Exception | None = None
+        # When set, only the fix turns naming this file basename take the
+        # retryable-failure ladder; every other file's fix succeeds on its first
+        # turn. Lets a test make one file group fail while a sibling group
+        # completes -- the shared-circuit/restart-nothing proof (#734).
+        self.fix_retryable_file: str | None = None
         self._fix_retry_counts: dict[str, int] = {}
         # When set, the fix branch WRITES a broken partial edit to the matching
         # file and THEN raises MaxTurnsError -- simulating an agent that mutated
@@ -1051,7 +1060,10 @@ class StubBackend:
             # than exhausting every attempt. Charge one event's worth of clock for
             # the failed attempt before raising (the backend time a real failure
             # burns), then let subsequent turns apply the normal fix.
-            if self._fix_retry_counts.get(fixed_name, 0) < self.fix_retryable_failures:
+            if (
+                (self.fix_retryable_file is None or self.fix_retryable_file == fixed_name)
+                and self._fix_retry_counts.get(fixed_name, 0) < self.fix_retryable_failures
+            ):
                 self._fix_retry_counts[fixed_name] = self._fix_retry_counts.get(fixed_name, 0) + 1
                 self._tick()
                 raise self.fix_retryable_error or _StubRetryableError(
