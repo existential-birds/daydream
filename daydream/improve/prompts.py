@@ -27,6 +27,7 @@ from daydream.improve.command_contract import (
 from daydream.improve.command_contract import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
 )
+from daydream.output_schema import strict_object
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
 # Single source for the structured repository-command contract wording used by
@@ -96,109 +97,61 @@ _MAINTENANCE_FINDING_PROPERTIES: dict[str, Any] = {
     },
 }
 
-AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["findings"],
-    "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "title",
-                    "category",
-                    "path",
-                    "line",
-                    "body",
-                    "impact",
-                    "effort",
-                    "risk",
-                    "confidence",
-                    "evidence",
-                    "maintenance_signals",
-                    "change_shape",
-                    "reuse_target",
-                ],
-                "properties": {
-                    "title": {"type": "string"},
-                    "category": {"type": "string"},
-                    "path": {"type": "string"},
-                    "line": {"type": ["integer", "null"]},
-                    "body": {"type": "string"},
-                    "impact": {"enum": ["HIGH", "MED", "LOW"]},
-                    "effort": {"enum": ["S", "M", "L"]},
-                    "risk": {"enum": ["LOW", "MED", "HIGH"]},
-                    "confidence": {"enum": ["HIGH", "MED", "LOW"]},
-                    "evidence": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    **_MAINTENANCE_FINDING_PROPERTIES,
-                },
+AUDIT_FINDINGS_SCHEMA: dict[str, Any] = strict_object({
+    "findings": {
+        "type": "array",
+        "items": strict_object({
+            "title": {"type": "string"},
+            "category": {"type": "string"},
+            "path": {"type": "string"},
+            "line": {"type": ["integer", "null"]},
+            "body": {"type": "string"},
+            "impact": {"enum": ["HIGH", "MED", "LOW"]},
+            "effort": {"enum": ["S", "M", "L"]},
+            "risk": {"enum": ["LOW", "MED", "HIGH"]},
+            "confidence": {"enum": ["HIGH", "MED", "LOW"]},
+            "evidence": {
+                "type": "array",
+                "items": {"type": "string"},
             },
-        },
+            **_MAINTENANCE_FINDING_PROPERTIES,
+        }),
     },
-}
+})
 
-VET_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["verdicts"],
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "vet_id",
-                    "keep",
-                    "reason",
-                    "severity",
-                    "impact",
-                    "effort",
-                    "risk",
-                    "confidence",
-                    "path",
-                    "line",
-                    "maintenance_signals",
-                    "change_shape",
-                    "reuse_target",
-                ],
-                "properties": {
-                    "vet_id": {"type": "integer"},
-                    "keep": {"type": "boolean"},
-                    "reason": {"type": "string"},
-                    "severity": {
-                        "type": ["string", "null"],
-                        "enum": ["high", "medium", "low", None],
-                    },
-                    "impact": {
-                        "type": ["string", "null"],
-                        "enum": ["HIGH", "MED", "LOW", None],
-                    },
-                    "effort": {
-                        "type": ["string", "null"],
-                        "enum": ["S", "M", "L", None],
-                    },
-                    "risk": {
-                        "type": ["string", "null"],
-                        "enum": ["LOW", "MED", "HIGH", None],
-                    },
-                    "confidence": {
-                        "type": ["string", "null"],
-                        "enum": ["HIGH", "MED", "LOW", None],
-                    },
-                    "path": {"type": ["string", "null"]},
-                    "line": {"type": ["integer", "null"]},
-                    **_MAINTENANCE_FINDING_PROPERTIES,
-                },
+VET_SCHEMA: dict[str, Any] = strict_object({
+    "verdicts": {
+        "type": "array",
+        "items": strict_object({
+            "vet_id": {"type": "integer"},
+            "keep": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "severity": {
+                "type": ["string", "null"],
+                "enum": ["high", "medium", "low", None],
             },
-        },
+            "impact": {
+                "type": ["string", "null"],
+                "enum": ["HIGH", "MED", "LOW", None],
+            },
+            "effort": {
+                "type": ["string", "null"],
+                "enum": ["S", "M", "L", None],
+            },
+            "risk": {
+                "type": ["string", "null"],
+                "enum": ["LOW", "MED", "HIGH", None],
+            },
+            "confidence": {
+                "type": ["string", "null"],
+                "enum": ["HIGH", "MED", "LOW", None],
+            },
+            "path": {"type": ["string", "null"]},
+            "line": {"type": ["integer", "null"]},
+            **_MAINTENANCE_FINDING_PROPERTIES,
+        }),
     },
-}
+})
 
 _STEP_NUMBER_LIST_SCHEMA: dict[str, Any] = {
     "type": "array",
@@ -216,498 +169,365 @@ _STOP_CONDITION_BODY_PROPERTIES: dict[str, Any] = {
 # The model-facing authoring schema: judgment content only. The host derives
 # numbering, command records, excerpt text, git policy, boilerplate stop
 # conditions, and rendering (see daydream/improve/assemble.py).
-PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "title",
-        "covered_fingerprints",
-        "why_this_matters",
-        "scope",
-        "context_excerpts",
-        "git_workflow",
-        "steps",
-        "test_plan",
-        "done_criteria",
-        "false_assumption",
-        "additional_command_refs",
-    ],
-    "properties": {
-        "title": {"type": "string", "minLength": 12, "maxLength": 160},
-        "covered_fingerprints": {
+PLAN_AUTHOR_SCHEMA: dict[str, Any] = strict_object({
+    "title": {"type": "string", "minLength": 12, "maxLength": 160},
+    "covered_fingerprints": {
+        "type": "array",
+        "minItems": 1,
+        "description": (
+            "Copy the selected finding's complete set of unique "
+            "member_fingerprints exactly. Order is not significant. When "
+            "it has no member_fingerprints, use a one-item array "
+            "containing its fingerprint."
+        ),
+        "items": {"type": "string", "minLength": 1, "maxLength": 128},
+    },
+    "why_this_matters": strict_object({
+        key: {"type": "string", "minLength": 30, "maxLength": 800}
+        for key in ("problem", "concrete_cost", "intended_outcome")
+    }),
+    "scope": strict_object({
+        "existing_paths": {
+            "type": "array",
+            "items": strict_object({
+                "path": _REPOSITORY_FILE_PATH_SCHEMA,
+                "role": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 300,
+                },
+            }),
+        },
+        "new_paths": {
+            "type": "array",
+            "items": strict_object({
+                "path": _REPOSITORY_FILE_PATH_SCHEMA,
+                "role": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 300,
+                },
+            }),
+        },
+        "out_of_scope_paths": {
             "type": "array",
             "minItems": 1,
-            "description": (
-                "Copy the selected finding's complete set of unique "
-                "member_fingerprints exactly. Order is not significant. When "
-                "it has no member_fingerprints, use a one-item array "
-                "containing its fingerprint."
-            ),
-            "items": {"type": "string", "minLength": 1, "maxLength": 128},
-        },
-        "why_this_matters": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["problem", "concrete_cost", "intended_outcome"],
-            "properties": {
-                key: {"type": "string", "minLength": 30, "maxLength": 800}
-                for key in ("problem", "concrete_cost", "intended_outcome")
-            },
-        },
-        "scope": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "existing_paths",
-                "new_paths",
-                "out_of_scope_paths",
-                "out_of_scope_behaviors",
-            ],
-            "properties": {
-                "existing_paths": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["path", "role"],
-                        "properties": {
-                            "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                            "role": {
-                                "type": "string",
-                                "minLength": 12,
-                                "maxLength": 300,
-                            },
-                        },
-                    },
-                },
-                "new_paths": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["path", "role"],
-                        "properties": {
-                            "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                            "role": {
-                                "type": "string",
-                                "minLength": 12,
-                                "maxLength": 300,
-                            },
-                        },
-                    },
-                },
-                "out_of_scope_paths": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["path", "reason"],
-                        "properties": {
-                            "path": _DIRECTORY_SCOPE_SCHEMA,
-                            "reason": {
-                                "type": "string",
-                                "minLength": 20,
-                                "maxLength": 500,
-                            },
-                        },
-                    },
-                },
-                "out_of_scope_behaviors": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["behavior", "reason"],
-                        "properties": {
-                            key: {
-                                "type": "string",
-                                "minLength": 20,
-                                "maxLength": 500,
-                            }
-                            for key in ("behavior", "reason")
-                        },
-                    },
-                },
-            },
-        },
-        "context_excerpts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["path", "start_line", "end_line", "file_role"],
-                "properties": {
-                    "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                    "start_line": {"type": "integer", "minimum": 1},
-                    "end_line": {"type": "integer", "minimum": 1},
-                    "file_role": {
-                        "type": "string",
-                        "minLength": 12,
-                        "maxLength": 300,
-                    },
-                },
-            },
-        },
-        "git_workflow": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["commit_boundaries", "commit_message_example"],
-            "properties": {
-                "commit_boundaries": {
+            "items": strict_object({
+                "path": _DIRECTORY_SCOPE_SCHEMA,
+                "reason": {
                     "type": "string",
                     "minLength": 20,
                     "maxLength": 500,
-                    "description": (
-                        "How to split the work into commits, stated as a "
-                        "decision the executor follows rather than a choice it "
-                        "makes: say 'one commit' or list each commit and the "
-                        "step numbers it covers. Never 'split as appropriate'."
-                    ),
                 },
-                "commit_message_example": {
-                    "type": "string",
-                    "minLength": 5,
-                    "maxLength": 200,
-                    "description": (
-                        "The literal commit message to use, ready to paste."
-                    ),
-                },
-            },
+            }),
         },
-        "steps": {
+        "out_of_scope_behaviors": {
             "type": "array",
             "minItems": 1,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["title", "changes", "verification"],
-                "properties": {
-                    "title": {
+            "items": strict_object({
+                key: {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 500,
+                }
+                for key in ("behavior", "reason")
+            }),
+        },
+    }),
+    "context_excerpts": {
+        "type": "array",
+        "items": strict_object({
+            "path": _REPOSITORY_FILE_PATH_SCHEMA,
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+            "file_role": {
+                "type": "string",
+                "minLength": 12,
+                "maxLength": 300,
+            },
+        }),
+    },
+    "git_workflow": strict_object({
+        "commit_boundaries": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 500,
+            "description": (
+                "How to split the work into commits, stated as a "
+                "decision the executor follows rather than a choice it "
+                "makes: say 'one commit' or list each commit and the "
+                "step numbers it covers. Never 'split as appropriate'."
+            ),
+        },
+        "commit_message_example": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 200,
+            "description": (
+                "The literal commit message to use, ready to paste."
+            ),
+        },
+    }),
+    "steps": {
+        "type": "array",
+        "minItems": 1,
+        "items": strict_object({
+            "title": {
+                "type": "string",
+                "minLength": 12,
+                "maxLength": 200,
+                "description": (
+                    "What this step accomplishes, in the imperative. "
+                    "Steps are executed strictly in array order, so "
+                    "order them by dependency."
+                ),
+            },
+            "changes": {
+                "type": "array",
+                "minItems": 1,
+                "items": strict_object({
+                    "path": _REPOSITORY_FILE_PATH_SCHEMA,
+                    "symbol": {
                         "type": "string",
-                        "minLength": 12,
-                        "maxLength": 200,
+                        "minLength": 1,
+                        "maxLength": 300,
                         "description": (
-                            "What this step accomplishes, in the imperative. "
-                            "Steps are executed strictly in array order, so "
-                            "order them by dependency."
+                            "Exact name of the function, class, "
+                            "constant, or block being changed, "
+                            "copied verbatim from the file. Never "
+                            "a description like 'the relevant "
+                            "handler'."
                         ),
                     },
-                    "changes": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": [
-                                "path",
-                                "symbol",
-                                "operation",
-                                "instruction",
-                                "target_state",
-                            ],
-                            "properties": {
-                                "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                                "symbol": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "maxLength": 300,
-                                    "description": (
-                                        "Exact name of the function, class, "
-                                        "constant, or block being changed, "
-                                        "copied verbatim from the file. Never "
-                                        "a description like 'the relevant "
-                                        "handler'."
-                                    ),
-                                },
-                                "operation": {
-                                    "type": "string",
-                                    "enum": [
-                                        "create",
-                                        "modify",
-                                        "delete",
-                                        "move",
-                                        "rename",
-                                    ],
-                                },
-                                "instruction": {
-                                    "type": "string",
-                                    "minLength": 30,
-                                    "maxLength": 4000,
-                                    "description": (
-                                        "Exactly what to do, written for an "
-                                        "executor that cannot infer anything "
-                                        "and will not look around the "
-                                        "repository. Name every identifier, "
-                                        "file, literal, header, key, and "
-                                        "import in full. State what must NOT "
-                                        "change. Banned: 'the relevant X', "
-                                        "'the appropriate Y', 'as "
-                                        "appropriate', 'as needed', 'if "
-                                        "necessary', 'where applicable', "
-                                        "'update accordingly', 'and similar', "
-                                        "'etc.', 'consider', 'you may want "
-                                        "to', 'try to' — each one is a "
-                                        "decision the executor cannot make. "
-                                        "If a change needs more than 4000 "
-                                        "characters to specify, split it into "
-                                        "several entries in this array or "
-                                        "into another step; it is never "
-                                        "truncated for you. For a delete "
-                                        "operation, name exactly what is "
-                                        "removed and do not invent a "
-                                        "replacement."
-                                    ),
-                                },
-                                "target_state": {
-                                    "type": "string",
-                                    "minLength": 30,
-                                    "maxLength": 4000,
-                                    "description": (
-                                        "What is literally true of this file "
-                                        "once the instruction is done, phrased "
-                                        "so the executor can re-read the file "
-                                        "and check it sentence by sentence. "
-                                        "Describe observable content, not "
-                                        "intent or quality. For a delete "
-                                        "operation, state that the exact "
-                                        "symbol or block is absent; when the "
-                                        "whole file is deleted, state that the "
-                                        "path no longer exists."
-                                    ),
-                                },
-                            },
-                        },
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "create",
+                            "modify",
+                            "delete",
+                            "move",
+                            "rename",
+                        ],
                     },
-                    "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
-                },
+                    "instruction": {
+                        "type": "string",
+                        "minLength": 30,
+                        "maxLength": 4000,
+                        "description": (
+                            "Exactly what to do, written for an "
+                            "executor that cannot infer anything "
+                            "and will not look around the "
+                            "repository. Name every identifier, "
+                            "file, literal, header, key, and "
+                            "import in full. State what must NOT "
+                            "change. Banned: 'the relevant X', "
+                            "'the appropriate Y', 'as "
+                            "appropriate', 'as needed', 'if "
+                            "necessary', 'where applicable', "
+                            "'update accordingly', 'and similar', "
+                            "'etc.', 'consider', 'you may want "
+                            "to', 'try to' — each one is a "
+                            "decision the executor cannot make. "
+                            "If a change needs more than 4000 "
+                            "characters to specify, split it into "
+                            "several entries in this array or "
+                            "into another step; it is never "
+                            "truncated for you. For a delete "
+                            "operation, name exactly what is "
+                            "removed and do not invent a "
+                            "replacement."
+                        ),
+                    },
+                    "target_state": {
+                        "type": "string",
+                        "minLength": 30,
+                        "maxLength": 4000,
+                        "description": (
+                            "What is literally true of this file "
+                            "once the instruction is done, phrased "
+                            "so the executor can re-read the file "
+                            "and check it sentence by sentence. "
+                            "Describe observable content, not "
+                            "intent or quality. For a delete "
+                            "operation, state that the exact "
+                            "symbol or block is absent; when the "
+                            "whole file is deleted, state that the "
+                            "path no longer exists."
+                        ),
+                    },
+                }),
             },
-        },
-        "test_plan": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "mode",
-                "rationale",
-                "existing_coverage",
-                "exemplars",
-                "cases",
+            "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
+        }),
+    },
+    "test_plan": strict_object({
+        "mode": {
+            "type": "string",
+            "enum": [
+                "new-or-updated-tests",
+                "existing-coverage",
+                "not-applicable",
             ],
-            "properties": {
-                "mode": {
+            "description": (
+                "Use new-or-updated-tests when test code must change, "
+                "existing-coverage when named tests already prove the "
+                "change, and not-applicable only for documentation, "
+                "exact comment/docstring cleanup, or deletion of a "
+                "non-runtime artifact or redundant test that cannot "
+                "usefully be exercised by a test."
+            ),
+        },
+        "rationale": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 700,
+            "description": (
+                "Explain why this mode is sufficient for this exact "
+                "change. Deletion alone is not a reason to omit tests "
+                "when observable behavior changes."
+            ),
+        },
+        "existing_coverage": {
+            "type": "array",
+            "description": (
+                "Exact existing tests that already prove the planned "
+                "behavior. Populate only in existing-coverage mode. "
+                "These paths are evidence, not writable plan scope."
+            ),
+            "items": strict_object({
+                "path": _REPOSITORY_FILE_PATH_SCHEMA,
+                "symbol": {
                     "type": "string",
-                    "enum": [
-                        "new-or-updated-tests",
-                        "existing-coverage",
-                        "not-applicable",
-                    ],
-                    "description": (
-                        "Use new-or-updated-tests when test code must change, "
-                        "existing-coverage when named tests already prove the "
-                        "change, and not-applicable only for documentation, "
-                        "exact comment/docstring cleanup, or deletion of a "
-                        "non-runtime artifact or redundant test that cannot "
-                        "usefully be exercised by a test."
-                    ),
+                    "minLength": 1,
+                    "maxLength": 300,
                 },
-                "rationale": {
+                "behavior": {
                     "type": "string",
                     "minLength": 20,
                     "maxLength": 700,
-                    "description": (
-                        "Explain why this mode is sufficient for this exact "
-                        "change. Deletion alone is not a reason to omit tests "
-                        "when observable behavior changes."
-                    ),
                 },
-                "existing_coverage": {
-                    "type": "array",
-                    "description": (
-                        "Exact existing tests that already prove the planned "
-                        "behavior. Populate only in existing-coverage mode. "
-                        "These paths are evidence, not writable plan scope."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "path",
-                            "symbol",
-                            "behavior",
-                            "verification",
-                        ],
-                        "properties": {
-                            "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                            "symbol": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 300,
-                            },
-                            "behavior": {
-                                "type": "string",
-                                "minLength": 20,
-                                "maxLength": 700,
-                            },
-                            "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
-                        },
-                    },
-                },
-                "exemplars": {
-                    "type": "array",
-                    "description": (
-                        "Existing tests whose shape the new tests copy. Leave "
-                        "this empty when the repository has no test to copy — "
-                        "an invented exemplar is worse than none."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["path", "symbol", "pattern_to_copy"],
-                        "properties": {
-                            "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                            "symbol": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 300,
-                            },
-                            "pattern_to_copy": {
-                                "type": "string",
-                                "minLength": 20,
-                                "maxLength": 700,
-                            },
-                        },
-                    },
-                },
-                "cases": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "name",
-                            "test_file",
-                            "test_symbol",
-                            "kind",
-                            "setup",
-                            "action",
-                            "assertions",
-                            "verification",
-                        ],
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "minLength": 12,
-                                "maxLength": 200,
-                            },
-                            "test_file": _REPOSITORY_FILE_PATH_SCHEMA,
-                            "test_symbol": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 300,
-                            },
-                            "kind": {
-                                "type": "string",
-                                "enum": [
-                                    "unit",
-                                    "integration",
-                                    "acceptance",
-                                    "static",
-                                ],
-                            },
-                            "setup": {
-                                "type": "string",
-                                "minLength": 20,
-                                "maxLength": 1000,
-                                "description": (
-                                    "The exact fixtures, helpers, and starting "
-                                    "values this test needs, named as they "
-                                    "appear in the repository. Prefer reusing "
-                                    "a named harness from an exemplar over "
-                                    "describing one."
-                                ),
-                            },
-                            "action": {
-                                "type": "string",
-                                "minLength": 20,
-                                "maxLength": 1000,
-                                "description": (
-                                    "The single call or interaction under "
-                                    "test, with its literal arguments."
-                                ),
-                            },
-                            "assertions": {
-                                "type": "array",
-                                "minItems": 1,
-                                "items": {
-                                    "type": "string",
-                                    "minLength": 15,
-                                    "maxLength": 500,
-                                    "description": (
-                                        "One observable outcome and the exact "
-                                        "expected value. Assert on what the "
-                                        "user or caller sees, never that a "
-                                        "function was called."
-                                    ),
-                                },
-                            },
-                            "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
-                        },
-                    },
-                },
-            },
+                "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
+            }),
         },
-        "done_criteria": {
+        "exemplars": {
             "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["kind", "description", "verification"],
-                "properties": {
-                    "kind": {
+            "description": (
+                "Existing tests whose shape the new tests copy. Leave "
+                "this empty when the repository has no test to copy — "
+                "an invented exemplar is worse than none."
+            ),
+            "items": strict_object({
+                "path": _REPOSITORY_FILE_PATH_SCHEMA,
+                "symbol": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300,
+                },
+                "pattern_to_copy": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 700,
+                },
+            }),
+        },
+        "cases": {
+            "type": "array",
+            "items": strict_object({
+                "name": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 200,
+                },
+                "test_file": _REPOSITORY_FILE_PATH_SCHEMA,
+                "test_symbol": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300,
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "unit",
+                        "integration",
+                        "acceptance",
+                        "static",
+                    ],
+                },
+                "setup": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 1000,
+                    "description": (
+                        "The exact fixtures, helpers, and starting "
+                        "values this test needs, named as they "
+                        "appear in the repository. Prefer reusing "
+                        "a named harness from an exemplar over "
+                        "describing one."
+                    ),
+                },
+                "action": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 1000,
+                    "description": (
+                        "The single call or interaction under "
+                        "test, with its literal arguments."
+                    ),
+                },
+                "assertions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
                         "type": "string",
-                        "enum": [
-                            "behavior",
-                            "step-gate",
-                            "test-gate",
-                            "scope-integrity",
-                            "static-invariant",
-                        ],
-                    },
-                    "description": {
-                        "type": "string",
-                        "minLength": 20,
+                        "minLength": 15,
                         "maxLength": 500,
                         "description": (
-                            "A statement the executor can settle as true or "
-                            "false without judgement, naming the exact test "
-                            "symbol, file, or observable behaviour it turns "
-                            "on. Not 'the code is clean' or 'performance "
-                            "improves'."
+                            "One observable outcome and the exact "
+                            "expected value. Assert on what the "
+                            "user or caller sees, never that a "
+                            "function was called."
                         ),
                     },
-                    "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
                 },
+                "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
+            }),
+        },
+    }),
+    "done_criteria": {
+        "type": "array",
+        "minItems": 1,
+        "items": strict_object({
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "behavior",
+                    "step-gate",
+                    "test-gate",
+                    "scope-integrity",
+                    "static-invariant",
+                ],
             },
-        },
-        "false_assumption": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "condition",
-                "evidence_to_report",
-                "related_paths",
-                "related_step_numbers",
-            ],
-            "properties": _STOP_CONDITION_BODY_PROPERTIES,
-        },
-        "additional_command_refs": {
-            "type": "array",
-            "items": _COMMAND_REF_SCHEMA,
-        },
+            "description": {
+                "type": "string",
+                "minLength": 20,
+                "maxLength": 500,
+                "description": (
+                    "A statement the executor can settle as true or "
+                    "false without judgement, naming the exact test "
+                    "symbol, file, or observable behaviour it turns "
+                    "on. Not 'the code is clean' or 'performance "
+                    "improves'."
+                ),
+            },
+            "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
+        }),
     },
-}
+    "false_assumption": strict_object(_STOP_CONDITION_BODY_PROPERTIES),
+    "additional_command_refs": {
+        "type": "array",
+        "items": _COMMAND_REF_SCHEMA,
+    },
+})
 
 
 AUDIT_PLAYBOOK_SECTIONS: dict[str, str] = {

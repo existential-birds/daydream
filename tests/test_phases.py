@@ -5933,8 +5933,7 @@ def test_fix_verify_verdicts_are_single_source() -> None:
         FIX_VERIFY_VERDICTS_SCHEMA,
     )
 
-    schema = cast(dict[str, Any], FIX_VERIFY_VERDICTS_SCHEMA)
-    enum = schema["properties"]["verdicts"]["items"]["properties"]["verdict"]["enum"]
+    enum = FIX_VERIFY_VERDICTS_SCHEMA["properties"]["verdicts"]["items"]["properties"]["verdict"]["enum"]
     assert enum == list(FIX_VERIFY_VERDICTS)
     # Subsets are drawn from the same four-value authority.
     assert set(FIX_VERIFY_ACTIONABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)

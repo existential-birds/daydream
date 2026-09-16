@@ -61,6 +61,7 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.output_schema import strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
     AdvisoryCandidate,
@@ -352,16 +353,11 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
     )
 
 
-SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "verdict": {"type": "string", "enum": ["correct", "replace"]},
-        "suggested_command": {"type": ["string", "null"]},
-        "reason": {"type": "string"},
-    },
-    "required": ["verdict", "suggested_command", "reason"],
-    "additionalProperties": False,
-}
+SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = strict_object({
+    "verdict": {"type": "string", "enum": ["correct", "replace"]},
+    "suggested_command": {"type": ["string", "null"]},
+    "reason": {"type": "string"},
+})
 
 
 def _sanitize_suggested_command(raw: str) -> str:
@@ -592,14 +588,9 @@ def _build_failure_summarizer_prompt(
     )
 
 
-FAILURE_SUMMARIZER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "handoff_prompt": {"type": "string"},
-    },
-    "required": ["handoff_prompt"],
-    "additionalProperties": False,
-}
+FAILURE_SUMMARIZER_SCHEMA: dict[str, Any] = strict_object({
+    "handoff_prompt": {"type": "string"},
+})
 
 
 def _changed_files(repo: Path) -> list[Path]:
@@ -1025,30 +1016,20 @@ async def _run_failure_summarizer(
     return body, handoff_path, written
 
 
-FEEDBACK_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "issues": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "description": {"type": "string"},
-                    "file": _REPOSITORY_FILE_PATH_SCHEMA,
-                    "line": {"type": "integer"},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
-                    "rationale": {"type": "string"},
-                    "evidence": {"type": "string"},
-                },
-                "required": ["id", "description", "file", "line", "confidence", "rationale", "evidence"],
-                "additionalProperties": False,
-            },
-        },
+FEEDBACK_SCHEMA: dict[str, Any] = strict_object({
+    "issues": {
+        "type": "array",
+        "items": strict_object({
+            "id": {"type": "integer"},
+            "description": {"type": "string"},
+            "file": _REPOSITORY_FILE_PATH_SCHEMA,
+            "line": {"type": "integer"},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
+            "rationale": {"type": "string"},
+            "evidence": {"type": "string"},
+        }),
     },
-    "required": ["issues"],
-    "additionalProperties": False,
-}
+})
 
 # Per-stack parse schema (issue #168). Identical to FEEDBACK_SCHEMA but carries a
 # required ``severity`` so the scoped Opus arbiter can select high-severity /
@@ -1080,17 +1061,12 @@ PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
 PER_STACK_RECORD_SCHEMA["required"] = ["issues", "verdicts"]
 PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
     "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "path": _REPOSITORY_FILE_PATH_SCHEMA,
-            "lines_read": {"type": "integer"},
-            "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed"]},
-            "n_findings": {"type": "integer"},
-        },
-        "required": ["path", "lines_read", "verdict", "n_findings"],
-        "additionalProperties": False,
-    },
+    "items": strict_object({
+        "path": _REPOSITORY_FILE_PATH_SCHEMA,
+        "lines_read": {"type": "integer"},
+        "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed"]},
+        "n_findings": {"type": "integer"},
+    }),
 }
 
 # Uncovered-sweep parse schema (issue #742 finding 2). The sweep re-runs a
@@ -1106,109 +1082,67 @@ UNCOVERED_SWEEP_SCHEMA: dict[str, Any] = copy.deepcopy(PER_STACK_RECORD_SCHEMA)
 UNCOVERED_SWEEP_SCHEMA["required"] = ["issues"]
 UNCOVERED_SWEEP_SCHEMA["properties"].pop("verdicts", None)
 
-ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "issues": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                    "recommendation": {"type": "string"},
-                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
-                    "rationale": {"type": "string"},
-                    "evidence": {"type": "string"},
-                },
-                "required": [
-                    "id",
-                    "title",
-                    "description",
-                    "recommendation",
-                    "severity",
-                    "files",
-                    "confidence",
-                    "rationale",
-                    "evidence",
-                ],
-                "additionalProperties": False,
-            },
-        },
+ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = strict_object({
+    "issues": {
+        "type": "array",
+        "items": strict_object({
+            "id": {"type": "integer"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "recommendation": {"type": "string"},
+            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
+            "rationale": {"type": "string"},
+            "evidence": {"type": "string"},
+        }),
     },
-    "required": ["issues"],
-    "additionalProperties": False,
-}
+})
 
-MERGED_ITEMS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "description": {"type": "string"},
-                    "file": _REPOSITORY_FILE_PATH_SCHEMA,
-                    "line": {"type": "integer"},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
-                    "rationale": {"type": "string"},
-                    "evidence": {"type": "string"},
-                    "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
-                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    # Issue #744: a finding may span sibling files. Optional in
-                    # the merge model's semantics (null when single-file) but
-                    # strict-mode required (Codex rejects optional properties,
-                    # see test_output_schema_strict.py), so the model always
-                    # emits the key and uses null to mean "no related files".
-                    "related_files": {
-                        "type": ["array", "null"],
-                        "items": _REPOSITORY_FILE_PATH_SCHEMA,
-                    },
-                    # Issue #1111: the machine-readable provenance handle. A
-                    # merged item is a synthesis the agent writes from scratch,
-                    # so without this the only link back to the records it came
-                    # from is the ``(Sources: ...)`` prose in ``rationale``,
-                    # which nothing downstream can parse. Each entry is the
-                    # host-minted ``uid`` of a contributing record; a
-                    # deduplicated cross-stack item lists all of them.
-                    # Same ``["array", "null"]`` shape as ``related_files``
-                    # above and for the same reason: strict mode rejects
-                    # optional properties (test_output_schema_strict.py), so
-                    # the model must always emit the key and says "cannot
-                    # attribute" with null or an empty array rather than by
-                    # omission. Host-side validation against the run's real uid
-                    # pool happens in ``phase_cross_stack_merge`` -- the schema
-                    # constrains the shape, never the truth of the values.
-                    "source_uids": {
-                        "type": ["array", "null"],
-                        "items": {"type": "string"},
-                    },
-                },
-                "required": [
-                    "id",
-                    "description",
-                    "file",
-                    "line",
-                    "confidence",
-                    "rationale",
-                    "evidence",
-                    "lens",
-                    "severity",
-                    "related_files",
-                    "source_uids",
-                ],
-                "additionalProperties": False,
+MERGED_ITEMS_SCHEMA: dict[str, Any] = strict_object({
+    "items": {
+        "type": "array",
+        "items": strict_object({
+            "id": {"type": "integer"},
+            "description": {"type": "string"},
+            "file": _REPOSITORY_FILE_PATH_SCHEMA,
+            "line": {"type": "integer"},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
+            "rationale": {"type": "string"},
+            "evidence": {"type": "string"},
+            "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
+            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            # Issue #744: a finding may span sibling files. Optional in
+            # the merge model's semantics (null when single-file) but
+            # strict-mode required (Codex rejects optional properties,
+            # see test_output_schema_strict.py), so the model always
+            # emits the key and uses null to mean "no related files".
+            "related_files": {
+                "type": ["array", "null"],
+                "items": _REPOSITORY_FILE_PATH_SCHEMA,
             },
-        },
+            # Issue #1111: the machine-readable provenance handle. A
+            # merged item is a synthesis the agent writes from scratch,
+            # so without this the only link back to the records it came
+            # from is the ``(Sources: ...)`` prose in ``rationale``,
+            # which nothing downstream can parse. Each entry is the
+            # host-minted ``uid`` of a contributing record; a
+            # deduplicated cross-stack item lists all of them.
+            # Same ``["array", "null"]`` shape as ``related_files``
+            # above and for the same reason: strict mode rejects
+            # optional properties (test_output_schema_strict.py), so
+            # the model must always emit the key and says "cannot
+            # attribute" with null or an empty array rather than by
+            # omission. Host-side validation against the run's real uid
+            # pool happens in ``phase_cross_stack_merge`` -- the schema
+            # constrains the shape, never the truth of the values.
+            "source_uids": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+            },
+        }),
     },
-    "required": ["items"],
-    "additionalProperties": False,
-}
+})
 
 
 class CrossStackMergeError(ValueError):
@@ -1507,30 +1441,19 @@ def group_items_by_footprint(
     return result
 
 
-RECOMMENDATION_VERDICTS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "issue_id": {"type": "integer"},
-                    "verdict": {"type": "string",
-                                "enum": ["consistent", "contradicts", "uncertain"]},
-                    "evidence": {"type": "string"},
-                    "unverified_assumptions": {"type": "array",
-                                               "items": {"type": "string"}},
-                },
-                "required": ["issue_id", "verdict", "evidence",
-                             "unverified_assumptions"],
-                "additionalProperties": False,
-            },
-        },
+RECOMMENDATION_VERDICTS_SCHEMA = strict_object({
+    "verdicts": {
+        "type": "array",
+        "items": strict_object({
+            "issue_id": {"type": "integer"},
+            "verdict": {"type": "string",
+                        "enum": ["consistent", "contradicts", "uncertain"]},
+            "evidence": {"type": "string"},
+            "unverified_assumptions": {"type": "array",
+                                       "items": {"type": "string"}},
+        }),
     },
-    "required": ["verdicts"],
-    "additionalProperties": False,
-}
+})
 
 # The four fix-verify verdicts -- single authority (issue #744). Every
 # consumer -- the output schema below, ``phase_fix_verify``'s allowed-value
@@ -1546,33 +1469,23 @@ FIX_VERIFY_ACTIONABLE_VERDICTS: tuple[str, ...] = ("unresolved", "wrong_target",
 FIX_VERIFY_RETARGETABLE_VERDICTS: tuple[str, ...] = ("wrong_target", "regressed")
 
 
-FIX_VERIFY_VERDICTS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "issue_id": {"type": "integer"},
-                    "verdict": {"type": "string",
-                                "enum": list(FIX_VERIFY_VERDICTS)},
-                    # Strict-mode required (Codex rejects optional properties,
-                    # see test_output_schema_strict.py). ``path`` is null for
-                    # resolved/unresolved and a repo-relative file for
-                    # wrong_target/regressed; the phase enforces the conditional
-                    # requirement because JSON Schema cannot express it.
-                    "path": {"type": ["string", "null"]},
-                    "reason": {"type": "string"},
-                },
-                "required": ["issue_id", "verdict", "path", "reason"],
-                "additionalProperties": False,
-            },
-        },
+FIX_VERIFY_VERDICTS_SCHEMA = strict_object({
+    "verdicts": {
+        "type": "array",
+        "items": strict_object({
+            "issue_id": {"type": "integer"},
+            "verdict": {"type": "string",
+                        "enum": list(FIX_VERIFY_VERDICTS)},
+            # Strict-mode required (Codex rejects optional properties,
+            # see test_output_schema_strict.py). ``path`` is null for
+            # resolved/unresolved and a repo-relative file for
+            # wrong_target/regressed; the phase enforces the conditional
+            # requirement because JSON Schema cannot express it.
+            "path": {"type": ["string", "null"]},
+            "reason": {"type": "string"},
+        }),
     },
-    "required": ["verdicts"],
-    "additionalProperties": False,
-}
+})
 
 def _confidence_and_convention_instructions() -> str:
     """Prompt language for QUAL-02 confidence, QUAL-03 conventions, QUAL-04 error handling.
@@ -4980,70 +4893,47 @@ async def phase_per_stack_reviews(
     return results, failures
 
 
-ARBITER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "arb_id": {"type": "integer"},
-                    "keep": {"type": "boolean"},
-                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
-                    "description": {"type": "string"},
-                    "rationale": {"type": "string"},
-                    "evidence": {"type": "string"},
-                },
-                "required": ["arb_id", "keep", "severity", "confidence", "description", "rationale", "evidence"],
-                "additionalProperties": False,
-            },
-        },
+ARBITER_SCHEMA: dict[str, Any] = strict_object({
+    "findings": {
+        "type": "array",
+        "items": strict_object({
+            "arb_id": {"type": "integer"},
+            "keep": {"type": "boolean"},
+            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
+            "description": {"type": "string"},
+            "rationale": {"type": "string"},
+            "evidence": {"type": "string"},
+        }),
     },
-    "required": ["findings"],
-    "additionalProperties": False,
-}
+})
 
 
-SUPERVISE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "action": {"type": "string", "enum": ["allow", "drop", "edit", "hold"]},
-                    "reason": {"type": "string"},
-                    "severity": {
-                        "anyOf": [
-                            {"type": "string", "enum": ["high", "medium", "low"]},
-                            {"type": "null"},
-                        ]
-                    },
-                    "confidence": {
-                        "anyOf": [
-                            {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                            {"type": "null"},
-                        ]
-                    },
-                    "description": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "rationale": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                },
-                "required": [
-                    "id", "action", "reason", "severity", "confidence", "description",
-                    "rationale", "evidence",
-                ],
-                "additionalProperties": False,
+SUPERVISE_SCHEMA: dict[str, Any] = strict_object({
+    "verdicts": {
+        "type": "array",
+        "items": strict_object({
+            "id": {"type": "integer"},
+            "action": {"type": "string", "enum": ["allow", "drop", "edit", "hold"]},
+            "reason": {"type": "string"},
+            "severity": {
+                "anyOf": [
+                    {"type": "string", "enum": ["high", "medium", "low"]},
+                    {"type": "null"},
+                ]
             },
-        },
+            "confidence": {
+                "anyOf": [
+                    {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    {"type": "null"},
+                ]
+            },
+            "description": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "rationale": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        }),
     },
-    "required": ["verdicts"],
-    "additionalProperties": False,
-}
+})
 
 
 @bind_resolved_run_context
@@ -5232,30 +5122,20 @@ async def phase_arbiter_review(
 # ALSO admits "LOW": suppression targets are precisely the LOW-confidence findings
 # the arbiter never sees, so a schema that omitted "LOW" (as ARBITER_SCHEMA does)
 # would force the agent to mis-report their confidence on every kept finding.
-SUPPRESSION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "sup_id": {"type": "integer"},
-                    "keep": {"type": "boolean"},
-                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                    "description": {"type": "string"},
-                    "rationale": {"type": "string"},
-                    "evidence": {"type": "string"},
-                },
-                "required": ["sup_id", "keep", "severity", "confidence", "description", "rationale", "evidence"],
-                "additionalProperties": False,
-            },
-        },
+SUPPRESSION_SCHEMA: dict[str, Any] = strict_object({
+    "findings": {
+        "type": "array",
+        "items": strict_object({
+            "sup_id": {"type": "integer"},
+            "keep": {"type": "boolean"},
+            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+            "description": {"type": "string"},
+            "rationale": {"type": "string"},
+            "evidence": {"type": "string"},
+        }),
     },
-    "required": ["findings"],
-    "additionalProperties": False,
-}
+})
 
 
 @bind_resolved_run_context
