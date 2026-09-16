@@ -580,7 +580,7 @@ async def test_server_retry_hint_is_read_from_the_message_when_the_attribute_is_
 )
 @pytest.mark.asyncio
 async def test_a_malformed_retry_after_attribute_degrades_to_jitter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed: object
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed: Any
 ) -> None:
     """A present-but-invalid ``retry_after`` is ignored, never coerced to a delay."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
@@ -666,14 +666,17 @@ async def test_retry_recovery_allowance_precedence_policy_then_attribute_then_ar
     """A superior declared source wins; a zero allowance ends the ladder immediately."""
     # Policy (a complete retry declaration) outranks the backend attribute and
     # the explicit argument: its zero allowance stops after one dispatch.
-    policy_backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
-    policy_backend.retry_policy = SimpleNamespace(
-        attempts=5,
-        base_delay_s=0.0,
-        max_delay_s=0.0,
-        retry_recovery_allowance_s=0.0,
+    policy_backend = ScriptedBackend(
+        events=[_HintError("503")],
+        retry_attempts=5,
+        retry_recovery_allowance_s=300.0,
+        retry_policy=SimpleNamespace(
+            attempts=5,
+            base_delay_s=0.0,
+            max_delay_s=0.0,
+            retry_recovery_allowance_s=0.0,
+        ),
     )
-    policy_backend.retry_recovery_allowance_s = 300.0
 
     with pytest.raises(_HintError):
         await run_agent(
