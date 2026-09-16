@@ -697,6 +697,29 @@ async def test_advisory_overflow_with_a_real_failure_still_exits_one(
     assert _diagram_phase_end(target)["status"] == "failed"
 
 
+async def test_findings_artifact_carries_the_advisory_omission_diagnostic(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
+) -> None:
+    """The operator-readable artifact says which advisory inputs were dropped."""
+    from tests.harness.diagram_repos import build_large_cross_module_repo
+
+    target = build_large_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+    out = tmp_path / "diagram-findings.json"
+
+    exit_code, _ = await diagram_run(
+        target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]},
+        inline_transport=True, findings_out=str(out),
+    )
+
+    assert exit_code == 0
+    artifact = json.loads(out.read_text(encoding="utf-8"))
+    result = artifact["diagrams"]["results"]["sequence"]
+    assert result["status"] != "failed"
+    assert [item["label"] for item in result["advisory"]["omitted"]]
+    assert result["advisory"]["admitted_bytes"] < result["advisory"]["allowance_bytes"]
+
+
 def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
     tmp_path: Path,
     fake_gh: FakeGh,
