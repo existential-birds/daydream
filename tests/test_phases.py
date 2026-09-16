@@ -5564,6 +5564,35 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
     assert not any("affected_files" in line for line in prompt.splitlines())
 
 
+def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One policy, not two: the intent pre-budget call site delegates to
+    ``select_advisory_inputs`` and reports the same admitted/omitted split."""
+    from daydream import phases as phases_module
+    from daydream.prompt_budget import AdvisorySelection, select_advisory_inputs
+
+    exploration = tmp_path / "exploration"
+    exploration.mkdir()
+    (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
+    (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
+    captured: dict[str, Any] = {}
+    real_select = select_advisory_inputs
+
+    def _spy(backend: Any, cwd: Any, candidates: Any, *, read_only: bool) -> AdvisorySelection:
+        captured["labels"] = [candidate.label for candidate in candidates]
+        captured["read_only"] = read_only
+        return real_select(backend, cwd, candidates, read_only=read_only)
+
+    monkeypatch.setattr(phases_module, "select_advisory_inputs", _spy)
+    sized = phases_module._budgeted_exploration_inputs(
+        exploration, inline_budgeted=False, backend=SimpleNamespace(model="fake"), cwd=tmp_path
+    )
+    assert captured["labels"] == ["exploration-summary", "exploration-affected-files"]
+    assert sized["exploration-summary"] == exploration / "summary.md"
+    assert sized["exploration-affected-files"] == exploration / "affected_files.md"
+
+
 @pytest.mark.asyncio
 async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_path(
     tmp_path: Path,

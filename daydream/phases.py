@@ -63,12 +63,13 @@ from daydream.generated_files import (
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
-    SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
+    AdvisoryCandidate,
     PreparedSanctionedInputs,
     SanctionedInputTransport,
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
     sanctioned_transport_for,
+    select_advisory_inputs,
     truncate_utf8_to_budget,
 )
 from daydream.prompts.authorial_intent import (
@@ -174,7 +175,7 @@ def _exploration_inline_budgeted(backend: Backend, work: WorkContext, *, read_on
     exploration files that would overflow the shared inline AGGREGATE budget
     must degrade (be excluded) rather than hard-fail the phase at capture
     time. The post-capture ``inline_transport`` remains authoritative for
-    prompt shaping; this pre-check only sizes advisory inputs.
+    prompt shaping; the shared advisory selector sizes the inputs.
     """
     return artifact_session_active() and (
         sanctioned_transport_for(backend, work.repo, read_only=read_only)
@@ -185,40 +186,33 @@ def _exploration_inline_budgeted(backend: Backend, work: WorkContext, *, read_on
 def _budgeted_exploration_inputs(
     exploration_dir: Path | None,
     *,
-    inline_budgeted: bool,
+    # Retained so both call sites state their own resolved transport gate;
+    # the shared selector re-resolves the transport, so the argument is
+    # intentionally unused here.
+    inline_budgeted: bool,  # noqa
+    backend: Backend,
+    cwd: Path,
+    read_only: bool = False,
 ) -> dict[str, Path | None]:
-    """Size the exploration pair against the shared inline aggregate.
+    """Size the exploration pair against the shared advisory-input budget.
 
-    Greedy include in declaration order (summary first) while the running
-    total stays within a single INLINE aggregate budget, so two files that
-    fit separately but not together degrade to the surviving prefix instead
-    of raising SanctionedInputUnavailable at capture time.
+    Delegates to :func:`select_advisory_inputs`, the single advisory-input
+    policy, so this pre-budget and capture-time agree on the transport and the
+    allowance. Candidates are declared in semantic priority (summary first),
+    admitted whole while they fit, and every omitted label maps to ``None``.
+    ``inline_budgeted`` records the caller's own transport gate; the selector
+    resolves the transport itself, so the two can never disagree.
     """
+    labels = tuple(_EXPLORATION_PHASE_INPUTS)
     if exploration_dir is None:
-        return {"exploration-summary": None, "exploration-affected-files": None}
-    if not inline_budgeted:
-        return {
-            "exploration-summary": exploration_dir / "summary.md",
-            "exploration-affected-files": exploration_dir / "affected_files.md",
-        }
-    remaining = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-    sized: dict[str, Path | None] = {}
-    for label, file_name in (
-        ("exploration-summary", "summary.md"),
-        ("exploration-affected-files", "affected_files.md"),
-    ):
-        path = exploration_dir / file_name
-        try:
-            size = path.stat().st_size
-        except OSError:
-            sized[label] = None
-            continue
-        if size <= remaining:
-            sized[label] = path
-            remaining -= size
-        else:
-            sized[label] = None
-    return sized
+        return dict.fromkeys(labels)
+    candidates = [
+        AdvisoryCandidate(label, exploration_dir / _EXPLORATION_PHASE_INPUTS[label])
+        for label in labels
+    ]
+    selection = select_advisory_inputs(backend, cwd, candidates, read_only=read_only)
+    admitted = selection.selected_paths()
+    return {label: admitted.get(label) for label in labels}
 
 
 TEST_OUTPUT_TAIL_LINES = 100
@@ -4512,15 +4506,21 @@ async def phase_understand_intent(
     # SanctionedInputUnavailable. (The over-budget diff itself is a separate
     # pre-existing capture limit on those transports; the inline-or-exclude
     # degradation below applies to the exploration context only. The
-    # post-capture ``inline_transport`` below remains authoritative; this
-    # pre-check only sizes advisory inputs.)
+    # post-capture ``inline_transport`` below remains authoritative; the
+    # shared advisory selector is the sole sizing policy.)
     exploration_inline_budgeted = _exploration_inline_budgeted(backend, work, read_only=True)
 
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {
             "diff": diff_path if inline_diff is None else None,
-            **_budgeted_exploration_inputs(exploration_dir, inline_budgeted=exploration_inline_budgeted),
+            **_budgeted_exploration_inputs(
+                exploration_dir,
+                inline_budgeted=exploration_inline_budgeted,
+                backend=backend,
+                cwd=work.repo,
+                read_only=True,
+            ),
         },
         read_only=True,
     )
@@ -4655,14 +4655,20 @@ async def phase_alternative_review(
     # hard-fail the wonder pass on INLINE transports (strict audit roots,
     # read-only disposable clones, sandboxed Osprey). (The over-budget diff
     # itself is a separate pre-existing capture limit on those transports;
-    # this pre-check only sizes advisory inputs.)
+    # the shared advisory selector is the sole sizing policy.)
     exploration_inline_budgeted = _exploration_inline_budgeted(backend, work, read_only=False)
 
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {
             "diff": diff_path if inline_diff is None else None,
-            **_budgeted_exploration_inputs(exploration_dir, inline_budgeted=exploration_inline_budgeted),
+            **_budgeted_exploration_inputs(
+                exploration_dir,
+                inline_budgeted=exploration_inline_budgeted,
+                backend=backend,
+                cwd=work.repo,
+                read_only=False,
+            ),
         },
     )
     prompt = get_registry().prompt("alternatives")(
