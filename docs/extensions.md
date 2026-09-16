@@ -400,7 +400,7 @@ name is stable.
 ### Prompts
 
 The 17 registered prompt names and the exact kwargs their builders receive
-(an override gets the same kwargs, except that on clone-mode backends a legacy override predating the inline kwargs keeps the documented kwarg set with `exploration_dir` arriving as `None` — see `diagram_sequence`/`diagram_flowchart` below). All kwargs are keyword-only except where
+(an override gets the same kwargs, except that on inline transports a legacy override predating the inline kwargs keeps the documented kwarg set with `exploration_dir` arriving as `None` — see `diagram_sequence`/`diagram_flowchart` below). All kwargs are keyword-only except where
 noted.
 
 | Prompt | Kwargs |

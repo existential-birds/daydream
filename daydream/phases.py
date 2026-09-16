@@ -68,7 +68,6 @@ from daydream.prompt_budget import (
     SanctionedInputTransport,
     fits_inline_diff_budget,
     prepare_sanctioned_inputs,
-    sanctioned_transport_for,
     select_advisory_inputs,
     truncate_utf8_to_budget,
 )
@@ -167,29 +166,9 @@ def _pointer_dir(
     return exploration_dir
 
 
-def _exploration_inline_budgeted(backend: Backend, work: WorkContext, *, read_only: bool) -> bool:
-    """Whether exploration files are sized against the shared INLINE aggregate.
-
-    Mirrors the advisory-budget rule: when an INLINE transport is active
-    (strict audit roots, read-only disposable clones, sandboxed Osprey),
-    exploration files that would overflow the shared inline AGGREGATE budget
-    must degrade (be excluded) rather than hard-fail the phase at capture
-    time. The post-capture ``inline_transport`` remains authoritative for
-    prompt shaping; the shared advisory selector sizes the inputs.
-    """
-    return artifact_session_active() and (
-        sanctioned_transport_for(backend, work.repo, read_only=read_only)
-        is SanctionedInputTransport.INLINE
-    )
-
-
 def _budgeted_exploration_inputs(
     exploration_dir: Path | None,
     *,
-    # Retained so both call sites state their own resolved transport gate;
-    # the shared selector re-resolves the transport, so the argument is
-    # intentionally unused here.
-    inline_budgeted: bool,  # noqa
     backend: Backend,
     cwd: Path,
     read_only: bool = False,
@@ -200,12 +179,16 @@ def _budgeted_exploration_inputs(
     policy, so this pre-budget and capture-time agree on the transport and the
     allowance. Candidates are declared in semantic priority (summary first),
     admitted whole while they fit, and every omitted label maps to ``None``.
-    ``inline_budgeted`` records the caller's own transport gate; the selector
-    resolves the transport itself, so the two can never disagree.
     """
     labels = tuple(_EXPLORATION_PHASE_INPUTS)
     if exploration_dir is None:
         return dict.fromkeys(labels)
+    if not artifact_session_active():
+        # No capture will happen without a session (see
+        # ``_prepare_existing_phase_inputs``), so resolve the transport only
+        # when the shared selector will actually size the inputs; otherwise a
+        # no-session run could hard-fail with SanctionedInputUnavailable.
+        return {label: exploration_dir / _EXPLORATION_PHASE_INPUTS[label] for label in labels}
     candidates = [
         AdvisoryCandidate(label, exploration_dir / _EXPLORATION_PHASE_INPUTS[label])
         for label in labels
@@ -4508,15 +4491,12 @@ async def phase_understand_intent(
     # degradation below applies to the exploration context only. The
     # post-capture ``inline_transport`` below remains authoritative; the
     # shared advisory selector is the sole sizing policy.)
-    exploration_inline_budgeted = _exploration_inline_budgeted(backend, work, read_only=True)
-
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {
             "diff": diff_path if inline_diff is None else None,
             **_budgeted_exploration_inputs(
                 exploration_dir,
-                inline_budgeted=exploration_inline_budgeted,
                 backend=backend,
                 cwd=work.repo,
                 read_only=True,
@@ -4656,15 +4636,12 @@ async def phase_alternative_review(
     # read-only disposable clones, sandboxed Osprey). (The over-budget diff
     # itself is a separate pre-existing capture limit on those transports;
     # the shared advisory selector is the sole sizing policy.)
-    exploration_inline_budgeted = _exploration_inline_budgeted(backend, work, read_only=False)
-
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {
             "diff": diff_path if inline_diff is None else None,
             **_budgeted_exploration_inputs(
                 exploration_dir,
-                inline_budgeted=exploration_inline_budgeted,
                 backend=backend,
                 cwd=work.repo,
                 read_only=False,

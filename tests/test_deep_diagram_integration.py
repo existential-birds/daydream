@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1529,6 +1530,11 @@ def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> No
     assert "omitted to fit the prompt budget" in first
     assert "pkg_059/mod_29.py" not in first                            # the tail is what goes
     assert "pkg_000/mod_00.py" in first                                # the head is what stays
+    kept = first.count("\n    - ")
+    total = sum(len(paths) for paths in huge.values())
+    match = re.search(r"\((\d+) more changed files omitted", first)
+    assert match is not None                                           # notice carries a numeric count
+    assert int(match.group(1)) == total - kept
 
 
 def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> None:
@@ -1544,6 +1550,10 @@ def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> No
     assert block == _candidate_roots_block(roots, forced=True)
     assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
     assert "omitted to fit the prompt budget" in block
+    kept = block.count("\n- `")
+    match = re.search(r"\((\d+) more candidate roots omitted", block)
+    assert match is not None                                           # notice carries a numeric count
+    assert int(match.group(1)) == len(roots) - kept
 
 
 async def test_large_pr_author_prompt_reports_the_capped_projection(

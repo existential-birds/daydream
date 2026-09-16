@@ -5564,14 +5564,24 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
     assert not any("affected_files" in line for line in prompt.splitlines())
 
 
-def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.asyncio
+async def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
 ) -> None:
     """One policy, not two: the intent pre-budget call site delegates to
     ``select_advisory_inputs`` and reports the same admitted/omitted split."""
     from daydream import phases as phases_module
     from daydream.prompt_budget import AdvisorySelection, select_advisory_inputs
 
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
     exploration = tmp_path / "exploration"
     exploration.mkdir()
     (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
@@ -5585,9 +5595,12 @@ def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
         return real_select(backend, cwd, candidates, read_only=read_only)
 
     monkeypatch.setattr(phases_module, "select_advisory_inputs", _spy)
-    sized = phases_module._budgeted_exploration_inputs(
-        exploration, inline_budgeted=False, backend=SimpleNamespace(model="fake"), cwd=tmp_path
-    )
+    # A capture (and therefore shared sizing) only happens inside a real
+    # artifact session; the no-session path returns the full mapping verbatim.
+    async with _private_session(tmp_path, work, "budgeted-exploration-inputs"):
+        sized = phases_module._budgeted_exploration_inputs(
+            exploration, backend=SimpleNamespace(model="fake"), cwd=repo
+        )
     assert captured["labels"] == ["exploration-summary", "exploration-affected-files"]
     assert sized["exploration-summary"] == exploration / "summary.md"
     assert sized["exploration-affected-files"] == exploration / "affected_files.md"

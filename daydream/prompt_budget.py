@@ -85,15 +85,19 @@ class PreparedSanctionedInputs:
         agent layer re-apply this renderer on its way to the backend. An
         already-appended section is returned unchanged rather than duplicated;
         the scrub still runs first, so a path that survived an earlier render
-        is still hidden.
+        is still hidden. The appended section is scrubbed too, because captured
+        content can itself embed a private pathname, and scrubbing both sides
+        keeps the idempotence check stable across re-renders.
         """
+        rendered = self.render()
         if self.transport is SanctionedInputTransport.INLINE and self.inputs:
             for item in self.inputs:
                 prompt = prompt.replace(str(item.path), f"sanctioned input '{item.label}'")
+                rendered = rendered.replace(str(item.path), f"sanctioned input '{item.label}'")
             common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
             if common_parent and common_parent != os.path.sep:
                 prompt = prompt.replace(common_parent, "sanctioned artifact storage")
-        rendered = self.render()
+                rendered = rendered.replace(common_parent, "sanctioned artifact storage")
         if not rendered:
             return prompt
         if prompt.endswith(rendered):
