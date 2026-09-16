@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -283,6 +283,36 @@ def _scrub_exploration_summary(summary: str) -> str:
     return "\n".join(kept)
 
 
+def _scrub_inline_exploration_summary(
+    prepared: PreparedSanctionedInputs | None,
+) -> PreparedSanctionedInputs | None:
+    """Strip summary.md's standalone-artifact scaffolding from captured text.
+
+    A live artifact session routes the pre-scan through sanctioned inputs, and
+    the INLINE render appends the captured summary verbatim. The sibling
+    artifacts the summary table names do not travel on an INLINE transport, so
+    those rows and the embedded boundary blockquote would dangle exactly as
+    they do on the disposable-clone path (:func:`_scrub_exploration_summary`).
+    The captured text is scrubbed before any render, so both
+    :meth:`~daydream.prompt_budget.PreparedSanctionedInputs.render` and the
+    idempotent re-render in ``run_agent`` emit the same clean section.
+
+    Only the captured ``text`` changes; ``(device, inode, size, mtime_ns)``
+    stay those of the on-disk file, so
+    :meth:`~daydream.prompt_budget.PreparedSanctionedInputs.revalidate` still
+    attests the exact file it captured.
+    """
+    if prepared is None or prepared.transport is not SanctionedInputTransport.INLINE:
+        return prepared
+    scrubbed = tuple(
+        replace(item, text=_scrub_exploration_summary(item.text))
+        if item.label == "exploration-summary" and item.text is not None
+        else item
+        for item in prepared.inputs
+    )
+    return replace(prepared, inputs=scrubbed)
+
+
 def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
     """Whether ``builder`` accepts the clone-mode inline kwargs.
 
@@ -313,15 +343,19 @@ def _redact_private_artifacts(
 
     The builtin INLINE builders suppress the pointers they own, but a fork
     override written before the inline kwargs still receives ``diff_path`` and
-    may echo it. This call site knows exactly three host-private paths — the
-    diff, its sibling hunk index, and the exploration directory — and replaces
-    each with the neutral phrase :meth:`PreparedSanctionedInputs.render_prompt`
-    already uses. Repository paths under ``ctx.work.repo`` are never touched.
+    may echo it. This call site knows exactly four host-private paths — the
+    diff, its sibling hunk index, the exploration directory, and the artifact
+    root that holds them — and replaces each with the neutral phrase
+    :meth:`PreparedSanctionedInputs.render_prompt` already uses. Repository
+    paths under ``ctx.work.repo`` are never touched. Longer paths are listed
+    first, so ``diff_path.parent`` cannot truncate a fuller path before it is
+    matched.
     """
     private_paths: tuple[Path | None, ...] = (
         diff_path,
         diff_path.parent / "hunk-index.json",
         exploration_dir,
+        diff_path.parent,
     )
     for private in private_paths:
         if private is not None:
@@ -411,6 +445,56 @@ def _diagram_author_prompt(
             )
         )
     return _redact_private_artifacts(prompt, diff_path, exploration_dir) if inline else prompt
+
+
+async def _diagram_turn(
+    ctx: FlowContext,
+    *,
+    descriptor: str,
+    prompt: str,
+    schema: dict[str, Any],
+    recorder: "TrajectoryRecorder | None",
+    backend: Any,
+    dispatch: "DispatchHandle | None",
+    continuation: Any = None,
+    sanctioned_inputs: PreparedSanctionedInputs | None = None,
+    advisory: dict[str, Any] | None = None,
+) -> tuple[Any, Any, str | None, Path | None] | DiagramResult:
+    """Run one diagram turn, mapping its failure modes to a kind result.
+
+    Shared by the author and repair turns so the two cannot drift. A
+    capture/revalidation failure is not an authoring outcome: it must reach
+    the caller's failure path unchanged, without being relabelled as an
+    advisory degradation, so ``SanctionedInputUnavailable`` propagates. Every
+    other exception fails the kind while keeping both facts -- the reason and
+    the advisory omission diagnostic (or ``None`` when every advisory input
+    fit). On success the turn's output, continuation, budget reason, and fork
+    path are returned.
+    """
+    try:
+        async with maybe_fork(recorder, descriptor, dispatch=dispatch) as fork:
+            output, token, budget_reason = await run_agent(
+                backend,
+                ctx.work.repo,
+                prompt,
+                phase=DaydreamPhase.DIAGRAM,
+                output_schema=schema,
+                continuation=continuation,
+                read_only=True,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                sanctioned_inputs=sanctioned_inputs,
+                run_context=ctx.run_context,
+            )
+    except SanctionedInputUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
+        return _diagram_result(
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            advisory=advisory if advisory and advisory["omitted"] else None,
+        )
+    return output, token, budget_reason, getattr(fork, "path", None)
 
 
 async def _run_diagram_kind(
@@ -510,6 +594,7 @@ async def _run_diagram_kind(
             if selection is not None
             else None
         )
+        sanctioned_inputs = _scrub_inline_exploration_summary(sanctioned_inputs)
         # The prompt is shaped and rendered to its final, private-path-free form
         # here, so the bytes this call site decides on are the bytes the backend
         # receives; run_agent re-applies the renderer idempotently for revalidation.
@@ -518,21 +603,20 @@ async def _run_diagram_kind(
             prompt = sanctioned_inputs.render_prompt(prompt)
         advisory = selection.to_dict() if selection is not None else None
 
-        async with maybe_fork(
-            recorder, f"diagram-{kind}", dispatch=dispatch
-        ) as fork:
-            structured, continuation, budget_reason = await run_agent(
-                backend,
-                ctx.work.repo,
-                prompt,
-                phase=DaydreamPhase.DIAGRAM,
-                output_schema=schema,
-                read_only=True,
-                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                sanctioned_inputs=sanctioned_inputs,
-                run_context=ctx.run_context,
-            )
+        turn = await _diagram_turn(
+            ctx,
+            descriptor=f"diagram-{kind}",
+            prompt=prompt,
+            schema=schema,
+            recorder=recorder,
+            backend=backend,
+            dispatch=dispatch,
+            sanctioned_inputs=sanctioned_inputs,
+            advisory=advisory,
+        )
+        if not isinstance(turn, tuple):
+            return turn
+        structured, continuation, budget_reason, fork_path = turn
     except SanctionedInputUnavailable:
         # A capture/revalidation failure is not an authoring outcome: it must
         # reach the caller's failure path unchanged, without being relabelled
@@ -547,7 +631,7 @@ async def _run_diagram_kind(
             f"{type(exc).__name__}: {exc}",
             advisory=advisory if advisory and advisory["omitted"] else None,
         )
-    read_paths |= _diagram_read_paths(getattr(fork, "path", None))
+    read_paths |= _diagram_read_paths(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
@@ -574,36 +658,22 @@ async def _run_diagram_kind(
             ),
             schema=schema,
         )
-        try:
-            async with maybe_fork(
-                recorder, f"diagram-{kind}-repair", dispatch=dispatch
-            ) as repair_fork:
-                repaired_output, _, repair_budget = await run_agent(
-                    backend,
-                    ctx.work.repo,
-                    repair_prompt,
-                    phase=DaydreamPhase.DIAGRAM,
-                    output_schema=schema,
-                    continuation=continuation,
-                    read_only=True,
-                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                    sanctioned_inputs=sanctioned_inputs,
-                    run_context=ctx.run_context,
-                )
-        except SanctionedInputUnavailable:
-            # Mirror the author turn: a capture/revalidation failure is not an
-            # authoring outcome and must not be relabelled as a degradation.
-            raise
-        except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
-            # The repair turn carries the same advisory omission diagnostic the
-            # author-turn failure path does, rather than discarding it.
-            return _diagram_result(
-                "failed",
-                f"{type(exc).__name__}: {exc}",
-                advisory=advisory if advisory and advisory["omitted"] else None,
-            )
-        read_paths |= _diagram_read_paths(getattr(repair_fork, "path", None))
+        turn = await _diagram_turn(
+            ctx,
+            descriptor=f"diagram-{kind}-repair",
+            prompt=repair_prompt,
+            schema=schema,
+            recorder=recorder,
+            backend=backend,
+            dispatch=dispatch,
+            continuation=continuation,
+            sanctioned_inputs=sanctioned_inputs,
+            advisory=advisory,
+        )
+        if not isinstance(turn, tuple):
+            return turn
+        repaired_output, _, repair_budget, repair_fork_path = turn
+        read_paths |= _diagram_read_paths(repair_fork_path)
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
             report = _ground(spec, read_paths)

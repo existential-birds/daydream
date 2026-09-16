@@ -341,7 +341,7 @@ def select_advisory_inputs(
     admitted: list[AdvisoryCandidate] = []
     omitted: list[OmittedAdvisoryInput] = []
     admitted_bytes = 0
-    aggregate = inline_section_emitted_bytes(()) if inline else 0
+    aggregate = 0
     for candidate in candidates:
         try:
             size = candidate.path.lstat().st_size
@@ -349,11 +349,13 @@ def select_advisory_inputs(
             omitted.append(OmittedAdvisoryInput(candidate.label, 0, "unavailable"))
             continue
         if inline:
-            cost = inline_section_emitted_bytes(((candidate.label, size),)) - inline_section_emitted_bytes(())
-            if aggregate + cost <= allowance_bytes:
+            entries = [(item.label, item.size) for item in admitted]
+            entries.append((candidate.label, size))
+            emitted = inline_section_emitted_bytes(entries)
+            if emitted <= allowance_bytes:
                 admitted.append(AdvisoryCandidate(candidate.label, candidate.path, size))
                 admitted_bytes += size
-                aggregate += cost
+                aggregate = emitted
             else:
                 omitted.append(OmittedAdvisoryInput(candidate.label, size, "exceeds-byte-budget"))
             continue
@@ -418,8 +420,10 @@ def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
     ``entries`` pairs each ``(label, content_bytes)`` exactly as
     :meth:`PreparedSanctionedInputs.render` receives them, so callers can size
     the emitted block — header, tags, newline separators, and content — before
-    capturing anything. ``()`` is the header alone.
+    capturing anything. ``()`` matches the renderer's empty result: zero bytes.
     """
+    if not entries:
+        return 0
     sizes = [len(_SANCTIONED_INLINE_HEADER.encode("utf-8"))]
     for label, content_bytes in entries:
         sizes.append(len(_sanctioned_inline_open_tag(label).encode("utf-8")))
