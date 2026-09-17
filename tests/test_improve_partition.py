@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from daydream.config_file import DaydreamFileConfig
 from daydream.improve.partition import (
     PARTITION_MAX_FILES,
     Partition,
@@ -14,6 +15,7 @@ from daydream.improve.partition import (
     stack_by_path,
 )
 from daydream.improve.services import Service
+from daydream.services import enumerate_services
 
 
 def test_service_files_cover_into_service_partitions() -> None:
@@ -240,3 +242,53 @@ def test_partition_max_files_default_is_the_module_bound() -> None:
     assert all(len(p.files) <= PARTITION_MAX_FILES for p in partitions)
     assert isinstance(partitions[0], Partition)
     assert isinstance(group_partitions(partitions, {})[0][0], PartitionGroup)
+
+
+def _nested_service_repo(tmp_path: Path) -> Path:
+    """A repo whose ``services/api/inner`` nests inside ``services/api``."""
+    repo = tmp_path / "repo"
+    for root in ("services/api", "services/api/inner"):
+        (repo / root).mkdir(parents=True)
+        (repo / root / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    return repo
+
+
+def test_service_ownership_freezes_nested_and_repo_root_partitioning(tmp_path: Path) -> None:
+    repo = _nested_service_repo(tmp_path)
+    services = enumerate_services(
+        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
+    )
+    assert [(s.name, s.root.as_posix()) for s in services] == [
+        ("repo", "."),
+        ("api", "services/api"),
+        ("inner", "services/api/inner"),
+    ]
+
+    partitions = build_partitions(
+        [
+            "services/api/handler.py",
+            "services/api/inner/main.py",
+            "services/api",
+            "services/api/inner",
+            "scripts/tool.py",
+            "README.md",
+        ],
+        services,
+    )
+
+    assert [(p.name, p.root, p.service, p.files) for p in partitions] == [
+        ("repo", ".", "repo", ("README.md", "scripts/tool.py", "services/api")),
+        ("api", "services/api", "api", ("services/api/handler.py", "services/api/inner")),
+        ("inner", "services/api/inner", "inner", ("services/api/inner/main.py",)),
+    ]
+
+
+def test_path_equal_to_a_service_root_falls_through_without_a_repo_root_service(tmp_path: Path) -> None:
+    repo = _nested_service_repo(tmp_path)
+    services = enumerate_services(
+        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner"])
+    )
+
+    assert [(p.name, p.root, p.service, p.source) for p in build_partitions(["services/api"], services)] == [
+        ("services", "services", None, "directory")
+    ]
