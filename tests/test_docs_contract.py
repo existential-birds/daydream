@@ -284,3 +284,36 @@ def test_observability_docs_pin_readback_deadline_semantics() -> None:
         "ui limitation",
     ):
         assert token in lower, f"matrix doc missing deadline-semantics token {token!r}"
+
+
+def test_readme_verbose_diagnostics_contract() -> None:
+    readme = (ROOT / "README.md").read_text()
+    help_sentence = (
+        "Run `daydream --help` to see the common flags. "
+        "Run `daydream --help-all` to see the full advanced surface."
+    )
+    assert help_sentence in readme
+    body = readme.split(help_sentence, 1)[1]
+    section = body.split("## ", 1)[1].split("\n## ", 1)[0]   # Diagnostics section body
+
+    assert "## Diagnostics" in body.split("## ", 1)[1] or "Diagnostics" in section
+    assert "--verbose" in section
+    assert "stdout" in section and "stderr" in section
+    assert "retries" in section and "exit code" in section
+    assert "diagnostic data" in section                      # disclosure warning
+
+    # --log appears exactly once in the whole README, inside a migration note.
+    assert readme.count("--log") == 1
+    assert "removed" in readme.split("--log", 1)[1][:120]
+
+    # the example never lands inside the common-commands fence
+    section = readme.split("Use the common commands for the common tasks:", 1)[1]
+    fence = section.split("```bash\n", 1)[1].split("\n```", 1)[0]
+    assert "--verbose" not in fence
+
+
+def test_changelog_unreleased_calls_out_flag_replacement() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
+    assert "--log" in unreleased
+    assert "--verbose" in unreleased

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **cli:** `--log` was removed; use `--verbose` for the redacted plain agent-event stream on `stdout` plus redacted chained fatal diagnostics on `stderr` (issue #1236).
+
 
 ## [0.29.0] - 2026-09-10
 

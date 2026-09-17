@@ -76,7 +76,7 @@ def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | 
     """Return the meaningful primary-argument value for a tool's progress line.
 
     ``_PRIMARY_TOOL_ARG`` is the source of truth shared by the callback path
-    and the ``--log`` summary, with Bash preferring required ``command`` over
+    and the ``--verbose`` summary, with Bash preferring required ``command`` over
     optional ``description``. Falls back to the first non-mechanical,
     non-boolean value so an unknown tool still shows something meaningful
     rather than a stray flag — the old blind ``next(iter(args.values()))``
