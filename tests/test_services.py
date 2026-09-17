@@ -11,6 +11,7 @@ flow's own behavioral coverage stays in ``tests/test_improve_services.py``.
 from __future__ import annotations
 
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -190,3 +191,35 @@ def test_service_field_order_is_positional_stable() -> None:
         Path("edge/gateway"),
         "config",
     )
+
+
+# These two patterns are the same shapes the issue #1216 M7 acceptance search
+# uses. Keep them in sync with the M7 command rather than treating them as
+# unrelated.
+_CONTAINMENT_SHAPES = (
+    re.compile(r'\.startswith\(f"\{[a-z_.]*root[a-z_.]*\}/"\)'),
+    re.compile(r"\b(path|file|relative|target|name|p)\s*[!=]=\s*([a-z_]+\.)?root\b"),
+)
+
+
+def test_no_service_containment_shape_lives_outside_services_py() -> None:
+    """The acceptance search (issue #1216 M7/S1), executable.
+
+    ``_owning_partition`` in the improve orchestrator answers the same *shape* of
+    question about partitions; it is enumerated Out of Scope and is the one
+    allowed exception.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    owner = repo_root / "daydream" / "services.py"
+    offenders: list[str] = []
+    for source in sorted((repo_root / "daydream").rglob("*.py")):
+        if source == owner:
+            continue
+        for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
+            if not any(shape.search(line) for shape in _CONTAINMENT_SHAPES):
+                continue
+            if re.search(r"partition\.root\b", line):
+                continue
+            offenders.append(f"{source.relative_to(repo_root)}:{number}: {line.strip()}")
+
+    assert offenders == []
