@@ -26,8 +26,11 @@ def test_explicit_cause_printed_in_python_order() -> None:
     out = format_verbose_exception(outer)
     assert "ValueError" in out and "outer boom" in out
     assert "GitError" in out and "isolation probe failure" in out
-    assert "The above exception was the direct cause" in out
+    assert "directly caused by the following exception" in out
     assert out.index("outer boom") < out.index("isolation probe failure")
+    assert out.index("directly caused by the following exception") < out.index(
+        "isolation probe failure"
+    )
 
 
 def test_implicit_context_shown_when_not_suppressed() -> None:
@@ -39,9 +42,10 @@ def test_implicit_context_shown_when_not_suppressed() -> None:
     except ValueError as exc:
         captured = exc
     out = format_verbose_exception(captured)
-    assert "During handling of the above exception" in out
+    assert "occurred while handling the following" in out
     assert "KeyError" in out and "implicit-inner" in out
     assert "implicit-outer" in out
+    assert out.index("implicit-outer") < out.index("implicit-inner")
 
 
 def test_suppressed_context_absent() -> None:

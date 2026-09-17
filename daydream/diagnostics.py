@@ -1,9 +1,11 @@
 """Verbose fatal diagnostics: one privacy-first, size-bounded exception dump.
 
 :func:`format_verbose_exception` renders an exception chain newest-first —
-the exception passed to the call FIRST, then what it was caused by, mirroring
-how the interpreter's chained-traceback text narrates the cause relationship —
-redacts the rendered value with the observability
+the exception passed to the call FIRST, then what it was caused by. The
+interpreter itself narrates oldest-first (the cause page above, the effect
+below); this module deliberately keeps the failing exception FIRST, per the
+pinned newest-first contract, so it adapts the interstitial lines to that
+order — redacts the rendered value with the observability
 :class:`~.PrivacyPolicy` (the same policy that guards every traced span)
 BEFORE any size bound, neutralizes terminal control characters while keeping
 newlines and tabs, and finally caps the result at one bounded head, a single
@@ -49,13 +51,18 @@ _CSI_SEQUENCE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
 #: Control characters the diagnostic is allowed to keep: line feeds and tabs.
 _KEPT_CONTROLS = frozenset({"\n", "\t"})
 
-#: The interpreter's interstitial between an exception and its direct cause.
+#: Interstitial between an exception page and its direct cause page, adapted
+#: from the interpreter's wording to the newest-first page order: the effect
+#: ("the above exception") sits on top, the cause ("the following exception")
+#: below it.
 _DIRECT_CAUSE_LINK = (
-    "\nThe above exception was the direct cause of the following exception:\n\n"
+    "\nThe above exception was directly caused by the following exception:\n\n"
 )
-#: The interpreter's interstitial before an exception handled during another.
+#: Interstitial before an exception handled during another, likewise adapted to
+#: the newest-first page order: the effect sits on top, the handled context
+#: below it.
 _CONTEXT_LINK = (
-    "\nDuring handling of the above exception, another exception occurred:\n\n"
+    "\nThe above exception occurred while handling the following exception:\n\n"
 )
 
 
@@ -128,8 +135,8 @@ def _render_chain(exc: BaseException) -> str:
     interpreter would (``capture_locals=False`` is mandatory — local-variable
     values must never appear; ``limit`` and the group caps keep the output
     bounded), but the pages are joined in the order the operator sees them:
-    the exception itself first, then what caused it. The interpreter's own
-    interstitial lines bridge the pages.
+    the exception itself first, then what caused it. The bridge lines are
+    adapted from the interpreter's phrasing to this newest-first page order.
     """
     members = _chain_members(exc)
     pages: list[str] = []

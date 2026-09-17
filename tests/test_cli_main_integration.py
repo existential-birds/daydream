@@ -882,7 +882,7 @@ def test_cli_main_verbose_prints_redacted_chain_on_stderr(
     assert "failed to create disposable read-only checkout" in out + err
     assert "CodexError" in err and "failed to create disposable read-only checkout" in err
     assert "GitError" in err and "isolation probe failure" in err
-    assert "The above exception was the direct cause" in err
+    assert "directly caused by the following exception" in err
     assert err.index("CodexError") < err.index("GitError")
     assert "isolation probe failure" not in out
 
