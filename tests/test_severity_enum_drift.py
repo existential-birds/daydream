@@ -234,3 +234,118 @@ def test_fenced_verifier_accepts_exactly_the_canonical_vocabulary() -> None:
         assert verifier_core.parse_candidate_finding({**base, "severity": level}).severity == level
     with pytest.raises(verifier_core.VerifierError):
         verifier_core.parse_candidate_finding({**base, "severity": "critical"})
+
+
+
+# --- Improve-path severity sites ---------------------------------------------
+#
+# ``daydream.improve.prompts`` carries its own model-facing severity enum:
+# ``VET_SCHEMA``'s verdict severity, consumed as *canonical* severity by
+# ``improve/prioritize.py`` (through ``normalize_severity``). The
+# ``daydream.phases`` walk above cannot see it, so the same two proofs run here
+# against that module's public ``*_SCHEMA`` constants: introspection discovers
+# the sites, and the subprocess rebuild proves they follow the declaration
+# rather than coincidentally matching it today.
+
+_IMPROVE_REBUILD_SCRIPT = '''
+import json
+
+import daydream.severity as severity
+
+severity.CANONICAL_LEVELS = ("high", "medium", "low", "critical")
+
+import daydream.improve.prompts as improve_prompts  # built AFTER the declaration moves
+
+
+def walk(node, path, out):
+    if isinstance(node, dict):
+        if isinstance(node.get("severity"), dict):
+            out.append([path, node["severity"]])
+        for key, value in node.items():
+            if isinstance(value, (dict, list)):
+                walk(value, f"{path}.{key}", out)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            walk(value, f"{path}[{index}]", out)
+
+
+found = []
+for name in sorted(dir(improve_prompts)):
+    if name.startswith("_") or not name.endswith("_SCHEMA"):
+        continue
+    schema = getattr(improve_prompts, name)
+    if isinstance(schema, dict):
+        walk(schema, f"daydream.improve.prompts.{name}", found)
+print(json.dumps(found))
+'''
+
+
+def _improve_severity_sites() -> list[tuple[str, dict[str, Any]]]:
+    """Every (site path, severity fragment) in ``daydream.improve.prompts``."""
+    import daydream.improve.prompts as improve_prompts
+
+    out: list[tuple[str, dict[str, Any]]] = []
+    for name in sorted(dir(improve_prompts)):
+        if name.startswith("_") or not name.endswith("_SCHEMA"):
+            continue
+        schema = getattr(improve_prompts, name)
+        if isinstance(schema, dict):
+            _walk(schema, f"daydream.improve.prompts.{name}", out)
+    return out
+
+
+_IMPROVE_SITES = _improve_severity_sites()
+_IMPROVE_SITE_IDS = [site for site, _ in _IMPROVE_SITES]
+
+
+def test_improve_severity_sites_are_discovered() -> None:
+    """Guard the guard: the improve walk must find the vet verdict severity site."""
+    assert _IMPROVE_SITES, "no severity-bearing *_SCHEMA discovered in daydream.improve.prompts"
+    assert any(site.startswith("daydream.improve.prompts.VET_SCHEMA") for site in _IMPROVE_SITE_IDS), (
+        f"the vet verdict severity site vanished from discovery: {_IMPROVE_SITE_IDS}"
+    )
+
+
+@pytest.mark.parametrize("site,fragment", _IMPROVE_SITES, ids=_IMPROVE_SITE_IDS)
+def test_improve_site_emits_the_frozen_model_facing_order(site: str, fragment: dict[str, Any]) -> None:
+    assert _levels(fragment) == FROZEN_MODEL_FACING, (
+        f"{site} emits {_levels(fragment)}; the frozen model-facing order is {FROZEN_MODEL_FACING}"
+    )
+
+
+@pytest.fixture(scope="module")
+def improve_rebuilt_under_patched_declaration(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[str, dict[str, Any]]:
+    script = tmp_path_factory.mktemp("improve-rebuild") / "rebuild.py"
+    script.write_text(_IMPROVE_REBUILD_SCRIPT)
+    proc = subprocess.run(
+        [sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300
+    )
+    assert proc.returncode == 0, proc.stderr
+    return {site: fragment for site, fragment in json.loads(proc.stdout)}
+
+
+@pytest.mark.parametrize("site,fragment", _IMPROVE_SITES, ids=_IMPROVE_SITE_IDS)
+def test_improve_site_follows_the_declaration_when_the_declaration_moves(
+    site: str,
+    fragment: dict[str, Any],
+    improve_rebuilt_under_patched_declaration: dict[str, dict[str, Any]],
+) -> None:
+    assert site in improve_rebuilt_under_patched_declaration, f"{site} vanished when the declaration moved"
+    emitted = _levels(improve_rebuilt_under_patched_declaration[site])
+    assert emitted == PATCHED_MODEL_FACING, (
+        f"{site} emitted {emitted} under CANONICAL_LEVELS={PATCHED_DECLARATION!r}; the declaration "
+        f"derives {PATCHED_MODEL_FACING}. A hand-written level list matches today's declaration and "
+        f"cannot follow a later change."
+    )
+
+
+def test_improve_vet_severity_still_accepts_null() -> None:
+    fragment = next(
+        fragment
+        for site, fragment in _IMPROVE_SITES
+        if site.endswith("VET_SCHEMA.properties.verdicts.items.properties")
+    )
+    assert _levels(fragment) == FROZEN_MODEL_FACING
+    assert {"type": "null"} in fragment["anyOf"]
