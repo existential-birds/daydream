@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.training.corpus_projection.identity import record_id as compute_record_id
 
 __all__ = ["EXPORT_KEYS", "validate_export_rows", "write_export_rows"]
@@ -88,5 +88,5 @@ def write_export_rows(rows: list[dict[str, Any]], out_path: Path) -> str:
     import hashlib
 
     payload = "".join(_canonical(row) + "\n" for row in rows)
-    atomic_write_bytes(out_path, payload.encode("utf-8"), fsync=False, dir_fsync=False, mode=0o644)
+    atomic_write_bytes(out_path, payload.encode("utf-8"), fsync=False, dir_fsync=False, mode=umask_derived_mode())
     return hashlib.sha256(out_path.read_bytes()).hexdigest()

@@ -21,7 +21,7 @@ import pytest
 
 from daydream import cli
 from daydream.benchmark.harbor import candidate
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, atomic_write_pair
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import write_export_rows
 from daydream.training.adjudication.final_bundle import build_final_bundle
@@ -182,7 +182,7 @@ class TestWriterCharacterization:
         assert dest.read_bytes() == json.dumps(artifact).encode("utf-8")
         assert not dest.read_bytes().endswith(b"\n")
         assert stat.S_IMODE(dest.stat().st_mode) == 0o644
-        assert list(dest.parent.glob("review.json*")) == [dest]
+        assert list(dest.parent.glob("*.tmp")) == []
 
     def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,7 +230,7 @@ class TestExportKnobs:
                  "--state-dir", str(state), "--out", str(out)]
             )
         assert out.read_bytes() == b"prior\n"
-        assert list(tmp_path.glob("export.jsonl*")) == [out]
+        assert list(tmp_path.glob("*.tmp")) == []
 
 
 class TestMaterializeKnobs:
@@ -354,10 +354,20 @@ class TestCalibrationKnobs:
     def test_calibration_calls_the_primitive_report_first(self, tmp_path: Path,
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
         config = _config(_build_fixture(tmp_path), tmp_path)
-        calls = _instrument(monkeypatch, "daydream.training.calibration")
-        run_calibration(config)
-        # M8: report.md is published before calibration.json, and both go through
-        # the primitive with the same explicit knobs.
+        calls: list[tuple[Path, bytes, dict[str, Any]]] = []
+        real = atomic_write_pair
+
+        def spy(first: tuple[Path, bytes], second: tuple[Path, bytes],
+                **kwargs: Any) -> None:
+            calls.append((Path(first[0]), first[1], kwargs))
+            calls.append((Path(second[0]), second[1], kwargs))
+            real(first, second, **kwargs)
+
+        monkeypatch.setattr("daydream.training.calibration.atomic_write_pair", spy)
+        with _umask(0o022):
+            run_calibration(config)
+        # M8: report.md is published before calibration.json, and the pair goes
+        # through the primitive with the same explicit knobs.
         assert [target.name for target, _c, _k in calls] == ["report.md", "calibration.json"]
         assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
                    for _t, _c, kwargs in calls)

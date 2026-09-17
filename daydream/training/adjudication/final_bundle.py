@@ -30,7 +30,7 @@ from typing import Any
 from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.training.adjudication.canonical import _evidence_after_as_of
 from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
@@ -456,28 +456,28 @@ def build_final_bundle(
         (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes(),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
     atomic_write_bytes(
         out_dir / _SESSIONS_OUT_FILENAME,
         (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes(),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
     atomic_write_bytes(
         out_dir / _MANIFEST_FILENAME,
         manifest_path.read_bytes(),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
     atomic_write_bytes(
         out_dir / _POLICY_BINDING_FILENAME,
         policy_binding,
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
 
     # 2. label-observations.jsonl: the archive's per-session observation
@@ -493,7 +493,7 @@ def build_final_bundle(
         "".join(_canonical(row) + "\n" for row in history_rows).encode("utf-8"),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
 
     # 3. coverage-report.json over the fresh complete queue, enriched exactly
@@ -521,7 +521,7 @@ def build_final_bundle(
         (_canonical(report) + "\n").encode("utf-8"),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
 
     # 4. lineage.json: generated from the pin — every field must be present.
@@ -544,7 +544,7 @@ def build_final_bundle(
         (_canonical(lineage) + "\n").encode("utf-8"),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
 
     written = sorted(path.name for path in out_dir.iterdir() if path.is_file())

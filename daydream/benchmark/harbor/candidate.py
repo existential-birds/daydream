@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.benchmark.harbor import verifier_core as vc
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.pr_review import extract_item_fields
 
 
@@ -184,7 +184,7 @@ def write_candidate_artifact_atomic(dest: str | Path, artifact: dict[str, Any]) 
     dest = Path(dest)
     payload = json.dumps(artifact).encode("utf-8")
     try:
-        atomic_write_bytes(dest, payload, fsync=False, dir_fsync=False, mode=0o644)
+        atomic_write_bytes(dest, payload, fsync=False, dir_fsync=False, mode=umask_derived_mode())
     except OSError as exc:
         raise CandidateError(
             f"cannot write candidate artifact {dest}: {exc}", kind="write_failure"

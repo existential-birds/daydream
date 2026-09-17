@@ -1,8 +1,9 @@
 """#1215: no corpus or benchmark module may hand-roll the temp+rename write primitive.
 
 The scan is AST-based because `.replace(` alone is dominated by str.replace noise;
-a rename is `os.replace(a, b)` or a single-argument `X.replace(target)` call, while
-str.replace always takes two arguments.
+a rename is `os.replace(a, b)` / `os.rename(a, b)` or a single-argument
+`X.replace(target)` / `X.rename(target)` call, while str.replace always takes two
+arguments.
 """
 
 from __future__ import annotations
@@ -37,20 +38,20 @@ def _os_replace_lines(source: str) -> list[int]:
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "replace"
+        and node.func.attr in ("replace", "rename")
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "os"
     ]
 
 
 def _single_arg_replace_lines(source: str) -> list[int]:
-    """`X.replace(target)` — a Path rename. A str.replace always carries two args."""
+    """`X.replace(target)` / `X.rename(target)` — a Path rename. A str.replace always carries two args."""
     return [
         node.lineno
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "replace"
+        and node.func.attr in ("replace", "rename")
         and not (isinstance(node.func.value, ast.Name) and node.func.value.id == "os")
         and len(node.args) == 1
         and not node.keywords
@@ -70,9 +71,9 @@ def test_no_hand_rolled_temp_rename_writer_remains() -> None:
     for path in _scope_files():
         rel = path.relative_to(_REPO_ROOT).as_posix()
         source = path.read_text(encoding="utf-8")
-        offenders += [f"{rel}:{line} os.replace()" for line in _os_replace_lines(source)
+        offenders += [f"{rel}:{line} os.replace()/os.rename()" for line in _os_replace_lines(source)
                       if rel not in _PERMITTED_OS_REPLACE_FILES]
-        offenders += [f"{rel}:{line} Path.replace()" for line in _single_arg_replace_lines(source)]
+        offenders += [f"{rel}:{line} Path.replace()/Path.rename()" for line in _single_arg_replace_lines(source)]
     assert offenders == []
 
 
@@ -97,6 +98,8 @@ def test_scanner_reports_a_reintroduced_hand_rolled_writer() -> None:
     )
     assert _os_replace_lines(reintroduced) == [4]
     assert _single_arg_replace_lines("def f(target):\n    Path('x.tmp').replace(target)\n") == [2]
+    assert _os_replace_lines("def f(out_path):\n    os.rename(out_path, out_path)\n") == [2]
+    assert _single_arg_replace_lines("def f(target):\n    Path('x.tmp').rename(target)\n") == [2]
     # ...and that it stays quiet on the two legitimate spellings it must not flag:
     assert _os_replace_lines("value = 'a'.replace('a', 'b')\n") == []
     assert _single_arg_replace_lines("value = 'a-b'.replace('-', '') if False else None\n") == []

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 from daydream.archive.hydrate import HubUnavailableError
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
@@ -495,7 +495,7 @@ def run_materialize(
         "".join(_canonical(r) + "\n" for r in records).encode("utf-8"),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
     manifest: dict[str, Any] = dict(pin)
     manifest["snapshot_id"] = id_digest
@@ -505,6 +505,6 @@ def run_materialize(
         _canonical(manifest).encode("utf-8"),
         fsync=False,
         dir_fsync=False,
-        mode=0o644,
+        mode=umask_derived_mode(),
     )
     return summary
