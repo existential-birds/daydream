@@ -43,6 +43,7 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.config import BUDGET_CLEANUP_GRACE_S, DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+from daydream.diagnostics import sanitize_verbose_message
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -1549,7 +1550,7 @@ async def _run_agent(
         except _ToolSupervisorFailure as exc:
             original = exc.original
             print_error(
-                console, "Extension Failure", redact_text(f"{type(original).__name__}: {original}")
+                console, "Extension Failure", sanitize_verbose_message(f"{type(original).__name__}: {original}")
             )
             # The exception itself still propagates to outer handlers that re-print
             # str(exc) without redaction (e.g. the CLI's "Fatal Error" panel on
@@ -1566,8 +1567,11 @@ async def _run_agent(
             if isinstance(category, str):
                 diagnostic += f" [{category}]"
             # Error messages can embed secrets (a leaked env var, an API key in a
-            # provider error); redact at this host boundary like every other surfaced text.
-            print_error(console, "Backend Execution Error", redact_text(diagnostic))
+            # provider error); sanitize (redact AND neutralize terminal control
+            # codes) at this host boundary like every other surfaced text, so a
+            # hostile exception message cannot paint or escape the operator's
+            # terminal in the fatal path.
+            print_error(console, "Backend Execution Error", sanitize_verbose_message(diagnostic))
             raise
         except BaseException:
             # Shutdown path: SIGINT (KeyboardInterrupt) / task cancellation

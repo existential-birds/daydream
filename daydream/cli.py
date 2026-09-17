@@ -53,6 +53,7 @@ from daydream import git_ops
 from daydream.agent import console
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.diagnostics import format_verbose_exception, sanitize_verbose_message
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.phases import UnconfinedFindingError
 from daydream.run_context import active_backends
@@ -109,6 +110,20 @@ def _first_verb(argv: list[str]) -> str:
     if argv and argv[0] in KNOWN_VERBS:
         return argv[0]
     return "review"
+
+
+def _verbose_token_in_argv(argv: list[str]) -> bool:
+    """True iff the exact bare ``--verbose`` token appears before any ``--`` separator.
+
+    Joined forms (``--verbose=true``), the removed ``--log`` spelling, and
+    tokens after a ``--`` separator never enable verbose diagnostics.
+    """
+    for token in argv:
+        if token == "--":
+            return False
+        if token == "--verbose":
+            return True
+    return False
 
 
 def _signal_handler(signum: int, _frame: object) -> None:
@@ -2619,12 +2634,20 @@ def _handle_list_reanchor(config: RunConfig) -> int:
     return 0
 
 
-def _shutdown_and_exit(console: Console, title: str, message: str) -> None:
+def _shutdown_and_exit(
+    console: Console,
+    title: str,
+    message: str,
+    *,
+    verbose_diagnostic: str | None = None,
+) -> None:
     """Finish the shutdown panel, print ``title``/``message``, and exit 1.
 
     Shared by :func:`main`'s error handlers so the panel-finish sequence
     (``get_shutdown_panel`` -> ``finish`` -> ``set_shutdown_panel(None)`` ->
     ``console.print`` -> ``print_error`` -> ``sys.exit(1)``) lives in one place.
+    When *verbose_diagnostic* is not None, it is written to stderr
+    after the panel, before exit — used only by the generic fatal branch.
     """
     panel = get_shutdown_panel()
     if panel is not None:
@@ -2632,6 +2655,8 @@ def _shutdown_and_exit(console: Console, title: str, message: str) -> None:
         set_shutdown_panel(None)
     console.print()
     print_error(console, title, message)
+    if verbose_diagnostic is not None:
+        print(verbose_diagnostic, file=sys.stderr)
     sys.exit(1)
 
 
@@ -2647,6 +2672,11 @@ def main(argv: list[str] | None = None) -> None:
     # Verb-first dispatch: non-``review`` verbs are short-circuited here (each
     # owns its parser and exit code); everything else flows into ``_parse_args``.
     argv = list(argv) if argv is not None else sys.argv[1:]
+    # Pre-parse scan: the bare ``--verbose`` token (before any ``--``
+    # separator) enables verbose fatal diagnostics. Resolved here, before
+    # provenance/observability/config parsing, so a failure in any of those
+    # stages is still diagnosable.
+    verbose_mode = _verbose_token_in_argv(argv)
     # ``bench`` was the legacy benchmark verb, removed in favor of
     # ``daydream benchmark``. Reject it explicitly instead of letting
     # ``_first_verb`` fall through to the review path with ``bench`` as a
@@ -2734,7 +2764,18 @@ def main(argv: list[str] | None = None) -> None:
             f"{e}. Check the finding's file ref.",
         )
     except Exception as e:
-        _shutdown_and_exit(console, "Fatal Error", str(e))
+        if verbose_mode:
+            try:
+                diagnostic = format_verbose_exception(e)
+            except Exception:
+                diagnostic = "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]"
+        else:
+            diagnostic = None
+        # The panel message is redacted and control-neutralized exactly like the
+        # verbose diagnostic, so a hostile exception message can never paint
+        # the operator's terminal even when verbose diagnostics are off.
+        safe_message = sanitize_verbose_message(str(e))
+        _shutdown_and_exit(console, "Fatal Error", safe_message, verbose_diagnostic=diagnostic)
 
 
 if __name__ == "__main__":
