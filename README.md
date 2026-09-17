@@ -111,8 +111,9 @@ Run `daydream --help` to see the common flags. Run `daydream --help-all` to see 
 ## Diagnostics
 
 Unexpected fatal errors print a concise error panel; `--verbose` additionally
-writes the complete redacted exception chain to `stderr` and keeps the redacted
-agent-event stream on `stdout`:
+writes the redacted exception chain to `stderr` (bounded at 64 KiB with a
+single explicit truncation marker) and keeps the redacted agent-event stream
+on `stdout`:
 
 ```bash
 daydream --verbose /path/to/project >events.log 2>diagnostics.log
