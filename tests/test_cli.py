@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from daydream.atif import validate as atif_validate
-from daydream.cli import _parse_args
+from daydream.cli import _parse_args, _parse_improve_args
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
@@ -162,6 +162,30 @@ def test_runconfig_has_no_loop_fields() -> None:
     """RunConfig carries no loop mode after the collapse (#330)."""
     assert not hasattr(RunConfig(), "loop")
     assert not hasattr(RunConfig(), "max_iterations")
+
+
+def test_log_flag_rejected_review(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["daydream", "--log", "/tmp/project"])
+    with pytest.raises(SystemExit) as exc_info:
+        _parse_args()
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_log_flag_rejected_improve(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _parse_improve_args(["improve", "/tmp/x", "--log"])
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_verbose_joined_equals_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        _parse_improve_args(["improve", "/tmp/x", "--verbose=true"])
+    with pytest.raises(SystemExit):
+        _parse_improve_args(["improve", "/tmp/x", "--log=true"])
 
 
 @pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])

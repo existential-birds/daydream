@@ -841,6 +841,13 @@ _SENSITIVE_KEY_SUFFIXES: frozenset[str] = frozenset(
         "token",
     }
 )
+#: Chars matching the camelCase lookbehind ``[a-z0-9]`` (lowercase + digits).
+_LOWER_OR_DIGIT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+#: Longest ``_SENSITIVE_KEY_SUFFIXES`` member (``secret_access_key``); a
+#: normalized key longer than this can never equal a member, so the bounded
+#: strict-suffix walk (:func:`_strict_suffix_is_sensitive`) can give up.
+_MAX_SENSITIVE_KEY_LEN = max(len(member) for member in _SENSITIVE_KEY_SUFFIXES)
+
 # Insert a separator before an uppercase letter that follows a lowercase/digit
 # (camelCase → snake_case boundary): apiKey → api_Key, dbPassword → db_Password.
 _CAMEL_CASE_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -976,29 +983,249 @@ def _redact_structured_key_values(text: str) -> str:
         return "[REDACTION_FAILED]"
 
 
+#: Key characters per the shared pair/block prefix ``[A-Za-z0-9_.\-]``; a key
+#: run is a maximal span of these ending at the separator region.
+_STRUCTURED_KEY_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
+#: Key-START characters per the shared pair/block key class ``[A-Za-z_]`` —
+#: the narrow set a structured key may BEGIN with (digits are continuation
+#: chars only: ``1apiKey`` starts at ``a``).
+_STRUCTURED_KEY_START_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+)
+#: Key-quote wrapper characters (``['\"]?``).
+_QUOTE_CHARS = frozenset("'\"")
+
+
+def _match_start_before_separator(text: str, sep: int) -> int:
+    """Return the leftmost possible match start anchored at *sep*.
+
+    Both structured patterns share one prefix —
+    ``(['\"]?)([A-Za-z_][A-Za-z0-9_.\\-]*)\1([^\\S\n\r]*[:=][^\\S\n\r]*)`` — so
+    the leftmost start for a match consuming *sep* is derived by walking
+    backwards: over the separator's interposed whitespace, then over key
+    characters to the start of the key run — or, for a quoted key, to its
+    matching opening quote. Walking back the whole key run anchors exactly one
+    start position per separator, so separator-less runs and per-character
+    re-scans never happen (the O(n^2) the old ``re.search(text, pos)`` paid on
+    long key-shaped runs).
+
+    A key run may be PREFIXED with continuation characters that are not valid
+    key STARTS (``1apiKey``, ``123secret``): the old leftmost-match engine
+    anchored at the first key-START char inside the run, never at the run's
+    left edge when that edge is a digit. The walk-back therefore steps FORWARD
+    again to that first key-START char — or to the run's end, where
+    ``pattern.match`` fails exactly as the old engine found nothing at this
+    separator.
+    """
+    i = sep
+    while i and text[i - 1].isspace() and text[i - 1] not in "\n\r":
+        i -= 1
+    if i and text[i - 1] in _QUOTE_CHARS:
+        quote = text[i - 1]
+        j = i - 1
+        while j and text[j - 1] in _STRUCTURED_KEY_CHARS:
+            j -= 1
+        if j and text[j - 1] == quote:
+            return j - 1
+        # Impossible quote pairing: the char before the key run becomes a
+        # boundary and the unquoted form starts at the run's first key char.
+        return j
+    run_end = i
+    while i and text[i - 1] in _STRUCTURED_KEY_CHARS:
+        i -= 1
+    while i < run_end and text[i] not in _STRUCTURED_KEY_START_CHARS:
+        i += 1
+    return i
+
+
+def _nearest_separator(text: str, pos: int) -> int:
+    """Return the index of the next ``:``/``=`` at or after *pos*, or -1.
+
+    A missing separator counts as infinity: the structured patterns cannot
+    match without one, so the search stops early instead of letting the regex
+    engine backtrack over every start position of a separator-less run.
+    """
+    colon = text.find(":", pos)
+    equals = text.find("=", pos)
+    if colon < 0 and equals < 0:
+        return -1
+    if colon < 0:
+        return equals
+    if equals < 0:
+        return colon
+    return colon if colon < equals else equals
+
+
+def _value_start(match: re.Match[str]) -> int:
+    """Return the output frontier after a non-sensitive pair match.
+
+    The value's first byte — the start of the double-quoted (4) / single-quoted
+    (5) / scheme-token (7) / bare (8) group, whichever participated — or the
+    match end when no value group exists. For quoted values the frontier is the
+    OPENING quote: the quote byte is emitted with the preserved prefix (never
+    re-scanned), and a later separator right after the value's closing quote
+    re-anchors a quoted-key match exactly at the frontier instead of behind it.
+    Advancing to the value start (never by one character) preserves the
+    key/separator region verbatim while re-scanning only the value, so a
+    sensitive pair nested inside a non-sensitive pair's value is still redacted
+    and a giant bare value is never re-scanned from every character.
+    """
+    for group in (4, 5, 7, 8):
+        index = match.start(group)
+        if index >= 0:
+            return index - 1 if group in (4, 5) else index
+    return match.end()
+
+
+def _strict_suffix_is_sensitive(text: str, s2: int, key_end: int) -> bool:
+    """Return ``_is_sensitive_key(text[s2:key_end])`` in O(max member length).
+
+    Exact decision for a STRICT suffix of a NON-sensitive key run — the only
+    context the pair/block suffix scans call it in. Two facts make that
+    decision bounded:
+
+    * The suffix's normalized form is a suffix of the whole key's normalized
+      form, so the ``ends with ``_<member>`` rule can never fire: it would
+      make the whole key sensitive, which the caller already excluded.
+    * Any underscore-separated segment AFTER the first is also a segment of
+      the whole key, so the segment rule can only fire on the FIRST segment.
+
+    Both remaining rules are decided from a bounded normalized prefix: the
+    first segment closes at the first separator (or the run end), and the
+    whole normalized suffix can only equal a ``_SENSITIVE_KEY_SUFFIXES``
+    member while it is at most ``_MAX_SENSITIVE_KEY_LEN`` chars. The walk
+    mirrors :func:`_normalize_sensitive_key` exactly — camelCase boundary,
+    non-alphanumeric collapse, lowercase, edge-``_`` strip — without slicing
+    or re-normalizing the remainder, so a long non-sensitive key run costs
+    O(n) total across all candidates instead of O(n^2) (issue #1236).
+    """
+    norm: list[str] = []
+    first_seg: str | None = None
+    pending_sep = False
+    i = s2
+    while i < key_end:
+        c = text[i]
+        if "A" <= c <= "Z" or c in _LOWER_OR_DIGIT_CHARS:
+            # A camelCase boundary or a collapsed non-alphanumeric run closes
+            # the current segment. The leading separator is stripped by the
+            # normalization's edge rule (never emitted); the first separator
+            # to survive records the FIRST segment, on which the segment rule
+            # can fire. Later separators only shape the whole-suffix string.
+            camel_boundary = (
+                "A" <= c <= "Z"
+                and i > s2
+                and text[i - 1] in _LOWER_OR_DIGIT_CHARS
+            )
+            if camel_boundary or pending_sep:
+                if norm and first_seg is None:
+                    first_seg = "".join(norm)
+                    if first_seg in _SENSITIVE_KEY_SUFFIXES:
+                        return True
+                if norm:
+                    norm.append("_")
+                pending_sep = False
+            norm.append(c.lower() if "A" <= c <= "Z" else c)
+            if len(norm) > _MAX_SENSITIVE_KEY_LEN:
+                # The whole normalized suffix is now longer than every member,
+                # so the exact-match rule is dead; the first segment was
+                # either never closed (it is at least this long) or already
+                # checked above.
+                return False
+        else:
+            # A run of non-alphanumeric key chars (``_``, ``.``, ``-``)
+            # collapses to a single ``_`` separator — emitted as pending so a
+            # trailing run is dropped like the normalization's edge strip.
+            pending_sep = True
+        i += 1
+    return "".join(norm) in _SENSITIVE_KEY_SUFFIXES
+
+
 def _redact_structured_pairs(text: str) -> str:
     """Redact line-scoped ``key<: or =>value`` pairs, re-scanning every value.
 
     A plain ``re.sub`` resumes after each consumed match, so a sensitive pair
     nested inside a non-sensitive pair's value (``text: apiKey: opaque``,
     ``config: token=opaque``, ``{\"description\": \"use token=opaque here\"}``)
-    would never be visited. The scan instead advances one character past any
-    pair whose key is not sensitive, so nested pairs inside its value are
-    still found and redacted.
+    would never be visited. The scan instead advances to the start of a
+    non-sensitive pair's value, so nested pairs inside its value are still
+    found and redacted. Scanning is separator-anchored: every ``:``/``=`` is
+    visited at most once and anchors at most one left-to-right match attempt,
+    keeping the pass linear on long key-shaped runs and huge bare values.
     """
     out: list[str] = []
     pos = 0
     while True:
-        match = _STRUCTURED_KEY_VALUE_PATTERN.search(text, pos)
-        if match is None:
+        sep = _nearest_separator(text, pos)
+        if sep < 0:
             break
+        start = _match_start_before_separator(text, sep)
+        if start < pos:
+            # The derived anchor lands behind the emission frontier — the
+            # bytes [start, pos) were already emitted (or already consumed by
+            # an earlier redaction), so this separator anchors no NEW match.
+            out.append(text[pos : sep + 1])
+            pos = sep + 1
+            continue
+        match = _STRUCTURED_KEY_VALUE_PATTERN.match(text, start)
+        if match is None:
+            # No pair can consume this separator: the value would fail
+            # identically from every candidate start, so skip the separator
+            # verbatim and re-anchor after it.
+            out.append(text[pos : sep + 1])
+            pos = sep + 1
+            continue
         if _is_sensitive_key(match.group(2)):
             out.append(text[pos : match.start()])
             out.append(_redact_structured_key_value(match, text))
             pos = match.end()
         else:
-            out.append(text[pos : match.start() + 1])
-            pos = match.start() + 1
+            # A non-sensitive anchored key may still hold a SENSITIVE SUFFIX at
+            # a later key-START char (`defauthorization` -> `authorization`,
+            # `nullpasswd` -> `passwd`, `fooapi_key` -> `api_key`). The old
+            # engine's one-character advance re-matched every suffix at the
+            # SAME separator and redacted the first sensitive one; reproduce
+            # that leftmost sensitive suffix, then stop — the old redaction
+            # consumed through the value end, so later suffixes were never
+            # visited. Each candidate's sensitivity test is O(max member
+            # length) and the full re-match runs only on the one candidate
+            # that is actually sensitive, so the pass stays linear.
+            suffix: re.Match[str] | None = None
+            s2 = match.start(2) + 1
+            key_end = match.end(2)
+            while s2 < key_end:
+                if text[s2] in _STRUCTURED_KEY_START_CHARS:
+                    if _strict_suffix_is_sensitive(text, s2, key_end):
+                        m2 = _STRUCTURED_KEY_VALUE_PATTERN.match(text, s2)
+                        if m2 is not None:
+                            suffix = m2
+                            break
+                    if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
+                        "A" <= text[s2] <= "Z"
+                    ):
+                        # Separator-run candidate: every position inside one
+                        # contiguous run of non-alphanumeric key chars
+                        # normalizes to the SAME suffix (leading separators
+                        # collapse and the edge is stripped), so the run
+                        # needs at most one evaluation — jump over the rest
+                        # instead of walking it per position, which re-enabled
+                        # the O(n^2) hang on separator-heavy key runs
+                        # (issue #1236).
+                        while s2 + 1 < key_end and not (
+                            "A" <= text[s2 + 1] <= "Z"
+                            or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
+                        ):
+                            s2 += 1
+                s2 += 1
+            if suffix is not None:
+                out.append(text[pos : suffix.start()])
+                out.append(_redact_structured_key_value(suffix, text))
+                pos = suffix.end()
+            else:
+                value_start = _value_start(match)
+                out.append(text[pos:value_start])
+                pos = value_start
     out.append(text[pos:])
     return "".join(out)
 
@@ -1017,24 +1244,87 @@ def _redact_structured_blocks(text: str) -> str:
     (``\"apiKey\": {\\n  \"nested\": ...\\n}``) where the sensitive value
     spans lines. Each matched block is replaced wholesale with a quoted
     ``_REDACTED_CREDENTIAL`` marker so the output stays structurally valid.
+    The scan is separator-anchored like the pair pass; the non-sensitive and
+    empty-value branches advance to the match end (the block value is
+    FOLLOWING text, so the next iteration re-anchors there).
     """
     try:
         out: list[str] = []
         pos = 0
         while True:
-            match = _BLOCK_VALUE_PATTERN.search(text, pos)
-            if match is None:
+            sep = _nearest_separator(text, pos)
+            if sep < 0:
                 break
+            start = _match_start_before_separator(text, sep)
+            if start < pos:
+                # Same behind-the-frontier guard as the pair scan: this
+                # separator cannot anchor a NEW block match.
+                out.append(text[pos : sep + 1])
+                pos = sep + 1
+                continue
+            match = _BLOCK_VALUE_PATTERN.match(text, start)
+            if match is None:
+                out.append(text[pos : sep + 1])
+                pos = sep + 1
+                continue
             key = match.group(2)
             if not _is_sensitive_key(key):
-                out.append(text[pos : match.start() + 1])
-                pos = match.start() + 1
+                # Sensitive-suffix mirror of the pair scan: `defpasswd` holds
+                # `passwd`, `fooapi_key` holds `api_key`. The old engine's
+                # one-character advance re-matched every suffix at the same
+                # separator and redacted the first sensitive one that opens a
+                # real block; reproduce that leftmost block-bearing sensitive
+                # suffix, then stop (the old redaction consumed through the
+                # block end). A sensitive suffix whose block is EMPTY is not a
+                # redaction either way — the old scan advanced one character
+                # past it and kept looking, so the scan continues to later
+                # suffixes.
+                found: tuple[re.Match[str], int] | None = None
+                s2 = match.start(2) + 1
+                key_end = match.end(2)
+                while s2 < key_end:
+                    if text[s2] in _STRUCTURED_KEY_START_CHARS:
+                        if _strict_suffix_is_sensitive(text, s2, key_end):
+                            m2 = _BLOCK_VALUE_PATTERN.match(text, s2)
+                            if m2 is not None:
+                                block_end = _block_value_end(text, m2.end())
+                                if block_end != m2.end():
+                                    found = (m2, block_end)
+                                    break
+                        if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
+                            "A" <= text[s2] <= "Z"
+                        ):
+                            # Separator-run candidate: every position inside one
+                            # contiguous run of non-alphanumeric key chars
+                            # normalizes to the SAME suffix (leading separators
+                            # collapse and the edge is stripped), so the run
+                            # needs at most one evaluation — jump over the rest
+                            # instead of walking it per position, which re-enabled
+                            # the O(n^2) hang on separator-heavy key runs
+                            # (issue #1236).
+                            while s2 + 1 < key_end and not (
+                                "A" <= text[s2 + 1] <= "Z"
+                                or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
+                            ):
+                                s2 += 1
+                    s2 += 1
+                if found is not None:
+                    m2, block_end = found
+                    out.append(text[pos : m2.start()])
+                    quote = m2.group(1) or ""
+                    out.append(f'{quote}{m2.group(2)}{quote}{m2.group(3)}"{_REDACTED_CREDENTIAL}"')
+                    pos = block_end
+                    continue
+                # No value is consumed by a block match; keep the matched
+                # key/separator verbatim and re-anchor after it.
+                out.append(text[pos : match.end()])
+                pos = match.end()
                 continue
             block_end = _block_value_end(text, match.end())
             if block_end == match.end():
                 # no indented block follows (empty value): skip and re-scan
-                out.append(text[pos : match.start() + 1])
-                pos = match.start() + 1
+                out.append(text[pos : match.end()])
+                pos = match.end()
                 continue
             out.append(text[pos : match.start()])
             quote = match.group(1) or ""

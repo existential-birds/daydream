@@ -627,9 +627,12 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
     monkeypatch.setattr("daydream.backends.codex.git_ops.clone", boom)
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
+        with pytest.raises(CodexError, match="failed to create disposable read-only checkout") as excinfo:
             async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
                 pass
+
+    # The wrapper must preserve the underlying GitError as the chained cause.
+    assert isinstance(excinfo.value.__cause__, git_ops.GitError)
 
     assert git_ops.head_sha(source) == before_head
     assert git_ops.staged_patch(source) == before_patch
@@ -650,11 +653,14 @@ async def test_codex_read_only_snapshot_failure_is_fail_closed(
     monkeypatch.setattr("daydream.backends.codex.git_ops.update_refs", boom)
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as exec_mock:
-        with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
+        with pytest.raises(CodexError, match="failed to create disposable read-only checkout") as excinfo:
             async for _ in CodexBackend(model="fixture-model").execute(
                 source, "Audit repository", read_only=True,
             ):
                 pass
+
+    # The wrapper must preserve the underlying GitError as the chained cause.
+    assert isinstance(excinfo.value.__cause__, git_ops.GitError)
     exec_mock.assert_not_called()
     assert git_ops.head_sha(source) == before_head
 

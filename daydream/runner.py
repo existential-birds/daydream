@@ -182,7 +182,8 @@ class RunConfig:
     extra_copy: list[Path] = field(default_factory=list)
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
-    log_mode: bool = False  # bypass Rich UI and emit plain text to stdout
+    log_mode: bool = False  # transitional internal name for the --verbose diagnostic mode
+    # (bypass Rich UI, emit plain text to stdout)
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
     # Issue #172: tiny-diff short-circuit gate (max changed files). CLI-tier
     # override; falls through to file-config scalar then the orchestrator

@@ -30,6 +30,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.cli import _parse_args
 from daydream.runner import RunConfig, run
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -401,3 +402,29 @@ def test_log_mode_trajectory_still_written(
 
     # Verify log output still works
     assert "generating trajectory" in output
+
+
+def test_verbose_flag_invocation_reaches_log_mode_pipeline(
+    tiny_diff_target: Path,
+    install_backend: InstallBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real --verbose flag (not a config dict) drives log_mode end-to-end."""
+    install_backend(
+        ScriptedBackend(
+            events=[TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
+            retryable=False,
+        )
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_repo_view", lambda repo, **_kwargs: ("test", "repo")
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None
+    )
+    config = _parse_args(["--verbose", str(tiny_diff_target)])
+    assert config.log_mode is True
+    output = _capture_stdout_and_run(config, monkeypatch)
+    assert "hello" in output
+    assert "[REDACTED_API_KEY]" in output     # redaction markers unchanged
+    assert "\x1b[" not in output              # plain text, no Rich escapes

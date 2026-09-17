@@ -43,7 +43,9 @@ from typing import Any, Literal
 import pytest
 
 from daydream import cli, git_ops
+from daydream.backends.codex import CodexError
 from daydream.phases import UnconfinedFindingError
+from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 
@@ -809,3 +811,239 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
 
     # Exact preservation: the concurrent replacement was not clobbered.
     assert explicit_trajectory.read_bytes() == replacement
+
+
+def _install_chained_failure_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    outer: BaseException | None = None,
+) -> None:
+    """Install a ScriptedBackend that raises a CodexError chained to a GitError."""
+    from daydream.backends.codex import CodexError
+
+    if outer is None:
+        outer = CodexError("failed to create disposable read-only checkout")
+        outer.__cause__ = git_ops.GitError("isolation probe failure")
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: ScriptedBackend(events=[outer], retryable=False),
+    )
+
+
+def test_verbose_token_scan_semantics() -> None:
+    scan = cli._verbose_token_in_argv
+    assert scan(["--verbose", "/t"]) is True
+    assert scan(["review", "--verbose", "/t"]) is True
+    assert scan(["improve", "/t", "--verbose"]) is True
+    assert scan(["/t", "--", "--verbose"]) is False
+    assert scan(["--verbose=true", "/t"]) is False
+    assert scan(["--log", "/t"]) is False
+    assert scan(["/t"]) is False
+    assert scan([]) is False
+
+
+def test_cli_main_fatal_default_concise_no_traceback(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_chained_failure_backend(monkeypatch, multi_stack_target)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", str(multi_stack_target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "failed to create disposable read-only checkout" in out + err
+    assert "Traceback (most recent call last)" not in err
+    assert "isolation probe failure" not in out + err
+    assert "During handling" not in err
+    assert "GitError" not in err
+
+
+def test_cli_main_verbose_prints_redacted_chain_on_stderr(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_chained_failure_backend(monkeypatch, multi_stack_target)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "failed to create disposable read-only checkout" in out + err
+    assert "CodexError" in err and "failed to create disposable read-only checkout" in err
+    assert "GitError" in err and "isolation probe failure" in err
+    assert "directly caused by the following exception" in err
+    assert err.index("CodexError") < err.index("GitError")
+    assert "isolation probe failure" not in out
+
+
+def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    sentinel = "ghp_" + "Q" * 12
+    outer = CodexError(f"failed to create disposable read-only checkout token={sentinel}\x1b[31m")
+    outer.__cause__ = git_ops.GitError("isolation probe failure\rBEEP\x07")
+    _install_chained_failure_backend(monkeypatch, multi_stack_target, outer)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    for stream in (out, err):
+        assert sentinel not in stream
+        assert "\x1b" not in stream and "\r" not in stream
+    assert "[REDACTED" in err
+    assert "CodexError" in err
+
+
+def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_chained_failure_backend(monkeypatch, multi_stack_target)
+
+    def _boom(*a: Any, **k: Any) -> str:
+        raise RuntimeError("formatter exploded")
+
+    monkeypatch.setattr("daydream.cli.format_verbose_exception", _boom)
+    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]" in err
+    assert "formatter exploded" not in err
+    assert "failed to create disposable read-only checkout" in out + err
+
+
+def test_cli_main_verbose_diagnoses_pre_config_failure(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _silence(monkeypatch)
+
+    def _denied(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("observability boom")
+
+    monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", str(git_repo)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    _out, err = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "RuntimeError" in err
+    assert "observability boom" in err
+
+
+def test_cli_main_default_hides_pre_config_failure_details(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _silence(monkeypatch)
+
+    def _denied(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("observability boom")
+
+    monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", str(git_repo)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    _out, err = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "RuntimeError" not in err
+
+
+class _ExplodingStrError(RuntimeError):
+    """An exception whose ``__str__`` raises: the hostile-message case."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("cannot stringify hostile exception")
+
+
+def _install_exploding_str_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install a ScriptedBackend whose failure exception cannot be str()ed.
+
+    The exception escapes ``runner.run`` into ``cli.main``'s generic fatal
+    handler — the exact shape issue #1236's fail-closed contract covers.
+    """
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: ScriptedBackend(
+            events=[_ExplodingStrError("hostile fatal")], retryable=False
+        ),
+    )
+
+
+def test_cli_main_hostile_str_fatal_default_fails_closed(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fatal exception whose ``__str__`` raises must not escape the generic
+    handler: the panel is empty-safe, never a raw interpreter traceback, never
+    the hostile message's own text (issue #1236 fail-closed contract)."""
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_exploding_str_backend(monkeypatch)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", str(multi_stack_target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "cannot stringify" not in out + err
+    assert "Traceback (most recent call last)" not in err
+    assert "Fatal Error" in out + err
+
+
+def test_cli_main_hostile_str_fatal_verbose_emits_unavailable_marker(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The verbose variant still fails closed: the verbose diagnostic is the
+    fixed unavailable marker (never a secondary traceback), the panel stays
+    safe, and exit code 1 is preserved."""
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_exploding_str_backend(monkeypatch)
+
+    monkeypatch.setattr(
+        sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]" in err
+    assert "cannot stringify" not in out + err
+    assert "Traceback (most recent call last)" not in err
+    assert "Fatal Error" in out + err

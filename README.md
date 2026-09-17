@@ -108,6 +108,22 @@ The profile selects analysis settings, but backend, provider, model, reasoning e
 
 Run `daydream --help` to see the common flags. Run `daydream --help-all` to see the full advanced surface.
 
+## Diagnostics
+
+Unexpected fatal errors print a concise error panel; `--verbose` additionally
+writes the redacted exception chain to `stderr` (bounded at 64 KiB with a
+single explicit truncation marker) and keeps the redacted agent-event stream
+on `stdout`:
+
+```bash
+daydream --verbose /path/to/project >events.log 2>diagnostics.log
+```
+
+Verbose mode changes neither retries nor exit codes. `--log` was removed; use
+`--verbose` instead. Verbose output is diagnostic data: credentials and
+usernames are redacted, but repository paths, package paths, commands, and
+Daydream stack frames may remain.
+
 ## Observability
 
 Send Daydream traces to LangSmith, HoneyHive, or any OTLP-compatible platform:

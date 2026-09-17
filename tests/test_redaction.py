@@ -715,3 +715,182 @@ def test_redactor_scrubs_scheme_pair_under_sensitive_key() -> None:
     out = redact_structured_text("token: Bearer opaque-token-xyz")
     assert "opaque-token-xyz" not in out
     assert "token: Bearer [REDACTED_CREDENTIAL]" in out
+
+
+# ---- Linear separator-anchored scan (issue #1236 Task 2, root-cause fix) ----
+
+
+def test_redactor_linear_scan_nested_pair_in_bare_value() -> None:
+    """A sensitive pair nested in a non-sensitive pair's bare value is still
+    redacted under the separator-anchored scan: the value advance stops at the
+    value start, so the inner pair's key is re-anchored, never skipped."""
+    out = redact_structured_text("note: apiKey: sk-opaque123")
+    assert "sk-opaque123" not in out
+    assert "[REDACTED" in out
+    assert out.startswith("note:")
+
+
+def test_redactor_linear_scan_nested_pair_in_quoted_value() -> None:
+    """The same nested pair inside a quoted value is redacted while the outer
+    key stays untouched."""
+    out = redact_structured_text('note: "apiKey: sk-opaque123"')
+    assert "sk-opaque123" not in out
+    assert "[REDACTED" in out
+    assert out.startswith('note: "')
+
+
+def test_redactor_linear_scan_long_non_sensitive_key_precedes_sensitive_pair() -> None:
+    """The O(n^2) shape from the bug: a long non-sensitive key run followed by
+    a sensitive pair. The scan must not re-match the run per character — the
+    pair after it is still found and redacted."""
+    text = "a" * 5000 + "=x token=sk-opaque123"
+    out = redact_structured_text(text)
+    assert "sk-opaque123" not in out
+    assert "[REDACTED" in out
+    assert out.startswith("a" * 5000)
+    assert "=x " in out
+
+
+def test_redactor_linear_scan_reanchors_after_long_run_structured_marker() -> None:
+    """The long-run shape with a value only the structured pair scan catches:
+    the value-start advance must leave the run untouched yet still redact the
+    ``token=`` pair that follows it."""
+    text = "a" * 5000 + "=x token=opaque-test-only-sentinel"
+    out = redact_structured_text(text)
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+    assert out.startswith("a" * 5000)
+    assert "=x " in out
+
+
+def test_redactor_linear_scan_separatorless_large_text_unchanged() -> None:
+    """A long run of key-shaped characters with no separator anywhere is
+    returned unchanged (the engine-quadratic guard: the old scan made the
+    engine try every start position over the run)."""
+    text = "x" * 200_000
+    out = redact_structured_text(text)
+    assert out == text
+
+
+def test_redactor_sensitive_suffix_scan_is_linear() -> None:
+    """The sensitive-suffix discovery must not blow up quadratically on a
+    long non-sensitive key run that ends with a separator + sensitive pair.
+    Before the fix the per-position ``_is_sensitive_key(text[s2:])`` calls
+    made 100K chars take ~77s; 5s is a generous deterministic ceiling, not
+    a tight bound (mirrors ``test_large_diagnostic_formatting_completes_quickly``).
+    The value is one only the structured pass redacts, so the marker proves
+    the pair after the long run was still found and redacted."""
+    import time
+
+    text = "a" * 200_000 + "=x token=opaque-test-only-sentinel"
+    start = time.perf_counter()
+    out = redact_structured_text(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+    assert out.startswith("a" * 200_000)
+    assert "=x " in out
+
+
+def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
+    """Separator-heavy key runs must not re-enable the O(n^2) suffix scan.
+
+    Before the fix, each '_' position inside the run walked the remainder of
+    the run (the length bound cannot fire on separators), so 100K separators
+    took ~180s. 10s is a generous deterministic ceiling, not a tight bound.
+    """
+    import time
+
+    seps = "_" * 100_000
+
+    # Non-sensitive: byte-identical output, and the run must not dominate.
+    text = "foo" + seps + "tail: x"
+    start = time.perf_counter()
+    out = redact_structured_text(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 10
+    assert out == text
+
+    # Pair pass: a sensitive suffix AFTER the run (''xapi_key'' -> 'api_key' —
+    # the whole key stays non-sensitive because segments split on '_') is
+    # still found and redacted once the separator run is skipped.
+    text2 = "foo" + seps + "xapi_key: opaque-test-only-sentinel"
+    start = time.perf_counter()
+    out2 = redact_structured_text(text2)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 10
+    assert "opaque-test-only-sentinel" not in out2
+    assert "[REDACTED" in out2
+    assert out2.startswith("foo" + seps + "x")
+
+    # Block pass: same long run in front of a block-style sensitive suffix.
+    text3 = "foo" + seps + "xapi_key: {\n  \"nested\": \"opaque-test-only-sentinel\"\n}"
+    start = time.perf_counter()
+    out3 = redact_structured_text(text3)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 10
+    assert "opaque-test-only-sentinel" not in out3
+    assert "[REDACTED" in out3
+    assert out3.startswith("foo" + seps + "x")
+
+
+@pytest.mark.parametrize("text", [
+    "1apiKey=x",
+    "2token= y",
+    "123secret: z",
+    "1AUTHORIZATION = opaque-test-only-sentinel",
+    '1apiKey: "opaque-test-only-sentinel"',
+    "1apiKey:\n  nested: opaque-test-only-sentinel\n",
+])
+def test_redactor_scrubs_digit_prefixed_sensitive_key_runs(text: str) -> None:
+    """A key run that starts with continuation chars (digits) still gets its
+    sensitive key redacted: the old leftmost-match engine anchored at the
+    first key-START char inside the run (issue #1236 Task 2b Gap 1)."""
+    out = redact_structured_text(text)
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+
+
+@pytest.mark.parametrize("text", [
+    'defauthorization: "opaque-test-only-sentinel"',
+    "nullpasswd=1",
+    "fooapi_key: 2",
+    "xpassword=3",
+    "superclient_secret = opaque-test-only-sentinel",
+    "defauthorization:\n  nested: opaque-test-only-sentinel\n",
+    "nullpasswd:\n  nested: opaque-test-only-sentinel\n",
+])
+def test_redactor_scrubs_sensitive_suffix_in_non_sensitive_key(text: str) -> None:
+    """A SENSITIVE suffix embedded in a non-sensitive key run is still
+    redacted at its own anchor: `defauthorization` contains `authorization`,
+    `nullpasswd` contains `passwd`, `fooapi_key` contains `api_key`. The
+    non-sensitive prefix is preserved verbatim (issue #1236 Task 2b Gap 2)."""
+    out = redact_structured_text(text)
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+    assert str(text).split(":", 1)[0].split("=", 1)[0] in out
+
+
+def test_redactor_gap_mechanics_compose() -> None:
+    """The digit-prefix anchor and the sensitive-suffix discovery compose: a
+    digit-prefixed run whose first key-START char starts a NON-sensitive key
+    still lands on the embedded sensitive suffix (issue #1236 Task 2b)."""
+    out = redact_structured_text("12defauthorization= opaque-test-only-sentinel")
+    assert "opaque-test-only-sentinel" not in out
+    assert out.startswith("12defauthorization=")
+    assert "[REDACTED_CREDENTIAL]" in out
+    out2 = redact_structured_text("1nullpasswd: opaque-test-only-sentinel")
+    assert "opaque-test-only-sentinel" not in out2
+    assert "[REDACTED_CREDENTIAL]" in out2
+
+
+def test_redactor_sensitive_suffix_block_empty_value_not_redacted() -> None:
+    """A sensitive suffix whose block value is EMPTY (nothing indented) is not
+    a redaction in the block pass — the old scan advanced past it and kept
+    looking, so the text passes through unchanged."""
+    text = "defpasswd:\nplain: 1\n"
+    out = redact_structured_text(text)
+    assert out == text
+    assert "[REDACTED_CREDENTIAL]" not in out
+
