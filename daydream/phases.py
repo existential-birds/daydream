@@ -5150,7 +5150,7 @@ SUPPRESSION_SCHEMA: dict[str, Any] = strict_object({
         "items": strict_object({
             "sup_id": {"type": "integer"},
             "keep": {"type": "boolean"},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
             "description": {"type": "string"},
             "rationale": {"type": "string"},
