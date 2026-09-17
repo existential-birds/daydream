@@ -15,7 +15,7 @@ from daydream.agent import (
     is_environmental_failure,
     run_agent,
 )
-from daydream.backends import DiagnosticEvent, ResultEvent
+from daydream.backends import DiagnosticEvent, ResultEvent, ToolStartEvent
 from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.prompt_budget import (
@@ -553,6 +553,96 @@ def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
     assert type(rebuilt_retryable) is RetryableBackendError
     assert credential not in str(rebuilt_retryable)
     assert getattr(rebuilt_retryable, "retryable", False) is True
+
+
+class ExplodingStrError(RuntimeError):
+    """A hostile supervisor exception: its ``__str__`` itself raises."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("boom in str")
+
+
+def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
+    """A supervisor error whose ``__str__`` raises must fail closed everywhere.
+
+    Regression for issue #1236 round 2: the raise site evaluates
+    ``_ToolSupervisorFailure.__init__`` (which str()s the original) before the
+    fail-closed handlers run, so a hostile ``__str__`` aborted construction and
+    escaped as its own error. The scrubber and the wrapper must both survive it.
+    """
+    from daydream.agent import (
+        _RedactedSupervisorError,
+        _scrubbed_supervisor_error,
+        _ToolSupervisorFailure,
+    )
+
+    # Scrubber: no raise; fail-closed stand-in carrying only the type name.
+    stand_in = _scrubbed_supervisor_error(ExplodingStrError("secret-shaped-payload"))
+    assert type(stand_in) is _RedactedSupervisorError
+    assert stand_in.original_type_name == "ExplodingStrError"
+    assert "secret-shaped-payload" not in str(stand_in)
+    assert "boom in str" not in str(stand_in)
+
+    # Wrapper: construction never evaluates the hostile __str__.
+    original = ExplodingStrError("secret-shaped-payload")
+    failure = _ToolSupervisorFailure(original)
+    assert failure.original is original
+    assert str(failure) == ""
+
+
+@pytest.mark.anyio
+async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent loop scrubs a hostile supervisor error, never leaking its text.
+
+    Regression for issue #1236 round 2: with the constructor failing open, the
+    propagated exception was the hostile ``__str__``'s own error misattributed
+    as a backend failure, and the hardened handler never ran. The real loop
+    must print the scrubbed "Extension Failure" panel and propagate the
+    redacted stand-in instead.
+    """
+    from daydream.agent import _RedactedSupervisorError
+
+    output = StringIO()
+    monkeypatch.setattr("daydream.agent.console", Console(file=output, force_terminal=False))
+
+    def hostile_supervisor(
+        tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase
+    ) -> ToolDecision:
+        raise ExplodingStrError("secret-shaped-payload")
+
+    registry = Registry()
+    registry.register_tool_supervisor(hostile_supervisor)
+    previous_registry = get_registry()
+    set_registry(registry)
+    try:
+        with pytest.raises(_RedactedSupervisorError) as excinfo:
+            await run_agent(
+                ScriptedBackend(
+                    events=[
+                        ToolStartEvent(
+                            id="t1",
+                            name="bash",
+                            input={"command": "opaque-not-included"},
+                        ),
+                        ResultEvent(structured_output=None, continuation=None),
+                    ]
+                ),
+                tmp_path,
+                "inspect",
+                phase=DaydreamPhase.REVIEW,
+            )
+        raised = excinfo.value
+    finally:
+        set_registry(previous_registry)
+
+    assert type(raised) is _RedactedSupervisorError
+    assert raised.original_type_name == "ExplodingStrError"
+    rendered = output.getvalue()
+    assert "Extension Failure" in rendered
+    assert "secret-shaped-payload" not in rendered
+    assert "boom in str" not in rendered
 
 
 @pytest.mark.anyio

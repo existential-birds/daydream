@@ -395,7 +395,11 @@ class _ToolSupervisorFailure(Exception):
 
     def __init__(self, original: Exception) -> None:
         self.original = original
-        super().__init__(str(original))
+        try:
+            text = str(original)
+        except Exception:  # noqa: BLE001 - a broken __str__ must not abort construction
+            text = ""
+        super().__init__(text)
 
     @property
     def subtype(self) -> str:
@@ -440,12 +444,22 @@ def _scrubbed_supervisor_error(original: BaseException) -> BaseException:
         clone = type(original)(*scrubbed_args)
     except (AttributeError, TypeError):
         clone = None
-    if clone is not None and redact_text(str(clone)) == str(clone):
+    # str() is the one operation that can raise on a hostile value; convert it
+    # inside the fail-closed try so a broken __str__ falls through to the
+    # stand-in instead of escaping the scrubber (sanitize_verbose_message's
+    # contract in diagnostics.py).
+    try:
+        clone_text = str(clone) if clone is not None else None
+    except Exception:  # noqa: BLE001 - fail closed to the stand-in on a broken __str__
+        clone_text = None
+    if clone is not None and clone_text is not None and redact_text(clone_text) == clone_text:
         setattr(clone, "retryable", getattr(original, "retryable", False))
         return clone
-    stand_in = _RedactedSupervisorError(
-        type(original).__name__, redact_text(str(original))
-    )
+    try:
+        message = redact_text(str(original))
+    except Exception:  # noqa: BLE001 - fail closed to a type-name-only stand-in
+        message = ""
+    stand_in = _RedactedSupervisorError(type(original).__name__, message)
     stand_in.retryable = getattr(original, "retryable", False)
     return stand_in
 
@@ -480,11 +494,11 @@ class _EventStreamScope:
 
 
 class _LogRedactingConsole(Console):
-    """Console that redacts string payloads while ``--log`` mode is active.
+    """Console that redacts string payloads while ``--verbose`` mode is active.
 
     phases.py, runner.py, and the other importers bind to this module-level
     console, so their Rich output would otherwise bypass the run_agent-event
-    emitter and leak raw secrets via the UI path in ``--log`` mode.
+    emitter and leak raw secrets via the UI path in ``--verbose`` mode.
     """
 
     def print(self, *objects: Any, **kwargs: Any) -> None:
@@ -643,7 +657,7 @@ def _summarize_input(input_data: dict[str, Any], name: str) -> str:
         value = input_data.get(key)
         if isinstance(value, str) and value:
             # S1 parity with the live render surfaces (ui.tools): the stored
-            # input keeps the replayable cd-prefixed payload, but the --log
+            # input keeps the replayable cd-prefixed payload, but the --verbose
             # surface shows the cd-stripped display variant. Codex-only
             # ('shell'): Claude/Pi Bash commands never pass through the Codex
             # wrapper, so their operator-authored cd prefix must render.
@@ -727,7 +741,7 @@ def _redact_log_value(value: Any) -> Any:
 
 
 def _print_log(value: str) -> None:
-    """The safe ``--log`` emitter for run_agent events: redact, then print.
+    """The safe ``--verbose`` emitter for run_agent events: redact, then print.
 
     Phase/UI output flows through the module-level ``console``, which redacts
     string payloads in log mode via the same fail-closed boundary.
@@ -1269,7 +1283,7 @@ async def _run_agent(
                                 elif isinstance(event, ResultEvent):
                                     # Capture the structured result unconditionally: the log-mode
                                     # print is an additive side effect, never a substitute for
-                                    # capture (otherwise --log silently drops every structured
+                                    # capture (otherwise --verbose silently drops every structured
                                     # result — exploration conventions, review findings, etc.).
                                     structured_result = event.structured_output
                                     if event.structured_output is not None:
@@ -1549,9 +1563,17 @@ async def _run_agent(
 
         except _ToolSupervisorFailure as exc:
             original = exc.original
-            print_error(
-                console, "Extension Failure", sanitize_verbose_message(f"{type(original).__name__}: {original}")
+            # Materialize str(original) inside a fail-closed try: a supervisor
+            # exception with a broken __str__ must not escape this handler
+            # (mirrors the generic branch below and sanitize_verbose_message).
+            try:
+                detail = str(original)
+            except Exception:  # noqa: BLE001 - a broken __str__ must not convert the failure
+                detail = ""
+            diagnostic = (
+                f"{type(original).__name__}: {detail}" if detail else type(original).__name__
             )
+            print_error(console, "Extension Failure", sanitize_verbose_message(diagnostic))
             # The exception itself still propagates to outer handlers that re-print
             # str(exc) without redaction (e.g. the CLI's "Fatal Error" panel on
             # `daydream <target>`, improve-run retry checks). Rewriting .args in
