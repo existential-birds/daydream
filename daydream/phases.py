@@ -4943,12 +4943,7 @@ SUPERVISE_SCHEMA: dict[str, Any] = strict_object({
             "id": {"type": "integer"},
             "action": {"type": "string", "enum": ["allow", "drop", "edit", "hold"]},
             "reason": {"type": "string"},
-            "severity": {
-                "anyOf": [
-                    {"type": "string", "enum": ["high", "medium", "low"]},
-                    {"type": "null"},
-                ]
-            },
+            "severity": severity_enum_schema(nullable=True),
             "confidence": {
                 "anyOf": [
                     {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
