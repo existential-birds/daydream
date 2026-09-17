@@ -25,6 +25,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from daydream.pr_review import FINDING_MARKER_RE
+from daydream.severity import SeverityLevel
 
 __all__ = [
     "Source",
@@ -830,7 +831,7 @@ class Finding(BaseModel):
     finding_id: str
     title: str
     body: str
-    severity: Literal["high", "medium", "low"] | None = None
+    severity: SeverityLevel | None = None
     location: Location | None = None
     provenance: Provenance
 

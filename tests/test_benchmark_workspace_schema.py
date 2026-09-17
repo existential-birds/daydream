@@ -731,11 +731,30 @@ def test_title_bound_is_unicode_characters_not_bytes() -> None:
         CaseDocument.model_validate(raw2)
 
 
-def test_finding_severity_enum() -> None:
+def test_finding_severity_accepts_every_canonical_level_and_rejects_unknown() -> None:
+    from daydream import severity
+
+    for level in severity.CANONICAL_LEVELS:
+        raw = _valid_case_dict()
+        finding = raw["curation"]["findings"][0]
+        finding["severity"] = level
+        finding["finding_id"] = derive_finding_id(finding, case_id=raw["case_id"])
+        assert CaseDocument.model_validate(raw).curation.findings[0].severity == level
+
     raw = _valid_case_dict()
-    raw["curation"]["findings"][0]["severity"] = "critical"
+    finding = raw["curation"]["findings"][0]
+    finding["severity"] = "critical"
+    finding["finding_id"] = derive_finding_id(finding, case_id=raw["case_id"])
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
+
+
+def test_finding_severity_declares_no_inline_level_literal() -> None:
+    """A second inline literal cannot follow a declaration change, so the field must
+    be typed by the shared vocabulary alias (spec requirement 4)."""
+    source = (Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "schema.py").read_text()
+    assert "SeverityLevel" in source
+    assert 'Literal["high", "medium", "low"]' not in source
 
 
 def test_finding_location_must_be_relative_and_ordered() -> None:
