@@ -730,6 +730,19 @@ def _audit_assignments(
     return assignments
 
 
+def _owning_services(
+    path: str, services: list[Service]
+) -> tuple[Service, ...]:
+    """The improve orchestrator's service-ownership rule, stated once."""
+    return owning_services(
+        path,
+        services,
+        match=ServiceMatch.ALL,
+        repo_root=RepoRootPolicy.ORDINARY,
+        match_root_equal=True,
+    )
+
+
 def _services_for_files(
     services: list[Service], files: tuple[str, ...]
 ) -> list[Service]:
@@ -738,13 +751,7 @@ def _services_for_files(
     owners = {
         service
         for path in files
-        for service in owning_services(
-            path,
-            services,
-            match=ServiceMatch.ALL,
-            repo_root=RepoRootPolicy.ORDINARY,
-            match_root_equal=True,
-        )
+        for service in _owning_services(path, services)
     }
     return [service for service in services if service in owners]
 
@@ -764,13 +771,7 @@ def _restrict_diff_to_services(
         path = _diff_block_path(block)
         if path is None:
             continue
-        if owning_services(
-            path,
-            services,
-            match=ServiceMatch.ALL,
-            repo_root=RepoRootPolicy.ORDINARY,
-            match_root_equal=True,
-        ):
+        if _owning_services(path, services):
             selected.append(block)
             if path not in files:
                 files.append(path)
@@ -786,13 +787,7 @@ def _stacks_for_services(
         files = [
             path
             for path in stack.files
-            if owning_services(
-                path,
-                services,
-                match=ServiceMatch.ALL,
-                repo_root=RepoRootPolicy.ORDINARY,
-                match_root_equal=True,
-            )
+            if _owning_services(path, services)
         ]
         if files:
             scoped.append(
@@ -892,13 +887,7 @@ def _stamp_finding(
     owners = {
         service
         for path in evidence_paths
-        for service in owning_services(
-            path,
-            services,
-            match=ServiceMatch.ALL,
-            repo_root=RepoRootPolicy.ORDINARY,
-            match_root_equal=True,
-        )
+        for service in _owning_services(path, services)
     }
     stamped["services"] = [
         service.name for service in services if service in owners

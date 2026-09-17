@@ -193,13 +193,23 @@ def test_service_field_order_is_positional_stable() -> None:
     )
 
 
-# These two patterns are the same shapes the issue #1216 M7 acceptance search
-# uses. Keep them in sync with the M7 command rather than treating them as
-# unrelated.
+# The first two patterns are the shapes the issue #1216 M7 acceptance search
+# uses; keep them in sync with the M7 command rather than treating them as
+# unrelated. The third is a superset that also catches a `startswith` arguing on
+# `root` without the exact f-string spelling (`path.startswith(service.root...)`),
+# which the M7 pair alone would let through.
 _CONTAINMENT_SHAPES = (
-    re.compile(r'\.startswith\(f"\{[a-z_.]*root[a-z_.]*\}/"\)'),
+    re.compile(r'\.startswith\(f"\{[^}]*root[^}]*\}/"\)'),
     re.compile(r"\b(path|file|relative|target|name|p)\s*[!=]=\s*([a-z_]+\.)?root\b"),
+    re.compile(r"\.startswith\([^)]*\broot\b"),
 )
+
+
+# ``_owning_partition`` in the improve orchestrator answers the same *shape* of
+# question about partitions. It is enumerated Out of Scope and is the one allowed
+# exception, so the exemption is scoped to that function's module and name rather
+# than to any line that happens to mention ``partition.root``.
+_PARTITION_EXCEPTION = Path("daydream") / "improve" / "orchestrator.py"
 
 
 def test_no_service_containment_shape_lives_outside_services_py() -> None:
@@ -211,6 +221,7 @@ def test_no_service_containment_shape_lives_outside_services_py() -> None:
     """
     repo_root = Path(__file__).resolve().parents[1]
     owner = repo_root / "daydream" / "services.py"
+    partition_exception = repo_root / _PARTITION_EXCEPTION
     offenders: list[str] = []
     for source in sorted((repo_root / "daydream").rglob("*.py")):
         if source == owner:
@@ -218,7 +229,7 @@ def test_no_service_containment_shape_lives_outside_services_py() -> None:
         for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
             if not any(shape.search(line) for shape in _CONTAINMENT_SHAPES):
                 continue
-            if re.search(r"partition\.root\b", line):
+            if source == partition_exception and re.search(r"partition\.root\b", line):
                 continue
             offenders.append(f"{source.relative_to(repo_root)}:{number}: {line.strip()}")
 
