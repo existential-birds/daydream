@@ -1195,13 +1195,28 @@ def _redact_structured_pairs(text: str) -> str:
             s2 = match.start(2) + 1
             key_end = match.end(2)
             while s2 < key_end:
-                if text[s2] in _STRUCTURED_KEY_START_CHARS and _strict_suffix_is_sensitive(
-                    text, s2, key_end
-                ):
-                    m2 = _STRUCTURED_KEY_VALUE_PATTERN.match(text, s2)
-                    if m2 is not None:
-                        suffix = m2
-                        break
+                if text[s2] in _STRUCTURED_KEY_START_CHARS:
+                    if _strict_suffix_is_sensitive(text, s2, key_end):
+                        m2 = _STRUCTURED_KEY_VALUE_PATTERN.match(text, s2)
+                        if m2 is not None:
+                            suffix = m2
+                            break
+                    if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
+                        "A" <= text[s2] <= "Z"
+                    ):
+                        # Separator-run candidate: every position inside one
+                        # contiguous run of non-alphanumeric key chars
+                        # normalizes to the SAME suffix (leading separators
+                        # collapse and the edge is stripped), so the run
+                        # needs at most one evaluation — jump over the rest
+                        # instead of walking it per position, which re-enabled
+                        # the O(n^2) hang on separator-heavy key runs
+                        # (issue #1236).
+                        while s2 + 1 < key_end and not (
+                            "A" <= text[s2 + 1] <= "Z"
+                            or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
+                        ):
+                            s2 += 1
                 s2 += 1
             if suffix is not None:
                 out.append(text[pos : suffix.start()])
@@ -1268,15 +1283,30 @@ def _redact_structured_blocks(text: str) -> str:
                 s2 = match.start(2) + 1
                 key_end = match.end(2)
                 while s2 < key_end:
-                    if text[s2] in _STRUCTURED_KEY_START_CHARS and _strict_suffix_is_sensitive(
-                        text, s2, key_end
-                    ):
-                        m2 = _BLOCK_VALUE_PATTERN.match(text, s2)
-                        if m2 is not None:
-                            block_end = _block_value_end(text, m2.end())
-                            if block_end != m2.end():
-                                found = (m2, block_end)
-                                break
+                    if text[s2] in _STRUCTURED_KEY_START_CHARS:
+                        if _strict_suffix_is_sensitive(text, s2, key_end):
+                            m2 = _BLOCK_VALUE_PATTERN.match(text, s2)
+                            if m2 is not None:
+                                block_end = _block_value_end(text, m2.end())
+                                if block_end != m2.end():
+                                    found = (m2, block_end)
+                                    break
+                        if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
+                            "A" <= text[s2] <= "Z"
+                        ):
+                            # Separator-run candidate: every position inside one
+                            # contiguous run of non-alphanumeric key chars
+                            # normalizes to the SAME suffix (leading separators
+                            # collapse and the edge is stripped), so the run
+                            # needs at most one evaluation — jump over the rest
+                            # instead of walking it per position, which re-enabled
+                            # the O(n^2) hang on separator-heavy key runs
+                            # (issue #1236).
+                            while s2 + 1 < key_end and not (
+                                "A" <= text[s2 + 1] <= "Z"
+                                or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
+                            ):
+                                s2 += 1
                     s2 += 1
                 if found is not None:
                     m2, block_end = found

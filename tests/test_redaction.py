@@ -793,6 +793,48 @@ def test_redactor_sensitive_suffix_scan_is_linear() -> None:
     assert "=x " in out
 
 
+def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
+    """Separator-heavy key runs must not re-enable the O(n^2) suffix scan.
+
+    Before the fix, each '_' position inside the run walked the remainder of
+    the run (the length bound cannot fire on separators), so 100K separators
+    took ~180s. 10s is a generous deterministic ceiling, not a tight bound.
+    """
+    import time
+
+    seps = "_" * 100_000
+
+    # Non-sensitive: byte-identical output, and the run must not dominate.
+    text = "foo" + seps + "tail: x"
+    start = time.perf_counter()
+    out = redact_structured_text(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 10
+    assert out == text
+
+    # Pair pass: a sensitive suffix AFTER the run (''xapi_key'' -> 'api_key' —
+    # the whole key stays non-sensitive because segments split on '_') is
+    # still found and redacted once the separator run is skipped.
+    text2 = "foo" + seps + "xapi_key: opaque-test-only-sentinel"
+    start = time.perf_counter()
+    out2 = redact_structured_text(text2)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 10
+    assert "opaque-test-only-sentinel" not in out2
+    assert "[REDACTED" in out2
+    assert out2.startswith("foo" + seps + "x")
+
+    # Block pass: same long run in front of a block-style sensitive suffix.
+    text3 = "foo" + seps + "xapi_key: {\n  \"nested\": \"opaque-test-only-sentinel\"\n}"
+    start = time.perf_counter()
+    out3 = redact_structured_text(text3)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 10
+    assert "opaque-test-only-sentinel" not in out3
+    assert "[REDACTED" in out3
+    assert out3.startswith("foo" + seps + "x")
+
+
 @pytest.mark.parametrize("text", [
     "1apiKey=x",
     "2token= y",
