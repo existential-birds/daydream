@@ -661,3 +661,53 @@ def test_candidate_root_and_thresholds_are_re_exported() -> None:
     assert DiagramThresholds() == DiagramThresholds(
         min_code_files=3, min_modules=2, min_branch_points=3
     )
+
+
+# --- Service ownership --------------------------------------------------------
+
+
+def test_service_ownership_is_the_deepest_root_and_a_repo_root_service_owns_nothing(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    base = {
+        "services/api/pyproject.toml": "[project]\nname = 'api'\n",
+        "services/api/inner/pyproject.toml": "[project]\nname = 'inner'\n",
+    }
+    head = {
+        "services/api/handler.py": "def handle():\n    return 1\n",
+        "services/api/inner/main.py": "def main():\n    return 2\n",
+        "scripts/tool.py": "def tool():\n    return 3\n",
+    }
+    changed, ranges = _diff_repo(repo, base, head)
+    services = enumerate_services(
+        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
+    )
+
+    eligibility = _decide(repo, changed, ranges, services=services)
+
+    assert eligibility.services == {
+        "services/api/handler.py": "api",
+        "services/api/inner/main.py": "inner",
+    }
+    assert eligibility.modules == {
+        "scripts/tool.py": "scripts",
+        "services/api/handler.py": "services/api",
+        "services/api/inner/main.py": "services/api/inner",
+    }
+
+
+def test_a_repo_root_service_is_skipped_by_eligibility(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    head = {
+        "services/api/handler.py": "def handle():\n    return 1\n",
+        "scripts/tool.py": "def tool():\n    return 2\n",
+    }
+    changed, ranges = _diff_repo(repo, {}, head)
+    services = enumerate_services(repo, DaydreamFileConfig(improve_service_roots=["."]))
+    assert [service.root.as_posix() for service in services] == ["."]
+
+    eligibility = _decide(repo, changed, ranges, services=services)
+
+    assert eligibility.services == {}
+    assert eligibility.modules == {"scripts/tool.py": "scripts", "services/api/handler.py": "services"}

@@ -41,6 +41,7 @@ from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK
 from daydream.deep.diagram_types import CandidateRoot, DiagramThresholds
 from daydream.repository_paths import is_test_path
+from daydream.services import RepoRootPolicy, ServiceMatch, owning_services
 from daydream.tree_sitter_index import (
     branch_statement_lines,
     definitions_in_file,
@@ -175,20 +176,15 @@ def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list
 
 
 def _owning_service(path: str, services: list[Service]) -> Service | None:
-    """Return the deepest enumerated service whose root contains ``path``."""
-    best: Service | None = None
-    best_depth = -1
-    for service in services:
-        root = service.root.as_posix()
-        if root in ("", "."):
-            continue
-        if path != root and not path.startswith(f"{root}/"):
-            continue
-        depth = len(PurePosixPath(root).parts)
-        if depth > best_depth:
-            best = service
-            best_depth = depth
-    return best
+    """Return the deepest service owning ``path``, skipping a repo-root service."""
+    owners = owning_services(
+        path,
+        services,
+        match=ServiceMatch.DEEPEST,
+        repo_root=RepoRootPolicy.SKIP,
+        match_root_equal=True,
+    )
+    return owners[0] if owners else None
 
 
 def _module_of(path: str, services: list[Service]) -> str:
@@ -454,9 +450,9 @@ def decide_eligibility(
     code_files = _code_files(stacks, changed_files)
     modules = {path: _module_of(path, services) for path in code_files}
     service_names = {
-        path: owner.name
-        for path, owner in ((path, _owning_service(path, services)) for path in code_files)
-        if owner is not None
+        path: service.name
+        for path in code_files
+        if (service := _owning_service(path, services)) is not None
     }
     cross_module_edges = _count_cross_module_edges(import_graph, modules)
 

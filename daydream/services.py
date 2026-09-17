@@ -1,10 +1,13 @@
-"""Discover monorepo service roots.
+"""Discover monorepo service roots and answer which service owns a path.
 
 The single service-discovery implementation, shared by the improve flow's
 monorepo audits (``--scope``, partition grouping) and grounded-diagram
 eligibility (the cross-service rule, issue #1113). Lives at package root so
 neither flow subpackage depends on the other; ``daydream.improve.services``
-remains as a re-export shim for the historical import path.
+remains as a re-export shim for the historical import path. This module also
+owns the service-root containment rule (``owning_services``): the question
+"which service, if any, owns this repository-relative path?" is answered here
+and nowhere else.
 """
 
 from __future__ import annotations
@@ -14,8 +17,10 @@ import glob
 import json
 import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from daydream.config_file import DaydreamFileConfig, load_toml_or_empty
@@ -47,6 +52,106 @@ class Service:
     name: str
     root: Path
     source: str
+
+
+class ServiceMatch(StrEnum):
+    """How many owners a path may have, and which of the matches to return."""
+
+    DEEPEST = "deepest"
+    FIRST = "first"
+    ALL = "all"
+
+
+class RepoRootPolicy(StrEnum):
+    """How a service rooted at the repository root (``.``) behaves."""
+
+    SKIP = "skip"
+    CATCH_ALL = "catch_all"
+    ORDINARY = "ordinary"
+
+
+def owning_services(
+    path: str,
+    services: Sequence[Service],
+    *,
+    match: ServiceMatch,
+    repo_root: RepoRootPolicy,
+    match_root_equal: bool,
+) -> tuple[Service, ...]:
+    """Return the services that own ``path``, per the caller's stated policy.
+
+    This is the one containment rule (issue #1216). It is parameterized on four
+    axes, and every caller must state all four -- the policy arguments are
+    keyword-only and carry no defaults, so none can silently inherit a rule it
+    did not choose:
+
+    * ``match`` (``ServiceMatch``): ``ALL`` returns every match in the caller's
+      ``services`` order, ``FIRST`` returns the first match in that order, and
+      ``DEEPEST`` returns the match with the greatest
+      ``len(PurePosixPath(root).parts)`` -- keeping the earlier input on a tie
+      and at most one element. Single-valued rules return ``()`` when nothing
+      matches; this function never raises.
+    * ``repo_root`` (``RepoRootPolicy``): the rule for a service rooted at the
+      repository root. ``SKIP`` never matches (the service is not even a
+      candidate), ``CATCH_ALL`` matches every path unconditionally, and
+      ``ORDINARY`` applies no special case: the ordinary containment test below
+      (so a ``.``-rooted service matches the exact path ``.`` when
+      ``match_root_equal`` is true, and nothing else in practice).
+    * ``match_root_equal`` (``bool``): whether a path equal to an ordinary
+      service root counts as contained by it, in addition to the
+      ``f"{root}/"`` prefix test.
+    * the caller's ``services`` order: ``ALL`` and ``FIRST`` are ordered by it,
+      so a caller that needs deepest-first selection sorts before calling.
+
+    Containment for an ordinary service root is ``path.startswith(f"{root}/")``
+    or, when ``match_root_equal`` is true, ``path == root``; ``root`` is
+    ``service.root.as_posix()``. The path itself is never normalized -- a
+    leading ``./`` is not stripped and nothing is resolved. That is a preserved
+    behaviour, not an oversight: ``filter_scope`` normalizes *scopes*, which is
+    a different rule.
+
+    The three live families are preserved as-is rather than unified --
+    correcting any of them is a behavioural change with its own ticket:
+
+    =======================  =========  ===========  ==================
+    caller                   match      repo_root    match_root_equal
+    =======================  =========  ===========  ==================
+    ``deep/diagram_trigger``  DEEPEST    SKIP         ``True``
+    ``improve/partition``     FIRST      CATCH_ALL    ``False``
+    ``improve/orchestrator``  ALL        ORDINARY     ``True``
+    =======================  =========  ===========  ==================
+
+    They diverge on a path equal to a service root (counted by diagram and
+    orchestrator, not by partition) and on a repo-root service (skipped by
+    diagram, a catch-all in partition, ordinary in the orchestrator).
+
+    ``""`` and ``"."`` are one input for a repo-root service:
+    ``Path("").as_posix() == "."``, and ``_expand_globs`` already normalizes to
+    ``Path(".")``, so no caller can spell that root two different ways.
+    """
+    matches: list[Service] = []
+    for service in services:
+        root = service.root.as_posix()
+        if root in ("", "."):
+            if repo_root is RepoRootPolicy.SKIP:
+                continue
+            matched = repo_root is RepoRootPolicy.CATCH_ALL or path.startswith(f"{root}/") or (
+                match_root_equal and path == root
+            )
+        else:
+            matched = path.startswith(f"{root}/") or (match_root_equal and path == root)
+        if not matched:
+            continue
+        if match is ServiceMatch.DEEPEST:
+            if not matches or len(PurePosixPath(root).parts) > len(
+                PurePosixPath(matches[0].root.as_posix()).parts
+            ):
+                matches = [service]
+        elif match is ServiceMatch.FIRST:
+            return (service,)
+        else:
+            matches.append(service)
+    return tuple(matches)
 
 
 def enumerate_services(

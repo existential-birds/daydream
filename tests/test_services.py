@@ -2,19 +2,29 @@
 
 ``daydream.services`` is the single service-discovery implementation after the
 move out of ``daydream/improve/services.py`` (issue #1113). This file covers the
-parts that are new at package root: the explicit ``service_roots`` override the
+parts that are new at package root: the parameterized ``owning_services``
+containment predicate, the explicit ``service_roots`` override the
 grounded-diagram flow passes, and the shim's re-export identity. The improve
 flow's own behavioral coverage stays in ``tests/test_improve_services.py``.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
+import re
 from pathlib import Path
 
 import pytest
 
 from daydream.config_file import DaydreamFileConfig
-from daydream.services import Service, enumerate_services
+from daydream.services import (
+    RepoRootPolicy,
+    Service,
+    ServiceMatch,
+    enumerate_services,
+    owning_services,
+)
 
 
 @pytest.fixture
@@ -82,6 +92,97 @@ def test_improve_shim_re_exports_the_same_objects() -> None:
     assert shim.__all__ == ["Service", "enumerate_services", "filter_scope"]
 
 
+def test_deepest_match_skips_a_repo_root_service_and_accepts_a_path_equal_to_a_root() -> None:
+    services = [
+        Service("root", Path("."), "config"),
+        Service("api", Path("services/api"), "config"),
+        Service("inner", Path("services/api/inner"), "config"),
+    ]
+
+    def owners(path: str) -> tuple[str, ...]:
+        return tuple(
+            s.name
+            for s in owning_services(
+                path, services, match=ServiceMatch.DEEPEST, repo_root=RepoRootPolicy.SKIP, match_root_equal=True
+            )
+        )
+
+    assert owners("services/api/inner/main.py") == ("inner",)
+    assert owners("services/api/inner") == ("inner",)
+    assert owners("scripts/tool.py") == ()
+    assert owners(".") == ()
+
+
+def test_first_match_in_the_callers_order_catch_alls_a_repo_root_service() -> None:
+    services = sorted(
+        [
+            Service("root", Path("."), "config"),
+            Service("api", Path("services/api"), "config"),
+            Service("inner", Path("services/api/inner"), "config"),
+        ],
+        key=lambda service: (-len(service.root.parts), service.root.as_posix()),
+    )
+
+    def owners(path: str) -> tuple[str, ...]:
+        return tuple(
+            s.name
+            for s in owning_services(
+                path, services, match=ServiceMatch.FIRST, repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False
+            )
+        )
+
+    assert owners("services/api/inner/main.py") == ("inner",)
+    assert owners("services/api/inner") == ("api",)
+    assert owners("services/api") == ("root",)
+    assert owners("README.md") == ("root",)
+
+
+def test_all_matching_owners_keep_input_order_under_the_ordinary_repo_root_rule() -> None:
+    services = [
+        Service("root", Path("."), "config"),
+        Service("api", Path("services/api"), "config"),
+        Service("inner", Path("services/api/inner"), "config"),
+    ]
+
+    def owners(path: str) -> tuple[str, ...]:
+        return tuple(
+            s.name
+            for s in owning_services(
+                path, services, match=ServiceMatch.ALL, repo_root=RepoRootPolicy.ORDINARY, match_root_equal=True
+            )
+        )
+
+    assert owners("services/api/inner/main.py") == ("api", "inner")
+    assert owners(".") == ("root",)
+    assert owners("README.md") == ()
+    assert owners("scripts/tool.py") == ()
+
+
+def test_the_repo_root_spellings_are_one_input() -> None:
+    """``Path("")`` and ``Path(".")`` are the same root; the predicate decides it."""
+    assert Path("").as_posix() == "."
+    services = [Service("root", Path(""), "config"), Service("api", Path("services/api"), "config")]
+
+    assert tuple(
+        s.name
+        for s in owning_services(
+            "README.md", services, match=ServiceMatch.FIRST, repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False
+        )
+    ) == ("root",)
+
+
+def test_policy_arguments_carry_no_defaults() -> None:
+    """M4: no caller may inherit a rule it did not state."""
+    parameters = inspect.signature(owning_services).parameters
+    assert list(parameters) == ["path", "services", "match", "repo_root", "match_root_equal"]
+    assert all(p.default is inspect.Parameter.empty for p in parameters.values())
+    assert all(
+        p.kind is inspect.Parameter.KEYWORD_ONLY
+        for p in parameters.values()
+        if p.name not in {"path", "services"}
+    )
+
+
 def test_service_field_order_is_positional_stable() -> None:
     """``Service`` is constructed positionally by existing tests, so its field
     order is load-bearing."""
@@ -91,3 +192,57 @@ def test_service_field_order_is_positional_stable() -> None:
         Path("edge/gateway"),
         "config",
     )
+
+
+# The first two patterns are the shapes the issue #1216 M7 acceptance search
+# uses; keep them in sync with the M7 command rather than treating them as
+# unrelated. The third is a superset that also catches a `startswith` arguing on
+# `root` without the exact f-string spelling (`path.startswith(service.root...)`),
+# which the M7 pair alone would let through.
+_CONTAINMENT_SHAPES = (
+    re.compile(r'\.startswith\(f"\{[^}]*root[^}]*\}/"\)'),
+    re.compile(r"\b(path|file|relative|target|name|p)\s*[!=]=\s*([a-z_]+\.)?root\b"),
+    re.compile(r"\.startswith\([^)]*\broot\b"),
+)
+
+
+# ``_owning_partition`` in the improve orchestrator answers the same *shape* of
+# question about partitions. It is enumerated Out of Scope and is the one allowed
+# exception, so the exemption is scoped to that function's module and name rather
+# than to any line that happens to mention ``partition.root``.
+_PARTITION_EXCEPTION = Path("daydream") / "improve" / "orchestrator.py"
+
+
+def _function_line_span(path: Path, name: str) -> set[int]:
+    """The inclusive source lines occupied by the named function, so an
+    exemption names the function rather than any line that mentions its state."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return set()
+
+
+def test_no_service_containment_shape_lives_outside_services_py() -> None:
+    """The acceptance search (issue #1216 M7/S1), executable.
+
+    ``_owning_partition`` in the improve orchestrator answers the same *shape* of
+    question about partitions; it is enumerated Out of Scope and is the one
+    allowed exception.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    owner = repo_root / "daydream" / "services.py"
+    partition_exception = repo_root / _PARTITION_EXCEPTION
+    partition_exempt_lines = _function_line_span(partition_exception, "_owning_partition")
+    offenders: list[str] = []
+    for source in sorted((repo_root / "daydream").rglob("*.py")):
+        if source == owner:
+            continue
+        for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
+            if not any(shape.search(line) for shape in _CONTAINMENT_SHAPES):
+                continue
+            if source == partition_exception and number in partition_exempt_lines:
+                continue
+            offenders.append(f"{source.relative_to(repo_root)}:{number}: {line.strip()}")
+
+    assert offenders == []

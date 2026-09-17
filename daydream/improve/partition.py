@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
 from daydream.improve.services import Service
+from daydream.services import RepoRootPolicy, ServiceMatch, owning_services
 
 PARTITION_MAX_FILES: int = 400
 
@@ -93,11 +94,17 @@ def build_partitions(
     service_files: dict[str, list[str]] = defaultdict(list)
     uncovered: list[str] = []
     for path in tracked:
-        owner = _owning_service(path, ordered_services)
-        if owner is None:
+        owners = owning_services(
+            path,
+            ordered_services,
+            match=ServiceMatch.FIRST,
+            repo_root=RepoRootPolicy.CATCH_ALL,
+            match_root_equal=False,
+        )
+        if not owners:
             uncovered.append(path)
         else:
-            service_files[owner.root.as_posix()].append(path)
+            service_files[owners[0].root.as_posix()].append(path)
 
     partitions: list[Partition] = []
     for service in sorted(ordered_services, key=lambda item: item.root.as_posix()):
@@ -202,14 +209,6 @@ def group_partitions(
         for index, (stack, members) in enumerate(bins, start=1)
     ]
     return groups, omissions
-
-
-def _owning_service(path: str, ordered_services: Sequence[Service]) -> Service | None:
-    for service in ordered_services:
-        root = service.root.as_posix()
-        if root in {"", "."} or path.startswith(f"{root}/"):
-            return service
-    return None
 
 
 def _split_directory(root: str, files: Sequence[str], max_files: int) -> list[tuple[str, tuple[str, ...]]]:

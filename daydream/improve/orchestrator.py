@@ -89,6 +89,11 @@ from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.run_context import resolve_run_context
+from daydream.services import (
+    RepoRootPolicy,
+    ServiceMatch,
+    owning_services,
+)
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -725,20 +730,30 @@ def _audit_assignments(
     return assignments
 
 
+def _owning_services(
+    path: str, services: list[Service]
+) -> tuple[Service, ...]:
+    """The improve orchestrator's service-ownership rule, stated once."""
+    return owning_services(
+        path,
+        services,
+        match=ServiceMatch.ALL,
+        repo_root=RepoRootPolicy.ORDINARY,
+        match_root_equal=True,
+    )
+
+
 def _services_for_files(
     services: list[Service], files: tuple[str, ...]
 ) -> list[Service]:
     if not files:
         return services
-    return [
+    owners = {
         service
-        for service in services
-        if any(
-            path == service.root.as_posix()
-            or path.startswith(f"{service.root.as_posix()}/")
-            for path in files
-        )
-    ]
+        for path in files
+        for service in _owning_services(path, services)
+    }
+    return [service for service in services if service in owners]
 
 
 def _restrict_diff_to_services(
@@ -750,14 +765,13 @@ def _restrict_diff_to_services(
     services into audit and vetting prompts, so both the diff text and the
     derived changed-file list are narrowed to the scoped roots.
     """
-    roots = tuple(service.root.as_posix() for service in services)
     selected: list[str] = []
     files: list[str] = []
     for block in _DIFF_BLOCK_SPLIT.split(diff):
         path = _diff_block_path(block)
         if path is None:
             continue
-        if any(path == root or path.startswith(f"{root}/") for root in roots):
+        if _owning_services(path, services):
             selected.append(block)
             if path not in files:
                 files.append(path)
@@ -768,13 +782,12 @@ def _stacks_for_services(
     stacks: list[StackAssignment],
     services: list[Service],
 ) -> list[StackAssignment]:
-    roots = tuple(service.root.as_posix() for service in services)
     scoped: list[StackAssignment] = []
     for stack in stacks:
         files = [
             path
             for path in stack.files
-            if any(path == root or path.startswith(f"{root}/") for root in roots)
+            if _owning_services(path, services)
         ]
         if files:
             scoped.append(
@@ -871,14 +884,13 @@ def _stamp_finding(
         stamped["reuse_target"] = None
     stamped["category"] = category
     stamped["partition"] = _owning_partition(partitions, evidence_paths)
+    owners = {
+        service
+        for path in evidence_paths
+        for service in _owning_services(path, services)
+    }
     stamped["services"] = [
-        service.name
-        for service in services
-        if any(
-            path == service.root.as_posix()
-            or path.startswith(f"{service.root.as_posix()}/")
-            for path in evidence_paths
-        )
+        service.name for service in services if service in owners
     ]
     stamped["fingerprint"] = compute_fingerprint(
         str(stamped.get("path", "")),
