@@ -1087,7 +1087,7 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = strict_object({
             "title": {"type": "string"},
             "description": {"type": "string"},
             "recommendation": {"type": "string"},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
             "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
             "rationale": {"type": "string"},
