@@ -18,6 +18,7 @@ from daydream.artifact_visibility import (
 from daydream.backends import AgentEvent, Backend, TextEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.deep.detection import StackAssignment
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
@@ -26,6 +27,9 @@ from daydream.improve.command_contract import validate_recon_commands
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
     _audit_repo,
+    _restrict_diff_to_services,
+    _services_for_files,
+    _stacks_for_services,
     _stamp_finding,
     _step_write_plans,
 )
@@ -43,6 +47,7 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
+from daydream.services import enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.git_helpers import (
@@ -4513,6 +4518,73 @@ def test_stamp_finding_attributes_dot_slash_evidence_to_partition_and_service(
     assert stamped is not None
     assert stamped["partition"] == "frontend"
     assert stamped["services"] == ["frontend"]
+
+
+def _nested_service_repo(tmp_path: Path) -> Path:
+    """A repo whose ``services/api/inner`` nests inside ``services/api``."""
+    repo = tmp_path / "repo"
+    for root in ("services/api", "services/api/inner"):
+        (repo / root).mkdir(parents=True)
+        (repo / root / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    return repo
+
+
+def test_services_for_files_is_multi_valued_and_a_repo_root_service_is_ordinary(tmp_path: Path) -> None:
+    repo = _nested_service_repo(tmp_path)
+    services = enumerate_services(
+        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
+    )
+    assert [(s.name, s.root.as_posix()) for s in services] == [
+        ("repo", "."),
+        ("api", "services/api"),
+        ("inner", "services/api/inner"),
+    ]
+
+    assert [s.name for s in _services_for_files(services, ("services/api/inner/main.py",))] == ["api", "inner"]
+    assert [s.name for s in _services_for_files(services, (".",))] == ["repo"]
+    assert [s.name for s in _services_for_files(services, ("README.md",))] == []
+    assert [s.name for s in _services_for_files(services, ("scripts/tool.py",))] == []
+
+
+def test_stamp_finding_attributes_nested_evidence_to_every_owning_service(tmp_path: Path) -> None:
+    repo = _nested_service_repo(tmp_path)
+    (repo / "services/api/inner/main.py").write_text("x = 1\n")
+    services = enumerate_services(
+        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
+    )
+
+    stamped = _stamp_finding(
+        {"evidence": ["services/api/inner/main.py:1"]}, "correctness", services, [], repo=repo
+    )
+
+    assert stamped is not None
+    assert stamped["services"] == ["api", "inner"]
+
+
+def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) -> None:
+    repo = _nested_service_repo(tmp_path)
+    services = enumerate_services(
+        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
+    )
+    diff = (
+        "diff --git a/services/api/inner/main.py b/services/api/inner/main.py\n"
+        "--- a/services/api/inner/main.py\n"
+        "+++ b/services/api/inner/main.py\n"
+        "@@ -1 +1 @@\n-a\n+b\n"
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+
+    text, files = _restrict_diff_to_services(diff, services)
+    assert files == ["services/api/inner/main.py"]
+    assert text.count("diff --git") == 1
+
+    scoped = _stacks_for_services(
+        [StackAssignment("python", ["services/api/inner/main.py", "README.md"], False)], services
+    )
+    assert [(stack.stack_name, list(stack.files)) for stack in scoped] == [
+        ("python", ["services/api/inner/main.py"])
+    ]
 
 
 @pytest.mark.anyio
