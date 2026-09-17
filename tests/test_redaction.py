@@ -772,6 +772,27 @@ def test_redactor_linear_scan_separatorless_large_text_unchanged() -> None:
     assert out == text
 
 
+def test_redactor_sensitive_suffix_scan_is_linear() -> None:
+    """The sensitive-suffix discovery must not blow up quadratically on a
+    long non-sensitive key run that ends with a separator + sensitive pair.
+    Before the fix the per-position ``_is_sensitive_key(text[s2:])`` calls
+    made 100K chars take ~77s; 5s is a generous deterministic ceiling, not
+    a tight bound (mirrors ``test_large_diagnostic_formatting_completes_quickly``).
+    The value is one only the structured pass redacts, so the marker proves
+    the pair after the long run was still found and redacted."""
+    import time
+
+    text = "a" * 200_000 + "=x token=opaque-test-only-sentinel"
+    start = time.perf_counter()
+    out = redact_structured_text(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+    assert out.startswith("a" * 200_000)
+    assert "=x " in out
+
+
 @pytest.mark.parametrize("text", [
     "1apiKey=x",
     "2token= y",

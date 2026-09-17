@@ -841,6 +841,13 @@ _SENSITIVE_KEY_SUFFIXES: frozenset[str] = frozenset(
         "token",
     }
 )
+#: Chars matching the camelCase lookbehind ``[a-z0-9]`` (lowercase + digits).
+_LOWER_OR_DIGIT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+#: Longest ``_SENSITIVE_KEY_SUFFIXES`` member (``secret_access_key``); a
+#: normalized key longer than this can never equal a member, so the bounded
+#: strict-suffix walk (:func:`_strict_suffix_is_sensitive`) can give up.
+_MAX_SENSITIVE_KEY_LEN = max(len(member) for member in _SENSITIVE_KEY_SUFFIXES)
+
 # Insert a separator before an uppercase letter that follows a lowercase/digit
 # (camelCase → snake_case boundary): apiKey → api_Key, dbPassword → db_Password.
 _CAMEL_CASE_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -1072,6 +1079,69 @@ def _value_start(match: re.Match[str]) -> int:
     return match.end()
 
 
+def _strict_suffix_is_sensitive(text: str, s2: int, key_end: int) -> bool:
+    """Return ``_is_sensitive_key(text[s2:key_end])`` in O(max member length).
+
+    Exact decision for a STRICT suffix of a NON-sensitive key run — the only
+    context the pair/block suffix scans call it in. Two facts make that
+    decision bounded:
+
+    * The suffix's normalized form is a suffix of the whole key's normalized
+      form, so the ``ends with ``_<member>`` rule can never fire: it would
+      make the whole key sensitive, which the caller already excluded.
+    * Any underscore-separated segment AFTER the first is also a segment of
+      the whole key, so the segment rule can only fire on the FIRST segment.
+
+    Both remaining rules are decided from a bounded normalized prefix: the
+    first segment closes at the first separator (or the run end), and the
+    whole normalized suffix can only equal a ``_SENSITIVE_KEY_SUFFIXES``
+    member while it is at most ``_MAX_SENSITIVE_KEY_LEN`` chars. The walk
+    mirrors :func:`_normalize_sensitive_key` exactly — camelCase boundary,
+    non-alphanumeric collapse, lowercase, edge-``_`` strip — without slicing
+    or re-normalizing the remainder, so a long non-sensitive key run costs
+    O(n) total across all candidates instead of O(n^2) (issue #1236).
+    """
+    norm: list[str] = []
+    first_seg: str | None = None
+    pending_sep = False
+    i = s2
+    while i < key_end:
+        c = text[i]
+        if "A" <= c <= "Z" or c in _LOWER_OR_DIGIT_CHARS:
+            # A camelCase boundary or a collapsed non-alphanumeric run closes
+            # the current segment. The leading separator is stripped by the
+            # normalization's edge rule (never emitted); the first separator
+            # to survive records the FIRST segment, on which the segment rule
+            # can fire. Later separators only shape the whole-suffix string.
+            camel_boundary = (
+                "A" <= c <= "Z"
+                and i > s2
+                and text[i - 1] in _LOWER_OR_DIGIT_CHARS
+            )
+            if camel_boundary or pending_sep:
+                if norm and first_seg is None:
+                    first_seg = "".join(norm)
+                    if first_seg in _SENSITIVE_KEY_SUFFIXES:
+                        return True
+                if norm:
+                    norm.append("_")
+                pending_sep = False
+            norm.append(c.lower() if "A" <= c <= "Z" else c)
+            if len(norm) > _MAX_SENSITIVE_KEY_LEN:
+                # The whole normalized suffix is now longer than every member,
+                # so the exact-match rule is dead; the first segment was
+                # either never closed (it is at least this long) or already
+                # checked above.
+                return False
+        else:
+            # A run of non-alphanumeric key chars (``_``, ``.``, ``-``)
+            # collapses to a single ``_`` separator — emitted as pending so a
+            # trailing run is dropped like the normalization's edge strip.
+            pending_sep = True
+        i += 1
+    return "".join(norm) in _SENSITIVE_KEY_SUFFIXES
+
+
 def _redact_structured_pairs(text: str) -> str:
     """Redact line-scoped ``key<: or =>value`` pairs, re-scanning every value.
 
@@ -1118,14 +1188,15 @@ def _redact_structured_pairs(text: str) -> str:
             # SAME separator and redacted the first sensitive one; reproduce
             # that leftmost sensitive suffix, then stop — the old redaction
             # consumed through the value end, so later suffixes were never
-            # visited. The suffix scan is bounded by the key span and runs only
-            # on non-sensitive matches, so the pass stays linear.
+            # visited. Each candidate's sensitivity test is O(max member
+            # length) and the full re-match runs only on the one candidate
+            # that is actually sensitive, so the pass stays linear.
             suffix: re.Match[str] | None = None
             s2 = match.start(2) + 1
             key_end = match.end(2)
             while s2 < key_end:
-                if text[s2] in _STRUCTURED_KEY_START_CHARS and _is_sensitive_key(
-                    text[s2:key_end]
+                if text[s2] in _STRUCTURED_KEY_START_CHARS and _strict_suffix_is_sensitive(
+                    text, s2, key_end
                 ):
                     m2 = _STRUCTURED_KEY_VALUE_PATTERN.match(text, s2)
                     if m2 is not None:
@@ -1197,8 +1268,8 @@ def _redact_structured_blocks(text: str) -> str:
                 s2 = match.start(2) + 1
                 key_end = match.end(2)
                 while s2 < key_end:
-                    if text[s2] in _STRUCTURED_KEY_START_CHARS and _is_sensitive_key(
-                        text[s2:key_end]
+                    if text[s2] in _STRUCTURED_KEY_START_CHARS and _strict_suffix_is_sensitive(
+                        text, s2, key_end
                     ):
                         m2 = _BLOCK_VALUE_PATTERN.match(text, s2)
                         if m2 is not None:

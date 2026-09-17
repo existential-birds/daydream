@@ -1562,7 +1562,14 @@ async def _run_agent(
             raise _scrubbed_supervisor_error(original) from original
         except Exception as exc:
             category = getattr(exc, "category", None)
-            msg = str(exc).strip()
+            try:
+                msg = str(exc).strip()
+            except Exception:  # noqa: BLE001 - a broken __str__ must not convert the failure
+                # A hostile ``__str__`` must neither abort this handler nor
+                # convert the failure into a new exception bearing the hostile
+                # text: the original exception propagates below and the CLI's
+                # generic handler fails closed on it (mirrors classify_failure).
+                msg = ""
             diagnostic = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
             if isinstance(category, str):
                 diagnostic += f" [{category}]"

@@ -10,11 +10,13 @@ newlines and tabs, and finally caps the result at one bounded head, a single
 explicit truncation marker, and the root cause's tail.
 
 Every failure mode degrades to one fixed marker string, so a fatal diagnostic
-can never leak a payload, crash twice, or render partial machinery. The module
-imports only the standard library plus
-:class:`daydream.observability.privacy.PrivacyPolicy` — a fatal path must not
-transitively pull in terminal-rendering or tracer machinery, and must never
-write to any log sink of its own.
+can never leak a payload, crash twice, or render partial machinery. To keep
+the fatal path from *introducing its own* I/O, the module imports only the
+standard library plus :class:`~.PrivacyPolicy` and never writes to any log
+sink, terminal, or tracer itself; note that :class:`~.PrivacyPolicy`
+transitively imports ``daydream.trajectory`` (which imports
+``daydream.ui``/``anyio``/``daydream.atif``), so the host CLI process already
+has those loaded before the handler runs.
 
 The only public seam::
 
@@ -176,7 +178,7 @@ def _assemble_diagnostic(value: str) -> str:
 
 
 def sanitize_verbose_message(
-    message: str,
+    message: BaseException | str,
     *,
     environ: Mapping[str, str] | None = None,
 ) -> str:
@@ -184,12 +186,17 @@ def sanitize_verbose_message(
 
     Applies the same privacy and control boundary as
     :func:`format_verbose_exception` to a single-line message — the generic
-    fatal branch's panel text. Fails closed to ``""`` so a hostile message
-    can never paint the panel with a payload.
+    fatal branch's panel text. Accepts the exception object itself (not just
+    its pre-materialized ``str``) so the ``str()`` conversion — the one
+    operation that can raise on a hostile value — happens INSIDE the fail-
+    closed try: an exception whose ``__str__`` raises degrades to ``""``
+    instead of escaping the generic fatal handler. Fails closed to ``""``
+    so a hostile message can never paint the panel with a payload.
     """
     try:
+        text = str(message) if isinstance(message, BaseException) else message
         policy = PrivacyPolicy(environ=environ)
-        return _neutralize_control(policy.text(message))
+        return _neutralize_control(policy.text(text))
     except Exception:  # noqa: BLE001 - fail closed to an empty panel
         return ""
 

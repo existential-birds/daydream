@@ -2774,7 +2774,7 @@ def main(argv: list[str] | None = None) -> None:
         # The panel message is redacted and control-neutralized exactly like the
         # verbose diagnostic, so a hostile exception message can never paint
         # the operator's terminal even when verbose diagnostics are off.
-        safe_message = sanitize_verbose_message(str(e))
+        safe_message = sanitize_verbose_message(e)
         _shutdown_and_exit(console, "Fatal Error", safe_message, verbose_diagnostic=diagnostic)
 
 

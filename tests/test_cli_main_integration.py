@@ -975,3 +975,75 @@ def test_cli_main_default_hides_pre_config_failure_details(
     _out, err = capsys.readouterr()
     assert exc.value.code == 1
     assert "RuntimeError" not in err
+
+
+class _ExplodingStrError(RuntimeError):
+    """An exception whose ``__str__`` raises: the hostile-message case."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("cannot stringify hostile exception")
+
+
+def _install_exploding_str_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install a ScriptedBackend whose failure exception cannot be str()ed.
+
+    The exception escapes ``runner.run`` into ``cli.main``'s generic fatal
+    handler — the exact shape issue #1236's fail-closed contract covers.
+    """
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: ScriptedBackend(
+            events=[_ExplodingStrError("hostile fatal")], retryable=False
+        ),
+    )
+
+
+def test_cli_main_hostile_str_fatal_default_fails_closed(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fatal exception whose ``__str__`` raises must not escape the generic
+    handler: the panel is empty-safe, never a raw interpreter traceback, never
+    the hostile message's own text (issue #1236 fail-closed contract)."""
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_exploding_str_backend(monkeypatch)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", str(multi_stack_target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "cannot stringify" not in out + err
+    assert "Traceback (most recent call last)" not in err
+    assert "Fatal Error" in out + err
+
+
+def test_cli_main_hostile_str_fatal_verbose_emits_unavailable_marker(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The verbose variant still fails closed: the verbose diagnostic is the
+    fixed unavailable marker (never a secondary traceback), the panel stays
+    safe, and exit code 1 is preserved."""
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_exploding_str_backend(monkeypatch)
+
+    monkeypatch.setattr(
+        sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out, err = capsys.readouterr()
+
+    assert exc.value.code == 1
+    assert "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]" in err
+    assert "cannot stringify" not in out + err
+    assert "Traceback (most recent call last)" not in err
+    assert "Fatal Error" in out + err
