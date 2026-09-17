@@ -57,7 +57,6 @@ import hashlib
 import json
 import shutil
 import sqlite3
-import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +72,7 @@ from daydream.archive.importer import (
 )
 from daydream.archive.index import _get_connection
 from daydream.archive.known_versions import STALE_LEGACY
+from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
@@ -160,17 +160,6 @@ def _resolved_record_ids(
 
 def _open_items(queue: Sequence[Mapping[str, Any]], resolved: set[str]) -> list[Mapping[str, Any]]:
     return [item for item in queue if str(item["record_id"]) not in resolved]
-
-
-def _write_queue(state_dir: Path, items: list[dict[str, Any]]) -> Path:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / _QUEUE_FILENAME
-    content = json.dumps(items, indent=2, sort_keys=True) + "\n"
-    fd, tmp_name = tempfile.mkstemp(dir=state_dir, prefix=f".{_QUEUE_FILENAME}.")
-    with open(fd, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    Path(tmp_name).replace(path)
-    return path
 
 
 def _positive_int(raw: str) -> int:
@@ -432,7 +421,14 @@ def handle_build(argv: list[str]) -> int:
     except ValueError as exc:
         print_error(create_console(), "adjudicate build failed", str(exc))
         return 1
-    path = _write_queue(args.state_dir, items)
+    path = args.state_dir / _QUEUE_FILENAME
+    atomic_write_bytes(
+        path,
+        (json.dumps(items, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
+    )
     reopened = sum(1 for item in items if item["status"] == "reopened")
     print_success(
         create_console(),

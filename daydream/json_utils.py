@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +25,80 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+# Serialises the read-modify-restore fallback in ``_read_umask`` on platforms
+# that do not expose the umask without mutating it.
+_UMASK_LOCK = threading.Lock()
+
+
+def _read_umask() -> int:
+    """Return the process umask without leaving it observable as zero.
+
+    Linux exposes the umask read-only in ``/proc/self/status``, so the common
+    path never calls ``os.umask``: the historical ``os.umask(0)`` /
+    ``os.umask(current)`` round trip briefly made concurrent file creation in
+    this process inherit mode ``0o666`` and let two callers interleave into a
+    corrupted value. The fallback for platforms without ``/proc`` still has to
+    toggle the umask, so it is serialised under a lock to keep concurrent
+    callers from observing a zeroed or corrupted value.
+    """
+    try:
+        with open("/proc/self/status", "rb") as status:
+            for line in status:
+                if line.startswith(b"Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    with _UMASK_LOCK:
+        current = os.umask(0)
+        os.umask(current)
+    return current
+
+
+def umask_derived_mode() -> int:
+    """Return the mode a plain ``open(path, "w")`` / ``Path.write_text`` applies.
+
+    ``mkstemp`` always creates its temp as ``0600`` regardless of the process
+    umask, so callers that previously relied on the umask-derived permission
+    model (``0o666 & ~umask``) must pass this computed mode instead of a fixed
+    ``0o644`` -- otherwise a restrictive umask (e.g. ``077``) is silently
+    widened to world-readable.
+    """
+    return 0o666 & ~_read_umask()
+
+
+def _stage_bytes(path: Path, content: bytes, *, fsync: bool, mode: int | None) -> Path:
+    """Write ``content`` to a sibling temp for ``path`` and return the temp path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+            f.flush()
+            if fsync:
+                os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        return Path(tmp)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _publish_staged(path: Path, tmp: Path, *, dir_fsync: bool, mode: int | None) -> None:
+    """Rename a staged temp into ``path``; remove it if the rename fails."""
+    try:
+        os.replace(tmp, path)
+        if mode is not None:
+            os.chmod(path, mode)
+        if dir_fsync:
+            _fsync_directory(path.parent)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def atomic_write_bytes(
@@ -50,26 +125,49 @@ def atomic_write_bytes(
       chmod is umask-immune and covers a pre-existing destination).
     - ``dir_fsync``: fsync the parent directory after the rename so the new
       name survives a crash.
+
+    The corpus/benchmark writers migrated by #1215 pass ``fsync``,
+    ``dir_fsync`` and ``mode`` **explicitly** to reproduce their prior
+    behaviour (``fsync=False`` everywhere; ``mode=umask_derived_mode()`` for
+    the former ``write_text`` writers and ``mode=None``, i.e. mkstemp's
+    ``0600``, for the two that already used ``mkstemp``), so these knobs are
+    load-bearing rather than decorative.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    tmp = _stage_bytes(path, content, fsync=fsync, mode=mode)
+    _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
+
+
+def atomic_write_pair(
+    first: tuple[Path, bytes],
+    second: tuple[Path, bytes],
+    *,
+    fsync: bool = True,
+    dir_fsync: bool = False,
+    mode: int | None = None,
+) -> None:
+    """Atomically write a logical pair, staging both payloads before either lands.
+
+    Both temps are written first and only then renamed (``first`` then
+    ``second``), so a failure while writing the second payload cannot publish
+    the first half of the pair. Every destination is always either its prior
+    bytes or its completed new bytes, and on failure no temp survives.
+    """
+    first_path, first_content = first
+    second_path, second_content = second
+    first_tmp = _stage_bytes(first_path, first_content, fsync=fsync, mode=mode)
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-            f.flush()
-            if fsync:
-                os.fsync(f.fileno())
-        if mode is not None:
-            os.chmod(tmp, mode)
-        os.replace(tmp, path)
-        if mode is not None:
-            os.chmod(path, mode)
-        if dir_fsync:
-            _fsync_directory(path.parent)
+        second_tmp = _stage_bytes(second_path, second_content, fsync=fsync, mode=mode)
     except BaseException:
         with suppress(OSError):
-            os.unlink(tmp)
+            os.unlink(first_tmp)
         raise
+    try:
+        _publish_staged(first_path, first_tmp, dir_fsync=dir_fsync, mode=mode)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(second_tmp)
+        raise
+    _publish_staged(second_path, second_tmp, dir_fsync=dir_fsync, mode=mode)
 
 
 def atomic_write_json(

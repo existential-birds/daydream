@@ -17,10 +17,10 @@ overstate gold coverage.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
+from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.training.corpus_projection.identity import record_id as compute_record_id
 
 __all__ = ["EXPORT_KEYS", "validate_export_rows", "write_export_rows"]
@@ -81,16 +81,12 @@ def validate_export_rows(rows: list[dict[str, Any]]) -> None:
 
 
 def write_export_rows(rows: list[dict[str, Any]], out_path: Path) -> str:
-    """Serialize rows canonically and write them atomically to ``out_path``.
+    """Serialize rows canonically and write them to ``out_path``.
 
-    Temp-file + ``os.replace`` so an interrupted writer leaves no partial
-    export. Returns the SHA-256 of the written bytes.
+    Returns the SHA-256 of the written bytes.
     """
     import hashlib
 
     payload = "".join(_canonical(row) + "\n" for row in rows)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = out_path.with_name(out_path.name + ".tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
-    os.replace(tmp_path, out_path)
+    atomic_write_bytes(out_path, payload.encode("utf-8"), fsync=False, dir_fsync=False, mode=umask_derived_mode())
     return hashlib.sha256(out_path.read_bytes()).hexdigest()

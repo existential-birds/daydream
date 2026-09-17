@@ -9,19 +9,18 @@ directory this function produces, so ``--dry-run`` and the real publish share
 
 Determinism: every file is written as canonical JSON (sorted keys, compact
 separators), so identical pipeline state produces byte-identical bundles
-across re-runs, and atomically (temp file + ``os.replace``), so a torn write
-can never leave a truncated contract file in the staged ``out_dir`` (the
-deterministic-atomic-writes convention). Every missing or invalid input
-raises ``ValueError`` / ``FileNotFoundError`` naming the artifact — no
-fallback defaults, no silent skips (the lineage file must never contain a
-fabricated field).
+across re-runs, and atomically via the shared ``atomic_write_bytes``
+primitive, so a torn write can never leave a truncated contract file in the
+staged ``out_dir`` (the deterministic-atomic-writes convention). Every missing
+or invalid input raises ``ValueError`` / ``FileNotFoundError`` naming the
+artifact — no fallback defaults, no silent skips (the lineage file must never
+contain a fabricated field).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -31,6 +30,7 @@ from typing import Any
 from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
+from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.training.adjudication.canonical import _evidence_after_as_of
 from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
@@ -124,22 +124,6 @@ def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
         digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     identity = _canonical(digests).encode("utf-8") + b"\n"
     return hashlib.sha256(identity).hexdigest(), dict(sorted(digests.items()))
-
-
-def _write_atomic(out_path: Path, payload: str) -> None:
-    """Temp-file + ``os.replace`` write, mirroring ``materialize._write_atomic``
-    (deterministic-atomic-writes convention): a torn write can never leave a
-    truncated contract file in the staged ``out_dir``."""
-    tmp_path = out_path.with_name(out_path.name + ".tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
-    os.replace(tmp_path, out_path)
-
-
-def _write_atomic_bytes(out_path: Path, payload: bytes) -> None:
-    """Byte twin of :func:`_write_atomic` for the verbatim materialized copies."""
-    tmp_path = out_path.with_name(out_path.name + ".tmp")
-    tmp_path.write_bytes(payload)
-    os.replace(tmp_path, out_path)
 
 
 def _require_regular_input(root: Path, name: str) -> Path:
@@ -467,16 +451,34 @@ def build_final_bundle(
     # 1. annotations.jsonl + sessions.jsonl: verbatim copies of the canonical
     #    materialized artifacts (already canonical JSONL — re-serializing
     #    would be a second code path for the same bytes).
-    _write_atomic_bytes(
+    atomic_write_bytes(
         out_dir / _ANNOTATIONS_FILENAME,
         (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes(),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
     )
-    _write_atomic_bytes(
+    atomic_write_bytes(
         out_dir / _SESSIONS_OUT_FILENAME,
         (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes(),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
     )
-    _write_atomic_bytes(out_dir / _MANIFEST_FILENAME, manifest_path.read_bytes())
-    _write_atomic_bytes(out_dir / _POLICY_BINDING_FILENAME, policy_binding)
+    atomic_write_bytes(
+        out_dir / _MANIFEST_FILENAME,
+        manifest_path.read_bytes(),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
+    )
+    atomic_write_bytes(
+        out_dir / _POLICY_BINDING_FILENAME,
+        policy_binding,
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
+    )
 
     # 2. label-observations.jsonl: the archive's per-session observation
     #    history, chronological by ``observed_at`` (per-session rows are
@@ -486,9 +488,12 @@ def build_final_bundle(
     for session_id in snapshot_session_ids:
         history_rows.extend(label_observation_history(archive_dir, session_id))
     history_rows.sort(key=lambda row: (str(row.get("observed_at")), str(row.get("session_id"))))
-    _write_atomic(
+    atomic_write_bytes(
         out_dir / _OBSERVATIONS_FILENAME,
-        "".join(_canonical(row) + "\n" for row in history_rows),
+        "".join(_canonical(row) + "\n" for row in history_rows).encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
     )
 
     # 3. coverage-report.json over the fresh complete queue, enriched exactly
@@ -511,7 +516,13 @@ def build_final_bundle(
     report["strata"] = {
         f"{stack}/{profile}": count for (stack, profile), count in report["strata"].items()
     }
-    _write_atomic(out_dir / _REPORT_FILENAME, _canonical(report) + "\n")
+    atomic_write_bytes(
+        out_dir / _REPORT_FILENAME,
+        (_canonical(report) + "\n").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
+    )
 
     # 4. lineage.json: generated from the pin — every field must be present.
     lineage: dict[str, Any] = {
@@ -528,7 +539,13 @@ def build_final_bundle(
         )
     as_of = manifest["as_of"]
     lineage["as_of"] = "" if as_of is None else str(as_of)
-    _write_atomic(out_dir / _LINEAGE_FILENAME, _canonical(lineage) + "\n")
+    atomic_write_bytes(
+        out_dir / _LINEAGE_FILENAME,
+        (_canonical(lineage) + "\n").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
+    )
 
     written = sorted(path.name for path in out_dir.iterdir() if path.is_file())
     missing = [name for name in _BUNDLE_FILES if name not in written]

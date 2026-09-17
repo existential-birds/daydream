@@ -18,8 +18,6 @@ atomically with a lineage pin.
 import hashlib
 import json
 import math
-import os
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,6 +26,7 @@ from typing import Any, Literal, Mapping, NoReturn, cast, overload
 
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
+from daydream.json_utils import atomic_write_bytes
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_projection.bundle import (
     CuratedBundle,
@@ -128,19 +127,6 @@ def _dump_jsonl(records: list[Record]) -> str:
         json.dumps(r, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
         for r in records
     )
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    """Tempfile-in-same-dir + ``Path.replace`` (mirrors ``corpus.py``)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-        Path(tmp_name).replace(path)
-    except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
-        raise
 
 
 @dataclass(frozen=True)
@@ -1183,17 +1169,38 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             valid_at = str(rec_valid_at)
 
     canonical = _dump_jsonl(records)
-    _atomic_write(config.out_dir / "corpus.jsonl", canonical)
+    atomic_write_bytes(
+        config.out_dir / "corpus.jsonl",
+        canonical.encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
+    )
     for split_name, filename in _SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
-        _atomic_write(config.out_dir / filename, _dump_jsonl(split_records))
-    _atomic_write(
+        atomic_write_bytes(
+            config.out_dir / filename,
+            _dump_jsonl(split_records).encode("utf-8"),
+            fsync=False,
+            dir_fsync=False,
+            mode=None,
+        )
+    atomic_write_bytes(
         config.out_dir / "adjudication-report.json",
-        json.dumps(adjudication, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+        (json.dumps(adjudication, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
     )
 
     schema_src = Path(__file__).parent.parent / "schema" / "record-schema.json"
-    _atomic_write(config.out_dir / "schema.json", schema_src.read_text(encoding="utf-8"))
+    atomic_write_bytes(
+        config.out_dir / "schema.json",
+        schema_src.read_text(encoding="utf-8").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
+    )
 
     split_counts = {name: 0 for name in _SPLIT_FILENAMES}
     for r in records:
@@ -1264,9 +1271,12 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         },
         "license_decision_distribution": _license_decision_distribution(decisions),
     }
-    _atomic_write(
+    atomic_write_bytes(
         config.out_dir / "lineage.json",
-        json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+        (json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
     )
 
     # Human license report (issue #1080 M7): the digest-pinned policy, the C5
@@ -1284,15 +1294,24 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         )),
         "distribution": _license_decision_distribution(decisions),
     }
-    _atomic_write(
+    atomic_write_bytes(
         config.out_dir / "license-report.json",
-        json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+        (json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
     )
 
     # Completeness marker (mirrors the bundle's own ``_SUCCESS`` gate): the
     # projection file set is only consumable once every member is in place,
     # so a mid-write failure never leaves a partial projection behind.
-    _atomic_write(config.out_dir / "_SUCCESS", "ok\n")
+    atomic_write_bytes(
+        config.out_dir / "_SUCCESS",
+        b"ok\n",
+        fsync=False,
+        dir_fsync=False,
+        mode=None,
+    )
 
     return {
         "total": len(records),

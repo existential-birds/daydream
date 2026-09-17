@@ -22,7 +22,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import random
 import statistics
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from daydream.json_utils import atomic_write_pair, umask_derived_mode
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.labeler_versions import (
     LABELER_POLICY_VERSION,
@@ -640,10 +640,11 @@ def _write_outputs(
     version_stamps: dict[str, str],
 ) -> None:
     """Build the artifact + report from already-computed numbers and write both
-    with ``calibration.json`` replaced last: a failure between the two replaces
-    leaves the previously recorded artifact — and its run identity — in place,
-    so a same-run re-run overwrites both and self-heals the directory. Temp
-    files are cleaned up on every path."""
+    with ``calibration.json`` published last: both payloads are staged to temps
+    before either destination is replaced, so a failure while writing either
+    one leaves the previously recorded artifact — and its run identity — in
+    place, and a same-run re-run overwrites both and self-heals the directory.
+    Each rename is atomic and no temp is left behind on any path."""
     warnings: list[str] = []
     if stage0_analysis["status"] != "ok":
         warnings.append("stage-0 score file not supplied; marginal analysis unavailable")
@@ -677,17 +678,13 @@ def _write_outputs(
     artifact_payload = json.dumps(rounded, sort_keys=True, indent=2) + "\n"
     report_payload = _render_report(rounded, record_count, metrics["class_balance"])
 
-    config.out_dir.mkdir(parents=True, exist_ok=True)
-    artifact_tmp = config.out_dir / ".calibration.json.tmp"
-    report_tmp = config.out_dir / ".report.md.tmp"
-    artifact_tmp.write_text(artifact_payload)
-    report_tmp.write_text(report_payload)
-    try:
-        os.replace(report_tmp, config.out_dir / "report.md")
-        os.replace(artifact_tmp, config.out_dir / "calibration.json")
-    finally:
-        artifact_tmp.unlink(missing_ok=True)
-        report_tmp.unlink(missing_ok=True)
+    atomic_write_pair(
+        (config.out_dir / "report.md", report_payload.encode("utf-8")),
+        (config.out_dir / "calibration.json", artifact_payload.encode("utf-8")),
+        fsync=False,
+        dir_fsync=False,
+        mode=umask_derived_mode(),
+    )
 
 
 def _check_out_dir_collision(config: CalibrationConfig) -> None:
