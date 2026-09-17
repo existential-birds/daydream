@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 import daydream.phases as phases
+import daydream.severity as severity
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -173,3 +174,44 @@ def test_no_two_sites_share_one_enum_list_object() -> None:
     owners = [(_root_of(site), _levels(fragment)) for site, fragment in _SITES]
     shared = len({id(levels) for _, levels in owners}) != len(owners)
     assert not shared, f"severity enum list objects are shared between schemas: {sorted(owners)}"
+
+
+def test_pr_review_severity_breakdown_follows_the_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream import pr_comment_renderer
+    from daydream.pr_review import (
+        ParsedIssue,
+        PRInfo,
+        ReviewRenderers,
+        _ClassifiedIssues,
+        build_payload,
+        default_render_finding,
+        default_render_summary,
+    )
+
+    # Declaration reversed: the model-facing order must follow it, so a hand-written
+    # tuple at the call site renders "1 high, 1 low" and fails here.
+    monkeypatch.setattr(severity, "CANONICAL_LEVELS", ("high", "medium", "low"))
+    classified = _ClassifiedIssues(
+        body_only=[
+            ParsedIssue(path="a.py", line=10, title="t1", body="b", confidence="HIGH", severity="high"),
+            ParsedIssue(path="a.py", line=12, title="t2", body="b", confidence="LOW", severity="low"),
+        ]
+    )
+    body = build_payload(
+        PRInfo(
+            number=42,
+            head_sha="head123",
+            base_sha="base456",
+            base_ref="main",
+            head_ref="feature",
+            owner="acme",
+            repo="widgets",
+            url="https://github.com/acme/widgets/pull/42",
+        ),
+        classified,
+        renderers=ReviewRenderers(default_render_finding, default_render_summary),
+        run_info=pr_comment_renderer._render_fallback(),
+    )["body"]
+    assert "- **Severity:** 1 low, 1 high" in body

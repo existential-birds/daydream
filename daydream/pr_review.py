@@ -54,7 +54,7 @@ from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbse
 from daydream.pr_comment_renderer import render_run_info
 from daydream.repository_paths import valid_repository_file_path
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
-from daydream.severity import normalize_severity
+from daydream.severity import model_facing_levels, normalize_severity
 from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
@@ -1759,7 +1759,7 @@ def _build_payload_for_event(
     )
     extra_info_lines: list[str] = []
     severity_parts = _count_labels(
-        all_issues_with_inline_meta, "severity", ("high", "medium", "low")
+        all_issues_with_inline_meta, "severity", model_facing_levels()
     )
     if severity_parts:
         extra_info_lines.append("- **Severity:** " + ", ".join(severity_parts))
