@@ -1108,7 +1108,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = strict_object({
             "rationale": {"type": "string"},
             "evidence": {"type": "string"},
             "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             # Issue #744: a finding may span sibling files. Optional in
             # the merge model's semantics (null when single-file) but
             # strict-mode required (Codex rejects optional properties,
