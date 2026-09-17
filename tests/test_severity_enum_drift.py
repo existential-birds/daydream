@@ -215,3 +215,22 @@ def test_pr_review_severity_breakdown_follows_the_declaration(
         run_info=pr_comment_renderer._render_fallback(),
     )["body"]
     assert "- **Severity:** 1 low, 1 high" in body
+
+
+def test_fenced_verifier_accepts_exactly_the_canonical_vocabulary() -> None:
+    """verifier_core deploys byte-for-byte into a daydream-free image, so it keeps its
+    literal; this test is the drift protection instead of an import (spec requirement 11)."""
+    from daydream.benchmark.harbor import verifier_core
+
+    base = {
+        "candidate_id": "a" * 64,
+        "title": "t",
+        "body": "b",
+        "path": "src/a.py",
+        "start_line": 1,
+        "end_line": 1,
+    }
+    for level in severity.CANONICAL_LEVELS:
+        assert verifier_core.parse_candidate_finding({**base, "severity": level}).severity == level
+    with pytest.raises(verifier_core.VerifierError):
+        verifier_core.parse_candidate_finding({**base, "severity": "critical"})
