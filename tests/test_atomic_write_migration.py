@@ -209,14 +209,17 @@ class TestExportKnobs:
         calls = _instrument(monkeypatch, "daydream.training.adjudication.export")
         root, state = _seed_adjudicated(tmp_path)
         out = tmp_path / "export.jsonl"
-        assert cli._handle_corpus_command(
-            ["adjudicate", "export", "--index-root", str(root),
-             "--state-dir", str(state), "--out", str(out)]
-        ) == 0
+        # A restrictive umask pins the umask-derived mode: 0o600 here proves the
+        # site passes umask_derived_mode(), not a hard-coded 0o644.
+        with _umask(0o077):
+            assert cli._handle_corpus_command(
+                ["adjudicate", "export", "--index-root", str(root),
+                 "--state-dir", str(state), "--out", str(out)]
+            ) == 0
         [(target, content, kwargs)] = calls
         assert target == out
         assert content == out.read_bytes()          # the site hands over exactly what lands on disk
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
 
     def test_export_failure_keeps_prior_bytes_and_leaves_no_temp(self, tmp_path: Path,
                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,11 +240,12 @@ class TestMaterializeKnobs:
     def test_materialize_calls_the_primitive_for_both_artifacts(self, tmp_path: Path,
                                                                monkeypatch: pytest.MonkeyPatch) -> None:
         calls = _instrument(monkeypatch, "daydream.training.adjudication.materialize")
-        run_materialize(_index(tmp_path), tmp_path / "mat", pin=_PIN)
+        with _umask(0o077):
+            run_materialize(_index(tmp_path), tmp_path / "mat", pin=_PIN)
         by_target = {target: (content, kwargs) for target, content, kwargs in calls}
         assert set(by_target) == {tmp_path / "mat" / "sessions.jsonl",
                                   tmp_path / "mat" / "preview-manifest.json"}
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
                    for _content, kwargs in by_target.values())
         for target, (content, _kwargs) in by_target.items():
             assert target.read_bytes() == content
@@ -265,11 +269,12 @@ class TestCanonicalKnobs:
                                                    monkeypatch: pytest.MonkeyPatch) -> None:
         index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
         calls = _instrument(monkeypatch, "daydream.training.adjudication.canonical")
-        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+        with _umask(0o077):
+            run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
         [(target, content, kwargs)] = calls
         assert target == mat / "annotations.jsonl"
         assert content == target.read_bytes()
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
         assert list(mat.glob("*.tmp")) == []
 
     def test_canonical_failure_leaves_no_stray_temp(self, tmp_path: Path,
@@ -294,9 +299,10 @@ class TestFinalBundleKnobs:
         run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
         calls = _instrument(monkeypatch, "daydream.training.adjudication.final_bundle")
         out = tmp_path / "final-bundle"
-        build_final_bundle(
-            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-        )
+        with _umask(0o077):
+            build_final_bundle(
+                index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
+            )
         assert {target.name for target, _c, _k in calls} == {
             "annotations.jsonl",
             "sessions.jsonl",
@@ -307,7 +313,7 @@ class TestFinalBundleKnobs:
             "lineage.json",
         }
         assert all(
-            kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+            kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
             for _t, _c, kwargs in calls
         )
         for target, content, _kwargs in calls:
@@ -382,11 +388,12 @@ class TestCandidateKnobs:
         artifact = candidate.build_candidate_artifact("case-abc123def456", [])
         dest = tmp_path / "review.json"
         calls = _instrument(monkeypatch, "daydream.benchmark.harbor.candidate")
-        candidate.write_candidate_artifact_atomic(dest, artifact)
+        with _umask(0o077):
+            candidate.write_candidate_artifact_atomic(dest, artifact)
         [(target, content, kwargs)] = calls
         assert target == dest
         assert content == json.dumps(artifact).encode("utf-8")
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
 
     def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path,
                                                               monkeypatch: pytest.MonkeyPatch) -> None:

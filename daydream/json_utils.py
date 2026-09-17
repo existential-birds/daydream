@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +27,35 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+# Serialises the read-modify-restore fallback in ``_read_umask`` on platforms
+# that do not expose the umask without mutating it.
+_UMASK_LOCK = threading.Lock()
+
+
+def _read_umask() -> int:
+    """Return the process umask without leaving it observable as zero.
+
+    Linux exposes the umask read-only in ``/proc/self/status``, so the common
+    path never calls ``os.umask``: the historical ``os.umask(0)`` /
+    ``os.umask(current)`` round trip briefly made concurrent file creation in
+    this process inherit mode ``0o666`` and let two callers interleave into a
+    corrupted value. The fallback for platforms without ``/proc`` still has to
+    toggle the umask, so it is serialised under a lock to keep concurrent
+    callers from observing a zeroed or corrupted value.
+    """
+    try:
+        with open("/proc/self/status", "rb") as status:
+            for line in status:
+                if line.startswith(b"Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    with _UMASK_LOCK:
+        current = os.umask(0)
+        os.umask(current)
+    return current
+
+
 def umask_derived_mode() -> int:
     """Return the mode a plain ``open(path, "w")`` / ``Path.write_text`` applies.
 
@@ -35,9 +65,7 @@ def umask_derived_mode() -> int:
     ``0o644`` -- otherwise a restrictive umask (e.g. ``077``) is silently
     widened to world-readable.
     """
-    current = os.umask(0)
-    os.umask(current)
-    return 0o666 & ~current
+    return 0o666 & ~_read_umask()
 
 
 def _stage_bytes(path: Path, content: bytes, *, fsync: bool, mode: int | None) -> Path:
