@@ -10,6 +10,7 @@ flow's own behavioral coverage stays in ``tests/test_improve_services.py``.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -212,6 +213,16 @@ _CONTAINMENT_SHAPES = (
 _PARTITION_EXCEPTION = Path("daydream") / "improve" / "orchestrator.py"
 
 
+def _function_line_span(path: Path, name: str) -> set[int]:
+    """The inclusive source lines occupied by the named function, so an
+    exemption names the function rather than any line that mentions its state."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return set()
+
+
 def test_no_service_containment_shape_lives_outside_services_py() -> None:
     """The acceptance search (issue #1216 M7/S1), executable.
 
@@ -222,6 +233,7 @@ def test_no_service_containment_shape_lives_outside_services_py() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     owner = repo_root / "daydream" / "services.py"
     partition_exception = repo_root / _PARTITION_EXCEPTION
+    partition_exempt_lines = _function_line_span(partition_exception, "_owning_partition")
     offenders: list[str] = []
     for source in sorted((repo_root / "daydream").rglob("*.py")):
         if source == owner:
@@ -229,7 +241,7 @@ def test_no_service_containment_shape_lives_outside_services_py() -> None:
         for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
             if not any(shape.search(line) for shape in _CONTAINMENT_SHAPES):
                 continue
-            if source == partition_exception and re.search(r"partition\.root\b", line):
+            if source == partition_exception and number in partition_exempt_lines:
                 continue
             offenders.append(f"{source.relative_to(repo_root)}:{number}: {line.strip()}")
 

@@ -175,8 +175,8 @@ def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list
     return sorted(selected)
 
 
-def _module_of(path: str, services: list[Service]) -> str:
-    """Return ``path``'s module: its service root, else its top-level directory."""
+def _owning_service(path: str, services: list[Service]) -> Service | None:
+    """Return the deepest service owning ``path``, skipping a repo-root service."""
     owners = owning_services(
         path,
         services,
@@ -184,7 +184,12 @@ def _module_of(path: str, services: list[Service]) -> str:
         repo_root=RepoRootPolicy.SKIP,
         match_root_equal=True,
     )
-    service = owners[0] if owners else None
+    return owners[0] if owners else None
+
+
+def _module_of(path: str, services: list[Service]) -> str:
+    """Return ``path``'s module: its service root, else its top-level directory."""
+    service = _owning_service(path, services)
     if service is not None:
         return service.root.as_posix()
     parts = PurePosixPath(path).parts
@@ -445,17 +450,9 @@ def decide_eligibility(
     code_files = _code_files(stacks, changed_files)
     modules = {path: _module_of(path, services) for path in code_files}
     service_names = {
-        path: owners[0].name
+        path: service.name
         for path in code_files
-        if (
-            owners := owning_services(
-                path,
-                services,
-                match=ServiceMatch.DEEPEST,
-                repo_root=RepoRootPolicy.SKIP,
-                match_root_equal=True,
-            )
-        )
+        if (service := _owning_service(path, services)) is not None
     }
     cross_module_edges = _count_cross_module_edges(import_graph, modules)
 
