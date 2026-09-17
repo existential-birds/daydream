@@ -41,6 +41,7 @@ from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK
 from daydream.deep.diagram_types import CandidateRoot, DiagramThresholds
 from daydream.repository_paths import is_test_path
+from daydream.services import RepoRootPolicy, ServiceMatch, owning_services
 from daydream.tree_sitter_index import (
     branch_statement_lines,
     definitions_in_file,
@@ -174,26 +175,16 @@ def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list
     return sorted(selected)
 
 
-def _owning_service(path: str, services: list[Service]) -> Service | None:
-    """Return the deepest enumerated service whose root contains ``path``."""
-    best: Service | None = None
-    best_depth = -1
-    for service in services:
-        root = service.root.as_posix()
-        if root in ("", "."):
-            continue
-        if path != root and not path.startswith(f"{root}/"):
-            continue
-        depth = len(PurePosixPath(root).parts)
-        if depth > best_depth:
-            best = service
-            best_depth = depth
-    return best
-
-
 def _module_of(path: str, services: list[Service]) -> str:
     """Return ``path``'s module: its service root, else its top-level directory."""
-    service = _owning_service(path, services)
+    owners = owning_services(
+        path,
+        services,
+        match=ServiceMatch.DEEPEST,
+        repo_root=RepoRootPolicy.SKIP,
+        match_root_equal=True,
+    )
+    service = owners[0] if owners else None
     if service is not None:
         return service.root.as_posix()
     parts = PurePosixPath(path).parts
@@ -454,9 +445,17 @@ def decide_eligibility(
     code_files = _code_files(stacks, changed_files)
     modules = {path: _module_of(path, services) for path in code_files}
     service_names = {
-        path: owner.name
-        for path, owner in ((path, _owning_service(path, services)) for path in code_files)
-        if owner is not None
+        path: owners[0].name
+        for path in code_files
+        if (
+            owners := owning_services(
+                path,
+                services,
+                match=ServiceMatch.DEEPEST,
+                repo_root=RepoRootPolicy.SKIP,
+                match_root_equal=True,
+            )
+        )
     }
     cross_module_edges = _count_cross_module_edges(import_graph, modules)
 
