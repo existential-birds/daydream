@@ -2,19 +2,27 @@
 
 ``daydream.services`` is the single service-discovery implementation after the
 move out of ``daydream/improve/services.py`` (issue #1113). This file covers the
-parts that are new at package root: the explicit ``service_roots`` override the
+parts that are new at package root: the parameterized ``owning_services``
+containment predicate, the explicit ``service_roots`` override the
 grounded-diagram flow passes, and the shim's re-export identity. The improve
 flow's own behavioral coverage stays in ``tests/test_improve_services.py``.
 """
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
 
 from daydream.config_file import DaydreamFileConfig
-from daydream.services import Service, enumerate_services
+from daydream.services import (
+    RepoRootPolicy,
+    Service,
+    ServiceMatch,
+    enumerate_services,
+    owning_services,
+)
 
 
 @pytest.fixture
@@ -80,6 +88,97 @@ def test_improve_shim_re_exports_the_same_objects() -> None:
     assert shim.enumerate_services is enumerate_services
     assert shim.Service is Service
     assert shim.__all__ == ["Service", "enumerate_services", "filter_scope"]
+
+
+def test_deepest_match_skips_a_repo_root_service_and_accepts_a_path_equal_to_a_root() -> None:
+    services = [
+        Service("root", Path("."), "config"),
+        Service("api", Path("services/api"), "config"),
+        Service("inner", Path("services/api/inner"), "config"),
+    ]
+
+    def owners(path: str) -> tuple[str, ...]:
+        return tuple(
+            s.name
+            for s in owning_services(
+                path, services, match=ServiceMatch.DEEPEST, repo_root=RepoRootPolicy.SKIP, match_root_equal=True
+            )
+        )
+
+    assert owners("services/api/inner/main.py") == ("inner",)
+    assert owners("services/api/inner") == ("inner",)
+    assert owners("scripts/tool.py") == ()
+    assert owners(".") == ()
+
+
+def test_first_match_in_the_callers_order_catch_alls_a_repo_root_service() -> None:
+    services = sorted(
+        [
+            Service("root", Path("."), "config"),
+            Service("api", Path("services/api"), "config"),
+            Service("inner", Path("services/api/inner"), "config"),
+        ],
+        key=lambda service: (-len(service.root.parts), service.root.as_posix()),
+    )
+
+    def owners(path: str) -> tuple[str, ...]:
+        return tuple(
+            s.name
+            for s in owning_services(
+                path, services, match=ServiceMatch.FIRST, repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False
+            )
+        )
+
+    assert owners("services/api/inner/main.py") == ("inner",)
+    assert owners("services/api/inner") == ("api",)
+    assert owners("services/api") == ("root",)
+    assert owners("README.md") == ("root",)
+
+
+def test_all_matching_owners_keep_input_order_under_the_ordinary_repo_root_rule() -> None:
+    services = [
+        Service("root", Path("."), "config"),
+        Service("api", Path("services/api"), "config"),
+        Service("inner", Path("services/api/inner"), "config"),
+    ]
+
+    def owners(path: str) -> tuple[str, ...]:
+        return tuple(
+            s.name
+            for s in owning_services(
+                path, services, match=ServiceMatch.ALL, repo_root=RepoRootPolicy.ORDINARY, match_root_equal=True
+            )
+        )
+
+    assert owners("services/api/inner/main.py") == ("api", "inner")
+    assert owners(".") == ("root",)
+    assert owners("README.md") == ()
+    assert owners("scripts/tool.py") == ()
+
+
+def test_the_repo_root_spellings_are_one_input() -> None:
+    """``Path("")`` and ``Path(".")`` are the same root; the predicate decides it."""
+    assert Path("").as_posix() == "."
+    services = [Service("root", Path(""), "config"), Service("api", Path("services/api"), "config")]
+
+    assert tuple(
+        s.name
+        for s in owning_services(
+            "README.md", services, match=ServiceMatch.FIRST, repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False
+        )
+    ) == ("root",)
+
+
+def test_policy_arguments_carry_no_defaults() -> None:
+    """M4: no caller may inherit a rule it did not state."""
+    parameters = inspect.signature(owning_services).parameters
+    assert list(parameters) == ["path", "services", "match", "repo_root", "match_root_equal"]
+    assert all(p.default is inspect.Parameter.empty for p in parameters.values())
+    assert all(
+        p.kind is inspect.Parameter.KEYWORD_ONLY
+        for p in parameters.values()
+        if p.name not in {"path", "services"}
+    )
 
 
 def test_service_field_order_is_positional_stable() -> None:
