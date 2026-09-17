@@ -61,7 +61,7 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.output_schema import strict_object
+from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
     AdvisoryCandidate,
@@ -1043,10 +1043,7 @@ FEEDBACK_SCHEMA: dict[str, Any] = strict_object({
 # schema and inject the extra ``severity`` field into the items sub-schema and
 # the top-level ``verdicts`` array.
 PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(FEEDBACK_SCHEMA)
-PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = {
-    "type": "string",
-    "enum": ["high", "medium", "low"],
-}
+PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = severity_enum_schema()
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
