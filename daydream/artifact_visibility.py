@@ -214,7 +214,9 @@ class ArtifactLayout:
 
     @property
     def live_root(self) -> Path:
-        return self.state_root / "runs" / self.session_id / "live"
+        from daydream.trajectory import run_directory
+
+        return run_directory(self.state_root, self.session_id) / "live"
 
     @property
     def daydream_dir(self) -> Path:
@@ -4652,6 +4654,8 @@ def _print_rebaseline_warning(source: Path, canonical: Path) -> None:
 
 def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwner) -> ArtifactSession:
     """Detach the public tree and return the held session, on a worker thread."""
+    from daydream.trajectory import RUNS_DIRNAME
+
     if not session_id or "\0" in session_id or "/" in session_id or "\\" in session_id or session_id in (".", ".."):
         raise ArtifactVisibilityError("artifact session id is invalid")
     identity = derive_workspace_identity(work, owner=owner)
@@ -4692,7 +4696,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                 source,
                 canonical_entries=validated_canonical_entries,
             )
-            runs = state_root / "runs"
+            runs = state_root / RUNS_DIRNAME
             transactions = state_root / "transactions"
             _create_private_directory(runs)
             _create_private_directory(transactions)

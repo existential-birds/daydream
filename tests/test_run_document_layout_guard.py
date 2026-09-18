@@ -8,8 +8,8 @@ blanket exemption.
 
 A literal counts only when it is *path-shaped*:
 
-* a string that carries ``trajectory.json`` / ``trajectories`` as a path segment
-  (bare, or embedded in a longer path such as ``runs/*/trajectory.json``), and
+* a string that carries ``trajectory.json`` / ``trajectories`` / ``runs`` as a path
+  segment (bare, or embedded in a longer path such as ``runs/*/trajectory.json``), and
 * for the bare names, only in a path context — a ``/`` composition, a comparison
   against a document name, or an argument to ``Path``/``glob``/``rglob``/
   ``joinpath``/``with_name``/``with_suffix``/``relative_to``.
@@ -36,11 +36,16 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 #: The in-scope callers. Each must import the layout surface (requirement 10).
 _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/archive/__init__.py",
+    "daydream/archive/hydrate.py",
+    "daydream/archive/index.py",
+    "daydream/archive/license_enrich.py",
+    "daydream/archive/sanitize.py",
     "daydream/eval/analyzer.py",
     "daydream/artifact_visibility.py",
     "daydream/phases.py",
     "daydream/training/adjudication/materialize.py",
     "daydream/training/adjudication/cli.py",
+    "daydream/training/coordinator.py",
     "daydream/runner.py",
 })
 
@@ -69,10 +74,10 @@ _PERMITTED = {
     "daydream/benchmark/harbor/entrypoint.py": frozenset({"root-document"}),
     # Training corpus batches: `batches/<sid>/trajectory.json`, its own producer.
     "daydream/training/corpus_projection/projector.py": frozenset({"root-document"}),
-    # `_partial_of` is generic over every artifact kind (diff, manifest, deep/...).
-    "daydream/phases.py": frozenset({"partial"}),
     # A standalone package that cannot import `daydream` (reads via a runtime seam).
-    "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document"}),
+    "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
+    # The `runs` SQLite table of the archive index (`archive/_schema.py`), not a path.
+    "daydream/training/adjudication/cli.py": frozenset({"runs-dir"}),
 }
 
 _PATH_CALLS = frozenset({
@@ -84,9 +89,10 @@ _PATH_CALLS = frozenset({
     "with_suffix",
     "relative_to",
 })
-_BARE_NAMES = frozenset({"trajectory.json", "trajectories"})
+_BARE_NAMES = frozenset({"trajectory.json", "trajectories", "runs"})
 _ROOT_DOCUMENT = re.compile(r"(?:^|/)trajectory\.json$|(?:^|/)trajectory\.json/")
 _SIBLINGS_DIR = re.compile(r"(?:^|/)trajectories$|(?:^|/)trajectories/")
+_RUNS_DIR = re.compile(r"(?:^|/)runs$|(?:^|/)runs/")
 
 
 def _production_modules() -> list[tuple[str, Path]]:
@@ -146,6 +152,8 @@ def _layout_literals(module: str, path: Path) -> list[tuple[str, int]]:
             kinds.add("root-document")
         if _SIBLINGS_DIR.search(value):
             kinds.add("siblings-dir")
+        if _RUNS_DIR.search(value):
+            kinds.add("runs-dir")
         if ".partial" in value:
             kinds.add("partial")
         if not kinds:

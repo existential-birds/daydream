@@ -28,7 +28,7 @@ from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest_from_snapshot
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.run_snapshot import ArchiveRunSnapshot
-from daydream.trajectory import DaydreamRunFlow
+from daydream.trajectory import RUNS_DIRNAME, DaydreamRunFlow
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import (
@@ -69,7 +69,7 @@ def get_archive_dir() -> Path:
     else:
         archive_dir = Path.home() / ".daydream" / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
-    (archive_dir / "runs").mkdir(exist_ok=True)
+    (archive_dir / RUNS_DIRNAME).mkdir(exist_ok=True)
     return archive_dir
 
 

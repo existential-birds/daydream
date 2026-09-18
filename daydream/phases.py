@@ -100,6 +100,7 @@ from daydream.trajectory import (
     get_current_recorder,
     host_phase_scope,
     maybe_fork,
+    partial_document_path,
     run_directory,
     run_document_path,
     siblings_directory,
@@ -897,14 +898,14 @@ async def _run_failure_summarizer(
             "fix-failures": None if deep is None else deep / "fix-failures.json",
         }
 
-    def _partial_of(path: Path | None) -> Path | None:
-        return None if path is None else path.with_suffix(path.suffix + ".partial")
-
     has_trajectory = recorder is not None
     active_session = artifact_session is not None
     changed_live = _changed_files(work.repo)
     durable_input_paths = _labelled(
-        _partial_of(trajectory_path), diff_path, manifest_path, deep_dir
+        None if trajectory_path is None else partial_document_path(trajectory_path),
+        diff_path,
+        manifest_path,
+        deep_dir,
     )
     private_runtime_paths: tuple[Path, ...] = ()
     if active_session:
@@ -924,7 +925,7 @@ async def _run_failure_summarizer(
             )
 
         possible_inputs = _labelled(
-            None if recorder is None else _partial_of(recorder.path),
+            None if recorder is None else partial_document_path(recorder.path),
             _live(diff_path),
             _live(manifest_path),
             _live(deep_dir),
