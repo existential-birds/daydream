@@ -194,7 +194,10 @@ def test_declaration_is_importable_from_both_module_paths() -> None:
 
 
 def _v1_baseline_sql() -> str:
-    return _schema._create_table_sql([col for col in RUNS_COLUMNS if not col.additive])
+    # Derived from the frozen V1_BASELINE_NAMES witness, never from the
+    # ``additive`` flag under test: a column newly mis-marked
+    # ``additive=False`` must stay absent here so fresh-vs-upgraded diverges.
+    return _schema._create_table_sql([col for col in RUNS_COLUMNS if col.name in V1_BASELINE_NAMES])
 
 
 def _pre_v4_sql() -> str:
