@@ -53,7 +53,14 @@ from daydream.artifact_visibility import (
 from daydream.artifact_visibility import (
     open_artifact_session as _open_artifact_session,
 )
-from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
+from daydream.trajectory import (
+    RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
+    partial_document_path,
+    run_directory,
+    run_document_path,
+    siblings_directory,
+)
 from daydream.workspace import WorkContext
 
 _TRANSITIONS = (
@@ -2325,6 +2332,19 @@ async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpa
         ):
             with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
                 session.register_destination(requested, label=label)
+
+
+async def test_trajectory_route_paths_are_composed_from_the_layout_surface(source: Path) -> None:
+    """The private route's run dir, full path and partial path all come from the owner."""
+    session_id = "layout-route"
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        route = session.register_trajectory_output(None)
+
+        assert route.run_dir == run_directory(session.daydream_dir, session_id)
+        assert route.full.frozen_path == run_document_path(route.run_dir)
+        assert route.partial.frozen_path == partial_document_path(run_document_path(route.run_dir))
+        assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
+        assert siblings_directory(route.run_dir) == route.run_dir / "trajectories"
 
 
 @pytest.mark.parametrize(

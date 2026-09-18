@@ -3988,20 +3988,24 @@ class ArtifactSession:
 
     def register_trajectory_output(self, requested: Path | None) -> TrajectoryOutputRoute:
         """Register the root trajectory and its P07 partial as one atomic route."""
+        from daydream.trajectory import partial_document_path, run_directory, run_document_path
+
         self._require_active()
         if self._trajectory_route is not None:
             raise ArtifactVisibilityError("paired trajectory output is already registered")
-        run_dir = self.daydream_dir / "runs" / self.layout.session_id
-        default_requested = self.layout.public_daydream_dir / "runs" / self.layout.session_id / "trajectory.json"
+        run_dir = run_directory(self.daydream_dir, self.layout.session_id)
+        default_requested = run_document_path(
+            run_directory(self.layout.public_daydream_dir, self.layout.session_id)
+        )
         declared_requested = default_requested if requested is None else _absolute_lexical(requested)
         try:
             canonical_requested = declared_requested.resolve(strict=False)
             canonical_default = default_requested.resolve(strict=False)
         except OSError as exc:
             raise ArtifactVisibilityError("artifact destination could not be resolved") from exc
-        partial_requested = declared_requested.with_suffix(declared_requested.suffix + ".partial")
-        private_full = run_dir / "trajectory.json"
-        private_partial = run_dir / "trajectory.json.partial"
+        partial_requested = partial_document_path(declared_requested)
+        private_full = run_document_path(run_dir)
+        private_partial = partial_document_path(run_document_path(run_dir))
         public_root = self.layout.public_daydream_dir
         if canonical_requested == canonical_default:
             full, partial = self._paired_trajectory(
@@ -4177,9 +4181,9 @@ class ArtifactSession:
         if route is None:
             raise ArtifactVisibilityError("trajectory output is not registered")
 
-        from daydream.trajectory import TrajectoryDocumentSnapshot
+        from daydream.trajectory import TrajectoryDocumentSnapshot, siblings_directory
 
-        trajectories_dir = route.run_dir / "trajectories"
+        trajectories_dir = siblings_directory(route.run_dir)
         snapshots: list[TrajectoryDocumentSnapshot] = []
         for trajectory_id, document in self._completed_sibling_trajectories.items():
             if (
