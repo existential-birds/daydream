@@ -14,6 +14,7 @@ from typing import Any, cast
 import pytest
 
 from daydream.archive import (
+    _project_documents,
     _read_fix_quality_gate,
     get_archive_dir,
 )
@@ -69,6 +70,10 @@ from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
+    partial_document_path,
+    run_directory,
+    run_document_path,
+    sibling_document_path,
 )
 from tests.harness.trajectory import make_manifest
 
@@ -3825,6 +3830,31 @@ def test_archive_rejects_a_sibling_document_from_another_session(
         )
     assert not (archive_dir / "runs" / recorder.session_id).exists()
     assert query_runs(archive_dir) == []
+
+
+def test_project_documents_destinations_are_the_layout_surface(tmp_path: Path) -> None:
+    """The bundle's destination names come from the owner; `.partial` is stripped there."""
+    session_id = "layout-session"
+    run_dir = run_directory(tmp_path / "archive", session_id)
+    run_dir.mkdir(parents=True)
+    root_bytes = json.dumps({"session_id": session_id, "trajectory_id": session_id}).encode()
+    sibling_bytes = json.dumps({"session_id": session_id, "trajectory_id": "fork-1"}).encode()
+    root_partial = partial_document_path(run_document_path(run_dir))
+    snapshot = RunWriteSnapshot(
+        status="partial",
+        cutoff_at="2026-01-01T00:00:00Z",
+        root_trajectory_id=session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(session_id, root_partial, root_bytes),
+            TrajectoryDocumentSnapshot(
+                "fork-1", sibling_document_path(run_dir, "deep-python.json"), sibling_bytes
+            ),
+        ),
+    )
+    _project_documents(snapshot, run_dir, session_id=session_id)
+
+    assert run_document_path(run_dir).read_bytes() == root_bytes
+    assert sibling_document_path(run_dir, "deep-python.json").read_bytes() == sibling_bytes
 
 
 def test_merge_failed_discriminates_on_merge_key_not_merged_items(

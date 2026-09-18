@@ -227,10 +227,10 @@ def finalize_archive_run(
     dump_started = False
     try:
         from daydream.archive.provenance import capture_executable_provenance
-        from daydream.trajectory import snapshot_trajectories
+        from daydream.trajectory import run_directory, snapshot_trajectories
 
         archive_dir = get_archive_dir()
-        run_dir = archive_dir / "runs" / session_id
+        run_dir = run_directory(archive_dir, session_id)
         assembly_dir = run_dir.with_name(f".{run_dir.name}.finalizing")
         run_dir.parent.mkdir(parents=True, exist_ok=True)
         for owned in (run_dir, assembly_dir):
@@ -457,9 +457,16 @@ def _project_documents(
 
     ``session_id`` additionally binds every document to the archived run.
     """
-    root_path = run_dir / "trajectory.json"
+    from daydream.trajectory import (
+        PARTIAL_SUFFIX,
+        run_document_path,
+        sibling_document_path,
+        siblings_directory,
+    )
+
+    root_path = run_document_path(run_dir)
     root_path.unlink(missing_ok=True)
-    shutil.rmtree(run_dir / "trajectories", ignore_errors=True)
+    shutil.rmtree(siblings_directory(run_dir), ignore_errors=True)
     seen: set[Path] = set()
     for document in write_snapshot.documents:
         payload = json.loads(document.json_bytes)
@@ -472,10 +479,10 @@ def _project_documents(
         if document.trajectory_id == write_snapshot.root_trajectory_id:
             destination = root_path
         else:
-            name = document.path.name.removesuffix(".partial")
+            name = document.path.name.removesuffix(PARTIAL_SUFFIX)
             if not name.endswith(".json") or name in {".", ".."}:
                 raise ValueError("invalid frozen trajectory document path")
-            destination = run_dir / "trajectories" / name
+            destination = sibling_document_path(run_dir, name)
         if destination in seen:
             raise ValueError("duplicate frozen trajectory destination")
         seen.add(destination)
