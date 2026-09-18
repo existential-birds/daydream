@@ -20,6 +20,7 @@ from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval.analyzer import (
     _files_read,
+    _latest_main_trajectory,
     _quality_python_parser,
     _semantic_tool_kind,
     _tokenize_command,
@@ -34,9 +35,18 @@ from daydream.eval.analyzer import (
     analyze_timing,
     analyze_tools,
     analyze_training_signals,
+    collect_trajectory_paths,
     load_trajectories,
 )
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import (
+    RUN_DOCUMENT_NAME,
+    DaydreamPhase,
+    DaydreamRunFlow,
+    TrajectoryRecorder,
+    run_directory,
+    run_document_path,
+    sibling_document_path,
+)
 
 
 def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
@@ -140,6 +150,40 @@ def test_exact_match_takes_precedence(tmp_path: Path) -> None:
 
     assert result["main"] is not None
     assert result["main"]["marker"] == "exact"
+
+
+SESSION = "11111111-2222-3333-4444-555555555555"
+
+
+def payload(trajectory_id: str) -> bytes:
+    return json.dumps(
+        {"session_id": SESSION, "trajectory_id": trajectory_id, "steps": []},
+        sort_keys=True,
+    ).encode()
+
+
+def test_analyzer_resolution_keys_off_the_owned_names(tmp_path: Path) -> None:
+    """Resolution, the main/forked split and the glob all come from the surface."""
+    daydream_dir = tmp_path / ".daydream"
+    run_dir = run_directory(daydream_dir, SESSION)
+    run_document_path(run_dir).parent.mkdir(parents=True)
+    run_document_path(run_dir).write_bytes(payload(SESSION))
+    sibling = sibling_document_path(run_dir, "deep-python.json")
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(payload("fork-1"))
+
+    assert [p.name for p in collect_trajectory_paths(run_dir)] == [
+        RUN_DOCUMENT_NAME,
+        "deep-python.json",
+    ]
+    assert [p.name for p in collect_trajectory_paths(daydream_dir)] == [
+        RUN_DOCUMENT_NAME,
+        "deep-python.json",
+    ]
+    loaded = load_trajectories(daydream_dir, SESSION)
+    assert loaded["main"]["trajectory_id"] == SESSION
+    assert [d["_source_file"] for d in loaded["forked"]] == ["deep-python.json"]
+    assert _latest_main_trajectory(daydream_dir) == run_document_path(run_dir)
 
 
 def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
