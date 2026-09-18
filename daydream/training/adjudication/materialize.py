@@ -201,7 +201,9 @@ def _trajectory_resolutions_readonly(
     malformed, or empty still raises ``HubUnavailableError`` naming the
     session -- corrupt data is never silently skipped.
     """
-    trajectory_path = index_root / "runs" / session_id / "trajectory.json"
+    from daydream.trajectory import run_directory, run_document_path
+
+    trajectory_path = run_document_path(run_directory(index_root, session_id))
     if not trajectory_path.is_file():
         return None
     try:
