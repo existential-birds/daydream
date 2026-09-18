@@ -28,6 +28,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCOPE_ROOTS = ("daydream", "rl")
 _OWNER = "daydream/trajectory.py"
 
+#: Directories that are not first-party source. ``.venv``/``venv``/``site-packages``
+#: keep the scan from walking an installed dependency tree (the ``rl`` project's own
+#: environment lives at ``rl/daydream_review/.venv`` once ``make deadcode`` syncs it).
+_EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-packages"})
+
 #: The in-scope callers. Each must import the layout surface (requirement 10).
 _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/archive/__init__.py",
@@ -88,7 +93,7 @@ def _production_modules() -> list[tuple[str, Path]]:
     modules: list[tuple[str, Path]] = []
     for root_name in _SCOPE_ROOTS:
         for path in sorted((_REPO_ROOT / root_name).rglob("*.py")):
-            if "tests" in path.parts or "__pycache__" in path.parts:
+            if _EXCLUDED_PARTS & set(path.parts):
                 continue
             modules.append((path.relative_to(_REPO_ROOT).as_posix(), path))
     return modules

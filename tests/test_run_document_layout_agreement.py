@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from daydream.archive import _project_documents, get_archive_dir
 from daydream.eval.analyzer import collect_trajectory_paths, load_trajectories
@@ -38,7 +39,7 @@ def _write_run(target: Path) -> Path:
     return root_document.parent
 
 
-def _snapshot(root_path: Path, status: str = "complete") -> RunWriteSnapshot:
+def _snapshot(root_path: Path, status: Literal["complete", "partial"] = "complete") -> RunWriteSnapshot:
     return RunWriteSnapshot(
         status=status,
         cutoff_at="2026-01-01T00:00:00Z",
