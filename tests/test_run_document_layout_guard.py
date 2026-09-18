@@ -72,12 +72,12 @@ _PERMITTED = {
     "daydream/benchmark/harbor/agent.py": frozenset({"root-document"}),
     "daydream/benchmark/harbor/clean.py": frozenset({"root-document"}),
     "daydream/benchmark/harbor/entrypoint.py": frozenset({"root-document"}),
+    # The harbor clean subcommand help names the same container log path.
+    "daydream/benchmark/cli.py": frozenset({"root-document"}),
     # Training corpus batches: `batches/<sid>/trajectory.json`, its own producer.
     "daydream/training/corpus_projection/projector.py": frozenset({"root-document"}),
     # A standalone package that cannot import `daydream` (reads via a runtime seam).
     "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
-    # The `runs` SQLite table of the archive index (`archive/_schema.py`), not a path.
-    "daydream/training/adjudication/cli.py": frozenset({"runs-dir"}),
 }
 
 _PATH_CALLS = frozenset({
@@ -90,9 +90,13 @@ _PATH_CALLS = frozenset({
     "relative_to",
 })
 _BARE_NAMES = frozenset({"trajectory.json", "trajectories", "runs"})
-_ROOT_DOCUMENT = re.compile(r"(?:^|/)trajectory\.json$|(?:^|/)trajectory\.json/")
-_SIBLINGS_DIR = re.compile(r"(?:^|/)trajectories$|(?:^|/)trajectories/")
-_RUNS_DIR = re.compile(r"(?:^|/)runs$|(?:^|/)runs/")
+#: A segment is a path segment when it is preceded by a separator (so
+#: `.../trajectory.json after finalization` still counts) or anchored at the
+#: string start and followed by end/separator. A prose label such as
+#: `"trajectories: "` has neither and is not flagged.
+_ROOT_DOCUMENT = re.compile(r"/trajectory\.json(?![A-Za-z0-9_.-])|^trajectory\.json(?:$|/)")
+_SIBLINGS_DIR = re.compile(r"/trajectories(?![A-Za-z0-9_.-])|^trajectories(?:$|/)")
+_RUNS_DIR = re.compile(r"/runs(?![A-Za-z0-9_.-])|^runs(?:$|/)")
 
 
 def _production_modules() -> list[tuple[str, Path]]:
@@ -124,7 +128,9 @@ def _is_path_context(parents: dict[int, ast.AST], node: ast.AST) -> bool:
         if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div):
             return True
         if isinstance(parent, ast.Compare):
-            return True
+            # Membership tests (`"runs" in tables`) compare data keys, not paths;
+            # only equality/ordering comparisons can assert a document name.
+            return not any(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
         if isinstance(parent, ast.Call):
             func = parent.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")

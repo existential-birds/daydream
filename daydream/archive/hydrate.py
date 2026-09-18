@@ -49,7 +49,7 @@ from daydream.archive.index import upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
-from daydream.trajectory import RUNS_DIRNAME, redact_text
+from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,39}$")
@@ -196,7 +196,7 @@ class DownloadResult:
     incomplete_manifests: tuple[str, ...] = ()
 
 
-_REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", "trajectory.json"))
+_REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", RUN_DOCUMENT_NAME))
 _DERIVED_ARCHIVE_ROOTS = frozenset(("annotations", "curated"))
 # Root names that are never valid session ids at depth 1, in either layout.
 # ``bronze`` is the immutable raw-ingest tree (M10): hydration must never
