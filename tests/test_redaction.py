@@ -327,7 +327,7 @@ def test_env_var_pattern_does_not_match_substring_lookalikes(non_secret: str) ->
     out = Redactor().redact_step(_user_step(non_secret))
     assert isinstance(out.message, str)
     assert "[REDACTED_ENV_VAR]" not in out.message
-    name, _, value = non_secret.partition("=")
+    _, _, value = non_secret.partition("=")
     assert value in out.message, f"Expected {value!r} preserved in {out.message!r}"
 
 

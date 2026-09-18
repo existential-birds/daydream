@@ -31,7 +31,7 @@ from daydream.backends import (
 )
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
-from tests.test_agent_recorder_integration import MockBackend
+from tests.harness.stub_backend import MockBackend
 
 RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}'
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
@@ -83,7 +83,7 @@ async def test_plain_text_still_renders(monkeypatch: pytest.MonkeyPatch, tmp_pat
     backend = MockBackend(
         [TextEvent(text="narration here"), ResultEvent(structured_output=None, continuation=None)]
     )
-    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
+    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()
 
 

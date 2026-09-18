@@ -35,7 +35,7 @@ def test_normalize_strips_credentials_and_keeps_identity(raw: str, slug: str, ur
 
 
 def test_normalize_unparseable_returns_none_identity() -> None:
-    identity, url = normalize_remote_url("not a url at all")
+    identity, _ = normalize_remote_url("not a url at all")
     assert identity is None
 
 

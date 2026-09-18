@@ -712,15 +712,6 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
 # ---------------------------------------------------------------------------
 
 
-_KNOWN_ITEMS = [
-    {"id": 1, "lens": "per-stack", "file": "api.py", "line": 1,
-     "severity": "medium", "description": "Sample issue",
-     "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"},
-    {"id": 2, "lens": "per-stack", "file": "api.py", "line": 1,
-     "severity": "medium", "description": "Sample issue",
-     "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"},
-]
-
 # The stub-produced findings are the deterministic output of the real deep
 # pipeline over this single-python-file diff: the language stack's Record schema
 # item plus the structural meta-stack's, each in its own lens's wording. They are

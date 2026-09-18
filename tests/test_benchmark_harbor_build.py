@@ -179,7 +179,7 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) ->
     ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     _seed_preflight(fake_gh, number=101)
-    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, number=101, lines=lines)
+    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=101, lines=lines)
     _seed_candidate(fake_gh, number=101, head_sha=head_sha)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
@@ -208,7 +208,7 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh: FakeGh, *, ready: bool = True
     ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     _seed_preflight(fake_gh, number=101)
-    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, number=101, lines=3)
+    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=101, lines=3)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
     case_id = raw["cases"][0]["case_id"]
@@ -228,7 +228,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines:
     from daydream.benchmark.storage import load_yaml_strict
 
     _seed_preflight(fake_gh, number=102)
-    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, number=102, lines=lines)
+    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=102, lines=lines)
     _seed_candidate(fake_gh, number=102, head_sha=head_sha)
     assert gi.run_import_prs(ws, pr_numbers=[102], heads=[], origin_url=origin_url) == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
@@ -260,12 +260,6 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
 def _compile(ws: Path) -> Any:
     from daydream.benchmark.harbor import build
     return build.compile_workspace(ws)
-
-
-def _harbor_file_sha(ws: Path, rel: str) -> str:
-    import hashlib as _hashlib
-    data = (ws / "harbor" / rel).read_bytes()
-    return _hashlib.sha256(data).hexdigest()
 
 
 def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
@@ -312,7 +306,7 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
 
 def test_spike_bundle_heads_is_exactly_base_head(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot
-    m, bundle_bytes = _seed_bare_bundle(tmp_path)
+    _, bundle_bytes = _seed_bare_bundle(tmp_path)
     (tmp_path / "b.bundle").write_bytes(bundle_bytes)
     heads = snapshot.bundle_heads(tmp_path / "b.bundle")
     assert heads == {"refs/heads/base", "refs/heads/head"}
@@ -850,7 +844,7 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
 
 def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
-    ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
+    ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
 
@@ -964,7 +958,7 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, 
 def test_compile_never_refetches_live_pr_text(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.harbor.build import compile_workspace
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
 
     def boom(*a: Any, **k: Any) -> None:
         raise AssertionError("compile must not fetch live PR text")
@@ -1172,7 +1166,7 @@ def test_leakage_scan_rejects_clean_readme() -> None:
 
 def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import build
-    m, bundle_bytes = _seed_bare_bundle(tmp_path)
+    _, bundle_bytes = _seed_bare_bundle(tmp_path)
     bp = tmp_path / "b.bundle"
     bp.write_bytes(bundle_bytes)
     build.validate_bundle_inventory(bp)
@@ -1201,7 +1195,7 @@ def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
 
 def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     build.compile_workspace(ws)
     rels = {str(p.relative_to(ws / "harbor")) for p in (ws / "harbor").rglob("*") if p.is_file()}
     forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
@@ -1655,7 +1649,7 @@ def test_compiled_policy_comes_from_workspace_allowlists(tmp_path: Path, fake_gh
 
     from daydream.benchmark.harbor import build
 
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock = build.compile_workspace(ws)                 # h1.example.com / h2.example.com
     key = next(iter(lock["cases"]))
     toml = (ws / "harbor" / key / "task.toml").read_bytes()
@@ -1677,7 +1671,7 @@ def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
 
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
     raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
@@ -1696,7 +1690,7 @@ def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) 
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
 
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["judge_allowed_hosts"] = ["no-dot-segment"]   # normalize_hostname rejects
     storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
@@ -1711,7 +1705,7 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
 
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock_a = build.compile_workspace(ws)
     digest_a = lock_a["files"][next(iter(lock_a["cases"])) + "/task.toml"]
     # change the reviewer allowlist in benchmark.yaml

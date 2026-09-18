@@ -15,47 +15,8 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.cli import _build_benchmark_parser
-
 ROOT = Path(__file__).resolve().parents[1]
 RUNBOOK = ROOT / "docs" / "benchmark.md"
-README = ROOT / "README.md"
-CLAUDE = ROOT / "CLAUDE.md"
-
-# The 12 shipped subcommands (MH-3), matching _build_benchmark_parser()
-# in daydream/benchmark/cli.py:469-613.
-EXPECTED_SUBCOMMANDS = {
-    "init", "status", "validate", "build-harbor", "upgrade", "import-prs",
-    "curate", "calibrate-judge", "run", "clean", "objective", "aggregate",
-}
-
-# Legacy runtime tokens MH-2 forbids as active instructions in the runbook.
-FORBIDDEN_LEGACY_TOKENS = ("martian", "MARTIAN", "CodeRabbit", "anthropic-direct")
-
-
-def _parser_choices() -> set[str]:
-    subparsers = _build_benchmark_parser()._subparsers
-    if subparsers is None:
-        raise AssertionError("benchmark parser has no subparsers")
-    choices = subparsers._group_actions[0].choices
-    if choices is None:
-        raise AssertionError("benchmark parser subcommands are empty")
-    return set(choices)
-
-
-def _code_lines(text: str) -> list[str]:
-    """Nonblank, non-comment lines inside fenced ```bash/```sh blocks."""
-    out: list[str] = []
-    in_block = False
-    for raw in text.splitlines():
-        if raw.strip().startswith("```"):
-            in_block = not in_block
-            continue
-        if in_block:
-            line = raw.strip()
-            if line and not line.startswith("#"):
-                out.append(line)
-    return out
 
 
 def _json_blocks(text: str) -> list[dict[str, Any]]:
@@ -69,15 +30,6 @@ def _objective_example() -> dict[str, Any]:
             return block
     pytest.fail("runbook has no ```json objective example with an identity block")
 
-
-def _suite_manifest_example() -> dict[str, Any]:
-    for block in _json_blocks(RUNBOOK.read_text(encoding="utf-8")):
-        if "entries" in block:
-            return block
-    pytest.fail("runbook has no ```json suite manifest example with entries")
-
-
-# --- CLI / runbook command set (MH-3, MH-15) ---
 
 def test_privacy_placeholders_only() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")

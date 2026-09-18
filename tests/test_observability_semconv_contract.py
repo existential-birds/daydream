@@ -31,9 +31,6 @@ DAYDREAM_SRC = TESTS_DIR.parent / "daydream" / "observability"
 
 SEMCONV_COMMIT = "94f432d7126f5884d30a2cdde6f4e89908ebb6fd"
 
-# Canonical Daydream attribute namespaces (daydream-owned values are NOT
-# registry attributes and are excluded from registry derivation).
-_DAYDREAM_NS = "daydream."
 _GENAI_LITERAL_RE = re.compile(r"[\"'](gen_ai\.[a-zA-Z0-9_.]+)[\"']")
 
 
@@ -83,20 +80,6 @@ def _registry_attributes() -> dict[str, dict[str, Any]]:
     data = yaml.safe_load((SEMCONV_DIR / "registry.yaml").read_text(encoding="utf-8"))
     assert data["file_format"] == "definition/2"
     return {a["key"]: a for a in data["attributes"]}
-
-
-def _attr_type(attr: dict[str, Any]) -> Any:
-    """Normalize a registry attribute type to a comparable value.
-
-    Returns the scalar type string (``string``/``int``/``double``/``boolean``),
-    ``string[]``-style templates, an (``enum``-prefix, member set) tuple for
-    enums, or ``any`` for template-typed attributes.
-    """
-    t = attr.get("type")
-    if isinstance(t, dict):
-        members = [m["value"] for m in t.get("members", [])]
-        return ("enum", frozenset(members))
-    return t
 
 
 def _attr_enum_members(attr: dict[str, Any]) -> frozenset[str]:

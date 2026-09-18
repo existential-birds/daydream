@@ -18,8 +18,8 @@ import shutil
 import stat
 import sys
 import unicodedata
-from collections.abc import Iterator, Sequence
-from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
+from collections.abc import Sequence
+from contextlib import ExitStack, asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
 import anyio
 
 from daydream import git_ops
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import _fsync_directory, atomic_write_bytes
 
 if TYPE_CHECKING:
     from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
@@ -693,23 +693,12 @@ def _fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _fsync_directory(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _atomic_json(path: Path, payload: object) -> None:
     """Atomically persist one canonical-JSON manifest document.
 
     Compact sorted separators (byte-exact for all persisted manifests) with a
     trailing newline, file fsync before the rename, and a parent-directory
-    fsync after it. A thin policy wrapper over the shared
-    :func:`daydream.json_utils.atomic_write_bytes` primitive; the exclusive
-    O_EXCL temp creation the module previously maintained is provided by the
-    same same-directory mkstemp + rename exchange.
+    fsync after it.
     """
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     atomic_write_bytes(path, encoded, fsync=True, dir_fsync=True, mode=0o600)
@@ -4582,15 +4571,6 @@ def assert_model_cwd_clean(cwd: Path) -> None:
         candidate = declared / name
         if candidate.exists() or candidate.is_symlink():
             raise ArtifactVisibilityError("model cwd contains generated Daydream artifacts")
-
-
-@contextmanager
-def bind_artifact_session(session: ArtifactSession) -> Iterator[ArtifactSession]:
-    token = _SESSION.set(session)
-    try:
-        yield session
-    finally:
-        _SESSION.reset(token)
 
 
 def _rebaseline_canonical_from_public(

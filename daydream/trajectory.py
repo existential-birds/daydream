@@ -3753,30 +3753,6 @@ class TrajectoryRecorder:
             self._final_totals["cost"] += cost_usd
             self._final_totals["any_cost_seen"] = True
 
-    def compute_wall_clock_seconds(self) -> float | None:
-        """Legacy local-step wall-clock span retained until lifecycle reduction.
-
-        Derived from the earliest and latest ``Step.timestamp`` across the
-        recorder's steps. Returns ``None`` when fewer than two timestamped
-        steps exist (no measurable span).
-
-        New trajectory documents carry explicit ``run_started_at`` and either
-        final ``run_ended_at`` or partial ``snapshot_at`` lifecycle bounds.
-        Task 5 migrates timing consumers to those authoritative bounds and keeps
-        this local-step calculation only as the documented legacy fallback.
-
-        Returns:
-            Rounded duration in seconds, or ``None`` when unmeasurable —
-            fewer than two timestamped steps, or an unparseable timestamp.
-        """
-        try:
-            timestamps = [parse_iso_timestamp(s.timestamp) for s in self.steps if s.timestamp]
-        except ValueError:
-            return None
-        if len(timestamps) < 2:
-            return None
-        return round((max(timestamps) - min(timestamps)).total_seconds(), 1)
-
     def compute_timing_summary(
         self,
         write_snapshot: RunWriteSnapshot,
@@ -3785,58 +3761,6 @@ class TrajectoryRecorder:
         if write_snapshot.root_trajectory_id != self.trajectory_id:
             raise ValueError("timing snapshot belongs to a different root trajectory")
         return compute_timing_summary(write_snapshot)
-
-    def compute_phase_timings(self) -> dict[str, Any] | None:
-        """Legacy per-phase timing for unidentified phase events only.
-
-        New identified lifecycle events are reduced only through
-        :func:`compute_timing_summary`, which pairs by session/scope identity
-        and unions overlaps. This compatibility seam retains phase-name LIFO
-        solely for callers holding pre-identity events.
-
-        Each phase entry: ``{"wall_clock_seconds": float, "occurrences": int}``.
-        Phases with the same :class:`DaydreamPhase` value (e.g. the deep
-        orchestrator's ``review`` and ``arbiter`` stages both emit
-        ``DaydreamPhase.DEEP``) fold into one bucket; the per-event ``metadata``
-        in ``extra["phase_events"]`` carries the stage breakdown for finer
-        analysis.
-
-        Returns:
-            Mapping of phase value → timing summary, or ``None`` when there are
-            no phase events.
-        """
-        legacy_events = [event for event in self._phase_events if event.session_id is None and event.scope_id is None]
-        if not legacy_events:
-            return None
-        by_phase: dict[str, dict[str, Any]] = {}
-        pending_starts: dict[str, list[str]] = {}
-        for ev in legacy_events:
-            key = ev.phase.value
-            if ev.event == "phase_start":
-                pending_starts.setdefault(key, []).append(ev.timestamp)
-                by_phase.setdefault(key, {"wall_clock_seconds": 0.0, "occurrences": 0})
-            elif ev.event == "phase_end":
-                starts = pending_starts.get(key)
-                if not starts:
-                    continue  # orphaned end with no matching start
-                bucket = by_phase[key]
-                start_ts = starts.pop()
-                try:
-                    start = parse_iso_timestamp(start_ts)
-                    end = parse_iso_timestamp(ev.timestamp)
-                except ValueError:
-                    continue  # unparseable timestamp; skip this pair
-                duration = (end - start).total_seconds()
-                bucket["wall_clock_seconds"] += max(0.0, duration)
-                bucket["occurrences"] += 1
-        return {
-            key: {
-                "wall_clock_seconds": round(val["wall_clock_seconds"], 3),
-                "occurrences": val["occurrences"],
-            }
-            for key, val in by_phase.items()
-            if val["occurrences"] > 0  # drop orphaned starts (start with no matching end)
-        }
 
     def _sibling_path_for(
         self,

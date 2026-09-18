@@ -58,7 +58,6 @@ from daydream.retry_policy import (
     undeclared_retry_allowance_message,
 )
 from daydream.run_context import (
-    InteractionPolicy,
     RunContext,
     bind_run_context,
     current_run_context,
@@ -512,51 +511,6 @@ class _LogRedactingConsole(Console):
 
 
 console = _LogRedactingConsole(theme=NEON_THEME)
-
-
-def resolve_or_prompt(
-    *,
-    assume: str | None,
-    interactive: bool,
-    safe_default: bool,
-    question: str,
-    default: str,
-) -> bool:
-    """Resolve a yes/no gate, falling back to an interactive prompt when needed.
-
-    Wraps :func:`resolve_gate` with the canonical prompt-and-coerce step so
-    callers don't each re-implement the ``decision is None → prompt_user →
-    lower() in ("y", "yes")`` idiom.
-
-    Args:
-        assume: Forwarded to :func:`resolve_gate` — ``"yes"`` → ``True``,
-            ``"no"`` → ``False``, ``None`` → defer to interactivity.
-        interactive: Forwarded to :func:`resolve_gate` — True when stdin may
-            be read.
-        safe_default: Forwarded to :func:`resolve_gate` — the answer used when
-            unattended and no assumption is set.
-        question: The prompt string shown to the user when interactive (e.g.
-            ``"Apply fixes now? [y/N]"``).
-        default: The default hint shown alongside the question (e.g. ``"n"``).
-
-    Returns:
-        ``True`` if the gate is approved, ``False`` if declined.
-    """
-    current = resolve_run_context()
-    context = RunContext(
-        InteractionPolicy(
-            assume=assume,
-            interactive=interactive,
-            quiet=current.policy.quiet,
-            log_mode=current.policy.log_mode,
-        )
-    )
-    return context.confirm(
-        question,
-        safe_default=safe_default,
-        default=default,
-        console=console,
-    )
 
 
 def detect_test_success(output: str) -> bool:

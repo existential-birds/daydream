@@ -53,7 +53,6 @@ VERIFIER_PATH = SCRIPTS / "verify_observability_readback.py"
 REPLAY_PATH = SCRIPTS / "replay_observability_acceptance.py"
 
 _SECRET_KEY = "sk-test-verifier-secret-9f3c"
-_HH_URL = "http://127.0.0.1"  # replaced by the fake server's real base
 
 
 # ---------------------------------------------------------------------------

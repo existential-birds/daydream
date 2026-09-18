@@ -172,7 +172,7 @@ def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candida
     ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     _seed_preflight(ws, fake_gh)
-    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
+    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
     if candidate:
         comment = {
             "id": 1,
@@ -337,7 +337,7 @@ def test_accept_candidate_produces_historical_derived_finding(tmp_path: Path, fa
 
 def test_add_finding_is_authored_and_replace_is_edited(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
 
     cu.add_finding(ws, case_id, title="New concern", body="fresh wording",
                    severity="high", location={"path": "feature.py",
@@ -447,7 +447,7 @@ def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path: Path, fa
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
 
     # clean attest on an empty-gold case: sets clean_attested, never ready
-    ws2, case_id2, head_sha2 = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    ws2, case_id2, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     cu.attest_clean(ws2, case_id2)
     raw2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")
     assert raw2["curation"]["clean_attested"] is True
@@ -623,7 +623,7 @@ def test_reject_before_persistence_leaves_file_unchanged(tmp_path: Path, fake_gh
 
 def test_list_cases_and_head_file_line_count(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4)
 
     cases = cu.list_cases(ws)
     assert [c["case_id"] for c in cases] == [case_id]
@@ -667,7 +667,7 @@ def test_list_cases_ready_mirror_failure_returns_stats_from_bundle(tmp_path: Pat
     mirror is deleted still returns change stats — the reads come from a
     disposable clone of the frozen bundle, never the mirror."""
     from daydream.benchmark import curation as cu
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    ws, _, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     import shutil
     shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
     cases = cu.list_cases(ws)
@@ -1076,7 +1076,7 @@ def test_stale_state_error_is_exported_curation_subtype() -> None:
 
 def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     cu.accept_candidate(ws, case_id, src)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -1259,7 +1259,7 @@ def test_classify_table_covers_precedence_and_dispositions() -> None:
         (set(), True, False, {"resolved"}, True, "at_head", "changed", "possibly_actioned", "undecided"),
     ]
     for refs, is_cand, dismissed, signals, has_facts, rel, delta, band, disp in cases:
-        got_band, got_disp, reasons = classify_evidence(
+        got_band, got_disp, _ = classify_evidence(
             refs=refs, is_candidate=is_cand, dismissed=dismissed, signals=signals,
             facts_present=has_facts, commit_relation=rel, anchor_delta=delta)
         assert got_band == band and got_disp == disp, (refs, signals, rel, delta, got_band)

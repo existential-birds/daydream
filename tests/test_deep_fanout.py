@@ -314,7 +314,7 @@ async def test_per_stack_prompts_are_skill_free(
             files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
-    results, failures = await phase_per_stack_reviews(
+    _, failures = await phase_per_stack_reviews(
         cast(Backend, backend),
         make_work(tmp_path),
         stacks,

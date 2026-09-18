@@ -34,7 +34,7 @@ from daydream.phases import (
     phase_per_stack_reviews,
 )
 from daydream.workspace import WorkContext
-from tests.test_agent_recorder_integration import MockBackend
+from tests.harness.stub_backend import MockBackend
 
 
 def _rec(monkeypatch: Any) -> Console:

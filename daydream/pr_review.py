@@ -608,10 +608,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
 # --- Git / gh helpers ------------------------------------------------------
 
 
-def _current_branch(target_dir: Path) -> str | None:
-    return git_ops.current_branch(target_dir)
-
-
 def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
     """The ``owner/repo`` slug that holds the PR's head commit, or ``None``.
 
@@ -722,7 +718,7 @@ def find_open_pr(
         GitError: If branch discovery, GitHub data, repository identity, or
             the local PR merge base cannot be resolved safely.
     """
-    branch = _current_branch(target_dir)
+    branch = git_ops.current_branch(target_dir)
     if not branch:
         return None
     rows = git_ops.gh_pr_list_for_branch(target_dir, branch, auth=auth)

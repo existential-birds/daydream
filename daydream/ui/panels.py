@@ -167,7 +167,7 @@ class LiveToolPanel:
     In quiet mode, renders the tool header only and skips result display.
 
     Usage:
-        panel = LiveToolPanel(console, "tool-123", "Bash", {"command": "ls"})
+        panel = LiveToolPanel(console, "Bash", {"command": "ls"})
         panel.start()
         # ... tool executes ...
         panel.set_result("file1.txt\nfile2.txt", is_error=False)
@@ -178,7 +178,6 @@ class LiveToolPanel:
     def __init__(
         self,
         console: Console,
-        tool_use_id: str,
         name: str,
         args: dict[str, object],
         quiet_mode: bool = False,
@@ -192,7 +191,6 @@ class LiveToolPanel:
 
         """
         self._console = console
-        self._tool_use_id = tool_use_id
         self._name = name
         self._args = args
         self._label = label
@@ -579,7 +577,6 @@ class LiveToolPanelRegistry:
 
         panel = LiveToolPanel(
             console=self._console,
-            tool_use_id=tool_use_id,
             name=name,
             args=args,
             quiet_mode=self._quiet_mode,

@@ -151,7 +151,7 @@ class TestPendingDraftLifecycle:
         assert summary["billing_owner"] == "unresolved"
 
     def test_seal_freezes_choice_and_timing_at_message_end_before_tools(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
+        _, inv = _sealed_invocation(tmp_path)
         # Tool execution starts AFTER message_end; it must not duplicate or
         # alter the sealed choice parts.
         inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
@@ -178,13 +178,13 @@ class TestPendingDraftLifecycle:
         assert _summary(inv)["drafts"][0]["ended"] is True
 
     def test_terminal_result_path_drains(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
+        _, inv = _sealed_invocation(tmp_path)
         inv.observe(ResultEvent(structured_output=None, continuation=None))
         inv.finish()
         assert _summary(inv)["drafts"][0]["ended"] is True
 
     def test_cancel_and_error_paths_drain(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
+        _, inv = _sealed_invocation(tmp_path)
         inv.mark_aborted("wall_budget_exceeded")
         inv.finish()
         assert _summary(inv)["drafts"][0]["ended"] is True
@@ -209,7 +209,7 @@ class TestNativeTimingValidation:
     """Decision 4: non-bool bounded int ms, exact ns conversion, explicit fallbacks."""
 
     def test_exact_ns_conversion(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
+        _, inv = _sealed_invocation(tmp_path)
         draft = _summary(inv)["drafts"][0]
         assert draft["native_started_at_unix_ms"] == NATIVE_START_MS
         assert draft["native_started_at_unix_ns"] == NATIVE_START_NS
@@ -494,7 +494,7 @@ class TestEventDispatchAndSummary:
         assert entry["drafts"][0]["ended"] is True
 
     def test_usage_never_invented(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
+        _, inv = _sealed_invocation(tmp_path)
         # No usage events at all: the record must not fabricate any numbers.
         inv.finish()
         draft = _summary(inv)["drafts"][0]

@@ -959,6 +959,19 @@ _DISPATCH_TARGETS = (
     "_run_improve",
 )
 
+def _make_recording_dispatch(called: list[str]) -> Any:
+    def _record(name: str) -> Any:
+        async def stub(
+            work: Any, config: Any, _run_artifacts: Any = None, *,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_factory: BackendFactory | None,
+        ) -> int:
+            assert run_context is current_run_context()
+            called.append(name)
+            return 0
+        return stub
+    return _record
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -1047,17 +1060,7 @@ async def test_run_rejects_head_mismatch_before_dispatch(
     """Head drift: run() returns 1 and no flow is dispatched."""
     called: list[str] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append(name)
-            return 0
-
-        return stub
+    _record = _make_recording_dispatch(called)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
@@ -1079,17 +1082,7 @@ async def test_run_allows_matching_approved_head(
     """Matching approved head: run() proceeds to the expected flow."""
     called: list[str] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append(name)
-            return 0
-
-        return stub
+    _record = _make_recording_dispatch(called)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
@@ -1117,17 +1110,7 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     """
     called: list[str] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append(name)
-            return 0
-
-        return stub
+    _record = _make_recording_dispatch(called)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
