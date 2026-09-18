@@ -13,12 +13,14 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream.archive import _schema
-from daydream.archive._schema import RUNS_COLUMNS
-from daydream.archive.index import _run_upsert_values
+from daydream.archive._schema import RUNS_COLUMNS, RunColumn
+from daydream.archive.index import _get_connection, _run_upsert_values
 from tests.harness.trajectory import make_manifest
 
 # Frozen witness: the whole generated CREATE TABLE text at the refactor commit.
@@ -189,3 +191,65 @@ def test_declaration_is_importable_from_both_module_paths() -> None:
 
     assert index.RUNS_COLUMNS is RUNS_COLUMNS
     assert "RUNS_COLUMNS" in index.__all__
+
+
+def _v1_baseline_sql() -> str:
+    return _schema._create_table_sql([col for col in RUNS_COLUMNS if not col.additive])
+
+
+def _pre_v4_sql() -> str:
+    return _schema._create_table_sql([col for col in RUNS_COLUMNS if col.name != "has_posterior"])
+
+
+def _open_legacy(archive_dir: Path, ddl: str) -> None:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        conn.execute(ddl)
+        conn.execute(
+            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+            ("legacy-row", "2026-01-01T00:00:00+00:00", "normal", "/x"),
+        )
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _runs_columns(archive_dir: Path) -> set[str]:
+    conn = _get_connection(archive_dir)
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("column", [col for col in RUNS_COLUMNS if col.additive], ids=lambda col: col.name)
+def test_every_additive_column_is_alter_eligible_on_a_populated_table(column: RunColumn) -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(_v1_baseline_sql())
+        conn.execute(
+            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+            ("populated", "2026-01-01T00:00:00+00:00", "normal", "/x"),
+        )
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {column.name} {column.definition}")
+        except sqlite3.OperationalError as exc:  # pragma: no cover - failure path
+            raise AssertionError(
+                f"declared additive column {column.name!r} cannot be added to a populated "
+                f"table with definition {column.definition!r}: {exc}"
+            ) from exc
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("build_legacy", [_v1_baseline_sql, _pre_v4_sql], ids=["v1-baseline", "pre-v4"])
+def test_fresh_and_upgraded_databases_end_with_the_same_column_set(
+    tmp_path: Path, build_legacy: Any
+) -> None:
+    legacy_dir = tmp_path / "legacy"
+    fresh_dir = tmp_path / "fresh"
+    _open_legacy(legacy_dir, build_legacy())
+
+    assert _runs_columns(legacy_dir) == _runs_columns(fresh_dir) == set(ALL_NAMES)
