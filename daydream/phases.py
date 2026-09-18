@@ -100,6 +100,9 @@ from daydream.trajectory import (
     get_current_recorder,
     host_phase_scope,
     maybe_fork,
+    run_directory,
+    run_document_path,
+    siblings_directory,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -654,7 +657,7 @@ def _resolve_handoff_paths(
             session=artifact_session,
             allow_standalone=False,
         )
-        live_artifact_root = live_daydream_dir / "runs" / recorder.session_id
+        live_artifact_root = run_directory(live_daydream_dir, recorder.session_id)
         artifact_root = artifact_session.durable_path_for(live_artifact_root, repo=work.repo)
         diff_path = artifact_session.durable_path_for(
             live_daydream_dir / "diff.patch", repo=work.repo,
@@ -668,7 +671,7 @@ def _resolve_handoff_paths(
         # self-contained and post-cleanup references stay valid.
         from daydream.archive import get_archive_dir
 
-        artifact_root = get_archive_dir() / "runs" / recorder.session_id
+        artifact_root = run_directory(get_archive_dir(), recorder.session_id)
         diff_path = artifact_root / "diff.patch"
         deep_dir = artifact_root / "deep"
     else:
@@ -677,18 +680,18 @@ def _resolve_handoff_paths(
             session=artifact_session,
             allow_standalone=allow_standalone,
         )
-        artifact_root = daydream_dir / "runs" / recorder.session_id
+        artifact_root = run_directory(daydream_dir, recorder.session_id)
         diff_path = daydream_dir / "diff.patch"
         deep_dir = daydream_dir / "deep"
 
-    trajectory_path = artifact_root / "trajectory.json"
+    trajectory_path = run_document_path(artifact_root)
     if artifact_session is not None:
         trajectory_path = artifact_session.durable_path_for(recorder.path, repo=work.repo)
 
     return (
         artifact_root / "handoff.md",
         trajectory_path,
-        artifact_root / "trajectories",
+        siblings_directory(artifact_root),
         diff_path,
         artifact_root / "manifest.json",
         deep_dir,
