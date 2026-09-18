@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import daydream.backends.pi as pi_module
+from daydream.backends import _parsed_nonnegative_float, _parsed_nonnegative_int
 from daydream.backends._transport import (
     PROCESS_EXIT_EXCERPT_MAX_LINES,
     CliTransport,
@@ -20,7 +23,12 @@ from daydream.backends._transport import (
 )
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.osprey import OspreyBackend, OspreyError
-from daydream.backends.pi import PiBackend, PiError
+from daydream.backends.pi import (
+    _PI_DEFAULT_RETRY_ATTEMPTS,
+    PiBackend,
+    PiError,
+    _pi_retry_attempts,
+)
 from tests.harness.fake_cli_process import FakeCliProcess
 
 DIAG = [f"diag-{i:02d}" for i in range(1, 26)]  # 25 > every capture window (codex/pi 20, osprey 10)
@@ -102,6 +110,85 @@ def test_process_exit_message_reports_the_count_it_prints() -> None:
         "Pi CLI exited with return code 2.\n"
         "(no non-JSON output captured — pi may have crashed before writing to stdout)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared parser contracts (the helpers the pi env facades delegate to) plus
+# the delegating facades themselves. The parsers have no other direct test.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "warning"),
+    [
+        (None, 20, None),                                     # absent: silent default
+        ("5", 5, None),                                       # valid override
+        ("", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='' is not a valid integer; using default 20"),
+        ("-1", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='-1' is negative; using default 20"),
+        ("2.5", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='2.5' is not a valid integer; using default 20"),
+    ],
+    ids=["absent", "override", "empty", "negative", "not-an-int"],
+)
+def test_shared_nonnegative_int_parser(
+    caplog: pytest.LogCaptureFixture, raw: str | None, expected: int, warning: str | None
+) -> None:
+    environment = {} if raw is None else {"DAYDREAM_PI_RETRY_ATTEMPTS": raw}
+    with caplog.at_level(logging.WARNING):
+        assert _parsed_nonnegative_int(environment, "DAYDREAM_PI_RETRY_ATTEMPTS", 20) == expected
+    if warning is None:
+        assert caplog.text == ""          # a valid or absent value must not warn
+    else:
+        assert warning in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "warning"),
+    [
+        (None, 10.0, None),
+        ("0.5", 0.5, None),
+        ("", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='' is not a valid float; using default 10"),
+        ("nan", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='nan' is not finite; using default 10"),
+        ("inf", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='inf' is not finite; using default 10"),
+        ("-1", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='-1' is negative; using default 10"),
+    ],
+    ids=["absent", "override", "empty", "nan", "inf", "negative"],
+)
+def test_shared_nonnegative_float_parser(
+    caplog: pytest.LogCaptureFixture, raw: str | None, expected: float, warning: str | None
+) -> None:
+    environment = {} if raw is None else {"DAYDREAM_PI_RETRY_BASE_DELAY_S": raw}
+    with caplog.at_level(logging.WARNING):
+        value = _parsed_nonnegative_float(environment, "DAYDREAM_PI_RETRY_BASE_DELAY_S", 10.0)
+    assert value == pytest.approx(expected)
+    if warning is None:
+        assert caplog.text == ""          # the check order is pinned: nan/inf are caught before the sign check
+    else:
+        assert warning in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, _PI_DEFAULT_RETRY_ATTEMPTS),
+        ("5", 5),
+        ("", _PI_DEFAULT_RETRY_ATTEMPTS),
+        ("-1", _PI_DEFAULT_RETRY_ATTEMPTS),
+    ],
+    ids=["default", "override", "empty-warns", "negative-warns"],
+)
+def test_pi_facades_delegate_to_the_shared_parsers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: str | None, expected: int
+) -> None:
+    if env_value is not None:
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
+    with caplog.at_level(logging.WARNING):
+        assert _pi_retry_attempts() == expected
+    if env_value not in (None, "5"):
+        assert f"DAYDREAM_PI_RETRY_ATTEMPTS={env_value!r}" in caplog.text   # the warning still names the knob
+
+
+def test_pi_retry_delay_is_gone() -> None:
+    assert not hasattr(pi_module, "_pi_retry_delay")
 
 
 # ---------------------------------------------------------------------------

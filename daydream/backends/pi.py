@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import re
 import time
@@ -58,6 +57,8 @@ from daydream.backends import (
     _admit_json_value,
     _admit_native_unix_ms,
     _new_generation_id,
+    _parsed_nonnegative_float,
+    _parsed_nonnegative_int,
     resolve_fanout_concurrency,
     unix_ms_to_ns,
 )
@@ -229,68 +230,21 @@ def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None
 
 
 def _pi_retry_attempts() -> int:
-    raw = os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS")
-    if raw is None:
-        return _PI_DEFAULT_RETRY_ATTEMPTS
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "DAYDREAM_PI_RETRY_ATTEMPTS=%r is not a valid integer; using default %d",
-            raw,
-            _PI_DEFAULT_RETRY_ATTEMPTS,
-        )
-        return _PI_DEFAULT_RETRY_ATTEMPTS
-    if value < 0:
-        logger.warning(
-            "DAYDREAM_PI_RETRY_ATTEMPTS=%r is negative; using default %d",
-            raw,
-            _PI_DEFAULT_RETRY_ATTEMPTS,
-        )
-        return _PI_DEFAULT_RETRY_ATTEMPTS
-    return value
-
-
-def _pi_retry_delay(env_name: str, default: float) -> float:
-    """Read one finite, non-negative retry delay from the environment."""
-    raw = os.environ.get(env_name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not a valid float; using default %g",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-    if not math.isfinite(value):
-        logger.warning(
-            "%s=%r is not finite; using default %g",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-    if value < 0:
-        logger.warning(
-            "%s=%r is negative; using default %g",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-    return value
+    return _parsed_nonnegative_int(
+        os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS
+    )
 
 
 def _pi_retry_base_delay() -> float:
-    return _pi_retry_delay("DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY)
+    return _parsed_nonnegative_float(
+        os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY
+    )
 
 
 def _pi_retry_max_delay() -> float:
-    return _pi_retry_delay("DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY)
+    return _parsed_nonnegative_float(
+        os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY
+    )
 
 
 # Shared error-taxonomy tokens. The permanent set is deliberately checked
