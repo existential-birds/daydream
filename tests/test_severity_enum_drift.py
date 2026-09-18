@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+import daydream.improve.prompts as improve_prompts
 import daydream.phases as phases
 import daydream.severity as severity
 
@@ -49,14 +50,14 @@ _EXPECTED_ROOTS = frozenset(
     }
 )
 
-_REBUILD_SCRIPT = '''
+_REBUILD_TEMPLATE = '''
 import json
 
 import daydream.severity as severity
 
 severity.CANONICAL_LEVELS = ("high", "medium", "low", "critical")
 
-import daydream.phases as phases  # built AFTER the declaration moves
+import __MODULE__ as target  # built AFTER the declaration moves
 
 
 def walk(node, path, out):
@@ -72,14 +73,19 @@ def walk(node, path, out):
 
 
 found = []
-for name in sorted(dir(phases)):
+for name in sorted(dir(target)):
     if name.startswith("_") or not name.endswith("_SCHEMA"):
         continue
-    schema = getattr(phases, name)
+    schema = getattr(target, name)
     if isinstance(schema, dict):
-        walk(schema, f"daydream.phases.{name}", found)
+        walk(schema, f"__ROOT__.{name}", found)
 print(json.dumps(found))
 '''
+
+
+def _rebuild_script(module: str, root: str) -> str:
+    """The one subprocess rebuild walker, parameterized by module and emitted prefix."""
+    return _REBUILD_TEMPLATE.replace("__MODULE__", module).replace("__ROOT__", root)
 
 
 def _walk(node: Any, path: str, out: list[tuple[str, dict[str, Any]]]) -> None:
@@ -94,15 +100,23 @@ def _walk(node: Any, path: str, out: list[tuple[str, dict[str, Any]]]) -> None:
             _walk(value, f"{path}[{index}]", out)
 
 
-def _severity_sites() -> list[tuple[str, dict[str, Any]]]:
-    """Every (site path, severity fragment) in the public ``*_SCHEMA`` constants."""
+# Every module whose public ``*_SCHEMA`` constants carry a model-facing severity enum.
+# One walker and one rebuild template cover them all, so a traversal fix reaches both.
+_MODULES: dict[str, Any] = {
+    "phases": phases,
+    "improve.prompts": improve_prompts,
+}
+
+
+def _severity_sites(module: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Every (site path, severity fragment) in a module's public ``*_SCHEMA`` constants."""
     out: list[tuple[str, dict[str, Any]]] = []
-    for name in sorted(dir(phases)):
+    for name in sorted(dir(module)):
         if name.startswith("_") or not name.endswith("_SCHEMA"):
             continue
-        schema = getattr(phases, name)
+        schema = getattr(module, name)
         if isinstance(schema, dict):
-            _walk(schema, f"daydream.phases.{name}", out)
+            _walk(schema, f"{module.__name__}.{name}", out)
     return out
 
 
@@ -119,7 +133,16 @@ def _root_of(site: str) -> str:
     return site.split(".")[2]
 
 
-_SITES = _severity_sites()
+_SITES_BY_MODULE = {key: _severity_sites(module) for key, module in _MODULES.items()}
+_ALL_SITES = [
+    (key, site, fragment)
+    for key, sites in _SITES_BY_MODULE.items()
+    for site, fragment in sites
+]
+_ALL_SITE_IDS = [f"{key}::{site}" for key, site, _ in _ALL_SITES]
+
+# The phases-only view, kept for the guards that are specific to ``daydream.phases``.
+_SITES = _SITES_BY_MODULE["phases"]
 _SITE_IDS = [site for site, _ in _SITES]
 
 
@@ -129,8 +152,10 @@ def test_severity_sites_are_discovered() -> None:
     assert _EXPECTED_ROOTS <= {_root_of(site) for site in _SITE_IDS}
 
 
-@pytest.mark.parametrize("site,fragment", _SITES, ids=_SITE_IDS)
-def test_site_emits_the_frozen_model_facing_order(site: str, fragment: dict[str, Any]) -> None:
+@pytest.mark.parametrize("_key,site,fragment", _ALL_SITES, ids=_ALL_SITE_IDS)
+def test_site_emits_the_frozen_model_facing_order(
+    _key: str, site: str, fragment: dict[str, Any]
+) -> None:
     assert _levels(fragment) == FROZEN_MODEL_FACING, (
         f"{site} emits {_levels(fragment)}; the frozen model-facing order is {FROZEN_MODEL_FACING}"
     )
@@ -139,24 +164,30 @@ def test_site_emits_the_frozen_model_facing_order(site: str, fragment: dict[str,
 @pytest.fixture(scope="module")
 def rebuilt_under_patched_declaration(
     tmp_path_factory: pytest.TempPathFactory,
-) -> dict[str, dict[str, Any]]:
-    script = tmp_path_factory.mktemp("rebuild") / "rebuild.py"
-    script.write_text(_REBUILD_SCRIPT)
-    proc = subprocess.run(
-        [sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300
-    )
-    assert proc.returncode == 0, proc.stderr
-    return {site: fragment for site, fragment in json.loads(proc.stdout)}
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Rebuild every severity-bearing module under the patched declaration, once each."""
+    rebuilt: dict[str, dict[str, dict[str, Any]]] = {}
+    for key, module in _MODULES.items():
+        script = tmp_path_factory.mktemp(f"rebuild-{key}") / "rebuild.py"
+        script.write_text(_rebuild_script(module.__name__, module.__name__))
+        proc = subprocess.run(
+            [sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300
+        )
+        assert proc.returncode == 0, proc.stderr
+        rebuilt[key] = {site: fragment for site, fragment in json.loads(proc.stdout)}
+    return rebuilt
 
 
-@pytest.mark.parametrize("site,fragment", _SITES, ids=_SITE_IDS)
+@pytest.mark.parametrize("key,site,fragment", _ALL_SITES, ids=_ALL_SITE_IDS)
 def test_site_follows_the_declaration_when_the_declaration_moves(
+    key: str,
     site: str,
     fragment: dict[str, Any],
-    rebuilt_under_patched_declaration: dict[str, dict[str, Any]],
+    rebuilt_under_patched_declaration: dict[str, dict[str, dict[str, Any]]],
 ) -> None:
-    assert site in rebuilt_under_patched_declaration, f"{site} vanished when the declaration moved"
-    emitted = _levels(rebuilt_under_patched_declaration[site])
+    module_sites = rebuilt_under_patched_declaration[key]
+    assert site in module_sites, f"{site} vanished when the declaration moved"
+    emitted = _levels(module_sites[site])
     assert emitted == PATCHED_MODEL_FACING, (
         f"{site} emitted {emitted} under CANONICAL_LEVELS={PATCHED_DECLARATION!r}; the declaration "
         f"derives {PATCHED_MODEL_FACING}. A hand-written level list matches today's declaration and "
@@ -242,59 +273,10 @@ def test_fenced_verifier_accepts_exactly_the_canonical_vocabulary() -> None:
 # ``daydream.improve.prompts`` carries its own model-facing severity enum:
 # ``VET_SCHEMA``'s verdict severity, consumed as *canonical* severity by
 # ``improve/prioritize.py`` (through ``normalize_severity``). The
-# ``daydream.phases`` walk above cannot see it, so the same two proofs run here
-# against that module's public ``*_SCHEMA`` constants: introspection discovers
-# the sites, and the subprocess rebuild proves they follow the declaration
-# rather than coincidentally matching it today.
+# ``daydream.phases`` walk above cannot see it, so it is walked by the same
+# helpers and covered by the same parametrized proofs above.
 
-_IMPROVE_REBUILD_SCRIPT = '''
-import json
-
-import daydream.severity as severity
-
-severity.CANONICAL_LEVELS = ("high", "medium", "low", "critical")
-
-import daydream.improve.prompts as improve_prompts  # built AFTER the declaration moves
-
-
-def walk(node, path, out):
-    if isinstance(node, dict):
-        if isinstance(node.get("severity"), dict):
-            out.append([path, node["severity"]])
-        for key, value in node.items():
-            if isinstance(value, (dict, list)):
-                walk(value, f"{path}.{key}", out)
-    elif isinstance(node, list):
-        for index, value in enumerate(node):
-            walk(value, f"{path}[{index}]", out)
-
-
-found = []
-for name in sorted(dir(improve_prompts)):
-    if name.startswith("_") or not name.endswith("_SCHEMA"):
-        continue
-    schema = getattr(improve_prompts, name)
-    if isinstance(schema, dict):
-        walk(schema, f"daydream.improve.prompts.{name}", found)
-print(json.dumps(found))
-'''
-
-
-def _improve_severity_sites() -> list[tuple[str, dict[str, Any]]]:
-    """Every (site path, severity fragment) in ``daydream.improve.prompts``."""
-    import daydream.improve.prompts as improve_prompts
-
-    out: list[tuple[str, dict[str, Any]]] = []
-    for name in sorted(dir(improve_prompts)):
-        if name.startswith("_") or not name.endswith("_SCHEMA"):
-            continue
-        schema = getattr(improve_prompts, name)
-        if isinstance(schema, dict):
-            _walk(schema, f"daydream.improve.prompts.{name}", out)
-    return out
-
-
-_IMPROVE_SITES = _improve_severity_sites()
+_IMPROVE_SITES = _SITES_BY_MODULE["improve.prompts"]
 _IMPROVE_SITE_IDS = [site for site, _ in _IMPROVE_SITES]
 
 
@@ -303,41 +285,6 @@ def test_improve_severity_sites_are_discovered() -> None:
     assert _IMPROVE_SITES, "no severity-bearing *_SCHEMA discovered in daydream.improve.prompts"
     assert any(site.startswith("daydream.improve.prompts.VET_SCHEMA") for site in _IMPROVE_SITE_IDS), (
         f"the vet verdict severity site vanished from discovery: {_IMPROVE_SITE_IDS}"
-    )
-
-
-@pytest.mark.parametrize("site,fragment", _IMPROVE_SITES, ids=_IMPROVE_SITE_IDS)
-def test_improve_site_emits_the_frozen_model_facing_order(site: str, fragment: dict[str, Any]) -> None:
-    assert _levels(fragment) == FROZEN_MODEL_FACING, (
-        f"{site} emits {_levels(fragment)}; the frozen model-facing order is {FROZEN_MODEL_FACING}"
-    )
-
-
-@pytest.fixture(scope="module")
-def improve_rebuilt_under_patched_declaration(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> dict[str, dict[str, Any]]:
-    script = tmp_path_factory.mktemp("improve-rebuild") / "rebuild.py"
-    script.write_text(_IMPROVE_REBUILD_SCRIPT)
-    proc = subprocess.run(
-        [sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300
-    )
-    assert proc.returncode == 0, proc.stderr
-    return {site: fragment for site, fragment in json.loads(proc.stdout)}
-
-
-@pytest.mark.parametrize("site,fragment", _IMPROVE_SITES, ids=_IMPROVE_SITE_IDS)
-def test_improve_site_follows_the_declaration_when_the_declaration_moves(
-    site: str,
-    fragment: dict[str, Any],
-    improve_rebuilt_under_patched_declaration: dict[str, dict[str, Any]],
-) -> None:
-    assert site in improve_rebuilt_under_patched_declaration, f"{site} vanished when the declaration moved"
-    emitted = _levels(improve_rebuilt_under_patched_declaration[site])
-    assert emitted == PATCHED_MODEL_FACING, (
-        f"{site} emitted {emitted} under CANONICAL_LEVELS={PATCHED_DECLARATION!r}; the declaration "
-        f"derives {PATCHED_MODEL_FACING}. A hand-written level list matches today's declaration and "
-        f"cannot follow a later change."
     )
 
 

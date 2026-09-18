@@ -1,7 +1,8 @@
 import hashlib
+import re
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -752,9 +753,21 @@ def test_finding_severity_accepts_every_canonical_level_and_rejects_unknown() ->
 def test_finding_severity_declares_no_inline_level_literal() -> None:
     """A second inline literal cannot follow a declaration change, so the field must
     be typed by the shared vocabulary alias (spec requirement 4)."""
+    from daydream import severity
+
     source = (Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "schema.py").read_text()
     assert "SeverityLevel" in source
-    assert 'Literal["high", "medium", "low"]' not in source
+    # Whitespace/quote-insensitive so an alternate spelling or re-wrap of the inline
+    # literal cannot evade the guard.
+    inline = re.search(
+        r'Literal\s*\[\s*["\']high["\']\s*,\s*["\']medium["\']\s*,\s*["\']low["\']\s*\]',
+        source,
+    )
+    assert inline is None
+    # And the resolved annotation is bound to the shared declaration, not a copy.
+    annotation = Finding.model_fields["severity"].annotation
+    literal = next(arg for arg in get_args(annotation) if get_args(arg))
+    assert get_args(literal) == get_args(severity.SeverityLevel)
 
 
 def test_finding_location_must_be_relative_and_ordered() -> None:
