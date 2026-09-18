@@ -19,6 +19,7 @@ import pytest
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval.analyzer import (
+    _agent_label,
     _files_read,
     _latest_main_trajectory,
     _quality_python_parser,
@@ -3311,3 +3312,20 @@ def test_analyze_session_reports_location_and_shipped_duplication(
     assert result["findings"]["shipped_duplication"]["same_file_pairs"] == 1
     assert result["findings"]["shipped_duplication"]["near_duplicate_pairs"] == 0
     assert result["grounding"]["hunk_source"] == "hunk-index.json"
+
+
+# --- _agent_label (retained legacy tolerance) ---
+
+
+@pytest.mark.parametrize(
+    ("filename", "label"),
+    [
+        ("trajectory.json", "main"),
+        ("deep-python.json", "deep-python"),
+        ("trajectory-20260101T000000-abc123.json", "main"),
+        ("deadbeef.deep-python.json", "deep-python"),
+    ],
+)
+def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: str) -> None:
+    """The legacy shapes are retained deliberately — pin them instead of guessing they are dead."""
+    assert _agent_label(filename) == label

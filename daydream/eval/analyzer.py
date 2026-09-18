@@ -151,8 +151,10 @@ def _agent_label(filename: str) -> str:
         return "main"
     # Retained legacy tolerance: no producer emits the old
     # ``trajectory-<timestamp>.json`` / ``<hash>.deep-python.json`` names any
-    # more, but this parser is fed caller-supplied ``_source_file`` values and
-    # has no test coverage, so deleting the branch is unverifiable here (D8).
+    # more, but this parser is fed caller-supplied ``_source_file`` values, so
+    # deleting the branch is a behaviour change outside this refactor and
+    # "provably dead" is not established. Pinned by the characterisation test
+    # ``test_agent_label_keeps_its_legacy_filename_tolerance`` (D8).
     parts = filename.rsplit(".", 2)
     if len(parts) >= 3:
         return parts[1]
