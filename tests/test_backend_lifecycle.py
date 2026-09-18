@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -235,3 +236,93 @@ async def test_osprey_clean_exit_lifecycle() -> None:
     backend = OspreyBackend(osprey_binary="fake")
     _events, proc = await _drive(backend, _osprey_stream())
     _assert_clean_lifecycle(backend, proc)
+
+
+# ---------------------------------------------------------------------------
+# Structural guard: the reap / raise / teardown sequence lives once, in the
+# owner module. The detectors are liveness-proven (each is asserted to fire on
+# a synthetic offender) so an empty scan can never pass because it is broken.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_BACKENDS_DIR = _REPO_ROOT / "daydream" / "backends"
+_OWNER = "daydream/backends/_transport.py"
+_OWNER_SURFACE = frozenset({"reap", "raise_for_exit", "teardown"})
+
+
+def _forbidden_sites(source: str) -> list[tuple[str, int]]:
+    """(label, lineno) for every reap/raise shape that must live only in the owner."""
+    tree = ast.parse(source)
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "wait"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "transport"
+            ):
+                found.append(("awaits transport.wait()", node.lineno))
+        if (
+            isinstance(node, ast.ExceptHandler)
+            and isinstance(node.type, ast.Name)
+            and node.type.id == "TransportExitError"
+        ):
+            found.append(("except TransportExitError", node.lineno))
+        if (
+            isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Call)
+            and any(
+                kw.arg == "category"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == "PROCESS_EXIT"
+                for kw in node.exc.keywords
+            )
+        ):
+            found.append(('raise with category="PROCESS_EXIT"', node.lineno))
+    return found
+
+
+@pytest.mark.parametrize(
+    ("source", "label"),
+    [
+        ("async def f(transport):\n    await transport.wait()\n", "awaits transport.wait()"),
+        ("try:\n    pass\nexcept TransportExitError:\n    pass\n", "except TransportExitError"),
+        ('raise AdapterError("x", category="PROCESS_EXIT")\n', 'raise with category="PROCESS_EXIT"'),
+    ],
+)
+def test_the_guard_detects_each_forbidden_shape(source: str, label: str) -> None:
+    """Liveness: an empty scan can never pass silently — each detector is proven to fire."""
+    assert label in [found for found, _line in _forbidden_sites(source)]
+
+
+def test_no_adapter_owns_the_reap_or_the_process_exit_raise() -> None:
+    offenders: dict[str, list[tuple[str, int]]] = {}
+    modules = sorted(_BACKENDS_DIR.glob("*.py"))
+    assert modules, "the scan found no production modules"  # liveness: mis-rooted scan fails
+    for path in modules:
+        relative = path.relative_to(_REPO_ROOT).as_posix()
+        if relative == _OWNER:
+            continue
+        sites = _forbidden_sites(path.read_text(encoding="utf-8"))
+        if sites:
+            offenders[relative] = sites
+    assert not offenders, f"the reap / PROCESS_EXIT raise must live in {_OWNER}: {offenders}"
+
+
+def test_the_owner_still_carries_the_shared_surface() -> None:
+    """Liveness: the exemption is a property of the owner's contents, not of its filename."""
+    tree = ast.parse((_REPO_ROOT / _OWNER).read_text(encoding="utf-8"))
+    defined = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert _OWNER_SURFACE <= defined, f"{_OWNER} no longer defines {sorted(_OWNER_SURFACE - defined)}"
+    assert any(
+        isinstance(node, ast.ExceptHandler)
+        and isinstance(node.type, ast.Name)
+        and node.type.id == "TransportExitError"
+        for node in ast.walk(tree)
+    ), "the suppression handler must live in _OWNER"
