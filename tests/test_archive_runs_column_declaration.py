@@ -253,3 +253,32 @@ def test_fresh_and_upgraded_databases_end_with_the_same_column_set(
     _open_legacy(legacy_dir, build_legacy())
 
     assert _runs_columns(legacy_dir) == _runs_columns(fresh_dir) == set(ALL_NAMES)
+
+
+def test_generation_tracks_a_mutated_declaration() -> None:
+    source = Path(_schema.__file__).read_text()
+    start = source.index("RUNS_COLUMNS: tuple[RunColumn, ...] = (")
+    open_paren = source.index("(", start)
+    depth = 0
+    close_paren = -1
+    for index in range(open_paren, len(source)):
+        if source[index] == "(":
+            depth += 1
+        elif source[index] == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = index
+                break
+    assert close_paren > open_paren
+    probe = '    RunColumn("zzz_probe", "TEXT NOT NULL DEFAULT \'probe\'", True, True),\n'
+    mutated = source[:close_paren] + probe + source[close_paren:]
+
+    namespace: dict[str, Any] = {"__name__": "schema_mutated", "__file__": _schema.__file__}
+    exec(compile(mutated, "<schema_mutated>", "exec"), namespace)  # noqa: S102 - test-local namespace
+
+    mutated_columns = namespace["RUNS_COLUMNS"]
+    assert len(mutated_columns) == len(RUNS_COLUMNS) + 1
+    assert namespace["_CREATE_TABLE"] == namespace["_create_table_sql"](mutated_columns)
+    assert "    zzz_probe TEXT NOT NULL DEFAULT 'probe'\n" in namespace["_CREATE_TABLE"]
+    assert ("zzz_probe", "TEXT NOT NULL DEFAULT 'probe'") in namespace["_migration_entries"](mutated_columns)
+    assert ":zzz_probe" in namespace["_UPSERT_SQL"]
