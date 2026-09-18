@@ -11,6 +11,9 @@ deliberate edit is required to change them, which is the point.
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+
+import pytest
 
 from daydream.archive import _schema
 from daydream.archive._schema import RUNS_COLUMNS
@@ -126,3 +129,22 @@ def test_create_table_is_generated_and_byte_identical_to_the_frozen_text() -> No
     assert len(body) == len(RUNS_COLUMNS)
     assert all(line.startswith("    ") and not line.startswith("     ") for line in body)
     assert [line.strip().rstrip(",").split()[0] for line in body] == [col.name for col in RUNS_COLUMNS]
+
+
+def test_migration_entries_are_generated_and_match_the_frozen_pairs() -> None:
+    entries = _schema._migration_entries(RUNS_COLUMNS)
+    assert set(entries) == FROZEN_MIGRATION_ENTRIES
+    assert entries == [(col.name, col.definition) for col in RUNS_COLUMNS if col.additive]
+
+
+def test_migrate_schema_applies_the_generated_entries_in_declaration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, list[tuple[str, str]]]] = []
+
+    def _capture(conn: sqlite3.Connection, table: str, migrations: list[tuple[str, str]]) -> None:
+        captured.append((table, list(migrations)))
+
+    monkeypatch.setattr(_schema, "_alter_add_missing", _capture)
+    _schema._migrate_schema(sqlite3.connect(":memory:"))
+    assert captured == [("runs", _schema._migration_entries(RUNS_COLUMNS))]

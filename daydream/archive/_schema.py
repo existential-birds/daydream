@@ -245,43 +245,21 @@ def _alter_add_missing(
                     raise
 
 
+def _migration_entries(columns: Iterable[RunColumn]) -> list[tuple[str, str]]:
+    """Render the ``(name, type)`` ALTER-ADD entries for the additive *columns*.
+
+    Non-additive entries are omitted: they are present in every legacy shape by
+    construction (``archived_at``, ``run_flow`` and ``archive_path`` are
+    ``NOT NULL`` without defaults and cannot be added to a populated table). The
+    emitted order follows the declaration; ``_alter_add_missing`` filters by
+    live ``PRAGMA table_info``, so order is not a contract.
+    """
+    return [(col.name, col.definition) for col in columns if col.additive]
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
-    _alter_add_missing(
-        conn,
-        "runs",
-        [
-            ("review_backend", "TEXT"),
-            ("fix_backend", "TEXT"),
-            ("test_backend", "TEXT"),
-            ("per_stack_review_backend", "TEXT"),
-            ("per_stack_review_model", "TEXT"),
-            ("rubric_json", "TEXT"),
-            ("base_sha", "TEXT"),
-            ("changed_files", "TEXT"),
-            ("composite_reward", "REAL"),
-            ("source_path", "TEXT"),
-            ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
-            ("erosion", "REAL"),
-            ("verbosity", "REAL"),
-            ("location_in_hunk_rate", "REAL"),
-            ("shipped_duplicate_pairs", "INTEGER"),
-            ("fix_quality_gate", "TEXT"),
-            ("recommended_patch_capture", "TEXT"),
-            ("archive_status", "TEXT NOT NULL DEFAULT 'complete'"),
-            ("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'"),
-            ("phase_states", "TEXT"),
-            ("daydream_version", "TEXT"),
-            ("daydream_install_source", "TEXT"),
-            ("daydream_commit", "TEXT"),
-            ("daydream_dirty", "INTEGER"),
-            ("daydream_container_digest", "TEXT"),
-            ("profile_schema_version", "INTEGER"),
-            ("profile_name", "TEXT"),
-            ("profile_source_kind", "TEXT"),
-            ("profile_digest", "TEXT"),
-        ],
-    )
+    _alter_add_missing(conn, "runs", _migration_entries(RUNS_COLUMNS))
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
