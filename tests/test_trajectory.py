@@ -30,15 +30,24 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.trajectory import (
+    PARTIAL_SUFFIX,
+    RUN_DOCUMENT_NAME,
     DaydreamPhase,
     DaydreamRunFlow,
     Invocation,
     Redactor,
+    RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     _safe_descriptor,
     get_current_recorder,
     now_iso,
+    partial_document_path,
     redact_text,
+    run_directory,
+    run_document_path,
+    sibling_document_path,
+    snapshot_trajectories,
 )
 from tests.harness.trajectory import (
     make_recorder,
@@ -970,6 +979,55 @@ async def test_lifecycle_reason_redaction_omits_exception_details(
     assert terminal["reason_code"] == "uncaught_exception"
 
 
+SESSION = "11111111-2222-3333-4444-555555555555"
+
+
+def _payload(trajectory_id: str) -> bytes:
+    return json.dumps(
+        {"session_id": SESSION, "trajectory_id": trajectory_id, "steps": []}, sort_keys=True
+    ).encode()
+
+
+def _replace_snapshot_root(snapshot: RunWriteSnapshot, root_path: Path) -> RunWriteSnapshot:
+    documents = tuple(
+        TrajectoryDocumentSnapshot(document.trajectory_id, root_path, document.json_bytes)
+        if document.trajectory_id == snapshot.root_trajectory_id
+        else document
+        for document in snapshot.documents
+    )
+    return RunWriteSnapshot(
+        status=snapshot.status,
+        cutoff_at=snapshot.cutoff_at,
+        root_trajectory_id=snapshot.root_trajectory_id,
+        documents=documents,
+    )
+
+
+def test_producer_labels_and_partial_paths_come_from_the_layout_surface(tmp_path: Path) -> None:
+    """`_source_file` names and the partial path are derived, not retyped."""
+    run_dir = run_directory(tmp_path / ".daydream", SESSION)
+    sibling = sibling_document_path(run_dir, "deep-python.json")
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:00Z",
+        root_trajectory_id=SESSION,
+        documents=(
+            TrajectoryDocumentSnapshot(SESSION, run_document_path(run_dir), _payload(SESSION)),
+            TrajectoryDocumentSnapshot("fork-1", sibling, _payload("fork-1")),
+        ),
+    )
+    frozen = snapshot_trajectories(snapshot)
+    assert frozen["main"]["_source_file"] == RUN_DOCUMENT_NAME
+    assert [d["_source_file"] for d in frozen["forked"]] == ["deep-python.json"]
+
+    partial = partial_document_path(run_document_path(run_dir))
+    assert partial.name == f"{RUN_DOCUMENT_NAME}{PARTIAL_SUFFIX}"
+    assert (
+        snapshot_trajectories(_replace_snapshot_root(snapshot, partial))["main"]["_source_file"]
+        == RUN_DOCUMENT_NAME
+    )
+
+
 def test_lifecycle_snapshot_value_types_are_frozen(tmp_path: Path) -> None:
     """Task 1 freezes the immutable payload types consumed by Task 5."""
     assert hasattr(trajectory_module, "TrajectoryDocumentSnapshot")
@@ -1756,7 +1814,7 @@ async def test_signal_flush_freezes_all_documents_before_one_callback(
     tmp_path: Path,
 ) -> None:
     """A run-wide partial snapshot has one cutoff and immutable written bytes."""
-    from daydream.trajectory import RunWriteSnapshot, flush_active_signal_recorders
+    from daydream.trajectory import flush_active_signal_recorders
 
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
@@ -1805,7 +1863,7 @@ async def test_signal_flush_with_child_evidence_freezes_schema_valid_empty_root(
     tmp_path: Path,
 ) -> None:
     """An early fan-out signal retains root lifecycle evidence without an LLM call."""
-    from daydream.trajectory import RunWriteSnapshot, flush_active_signal_recorders
+    from daydream.trajectory import flush_active_signal_recorders
 
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
@@ -1858,7 +1916,7 @@ async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged run snapshot reuses bytes; child progress advances its cutoff."""
-    from daydream.trajectory import RunWriteSnapshot, flush_active_signal_recorders
+    from daydream.trajectory import flush_active_signal_recorders
 
     ticks = iter(f"2026-09-06T00:00:{second:02d}.000000Z" for second in range(60))
     monkeypatch.setattr(trajectory_module, "now_iso", lambda: next(ticks))
@@ -1897,7 +1955,7 @@ async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapsh
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A root freeze failure writes no child-only snapshot and a retry recovers."""
-    from daydream.trajectory import RunWriteSnapshot, flush_active_signal_recorders
+    from daydream.trajectory import flush_active_signal_recorders
 
     snapshots: list[RunWriteSnapshot] = []
     warnings: list[str] = []

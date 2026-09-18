@@ -633,9 +633,9 @@ def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
             raise ValueError("frozen trajectory identity mismatch")
         copied = dict(payload)
         copied["_source_file"] = (
-            "trajectory.json"
+            RUN_DOCUMENT_NAME
             if document.trajectory_id == write_snapshot.root_trajectory_id
-            else document.path.name.removesuffix(".partial")
+            else document.path.name.removesuffix(PARTIAL_SUFFIX)
         )
         if document.trajectory_id == write_snapshot.root_trajectory_id:
             if main is not None:
@@ -3277,7 +3277,7 @@ class TrajectoryRecorder:
     allowing sensitive values to pass through.
 
     Attributes:
-        path: Output JSON path; default ``<target>/.daydream/runs/<session_id>/trajectory.json``.
+        path: Output JSON path; default ``run_document_path(run_directory(<target>/.daydream, <session_id>))``.
         run_flow: Per-trajectory invariant (D-07) stamped on every Step.
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
@@ -4082,7 +4082,7 @@ class TrajectoryRecorder:
             payload.setdefault("extra", {})["partial"] = True
         path = self.path
         if status == "partial":
-            path = path.with_suffix(path.suffix + ".partial")
+            path = partial_document_path(path)
         return TrajectoryDocumentSnapshot(
             trajectory_id=self.trajectory_id,
             path=path,
@@ -4123,10 +4123,10 @@ class TrajectoryRecorder:
         return self._partial_cutoff_at
 
     def _write_partial_self(self) -> bool:
-        """Write only this recorder's in-flight state to ``<path>.partial``.
+        """Write only this recorder's in-flight state to ``partial_document_path(self.path)``.
 
         Per D-07 the partial trajectory lives at a sibling path with the
-        ``.partial`` suffix appended to the full filename (e.g.
+        ``PARTIAL_SUFFIX`` appended to the full filename (e.g.
         ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
         ``partial=true`` so consumers can detect incomplete runs without
         path-string parsing. Steps from any in-flight Invocation are
