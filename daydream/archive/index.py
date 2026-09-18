@@ -94,6 +94,7 @@ from daydream.archive._schema import (
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.manifest import Manifest
+from daydream.trajectory import RUNS_DIRNAME
 
 # Re-export for callers (including tests) that import these names from this module.
 __all__ = [
@@ -766,7 +767,7 @@ def _remove_bundles(archive_dir: Path, ids: list[str]) -> None:
     (including traversal-shaped ids or archive paths outside ``runs/``) is
     left untouched.
     """
-    runs_root = (archive_dir / "runs").resolve()
+    runs_root = (archive_dir / RUNS_DIRNAME).resolve()
     for sid in ids:
         if not sid or Path(sid).name != sid:
             continue

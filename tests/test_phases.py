@@ -4426,6 +4426,51 @@ def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path: P
     assert deep is not None and not deep.exists()
 
 
+@pytest.mark.asyncio
+async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """The handoff artifact root is the owner's run directory, not a hand-composed path.
+
+    The resolver returns the same live run directory the recorder writes into,
+    composed through the layout surface, so a reader never re-derives
+    ``<root>/runs/<session_id>/trajectory.json`` on its own.
+    """
+    from daydream.artifact_visibility import artifact_dir_for
+    from daydream.phases import _resolve_handoff_paths
+    from daydream.trajectory import (
+        DaydreamRunFlow,
+        run_directory,
+        run_document_path,
+        siblings_directory,
+    )
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    work = make_work(repo)
+    live_daydream = artifact_dir_for(repo, allow_standalone=True)
+    session_id = "handoff-layout"
+    run_dir = run_directory(live_daydream, session_id)
+    recorder = TrajectoryRecorder(
+        path=run_document_path(run_dir),
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=repo,
+        artifact_run_dir=run_dir,
+        agent_model_name="fake-external",
+        session_id=session_id,
+    )
+    async with recorder:
+        handoff, trajectory_path, trajectories_dir, *_ = _resolve_handoff_paths(
+            recorder, work, allow_standalone=True
+        )
+
+    assert trajectory_path == run_document_path(run_dir)
+    assert trajectories_dir == siblings_directory(run_dir)
+    assert handoff == run_dir / "handoff.md"
+    assert trajectory_path.parent == run_dir
+
+
 # _write_handoff — must report write failure so the caller can fall back
 
 

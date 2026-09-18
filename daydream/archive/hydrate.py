@@ -49,7 +49,7 @@ from daydream.archive.index import upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
-from daydream.trajectory import redact_text
+from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,39}$")
@@ -196,7 +196,7 @@ class DownloadResult:
     incomplete_manifests: tuple[str, ...] = ()
 
 
-_REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", "trajectory.json"))
+_REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", RUN_DOCUMENT_NAME))
 _DERIVED_ARCHIVE_ROOTS = frozenset(("annotations", "curated"))
 # Root names that are never valid session ids at depth 1, in either layout.
 # ``bronze`` is the immutable raw-ingest tree (M10): hydration must never
@@ -679,7 +679,7 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
             results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
             continue
         derivative = stage / "sanitized" / session_id
-        target = stage / "runs" / session_id
+        target = stage / RUNS_DIRNAME / session_id
         if target.exists():
             shutil.rmtree(target)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -736,7 +736,7 @@ def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collis
     bundle); ``(None, None)`` when no manifest is readable anywhere.
     """
     segment = sid if _is_bare_segment(sid) else hashlib.sha256(sid.encode()).hexdigest()
-    candidates = [stage / "runs" / sid]
+    candidates = [stage / RUNS_DIRNAME / sid]
     if collision:
         candidates.append(stage / "quarantine" / f"{segment}.conflict")
     candidates += [stage / root / segment,
@@ -825,7 +825,7 @@ def apply_license_gate(
     ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
     rejected: list[tuple[str, str]] = []
     unresolved = _repo_commit_unresolved_sessions(stage)
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             data = _read_manifest_dict(derivative)
@@ -894,7 +894,7 @@ def rebuild_index(stage: Path) -> None:
     ``upsert_run`` errors propagate — an admitted bundle is never silently
     skipped.
     """
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     if not runs_dir.is_dir():
         return
     for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
@@ -1096,7 +1096,7 @@ def _policy_binding(
     )
 
     decisions: dict[str, tuple[str, str | None, str | None]] = {}
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             data = _read_manifest_dict(derivative)
@@ -1286,7 +1286,7 @@ def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
     (latest-entry-wins, same convention as the dedupe pass itself)."""
     from daydream.archive import sanitize  # noqa: PLC0415  # local: avoid import cycle
 
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     if not runs_dir.is_dir():
         return
     curated = _pre_identity_dir(stage, revision)
@@ -1386,7 +1386,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     # over the published baseline (M7 durability across re-runs).
     ledger = _DedupeLedger.load(ledger_path)
     result = DedupeResult()
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             name = derivative.name
@@ -1913,7 +1913,7 @@ def publish_batches(
     prefix = f"curated/{curation_id}/"
     relpaths = sorted(f.relative_to(curated).as_posix() for f in files)
     # Bronze safety gate: assert nothing escapes the curated prefix (M10/M13).
-    assert all(not p.startswith(("bronze", "runs/", "downloads/")) and ".." not in p
+    assert all(not p.startswith(("bronze", f"{RUNS_DIRNAME}/", "downloads/")) and ".." not in p
                for p in relpaths), relpaths
 
     # SHA256SUMS covers every published file except itself (self-inclusion would
@@ -1940,7 +1940,7 @@ def publish_batches(
 
 def _stage_batches(stage: Path, curated: Path) -> None:
     """Copy every admitted derivative (``stage/runs/<sid>``) into ``batches/<sid>/``."""
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     if not runs_dir.is_dir():
         return
     for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):

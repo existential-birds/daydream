@@ -53,6 +53,7 @@ from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
 from daydream.training.stacks import V2Projection, load_v2_projection, recompute_split_from_record_id
+from daydream.trajectory import RUNS_DIRNAME
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
@@ -293,7 +294,7 @@ def _materialize_diff(rec: dict[str, Any]) -> str | None:
     # M17 derivative bundles legitimately live under ``runs/sanitized/...``,
     # reached via a ``../sanitized/...`` pointer; anything resolving outside
     # the archive root is treated as unavailable (fail-closed), never read.
-    target = (archive_root / "runs" / sid / rel).resolve()
+    target = (archive_root / RUNS_DIRNAME / sid / rel).resolve()
     if not target.is_relative_to(archive_root.resolve()):
         return None
     if not target.is_file():

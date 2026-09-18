@@ -6,6 +6,7 @@ import pytest
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.training.adjudication.materialize import run_materialize
+from daydream.trajectory import run_directory, run_document_path
 
 
 def _index(tmp_path: Path) -> Path:
@@ -186,11 +187,15 @@ def _make_labels_only_rubric(root: Path) -> None:
 
 
 def _seed_legacy_trajectory(root: Path, session_id: str = "s1") -> None:
-    """Legacy hydrated trajectory: ``runs/<session_id>/trajectory.json`` with a
-    ``resolutions`` key — the pre-#1095 materialization source."""
-    trajectory_dir = root / "runs" / session_id
-    trajectory_dir.mkdir(parents=True)
-    trajectory_dir.joinpath("trajectory.json").write_text(json.dumps({
+    """Legacy hydrated trajectory: the layout run directory's root document with
+    a ``resolutions`` key — the pre-#1095 materialization source.
+
+    Composes through the layout surface so the fixture addresses the run
+    exactly the way the readers under test do.
+    """
+    trajectory_path = run_document_path(run_directory(root, session_id))
+    trajectory_path.parent.mkdir(parents=True)
+    trajectory_path.write_text(json.dumps({
         "session_id": session_id,
         "trajectory_id": session_id,
         "segment_id": session_id,
@@ -217,6 +222,20 @@ def test_materialize_serves_legacy_labels_only_rows_from_trajectory(tmp_path: Pa
     assert record["fingerprint"] == "fp-1"
     assert record["disposition"] == "accepted"
     assert record["evidence_digest"] == "d" * 32
+
+
+def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> None:
+    """The hydrated-index readers address `<index_root>/runs/<sid>/trajectory.json` via the surface."""
+    from daydream.training.adjudication.cli import _hydrated_identity_index
+    from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly
+
+    root = _hydrated_sqlite_index(tmp_path)
+    _make_labels_only_rubric(root)
+    _seed_legacy_trajectory(root, "s1")
+
+    assert run_document_path(run_directory(root, "s1")).is_file()
+    assert _trajectory_resolutions_readonly(root, "s1") is not None
+    assert _hydrated_identity_index([{"session_id": "s1"}], root)["s1"]["record_id"] == "s1"
 
 
 def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(

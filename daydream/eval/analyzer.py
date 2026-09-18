@@ -32,7 +32,13 @@ from daydream.artifact_visibility import ArtifactEvidenceProvenance
 from daydream.generated_files import is_generated_file
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.timeutil import parse_iso_timestamp
-from daydream.trajectory import redact_text
+from daydream.trajectory import (
+    RUN_DOCUMENT_NAME,
+    RUNS_DIRNAME,
+    redact_text,
+    run_document_path,
+    siblings_directory,
+)
 
 # Trajectory loading
 
@@ -41,7 +47,7 @@ def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
 
     New layout: ``runs/<session_id>/trajectory.json``.
     """
-    candidates = list(daydream_dir.glob("runs/*/trajectory.json"))
+    candidates = list(daydream_dir.glob(f"{RUNS_DIRNAME}/*/{RUN_DOCUMENT_NAME}"))
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -50,10 +56,10 @@ def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
 def _run_dir_trajectory_paths(run_dir: Path) -> list[Path]:
     """``trajectory.json`` plus sorted ``trajectories/*.json`` directly under *run_dir*."""
     paths: list[Path] = []
-    main_path = run_dir / "trajectory.json"
+    main_path = run_document_path(run_dir)
     if main_path.is_file():
         paths.append(main_path)
-    siblings_dir = run_dir / "trajectories"
+    siblings_dir = siblings_directory(run_dir)
     if siblings_dir.is_dir():
         paths.extend(f for f in sorted(siblings_dir.glob("*.json")) if f.is_file())
     return paths
@@ -91,7 +97,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
     """
     main = None
     forked: list[dict[str, Any]] = []
-    runs_dir = daydream_dir / "runs"
+    runs_dir = daydream_dir / RUNS_DIRNAME
 
     # --- Resolve the run directory ------------------------------------------
     run_dir: Path | None = None
@@ -120,7 +126,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
         for path in _run_dir_trajectory_paths(run_dir):
             data = json.loads(path.read_text())
             data["_source_file"] = path.name
-            if path.name == "trajectory.json":
+            if path.name == RUN_DOCUMENT_NAME:
                 main = data
             else:
                 forked.append(data)
@@ -143,6 +149,12 @@ def _agent_label(filename: str) -> str:
     """
     if filename.startswith("trajectory"):
         return "main"
+    # Retained legacy tolerance: no producer emits the old
+    # ``trajectory-<timestamp>.json`` / ``<hash>.deep-python.json`` names any
+    # more, but this parser is fed caller-supplied ``_source_file`` values, so
+    # deleting the branch is a behaviour change outside this refactor and
+    # "provably dead" is not established. Pinned by the characterisation test
+    # ``test_agent_label_keeps_its_legacy_filename_tolerance`` (D8).
     parts = filename.rsplit(".", 2)
     if len(parts) >= 3:
         return parts[1]
@@ -1646,7 +1658,7 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
                 canonical["trajectory_id"] = trajectory_id
             filename = payload.get("_source_file")
             if not isinstance(filename, str):
-                filename = "trajectory.json" if index == 0 else f"trajectory-{index}.json"
+                filename = RUN_DOCUMENT_NAME if index == 0 else f"trajectory-{index}.json"
             documents.append(
                 TrajectoryDocumentSnapshot(
                     trajectory_id=trajectory_id,

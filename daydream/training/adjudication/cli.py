@@ -926,6 +926,8 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
         ValueError: When the root has no ``index.db`` or no
             ``label_observations`` table — always naming the path.
     """
+    from daydream.trajectory import run_directory
+
     db_path = root / "index.db"
     if not db_path.is_file():
         raise ValueError(
@@ -967,7 +969,7 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
             # precedence marker to the writer's own default ("auto") so no
             # downstream ``row["source"]`` read raises KeyError on a legacy row.
             row["source"] = "auto"
-        runs_dir = root / "runs" / str(row["session_id"])
+        runs_dir = run_directory(root, str(row["session_id"]))
         if runs_dir.is_dir():
             # Derivative content digest for identity linkage: the hydrated
             # index side derives the same digest over its own runs/<sid>
@@ -1233,11 +1235,12 @@ def _hydrated_identity_index(
     ``None``) plus the identity ``record_id``.
     """
     from daydream.archive.sanitize import _derivative_digest
+    from daydream.trajectory import run_directory
 
     hydrated: dict[str, dict[str, Any]] = {}
     for session in sessions:
         session_id = str(session["session_id"])
-        runs_dir = index_root / "runs" / session_id
+        runs_dir = run_directory(index_root, session_id)
         hydrated[session_id] = {
             "derivative_digest": _derivative_digest(runs_dir) if runs_dir.is_dir() else None,
             "record_id": session_id,

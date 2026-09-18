@@ -580,15 +580,16 @@ from daydream.artifact_visibility import artifact_dir_for
 from daydream.extensions import FlowStep, Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import prepare_sanctioned_inputs
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, run_directory
 
 DAYDREAM_EXT_API = 6
 
 async def explain_note(ctx: FlowContext) -> None:
     assert ctx.artifacts is not None
-    note = artifact_dir_for(
-        ctx.work.repo, session=ctx.artifacts, allow_standalone=False,
-    ) / "runs" / ctx.artifacts.layout.session_id / "extension-note.txt"
+    note = run_directory(
+        artifact_dir_for(ctx.work.repo, session=ctx.artifacts, allow_standalone=False),
+        ctx.artifacts.layout.session_id,
+    ) / "extension-note.txt"
     note.parent.mkdir(parents=True, exist_ok=True)
     note.write_text("Review this repository's error-handling conventions.", encoding="utf-8")
     backend = ctx.backend_for("review")
@@ -641,9 +642,11 @@ These methods validate the owning session, repository, registered route, and
 path ancestry. They reject unrelated paths and destinations without a live
 write route, including finalization-only artifact dumps.
 
-Place extension artifacts under the current `runs/<session_id>/` directory.
-Legacy adoption accepts only registered top-level artifact names; an unknown
-sibling is rejected even when the tree also contains a recognized directory.
+Place extension artifacts under the current `runs/<session_id>/` run directory,
+composed with `daydream.trajectory.run_directory(root, session_id)` rather than
+retyped. Legacy adoption accepts only registered top-level artifact names; an
+unknown sibling is rejected even when the tree also contains a recognized
+directory.
 Previously published custom paths can reopen when their complete subtree
 matches the validated canonical recovery copy.
 

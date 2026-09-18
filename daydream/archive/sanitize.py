@@ -42,7 +42,7 @@ from typing import Any
 
 from daydream.archive import scan
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
-from daydream.trajectory import redact_text, redact_value
+from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
 
 __all__ = ["ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive", "sanitize_bundle"]
 
@@ -377,7 +377,7 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
     sanitized_dir.mkdir(parents=True, exist_ok=True)
     completed = _read_progress(sanitized_dir)
     results: list[SanitizeResult] = []
-    runs_dir = archive_dir / "runs"
+    runs_dir = archive_dir / RUNS_DIRNAME
     if not runs_dir.is_dir():
         return results
     for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
@@ -438,7 +438,7 @@ def report_inventory(archive_dir: Path) -> dict[str, int]:
     A malformed manifest counts under ``"unparseable"``. Never raises.
     """
     counts: dict[str, int] = {}
-    runs_dir = archive_dir / "runs"
+    runs_dir = archive_dir / RUNS_DIRNAME
     if runs_dir.is_dir():
         for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             manifest = run_dir / "manifest.json"

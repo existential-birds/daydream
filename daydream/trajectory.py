@@ -56,11 +56,17 @@ from daydream.json_utils import atomic_write_json
 from daydream.timeutil import parse_iso_timestamp
 from daydream.ui import create_console, print_error, print_warning
 
-# Run-directory layout. Live + archive trajectories share an identical on-disk
-# shape (<root>/runs/<session_id>/trajectory.json and .../trajectories/<descriptor>.json);
-# live root is <target>/.daydream, archive root is per daydream.archive.
-_RUNS_SUBDIR = "runs"
-_TRAJECTORIES_SUBDIR = "trajectories"
+# Run-document layout: this module is the sole declaration of
+# <root>/runs/<session_id>/trajectory.json and the sibling <root>/runs/<session_id>/
+# trajectories/<descriptor>.json set. The same shape is carried by the live
+# <target>/.daydream root, the public live root, the archive root and the hydrated
+# index root; every reader composes it through the helpers below rather than
+# retyping the names. The archive *bundle* layout (manifest, diff, deep/, handoff)
+# is deliberately not unified with this shape beyond the shared names.
+RUNS_DIRNAME = "runs"
+RUN_DOCUMENT_NAME = "trajectory.json"
+SIBLINGS_DIRNAME = "trajectories"
+PARTIAL_SUFFIX = ".partial"
 _DAYDREAM_DIRNAME = ".daydream"
 
 if TYPE_CHECKING:
@@ -343,13 +349,57 @@ def _safe_descriptor(raw: str) -> str:
     return slug
 
 
+def run_directory(root: Path, session_id: str) -> Path:
+    """Return the per-run directory under the layout *root*.
+
+    *root* is any layout root (the live ``<target>/.daydream``, the public live
+    root, the archive root, or the hydrated index root); this helper composes no
+    ``.daydream`` segment and validates no session identity -- callers own both.
+    """
+    return root / RUNS_DIRNAME / session_id
+
+
+def run_document_path(run_dir: Path) -> Path:
+    """Return the run's root trajectory document within *run_dir*.
+
+    Takes the run directory, not ``(root, session_id)``: three callers hold one
+    and no root. It performs no existence or identity validation.
+    """
+    return run_dir / RUN_DOCUMENT_NAME
+
+
+def siblings_directory(run_dir: Path) -> Path:
+    """Return the directory holding a run's sibling trajectory documents."""
+    return run_dir / SIBLINGS_DIRNAME
+
+
+def sibling_document_path(run_dir: Path, name: str) -> Path:
+    """Return a named sibling document path within *run_dir*.
+
+    *name* is the full file name (e.g. ``"deep-python.json"``); the helper adds
+    the siblings directory and nothing else. It validates no duplicate or
+    descriptor identity.
+    """
+    return siblings_directory(run_dir) / name
+
+
+def partial_document_path(document: Path) -> Path:
+    """Return the partial-write variant of *document*.
+
+    The ``.partial`` suffix is appended after the existing suffix, so dotted names
+    are preserved (``a.b.json`` -> ``a.b.json.partial``). The helper only composes
+    the path; the caller owns deciding when a document is partial.
+    """
+    return document.with_suffix(document.suffix + PARTIAL_SUFFIX)
+
+
 def default_trajectory_path(target_dir: Path, session_id: str) -> Path:
     """Return the default trajectory path under ``<target>/.daydream/runs/<session_id>/``.
 
     The session_id segment guarantees uniqueness per run; the recorder
     creates the directory before its first write.
     """
-    return target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / session_id / "trajectory.json"
+    return run_document_path(run_directory(target_dir / _DAYDREAM_DIRNAME, session_id))
 
 
 def maybe_fork(
@@ -583,9 +633,9 @@ def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
             raise ValueError("frozen trajectory identity mismatch")
         copied = dict(payload)
         copied["_source_file"] = (
-            "trajectory.json"
+            RUN_DOCUMENT_NAME
             if document.trajectory_id == write_snapshot.root_trajectory_id
-            else document.path.name.removesuffix(".partial")
+            else document.path.name.removesuffix(PARTIAL_SUFFIX)
         )
         if document.trajectory_id == write_snapshot.root_trajectory_id:
             if main is not None:
@@ -3227,7 +3277,7 @@ class TrajectoryRecorder:
     allowing sensitive values to pass through.
 
     Attributes:
-        path: Output JSON path; default ``<target>/.daydream/runs/<session_id>/trajectory.json``.
+        path: Output JSON path; default ``run_document_path(run_directory(<target>/.daydream, <session_id>))``.
         run_flow: Per-trajectory invariant (D-07) stamped on every Step.
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
@@ -3806,14 +3856,14 @@ class TrajectoryRecorder:
             slug = f"{slug[:80]}--{identity_digest}"
         run_dir = self.artifact_run_dir
         if run_dir is None:
-            run_dir = self.target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / self.session_id
-        return run_dir / _TRAJECTORIES_SUBDIR / f"{slug}.json"
+            run_dir = run_directory(self.target_dir / _DAYDREAM_DIRNAME, self.session_id)
+        return sibling_document_path(run_dir, f"{slug}.json")
 
     def _logical_child_trajectory_ref(self, child_path: Path) -> str:
         """Return a child path relative to the stable public ``.daydream`` root."""
         if self.artifact_run_dir is not None:
             relative = child_path.relative_to(self.artifact_run_dir)
-            return (Path(_RUNS_SUBDIR) / self.session_id / relative).as_posix()
+            return (Path(RUNS_DIRNAME) / self.session_id / relative).as_posix()
         return child_path.relative_to(self.target_dir / _DAYDREAM_DIRNAME).as_posix()
 
     def fork(
@@ -4032,7 +4082,7 @@ class TrajectoryRecorder:
             payload.setdefault("extra", {})["partial"] = True
         path = self.path
         if status == "partial":
-            path = path.with_suffix(path.suffix + ".partial")
+            path = partial_document_path(path)
         return TrajectoryDocumentSnapshot(
             trajectory_id=self.trajectory_id,
             path=path,
@@ -4073,10 +4123,10 @@ class TrajectoryRecorder:
         return self._partial_cutoff_at
 
     def _write_partial_self(self) -> bool:
-        """Write only this recorder's in-flight state to ``<path>.partial``.
+        """Write only this recorder's in-flight state to ``partial_document_path(self.path)``.
 
         Per D-07 the partial trajectory lives at a sibling path with the
-        ``.partial`` suffix appended to the full filename (e.g.
+        ``PARTIAL_SUFFIX`` appended to the full filename (e.g.
         ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
         ``partial=true`` so consumers can detect incomplete runs without
         path-string parsing. Steps from any in-flight Invocation are

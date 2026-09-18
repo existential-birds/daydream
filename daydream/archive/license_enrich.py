@@ -42,7 +42,7 @@ from daydream.archive.hydrate import (
     _read_manifest_dict,
 )
 from daydream.training.corpus_projection.license import normalize_repo_slug
-from daydream.trajectory import redact_text
+from daydream.trajectory import RUNS_DIRNAME, redact_text
 
 _ENRICH_DIR = "_enrich"
 _ENRICH_CACHE_NAME = "evidence.jsonl"
@@ -264,7 +264,7 @@ def enrich_license_evidence(
     resolved repo commit, not the Hub dataset revision — repository commits in
     the resolution map come from the resolver, never the Hub revision).
     """
-    runs_dir = stage / "runs"
+    runs_dir = stage / RUNS_DIRNAME
     by_session, by_repo = _load_cache(stage)
     fresh: list[dict[str, Any]] = []
     resolved: dict[str, dict[str, str]] = {}

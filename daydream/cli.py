@@ -58,7 +58,7 @@ from daydream.observability.config import ObservabilityConfig, ObservabilityErro
 from daydream.phases import UnconfinedFindingError
 from daydream.run_context import active_backends
 from daydream.runner import RunConfig, run
-from daydream.trajectory import flush_active_signal_recorders
+from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, flush_active_signal_recorders
 from daydream.ui import (
     ShutdownPanel,
     create_console,
@@ -253,8 +253,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         type=Path,
         dest="trajectory_path",
         help=(
-            "Write ATIF v1.7 trajectory JSON to PATH (default: publish to <target>/.daydream/runs/"
-            "<session_id>/trajectory.json after finalization; explicit external paths receive live updates)"
+            "Write ATIF v1.7 trajectory JSON to PATH (default: publish to "
+            f"<target>/.daydream/{RUNS_DIRNAME}/<session_id>/{RUN_DOCUMENT_NAME} after finalization; "
+            "explicit external paths receive live updates)"
         ) if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

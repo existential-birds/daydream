@@ -100,6 +100,10 @@ from daydream.trajectory import (
     get_current_recorder,
     host_phase_scope,
     maybe_fork,
+    partial_document_path,
+    run_directory,
+    run_document_path,
+    siblings_directory,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -654,7 +658,7 @@ def _resolve_handoff_paths(
             session=artifact_session,
             allow_standalone=False,
         )
-        live_artifact_root = live_daydream_dir / "runs" / recorder.session_id
+        live_artifact_root = run_directory(live_daydream_dir, recorder.session_id)
         artifact_root = artifact_session.durable_path_for(live_artifact_root, repo=work.repo)
         diff_path = artifact_session.durable_path_for(
             live_daydream_dir / "diff.patch", repo=work.repo,
@@ -668,7 +672,7 @@ def _resolve_handoff_paths(
         # self-contained and post-cleanup references stay valid.
         from daydream.archive import get_archive_dir
 
-        artifact_root = get_archive_dir() / "runs" / recorder.session_id
+        artifact_root = run_directory(get_archive_dir(), recorder.session_id)
         diff_path = artifact_root / "diff.patch"
         deep_dir = artifact_root / "deep"
     else:
@@ -677,18 +681,18 @@ def _resolve_handoff_paths(
             session=artifact_session,
             allow_standalone=allow_standalone,
         )
-        artifact_root = daydream_dir / "runs" / recorder.session_id
+        artifact_root = run_directory(daydream_dir, recorder.session_id)
         diff_path = daydream_dir / "diff.patch"
         deep_dir = daydream_dir / "deep"
 
-    trajectory_path = artifact_root / "trajectory.json"
+    trajectory_path = run_document_path(artifact_root)
     if artifact_session is not None:
         trajectory_path = artifact_session.durable_path_for(recorder.path, repo=work.repo)
 
     return (
         artifact_root / "handoff.md",
         trajectory_path,
-        artifact_root / "trajectories",
+        siblings_directory(artifact_root),
         diff_path,
         artifact_root / "manifest.json",
         deep_dir,
@@ -894,14 +898,14 @@ async def _run_failure_summarizer(
             "fix-failures": None if deep is None else deep / "fix-failures.json",
         }
 
-    def _partial_of(path: Path | None) -> Path | None:
-        return None if path is None else path.with_suffix(path.suffix + ".partial")
-
     has_trajectory = recorder is not None
     active_session = artifact_session is not None
     changed_live = _changed_files(work.repo)
     durable_input_paths = _labelled(
-        _partial_of(trajectory_path), diff_path, manifest_path, deep_dir
+        None if trajectory_path is None else partial_document_path(trajectory_path),
+        diff_path,
+        manifest_path,
+        deep_dir,
     )
     private_runtime_paths: tuple[Path, ...] = ()
     if active_session:
@@ -921,7 +925,7 @@ async def _run_failure_summarizer(
             )
 
         possible_inputs = _labelled(
-            None if recorder is None else _partial_of(recorder.path),
+            None if recorder is None else partial_document_path(recorder.path),
             _live(diff_path),
             _live(manifest_path),
             _live(deep_dir),
