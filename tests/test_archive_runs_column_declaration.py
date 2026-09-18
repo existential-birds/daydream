@@ -18,6 +18,8 @@ import pytest
 
 from daydream.archive import _schema
 from daydream.archive._schema import RUNS_COLUMNS
+from daydream.archive.index import _run_upsert_values
+from tests.harness.trajectory import make_manifest
 
 # Frozen witness: the whole generated CREATE TABLE text at the refactor commit.
 FROZEN_DDL_SHA256 = "eac468a7be8b7830b245925e55e3be2d03abceeb3f443d9332404e0ff36e68c8"
@@ -176,3 +178,14 @@ def test_writer_owned_columns_are_never_written_by_the_upsert() -> None:
     columns, params = _upsert_statement_names()
     assert not WRITER_OWNED & set(columns)
     assert not WRITER_OWNED & set(params)
+
+
+def test_upsert_values_mapping_covers_exactly_the_declared_upsert_columns() -> None:
+    assert set(_run_upsert_values(make_manifest())) == UPSERT_NAMES
+
+
+def test_declaration_is_importable_from_both_module_paths() -> None:
+    from daydream.archive import index
+
+    assert index.RUNS_COLUMNS is RUNS_COLUMNS
+    assert "RUNS_COLUMNS" in index.__all__

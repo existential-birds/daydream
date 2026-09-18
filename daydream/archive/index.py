@@ -85,6 +85,7 @@ from daydream.archive._schema import (
     _PRECEDENCE_ORDER,
     _REVIEWER_PENALTY_MAP,
     _UPSERT_SQL,
+    RUNS_COLUMNS,
     SCHEMA_VERSION,
     _migrate_label_observations_schema,
     _migrate_schema,
@@ -97,6 +98,7 @@ from daydream.archive.manifest import Manifest
 # Re-export for callers (including tests) that import these names from this module.
 __all__ = [
     "SCHEMA_VERSION",
+    "RUNS_COLUMNS",
     "_CREATE_TABLE",
     "upsert_run",
     "update_labels",
@@ -200,10 +202,10 @@ def _project_daydream(daydream: Any) -> dict[str, Any]:
     """Project the ``manifest.daydream`` provenance onto per-column values.
 
     Collapses the guarded-ternary projection ladder into one place so the five
-    ``daydream_*`` projections stay in sync with the ``_UPSERT_SQL`` column
-    list. ``None`` (no executable provenance captured) projects every field to
-    ``None``; ``daydream_dirty`` is stored as an int only when it is a real
-    bool so a sentinel (non-bool) dirty state persists as ``NULL``.
+    ``daydream_*`` projections stay in sync with the ``RUNS_COLUMNS``
+    declaration. ``None`` (no executable provenance captured) projects every
+    field to ``None``; ``daydream_dirty`` is stored as an int only when it is a
+    real bool so a sentinel (non-bool) dirty state persists as ``NULL``.
     """
     if daydream is None:
         return {
@@ -223,13 +225,16 @@ def _project_daydream(daydream: Any) -> dict[str, Any]:
     }
 
 
-def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
-    """Insert or replace a run entry from a Manifest.
+def _run_upsert_values(manifest: Manifest) -> dict[str, Any]:
+    """Project *manifest* onto the run upsert's per-column values.
 
-    Bool fields (review_only, deep) are normalized to integers (0/1)
-    for SQLite storage.
+    The name-keyed value expressions are the one piece of the upsert that stays
+    explicit code: :func:`upsert_run` projects the declaration's ``upserted``
+    column set through this mapping, so a hand-written parameter name can never
+    reach SQLite. ``None`` identity is preserved (a missing source stores
+    ``NULL``); the two booleans are stored as ints; JSON columns are serialised
+    here.
     """
-    conn = _get_connection(archive_dir)
     daydream = manifest.daydream
     # Defense-in-depth: never persist a credential-bearing remote URL, even if
     # upstream capture bypassed the normalizer. None identity stores None.
@@ -238,67 +243,78 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
         normalized_slug, normalized_url = manifest.repo_slug, None
     else:
         normalized_slug, normalized_url = normalize_remote_url(manifest.remote_url)
+    return {
+        "session_id": manifest.session_id,
+        "archived_at": manifest.archived_at,
+        "status": manifest.status,
+        "archive_status": manifest.archive_status,
+        "pipeline_status": manifest.pipeline_status,
+        "phase_states": json.dumps(manifest.phase_states) if manifest.phase_states is not None else None,
+        **_project_daydream(daydream),
+        "run_flow": manifest.run_flow,
+        "skill": manifest.skill,
+        "model": manifest.model,
+        "backend": manifest.backend,
+        "review_backend": manifest.review_backend,
+        "fix_backend": manifest.fix_backend,
+        "test_backend": manifest.test_backend,
+        "per_stack_review_backend": manifest.per_stack_review_backend,
+        "per_stack_review_model": manifest.per_stack_review_model,
+        "review_only": int(manifest.review_only),
+        "deep": int(manifest.deep),
+        "remote_url": normalized_url,
+        "repo_slug": normalized_slug,
+        "source_path": manifest.source_path,
+        "branch": manifest.branch,
+        "base_branch": manifest.base_branch,
+        "head_sha": manifest.head_sha,
+        "base_sha": manifest.base_sha,
+        "changed_files": json.dumps(manifest.changed_files),
+        "pr_number": manifest.pr_number,
+        "pr_repo": manifest.pr_repo,
+        "total_cost_usd": manifest.total_cost_usd,
+        "total_findings": manifest.total_findings,
+        "grounding_rate": manifest.grounding_rate,
+        "coverage_ratio": manifest.coverage_ratio,
+        "cost_per_finding_usd": manifest.cost_per_finding_usd,
+        "wall_clock_seconds": manifest.wall_clock_seconds,
+        "erosion": manifest.erosion,
+        "verbosity": manifest.verbosity,
+        "location_in_hunk_rate": manifest.location_in_hunk_rate,
+        "shipped_duplicate_pairs": manifest.shipped_duplicate_pairs,
+        "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
+        if manifest.fix_quality_gate is not None
+        else None,
+        "recommended_patch_capture": manifest.recommended_patch_capture,
+        "total_prompt_tokens": manifest.total_prompt_tokens,
+        "total_completion_tokens": manifest.total_completion_tokens,
+        "total_cached_tokens": manifest.total_cached_tokens,
+        "outcome_labels": manifest.outcome_labels,
+        "labeled_at": manifest.labeled_at,
+        "composite_reward": manifest.composite_reward,
+        "archive_path": manifest.archive_path,
+        "schema_version": SCHEMA_VERSION,
+        "profile_schema_version": manifest.profile_schema_version,
+        "profile_name": manifest.profile_name,
+        "profile_source_kind": manifest.profile_source_kind,
+        "profile_digest": manifest.profile_digest,
+    }
+
+
+def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
+    """Insert or replace a run entry from a Manifest.
+
+    Bool fields (review_only, deep) are normalized to integers (0/1)
+    for SQLite storage. The bound parameter set is projected from the
+    ``upserted`` subset of the ``RUNS_COLUMNS`` declaration, so the statement,
+    its placeholders and its parameters cannot drift apart.
+    """
+    values = _run_upsert_values(manifest)
+    conn = _get_connection(archive_dir)
     try:
         conn.execute(
             _UPSERT_SQL,
-            {
-                "session_id": manifest.session_id,
-                "archived_at": manifest.archived_at,
-                "status": manifest.status,
-                "archive_status": manifest.archive_status,
-                "pipeline_status": manifest.pipeline_status,
-                "phase_states": json.dumps(manifest.phase_states)
-                if manifest.phase_states is not None
-                else None,
-                **_project_daydream(daydream),
-                "run_flow": manifest.run_flow,
-                "skill": manifest.skill,
-                "model": manifest.model,
-                "backend": manifest.backend,
-                "review_backend": manifest.review_backend,
-                "fix_backend": manifest.fix_backend,
-                "test_backend": manifest.test_backend,
-                "per_stack_review_backend": manifest.per_stack_review_backend,
-                "per_stack_review_model": manifest.per_stack_review_model,
-                "review_only": int(manifest.review_only),
-                "deep": int(manifest.deep),
-                "remote_url": normalized_url,
-                "repo_slug": normalized_slug,
-                "source_path": manifest.source_path,
-                "branch": manifest.branch,
-                "base_branch": manifest.base_branch,
-                "head_sha": manifest.head_sha,
-                "base_sha": manifest.base_sha,
-                "changed_files": json.dumps(manifest.changed_files),
-                "pr_number": manifest.pr_number,
-                "pr_repo": manifest.pr_repo,
-                "total_cost_usd": manifest.total_cost_usd,
-                "total_findings": manifest.total_findings,
-                "grounding_rate": manifest.grounding_rate,
-                "coverage_ratio": manifest.coverage_ratio,
-                "cost_per_finding_usd": manifest.cost_per_finding_usd,
-                "wall_clock_seconds": manifest.wall_clock_seconds,
-                "erosion": manifest.erosion,
-                "verbosity": manifest.verbosity,
-                "location_in_hunk_rate": manifest.location_in_hunk_rate,
-                "shipped_duplicate_pairs": manifest.shipped_duplicate_pairs,
-                "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
-                if manifest.fix_quality_gate is not None
-                else None,
-                "recommended_patch_capture": manifest.recommended_patch_capture,
-                "total_prompt_tokens": manifest.total_prompt_tokens,
-                "total_completion_tokens": manifest.total_completion_tokens,
-                "total_cached_tokens": manifest.total_cached_tokens,
-                "outcome_labels": manifest.outcome_labels,
-                "labeled_at": manifest.labeled_at,
-                "composite_reward": manifest.composite_reward,
-                "archive_path": manifest.archive_path,
-                "schema_version": SCHEMA_VERSION,
-                "profile_schema_version": manifest.profile_schema_version,
-                "profile_name": manifest.profile_name,
-                "profile_source_kind": manifest.profile_source_kind,
-                "profile_digest": manifest.profile_digest,
-            },
+            {col.name: values[col.name] for col in RUNS_COLUMNS if col.upserted},
         )
         conn.commit()
     finally:
