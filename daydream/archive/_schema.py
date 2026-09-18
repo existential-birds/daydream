@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import sqlite3
 import warnings
+from collections.abc import Iterable
+from typing import NamedTuple
 
 SCHEMA_VERSION = 8
 
@@ -30,68 +32,106 @@ _REVIEWER_PENALTY_MAP: dict[str, float] = {
 ``daydream.training.reward._FP_PENALTY_MAP``.  Defined here so the archive
 layer does not depend on the training layer."""
 
-_CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS runs (
-    session_id TEXT PRIMARY KEY,
-    archived_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'complete',
-    archive_status TEXT NOT NULL DEFAULT 'complete',
-    pipeline_status TEXT NOT NULL DEFAULT 'unknown',
-    phase_states TEXT,
-    daydream_version TEXT,
-    daydream_install_source TEXT,
-    daydream_commit TEXT,
-    daydream_dirty INTEGER,
-    daydream_container_digest TEXT,
-    run_flow TEXT NOT NULL,
-    skill TEXT,
-    model TEXT,
-    backend TEXT NOT NULL DEFAULT 'claude',
-    review_backend TEXT,
-    fix_backend TEXT,
-    test_backend TEXT,
-    per_stack_review_backend TEXT,
-    per_stack_review_model TEXT,
-    review_only INTEGER NOT NULL DEFAULT 0,
-    deep INTEGER NOT NULL DEFAULT 0,
-    remote_url TEXT,
-    repo_slug TEXT,
-    source_path TEXT,
-    branch TEXT,
-    base_branch TEXT,
-    head_sha TEXT,
-    base_sha TEXT,
-    changed_files TEXT,
-    pr_number INTEGER,
-    pr_repo TEXT,
-    total_cost_usd REAL,
-    total_findings INTEGER,
-    grounding_rate REAL,
-    coverage_ratio REAL,
-    cost_per_finding_usd REAL,
-    wall_clock_seconds REAL,
-    erosion REAL,
-    verbosity REAL,
-    location_in_hunk_rate REAL,
-    shipped_duplicate_pairs INTEGER,
-    fix_quality_gate TEXT,
-    recommended_patch_capture TEXT,
-    total_prompt_tokens INTEGER,
-    total_completion_tokens INTEGER,
-    total_cached_tokens INTEGER,
-    outcome_labels TEXT NOT NULL DEFAULT '[]',
-    labeled_at TEXT,
-    rubric_json TEXT,
-    composite_reward REAL,
-    has_posterior INTEGER NOT NULL DEFAULT 0,
-    archive_path TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 1,
-    profile_schema_version INTEGER,
-    profile_name TEXT,
-    profile_source_kind TEXT,
-    profile_digest TEXT
+class RunColumn(NamedTuple):
+    """One column of the ``runs`` table.
+
+    ``RUNS_COLUMNS`` is the *only* declaration of the runs column set — the
+    ``CREATE TABLE`` text (``_CREATE_TABLE``), the ``ALTER TABLE ADD COLUMN``
+    entries ``_migrate_schema`` applies, and the run-upsert statement
+    (``_UPSERT_SQL``) are all generated from it. Its order is the canonical
+    fresh-database column order; upgraded databases are migrated *by name*
+    (see ``_alter_add_missing``), so their resulting column order is not a
+    contract, and every runs read is ``SELECT *`` materialised by column name.
+
+    ``definition`` is the DDL body text after the column name (including any
+    constraint clauses). ``additive`` marks a column that appended databases
+    migrate onto; ``upserted`` marks a column the run upsert writes (the
+    label-observation paths own the rest and maintain them separately).
+    """
+
+    name: str
+    definition: str
+    additive: bool
+    upserted: bool
+
+
+RUNS_COLUMNS: tuple[RunColumn, ...] = (
+    RunColumn("session_id", "TEXT PRIMARY KEY", False, True),
+    RunColumn("archived_at", "TEXT NOT NULL", False, True),
+    RunColumn("status", "TEXT NOT NULL DEFAULT 'complete'", False, True),
+    RunColumn("archive_status", "TEXT NOT NULL DEFAULT 'complete'", True, True),
+    RunColumn("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'", True, True),
+    RunColumn("phase_states", "TEXT", True, True),
+    RunColumn("daydream_version", "TEXT", True, True),
+    RunColumn("daydream_install_source", "TEXT", True, True),
+    RunColumn("daydream_commit", "TEXT", True, True),
+    RunColumn("daydream_dirty", "INTEGER", True, True),
+    RunColumn("daydream_container_digest", "TEXT", True, True),
+    RunColumn("run_flow", "TEXT NOT NULL", False, True),
+    RunColumn("skill", "TEXT", False, True),
+    RunColumn("model", "TEXT", False, True),
+    RunColumn("backend", "TEXT NOT NULL DEFAULT 'claude'", False, True),
+    RunColumn("review_backend", "TEXT", True, True),
+    RunColumn("fix_backend", "TEXT", True, True),
+    RunColumn("test_backend", "TEXT", True, True),
+    RunColumn("per_stack_review_backend", "TEXT", True, True),
+    RunColumn("per_stack_review_model", "TEXT", True, True),
+    RunColumn("review_only", "INTEGER NOT NULL DEFAULT 0", False, True),
+    RunColumn("deep", "INTEGER NOT NULL DEFAULT 0", False, True),
+    RunColumn("remote_url", "TEXT", False, True),
+    RunColumn("repo_slug", "TEXT", False, True),
+    RunColumn("source_path", "TEXT", True, True),
+    RunColumn("branch", "TEXT", False, True),
+    RunColumn("base_branch", "TEXT", False, True),
+    RunColumn("head_sha", "TEXT", False, True),
+    RunColumn("base_sha", "TEXT", True, True),
+    RunColumn("changed_files", "TEXT", True, True),
+    RunColumn("pr_number", "INTEGER", False, True),
+    RunColumn("pr_repo", "TEXT", False, True),
+    RunColumn("total_cost_usd", "REAL", False, True),
+    RunColumn("total_findings", "INTEGER", False, True),
+    RunColumn("grounding_rate", "REAL", False, True),
+    RunColumn("coverage_ratio", "REAL", False, True),
+    RunColumn("cost_per_finding_usd", "REAL", False, True),
+    RunColumn("wall_clock_seconds", "REAL", False, True),
+    RunColumn("erosion", "REAL", True, True),
+    RunColumn("verbosity", "REAL", True, True),
+    RunColumn("location_in_hunk_rate", "REAL", True, True),
+    RunColumn("shipped_duplicate_pairs", "INTEGER", True, True),
+    RunColumn("fix_quality_gate", "TEXT", True, True),
+    RunColumn("recommended_patch_capture", "TEXT", True, True),
+    RunColumn("total_prompt_tokens", "INTEGER", False, True),
+    RunColumn("total_completion_tokens", "INTEGER", False, True),
+    RunColumn("total_cached_tokens", "INTEGER", False, True),
+    RunColumn("outcome_labels", "TEXT NOT NULL DEFAULT '[]'", False, True),
+    RunColumn("labeled_at", "TEXT", False, True),
+    RunColumn("rubric_json", "TEXT", True, False),
+    RunColumn("composite_reward", "REAL", True, True),
+    RunColumn("has_posterior", "INTEGER NOT NULL DEFAULT 0", True, False),
+    RunColumn("archive_path", "TEXT NOT NULL", False, True),
+    RunColumn("schema_version", "INTEGER NOT NULL DEFAULT 1", False, True),
+    RunColumn("profile_schema_version", "INTEGER", True, True),
+    RunColumn("profile_name", "TEXT", True, True),
+    RunColumn("profile_source_kind", "TEXT", True, True),
+    RunColumn("profile_digest", "TEXT", True, True),
 )
-"""
+
+
+def _create_table_sql(columns: Iterable[RunColumn]) -> str:
+    """Render the ``runs`` CREATE TABLE text from *columns*.
+
+    Every line carries a trailing comma except the last, matching the canonical
+    fresh-database DDL byte-for-byte. The definition text is emitted verbatim.
+    """
+    columns = tuple(columns)
+    lines = [
+        f"    {col.name} {col.definition}" + ("," if i < len(columns) - 1 else "")
+        for i, col in enumerate(columns)
+    ]
+    return "\nCREATE TABLE IF NOT EXISTS runs (\n" + "\n".join(lines) + "\n)\n"
+
+
+_CREATE_TABLE = _create_table_sql(RUNS_COLUMNS)
 
 # Append-only bitemporal annotation history. ``observed_at`` is transaction
 # time (when the annotation was recorded); ``valid_at`` is valid time (when the
