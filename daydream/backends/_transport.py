@@ -2,9 +2,13 @@
 
 One owner for spawn, stdin policy, idle-timeout line reads, stderr handling,
 exit-code surfacing, and shielded teardown, built on the primitives in
-:mod:`daydream.backends._subprocess`. Backends keep all protocol mapping: the
-transport yields raw decoded lines and surfaces only the exit code, so backend
-error messages stay byte-identical to what they were before the transport.
+:mod:`daydream.backends._subprocess`. The module also owns the shared
+reap / exit-check / teardown sequence and the exit-diagnostic message builder
+(:func:`reap`, :func:`raise_for_exit`, :func:`teardown`,
+:func:`process_exit_message`), so each CLI adapter contributes only its own
+wording and parameters. Backends keep all protocol mapping: the transport
+yields raw decoded lines and surfaces only the exit code, so backend error
+messages stay byte-identical to what they were before the transport.
 """
 
 from __future__ import annotations
@@ -245,3 +249,81 @@ class CliTransport:
             # a live iteration can raise 'list changed size during iteration'.
             for t in list(transports):
                 await t.drain_finished()
+
+
+# Number of captured non-JSON lines printed in a PROCESS_EXIT message. The
+# count reported in the message is the number of lines actually printed, not
+# the size of the capture window.
+PROCESS_EXIT_EXCERPT_MAX_LINES = 10
+
+
+async def reap(transport: CliTransport) -> int | None:
+    """Await *transport*'s child and return its exit code, however it exited.
+
+    :meth:`CliTransport.wait` raises :class:`TransportExitError` on a non-zero
+    exit; this suppresses that signal and returns the code so the caller can
+    run its own exit check after any between-the-two steps (codex yields its
+    final diagnostics, pi its terminal events). No fallback value is
+    substituted: the returned code is exactly ``transport.returncode``.
+    """
+    try:
+        await transport.wait()
+    except TransportExitError:
+        pass
+    return transport.returncode
+
+
+def raise_for_exit(
+    returncode: int | None,
+    *,
+    error_type: Callable[..., Exception],
+    category: str,
+    build_message: Callable[[int], str],
+    retryable: bool | None = None,
+) -> None:
+    """Raise ``error_type`` for a non-zero *returncode*, else return.
+
+    The adapter owns the error class and the wording; this owns the shared
+    guard. ``retryable`` is forwarded only when the adapter passes it (pi does;
+    codex/osprey construct their error with exactly today's kwargs).
+    """
+    if returncode is None or returncode == 0:
+        return
+    kwargs: dict[str, object] = {"category": category}
+    if retryable is not None:
+        kwargs["retryable"] = retryable
+    raise error_type(build_message(returncode), **kwargs)
+
+
+async def teardown(transport: CliTransport, transports: list[CliTransport]) -> None:
+    """Signal, drain and drop *transport* from the caller-owned *transports*.
+
+    Idempotent: the reap (:meth:`CliTransport.terminate`) and the stderr drain
+    (:meth:`CliTransport.drain_finished`) are each shielded and idempotent, so
+    a second call re-signals nothing and re-drains nothing. Osprey calls this
+    early as well as in its ``finally``; the ``finally`` call is a no-op.
+    """
+    await transport.terminate()
+    await transport.drain_finished()
+    if transport in transports:
+        transports.remove(transport)
+
+
+def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> str:
+    """Build the codex/pi PROCESS_EXIT message, parameterized by *display*.
+
+    Always leads with ``<display> CLI exited with return code <n>.`` and then
+    either the last :data:`PROCESS_EXIT_EXCERPT_MAX_LINES` captured lines (the
+    header reports the number of lines actually printed) or the display's
+    no-output fallback sentence. Osprey builds its structurally different
+    message itself.
+    """
+    if lines:
+        shown = lines[-PROCESS_EXIT_EXCERPT_MAX_LINES:]
+        detail = (
+            f"\n{display} CLI output (last {len(shown)} non-JSON lines):\n"
+            + "\n".join(shown)
+        )
+    else:
+        detail = f"\n(no non-JSON output captured — {display.lower()} may have crashed before writing to stdout)"
+    return f"{display} CLI exited with return code {returncode}.{detail}"
