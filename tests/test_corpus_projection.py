@@ -964,7 +964,7 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
     tmp_path: Path,
     existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
 ) -> None:
-    bundle_dir, _rows, kwargs = existing_bundle_fixture
+    bundle_dir, _rows, _ = existing_bundle_fixture
     with pytest.raises(ValueError, match="annotation_bundle_dir"):
         BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
 

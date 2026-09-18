@@ -424,7 +424,7 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
 
     # External argv shape, recorded at the real transport spawn seam. Codex
     # omits the cwd kwarg when the execution cwd equals the caller's cwd.
-    argv, spawn_kwargs = _spawner(spawner)
+    argv, _ = _spawner(spawner)
     assert argv[:4] == ("codex", "exec", "--experimental-json", "--model")
     assert "--sandbox" in argv and "--cd" in argv
 

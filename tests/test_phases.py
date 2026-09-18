@@ -2336,14 +2336,6 @@ class TestBuildFixPrompt:
         assert str(tmp_path / "src" / "ghost.py") not in result
 
 
-def test_git_diff_returns_diff(feature_branch_repo: Path) -> None:
-    """Test _git_diff returns diff output against default branch."""
-    from daydream.phases import _git_diff
-
-    diff = _git_diff(feature_branch_repo)
-    assert "hello" in (diff or "") or "world" in (diff or "")
-
-
 def test_git_log_returns_log(git_repo: Path) -> None:
     """Test _git_log returns commit log."""
     from daydream.phases import _git_log
@@ -2365,67 +2357,6 @@ def test_git_branch_returns_branch(git_repo: Path) -> None:
 
     branch = _git_branch(git_repo)
     assert branch == "my-feature"
-
-
-def test_git_diff_empty_when_no_changes(git_repo: Path) -> None:
-    """Test _git_diff returns empty string when branch has no diff."""
-    from daydream.phases import _git_diff
-
-    diff = _git_diff(git_repo)
-    assert diff == ""
-
-
-def _init_repo_with_exclude_fixture(tmp_path: Path) -> None:
-    """Create a repo with a main branch, then a feature branch touching tracked
-    files and files under .planning/."""
-    init_repo(tmp_path)
-    (tmp_path / "file.txt").write_text("hello")
-    git(tmp_path, "add", ".")
-    git_commit(tmp_path, "init")
-    git(tmp_path, "checkout", "-b", "feature")
-    (tmp_path / "file.txt").write_text("world-change")
-    (tmp_path / ".planning").mkdir()
-    (tmp_path / ".planning" / "notes.md").write_text("planning-only-content")
-    git(tmp_path, "add", ".")
-    git_commit(tmp_path, "feature work")
-
-
-def test_git_diff_exclude_filters_out_directory(tmp_path: Path) -> None:
-    """_git_diff with exclude should drop matching files from the diff."""
-    from daydream.phases import _git_diff
-
-    _init_repo_with_exclude_fixture(tmp_path)
-
-    diff = _git_diff(tmp_path, exclude=[".planning"])
-    assert diff is not None
-    assert "planning-only-content" not in diff
-    assert "world-change" in diff
-
-
-def test_git_diff_exclude_empty_list_matches_none(tmp_path: Path) -> None:
-    """Passing an empty exclude list should behave identically to None."""
-    from daydream.phases import _git_diff
-
-    _init_repo_with_exclude_fixture(tmp_path)
-
-    diff_no_arg = _git_diff(tmp_path)
-    diff_empty = _git_diff(tmp_path, exclude=[])
-    assert diff_no_arg == diff_empty
-    # Sanity: the planning content is present when no exclude is applied.
-    assert diff_no_arg is not None
-    assert "planning-only-content" in diff_no_arg
-
-
-def test_git_diff_no_exclude_still_works(tmp_path: Path) -> None:
-    """Regression: _git_diff with no exclude arg returns full diff."""
-    from daydream.phases import _git_diff
-
-    _init_repo_with_exclude_fixture(tmp_path)
-
-    diff = _git_diff(tmp_path)
-    assert diff is not None
-    assert "planning-only-content" in diff
-    assert "world-change" in diff
 
 
 def test_build_intent_prompt_includes_pr_description_with_precedence_framing() -> None:

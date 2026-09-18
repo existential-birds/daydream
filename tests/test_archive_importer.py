@@ -184,44 +184,6 @@ def _append_observation(root: Path, *, observed_at: str, evidence_sha: str) -> N
     )
 
 
-def _force_insert_observation(root: Path, *, observed_at: str, evidence_sha: str) -> None:
-    """Insert the exact same evidence payload under a different ``observed_at``.
-
-    Mirrors the real overlap scenario — two independently captured backups of
-    the same archive carry identical rows stamped at their own capture times.
-    """
-    write = sqlite3.connect(root / "index.db")
-    write.execute(
-        "INSERT INTO label_observations (session_id, observed_at, labels, pr_state, labeler_version,"
-        " evidence_sha, rubric_json, valid_at, reward_version, reward_json, composite_reward,"
-        " reviewer_logins, has_posterior, source, labeler_policy_version,"
-        " reply_classifier_version, reply_evidence_digest, legacy) VALUES ("
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            SID,
-            observed_at,
-            '["accepted"]',
-            None,
-            "980-rubric-r2",
-            evidence_sha,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            0,
-            "auto",
-            "980-policy-r1",
-            None,
-            None,
-            "auto",
-        ),
-    )
-    write.commit()
-    write.close()
-
-
 def read_label_rows(root: Path) -> list[dict[str, Any]]:
     """Read-only inventory of one root's ``label_observations`` rows.
 

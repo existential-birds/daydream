@@ -179,11 +179,6 @@ def _fake_gh(
     return responder
 
 
-def _fake_gh_merged(merged_at: str) -> Callable[..., Any]:
-    """The evidenced-merge shape, kept as a name for ``tests/test_corpus_reproducibility.py``."""
-    return _fake_gh(merged_at=merged_at, comments=_REPLIED_FINDING)
-
-
 def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """A ``gh_api`` responder the local-branch path must never call."""
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")

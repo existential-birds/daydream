@@ -61,7 +61,7 @@ def test_run_curate_tui_queue_renders_index_and_quits(
 def test_render_case_shows_header_and_numbered_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
     from daydream.benchmark.curate_tui import render_case
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     view = cu.get_case(ws, case_id)
     out = render_case(view)
     assert case_id in out and "draft" in out

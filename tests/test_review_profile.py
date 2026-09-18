@@ -51,7 +51,7 @@ def test_default_profile_carries_schema_version_name_and_every_stage() -> None:
     assert p.name  # human-readable, nonempty
     assert set(p.strategies) == set(rp.STAGE_KEYS)  # every stage present
 
-    for key, strategy in p.strategies.items():
+    for _key, strategy in p.strategies.items():
         assert strategy.content  # nonempty, real content (copied, not invented)
         assert strategy.source  # provenance string present ("copied:" / "authored:")
 

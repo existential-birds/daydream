@@ -138,20 +138,6 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.fixture
-def mock_backend(install_backend: Callable[[object], object]) -> Any:
-    """Patch create_backend to return the shared phase-dispatch fake."""
-    return install_backend(
-        PhaseDispatchBackend(parse_results=[[_FULL_FLOW_ISSUE]], emit_cost=True)
-    )
-
-
-@pytest.fixture
-def mock_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch UI functions that require user input."""
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "n")
-
-
-@pytest.fixture
 def target_project(tmp_path: Path) -> Path:
     """Create a minimal project structure for testing.
 

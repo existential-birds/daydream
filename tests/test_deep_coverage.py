@@ -632,7 +632,7 @@ def test_assignment_alone_never_counts(tmp_path: Path) -> None:
                                                 "inline_files": [], "frontier_files": []}})
     (deep / "stack-python#0-records.json").write_text('{"issues": []}')
     receipts = json.loads(coverage_receipt_path(deep).read_text())
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-b", receipts=receipts)
+    uncovered, _ = compute_uncovered_files(daydream_dir, "sess-b", receipts=receipts)
     assert "api.py" in uncovered              # assignment alone is never coverage
 
 
@@ -656,7 +656,7 @@ def test_incomplete_shard_receipt_does_not_cover(tmp_path: Path) -> None:
                                                 "inline_files": ["api.py"], "frontier_files": []}})
     # NO stack-python#0-records.json on purpose.
     receipts = json.loads(coverage_receipt_path(deep).read_text())
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-c", receipts=receipts)
+    uncovered, _ = compute_uncovered_files(daydream_dir, "sess-c", receipts=receipts)
     assert "api.py" in uncovered              # fail-open: missing completion -> swept
 
 

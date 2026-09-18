@@ -2226,14 +2226,12 @@ def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
     name = "run-same-reanchor"
     other = tmp_path / "other-parent" / name
     target = operational / name
-    git_ops.worktree_add(repo, other, "main", detach=True)
-    git_ops.worktree_add(repo, target, "main", detach=True)
+    lock_target = "active-run" if lock_state == "live" else "crashed-run"
+    lock_other = None if lock_state == "live" else "different-live-run"
+    git_ops.worktree_add(repo, other, "main", detach=True, lock_reason=lock_other)
+    git_ops.worktree_add(repo, target, "main", detach=True, lock_reason=lock_target)
     assert git_ops.git_dir(other) != git_ops.git_dir(target)
-    if lock_state == "live":
-        git_ops.worktree_lock(repo, target, reason="active-run")
-    else:
-        git_ops.worktree_lock(repo, other, reason="different-live-run")
-        git_ops.worktree_lock(repo, target, reason="crashed-run")
+    if lock_state == "stale":
         os.utime(git_ops.git_dir(target) / "locked", (0, 0))
 
     removed = prune_stale_reanchor_worktrees(repo, private_workspace_owner=owner)
@@ -2811,6 +2809,8 @@ def test_min_length_violation_issue_carries_detail_segment(repo: Path) -> None:
         "Callers must send X-Internal-Service-Secret: ${INTERNAL_SECRET} on every request.",
         "The deploy script reads secret: $SECRET from the environment at startup.",
         "The fixture configures secret: test-secret for the local integration suite.",
+        "The tokenizer: sentencepiece choice stays as the repository has it.",
+        "The passwordless: true flag in the fixture config stays untouched.",
     ],
 )
 def test_secret_placeholder_prose_survives_normalization_unchanged(repo: Path, prose: str) -> None:
@@ -2884,23 +2884,6 @@ def test_underscored_secret_key_name_is_redacted_in_quoted_source(
     assert len(result["written"]) == 1
     for artifact in (repo / "daydream_plans").iterdir():
         assert "wJalrXUtnFEMI" not in artifact.read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize(
-    "prose",
-    [
-        "The tokenizer: sentencepiece choice stays as the repository has it.",
-        "The passwordless: true flag in the fixture config stays untouched.",
-    ],
-)
-def test_secret_shaped_word_prefixes_are_not_treated_as_key_names(repo: Path, prose: str) -> None:
-    """Segment anchoring: ``tokenizer`` is not a ``token`` key."""
-    plan = _authored_plan()
-    plan["why_this_matters"]["problem"] = prose
-
-    assembled = _assembled(repo, plan)
-
-    assert assembled["why_this_matters"]["problem"] == prose
 
 
 def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(repo: Path) -> None:
@@ -4680,8 +4663,7 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
     from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
-    git(repo, "worktree", "add", "--detach", str(stale), "HEAD")
-    git_ops.worktree_lock(repo, stale, reason="run-dead")
+    git_ops.worktree_add(repo, stale, "HEAD", lock_reason="run-dead")
     git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
     if not git_dir.is_absolute():
         git_dir = repo / git_dir

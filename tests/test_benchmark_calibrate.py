@@ -515,7 +515,7 @@ class TestCalibrateAcceptance:
                 m = p["label"] == "match"
                 responses += [{"match": m, "confidence": 0.95 if m else 0.1,
                                "reasoning": "x"} for _ in range(3)]
-        fake, counter = _scripted_http(responses)
+        fake, _ = _scripted_http(responses)
         code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
         assert code == 1
         err = capsys.readouterr().err

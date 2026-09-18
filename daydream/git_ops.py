@@ -1172,25 +1172,6 @@ def capture_recommended_patch(
     return True
 
 
-def capture_recommended_patch_with_base(
-    repo: Path,
-    pre_fix_snapshot: str | None,
-    pre_fix_head: str | None,
-    out_path: Path,
-    *,
-    preexisting_untracked: set[str] | None = None,
-) -> bool:
-    """Use a pre-fix stash SHA, falling back to the pre-fix ``HEAD`` SHA.
-
-    Both inputs are captured before fixes or commit. Forwards the base and
-    preexisting untracked paths to :func:`capture_recommended_patch`.
-    """
-    base_ref = pre_fix_snapshot or pre_fix_head
-    return capture_recommended_patch(
-        repo, base_ref, out_path, preexisting_untracked=preexisting_untracked
-    )
-
-
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
     """Return the one-line commit log for ``base..head``.
 
@@ -2771,28 +2752,6 @@ def apply_staged_patch(repo: Path, patch: bytes) -> None:
             os.unlink(tmp_path)
 
 
-def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int = 300) -> None:
-    """Fetch a single *refspec* from *remote* into *repo*.
-
-    Useful for fetching refs that are not covered by the default fetch
-    configuration, such as ``refs/pull/<N>/head`` on GitHub.
-
-    Args:
-        timeout: Subprocess timeout in seconds. Defaults to 300 s to
-            accommodate first-run blobless fetches of large repositories.
-
-    Raises:
-        GitError: If the fetch fails for any reason.
-    """
-    proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout, retries=0)
-    if proc.returncode != 0:
-        from daydream.trajectory import redact_text
-
-        raise GitError(
-            f"git fetch {_safe_url_desc(remote)} {refspec} failed in {repo}: {redact_text(proc.stderr.strip())}"
-        )
-
-
 def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     """Detach HEAD onto *sha* in *repo*.
 
@@ -3203,17 +3162,6 @@ def build_recommended_patch_strict(
     return b"".join(chunks)
 
 
-def clean_untracked(repo: Path) -> None:
-    """Run ``git clean -fd`` to remove untracked files and directories.
-
-    Raises:
-        GitError: If the clean fails.
-    """
-    proc = _run_git(repo, ["clean", "-fd"], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git clean -fd failed in {repo}: {proc.stderr.strip()}")
-
-
 def worktree_add(
     repo: Path,
     path: Path,
@@ -3302,25 +3250,6 @@ def worktree_remove_unlocked(repo: Path, path: Path, *, force: bool = True) -> N
     except GitError:
         pass
     worktree_remove(repo, path, force=force)
-
-
-def worktree_lock(repo: Path, path: Path, *, reason: str | None = None) -> None:
-    """Lock the worktree at *path* so git refuses to remove it.
-
-    Args:
-        reason: Human-readable lock reason (e.g. the run_id), shown by
-            ``git worktree list --porcelain`` and stored in the ``locked`` file.
-
-    Raises:
-        GitError: If ``git worktree lock`` fails.
-    """
-    args = ["worktree", "lock"]
-    if reason is not None:
-        args.extend(["--reason", reason])
-    args.append(str(path))
-    proc = _run_git(repo, args, timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git worktree lock {path} failed: {proc.stderr.strip()}")
 
 
 def worktree_unlock(repo: Path, path: Path) -> None:

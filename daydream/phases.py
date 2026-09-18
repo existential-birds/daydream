@@ -1765,9 +1765,6 @@ def build_parse_prompt(
     )
 
 
-FixResult = tuple[dict[str, Any], bool, str | None]
-
-
 def _prior_daydream_commits(work: WorkContext) -> str | None:
     """Return oneline log of prior daydream commits on this branch."""
     return git_ops.daydream_commits(work.repo, work.base_branch)
@@ -1783,27 +1780,6 @@ def _detect_default_branch(cwd: Path) -> str | None:
     try:
         return git_ops.default_branch(cwd)
     except (BranchNotFoundError, GitError):
-        return None
-
-
-def _git_diff(cwd: Path, exclude: list[str] | None = None) -> str | None:
-    """Get the diff of current branch against the default branch.
-
-    Args:
-        cwd: Repository working directory.
-        exclude: Optional list of paths to exclude from the diff via git's
-            `:(exclude)` magic pathspec. Each entry may be a file or directory.
-
-    Returns:
-        The diff output, empty string if no diff, or None if base branch detection fails.
-
-    """
-    base_branch = _detect_default_branch(cwd)
-    if not base_branch:
-        return None
-    try:
-        return git_ops.diff(cwd, base_branch, exclude=exclude)
-    except GitError:
         return None
 
 
@@ -1835,32 +1811,6 @@ def _git_branch(cwd: Path) -> str:
     except GitError:
         return ""
     return name or ""
-
-
-def check_review_file_exists(
-    target_dir: Path,
-    *,
-    artifact_session: ArtifactSession | None = None,
-    allow_standalone: bool = False,
-) -> None:
-    """Check that the review output file exists.
-
-    Raises:
-        FileNotFoundError: If the review output file doesn't exist.
-    """
-    review_output_path = review_output_path_for(
-        target_dir,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
-    if not review_output_path.exists():
-        msg = f"""No review file found.
-
-Expected: {review_output_path}
-
-Run a full review first:
-  daydream {target_dir}"""
-        raise FileNotFoundError(msg)
 
 
 @overload
@@ -2568,20 +2518,6 @@ class UnconfinedFindingError(ValueError):
     (issue #574). Callers either route it through the fix-failure recovery in
     ``_step_fix`` or render it actionably in ``cli.main``.
     """
-
-
-def _record_fix_failure(
-    fix_failures: dict[str, str],
-    fix_key: str,
-    exc: BaseException,
-) -> None:
-    """Record one exception-failed fix group in ``fix_failures``.
-
-    Writes ``"<ExceptionType>: <message>"`` under ``fix_key``, matching the
-    exception-entry format produced inside ``phase_fix_parallel`` so callers
-    can distinguish exception entries from budget stops by the prefix.
-    """
-    fix_failures[fix_key] = f"{type(exc).__name__}: {exc}"
 
 
 def _resolve_finding_file_ref(repo: Path, value: object) -> str:

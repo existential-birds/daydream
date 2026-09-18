@@ -110,11 +110,6 @@ class WorkContext:
         """True only for an explicitly admitted improve-only unborn checkout."""
         return self.head_sha is None
 
-    @property
-    def is_in_place(self) -> bool:
-        """Return True when this context runs on the user's source worktree."""
-        return not self.is_ephemeral
-
 
 # --- Public API --------------------------------------------------------------
 
@@ -831,9 +826,4 @@ def _resolve_copy_entries(source: Path) -> list[Path]:
     candidates.extend(p.name for p in source.glob(_DEFAULT_COPY_GLOB))
 
     unique = _dedupe_ordered(candidates)
-    return [p for p in unique if _is_gitignored(source, str(p))]
-
-
-def _is_gitignored(repo: Path, relative_path: str) -> bool:
-    """Return True iff ``git check-ignore`` says *relative_path* is ignored."""
-    return git_ops.check_ignore(repo, relative_path)
+    return [p for p in unique if git_ops.check_ignore(source, str(p))]

@@ -92,13 +92,12 @@ class DaydreamFileConfig:
         uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
             are swept in one run. Non-negative only: ``0`` disables the sweep;
             a negative value degrades to ``None`` (the named default applies).
-            ``None`` falls through to the RunConfig field /
-            ``config.DEFAULT_UNCOVERED_SWEEP_MAX_FILES`` (10).
+            ``None`` falls through to the review-profile pipeline default (10).
         uncovered_sweep_min_hunk_lines: Issue #309. Minimum added/removed lines
             a file's hunks must contain to warrant a sweep. Non-negative only:
             ``0`` removes the floor; a negative value degrades to ``None`` (the
-            named default applies). ``None`` falls through to the RunConfig field /
-            ``config.DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
+            named default applies). ``None`` falls through to the review-profile
+            pipeline default (5).
         quality_gate_enabled: Issue #315. Toggle the fix-phase anti-degradation
             quality gate. ``None`` falls through to the orchestrator default
             (``config.DEFAULT_QUALITY_GATE_ENABLED``, ``True``); ``False`` skips
@@ -368,10 +367,7 @@ def _coerce_quality_threshold(raw: Any) -> float | None:
     negative, NaN, inf, bool, or non-number -- degrades to ``None`` so the
     ``config.py`` default applies.
     """
-    value = _coerce_float(raw)
-    if value is None or not math.isfinite(value) or value < 0:
-        return None
-    return value
+    return _coerce_non_negative_float(raw)
 
 
 def _coerce_non_negative_float(raw: Any) -> float | None:

@@ -27,7 +27,6 @@ INDEX_REVISION = "a" * 40
 _CID = "cur-1"
 _SID = "e" * 64
 _STABLE_POINTER = f"annotations/{_CID}/checkpoints/batch-latest.json"
-_STATE_NAMES = ("queue.json", "observations.jsonl", "preview-ledger.json", "preview-manifest.json", "index.db")
 
 
 def _canonical_bytes(value: Any) -> bytes:

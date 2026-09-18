@@ -4,8 +4,8 @@ Deep artifacts use the explicit session's private `.daydream/deep` route.
 Intentional standalone callers opt into `target / ".daydream" / "deep"`.
 The session publishes the merged report to `target / REVIEW_OUTPUT_FILE`.
 
-The check_deep_artifacts() helper mirrors check_review_file_exists()
-(daydream/phases.py:611-629) -- same exception type, same actionable message format.
+The check_deep_artifacts() helper uses the same exception type and actionable
+message format as the other artifact-predecessor guards.
 """
 
 from __future__ import annotations

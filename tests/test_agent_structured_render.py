@@ -83,7 +83,7 @@ async def test_plain_text_still_renders(monkeypatch: pytest.MonkeyPatch, tmp_pat
     backend = MockBackend(
         [TextEvent(text="narration here"), ResultEvent(structured_output=None, continuation=None)]
     )
-    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
+    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()
 
 

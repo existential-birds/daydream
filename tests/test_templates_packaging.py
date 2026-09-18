@@ -19,7 +19,6 @@ from daydream.templates import workflow_template_files
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _EXPECTED_TEMPLATES = {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
-_TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
 # Optional manual-copy variant; NOT part of the default `daydream setup` deposit.
 _SINGLE_TEMPLATE_PATH = "daydream/templates/workflows/single/daydream.yml"
 

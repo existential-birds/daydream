@@ -114,7 +114,6 @@ async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
         assert ctx.repo == repo
         assert ctx.source == repo
         assert ctx.is_ephemeral is False
-        assert ctx.is_in_place is True
         assert ctx.head_branch == "main"
         # No fetch should have run -> the new commit on origin is not visible.
         proc = subprocess.run(  # noqa: S603
@@ -146,7 +145,6 @@ async def test_ephemeral_with_no_branch_uses_head(tmp_path: Path) -> None:
         assert git_ops.is_inside_worktree(ctx.repo) is True
         assert ctx.head_sha == expected_head
         assert ctx.head_branch is None  # detached
-        assert ctx.is_in_place is False
         captured_path = ctx.repo
 
     assert captured_path is not None

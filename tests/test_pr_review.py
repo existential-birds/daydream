@@ -43,6 +43,23 @@ gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed
 SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
 BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summary)
 
+def _recording_fake_submit(
+    captured: dict[str, pr_review.ClassifiedReviewPlan],
+) -> Any:
+    def fake_submit(
+        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
+    ) -> pr_review.ClassifiedReviewResult:
+        captured["plan"] = plan
+        return pr_review.ClassifiedReviewResult(
+            status=pr_review.SubmissionStatus.POSTED,
+            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
+            posted_file_level=(),
+            folded_file_level=(),
+            final_review_posted=True,
+            safe_error=None,
+        )
+    return fake_submit
+
 
 def test_finding_and_summary_markdown_is_byte_stable() -> None:
     i = ParsedIssue(
@@ -1053,20 +1070,7 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
         ),
     )
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-
-    def fake_submit(
-        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
-        captured["plan"] = plan
-        return pr_review.ClassifiedReviewResult(
-            status=pr_review.SubmissionStatus.POSTED,
-            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
-            posted_file_level=(),
-            folded_file_level=(),
-            final_review_posted=True,
-            safe_error=None,
-        )
-
+    fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     successes: list[str] = []
     monkeypatch.setattr(
@@ -1116,20 +1120,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
         ),
     )
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-
-    def fake_submit(
-        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
-        captured["plan"] = plan
-        return pr_review.ClassifiedReviewResult(
-            status=pr_review.SubmissionStatus.POSTED,
-            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
-            posted_file_level=(),
-            folded_file_level=(),
-            final_review_posted=True,
-            safe_error=None,
-        )
-
+    fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
@@ -1304,20 +1295,7 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-
-    def fake_submit(
-        plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
-        captured["plan"] = plan
-        return pr_review.ClassifiedReviewResult(
-            status=pr_review.SubmissionStatus.POSTED,
-            review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
-            posted_file_level=(),
-            folded_file_level=(),
-            final_review_posted=True,
-            safe_error=None,
-        )
-
+    fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)

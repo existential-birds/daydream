@@ -39,7 +39,6 @@ from daydream.artifact_visibility import (
     TrajectoryOutputRoute,
     artifact_dir_for,
     artifact_session_active,
-    bind_artifact_session,
     derive_workspace_identity,
     operational_worktree_root,
     private_root_locations,
@@ -1106,8 +1105,6 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
         async with anyio.create_task_group() as group:
             group.start_soon(child)
         assert observed == [session.daydream_dir]
-        with bind_artifact_session(session):
-            assert artifact_dir_for(work.repo, allow_standalone=True) == session.daydream_dir
         assert artifact_dir_for(work.repo, allow_standalone=True) == session.daydream_dir
         with pytest.raises(ArtifactVisibilityError, match="active artifact session"):
             artifact_dir_for(tmp_path / "wrong-repo", allow_standalone=True)

@@ -159,12 +159,9 @@ def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
 
 
 # Deterministic SHAs/trees produced by ``_seed_origin`` (verified at seed build).
-_SHA_BASE1 = 'cae67fc3eb4c5d3dd3353ca7fb41f909837bf0a2'
-_SHA_BASE1_TREE = '2cd99bd20f7b3bac54014e20db1831d64b2c4fc9'
 _SHA_BASE2 = 'd35f2cbffc81b6292f67cf891ac1c4256fe948a4'
 _SHA_BASE2_TREE = 'a54e8fefe4dd3ffe592efe5fc64eb32f9eb7dbd4'
 _SHA_BASE3 = '7a447892308f03f6861099ad03b5895397591f02'
-_SHA_BASE3_TREE = '7bf0703afd952cd48a9a9e231cd6fee8e09cc5d0'
 _SHA_HEAD = 'd9a75fd29107db73ef6cb08f877e644381c31f25'
 _SHA_HEAD_TREE = '100c61d903cabfd705776af46193bc55d494940d'
 

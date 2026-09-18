@@ -793,9 +793,6 @@ class ClaudeCliJudgeClient:
         raise VerifierError(last_error or "claude-cli judge failed (unknown)")
 
 
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_OPENROUTER_KEY_PREFIX = "sk-or-"
-_OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 
 

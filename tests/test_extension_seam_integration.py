@@ -42,6 +42,25 @@ InstallBackend = Callable[[object], object]
 _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
 
 
+
+async def _no_post(
+    target_dir: Path,
+    merged_items_path: Path,
+    *,
+    console: Any,
+    run_info: str,
+    renderers: pr_review.ReviewRenderers,
+    post: bool = False,
+    approve_on_clean: bool = False,
+    pr_number: int | None = None,
+    diagram_blocks: str | None = None,
+    run_context: RunContext | None = None,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+) -> None:
+    assert run_context is not None
+    return None
+
+
 FILTER_ITEMS_EXT = """
 import json
 
@@ -630,22 +649,6 @@ async def test_fork_disables_arbiter_in_deep(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    async def _no_post(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: pr_review.ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    ) -> None:
-        assert run_context is not None
-        return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
@@ -983,22 +986,6 @@ async def test_custom_phase_full_stack(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    async def _no_post(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: pr_review.ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    ) -> None:
-        assert run_context is not None
-        return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
@@ -1025,22 +1012,6 @@ async def test_flow_deep_routes_to_deep_helper(
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
     _silence(monkeypatch)
 
-    async def _no_post(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: pr_review.ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    ) -> None:
-        assert run_context is not None
-        return None
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     rc = await runner.run(make_config(multi_stack_target, flow_name="deep"))

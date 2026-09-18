@@ -145,38 +145,6 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # ``"diagram"``, ``"recon"``, ``"audit"``, ``"vet"``,
 # ``"plan_write"``).
 #
-# Claude tiering:
-#   - cheap (haiku):   PARSE
-#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT,
-#                      SUPPRESSION, DIAGRAM, RECON, AUDIT
-#   - heavy (opus):    REVIEW, WONDER, MERGE, ARBITER, VET,
-#                      PLAN_WRITE
-#
-# Codex tiering mirrors it across the GPT-5.6 lineup:
-#   - cheap (gpt-5.6-luna):   PARSE
-#   - mid   (gpt-5.6-terra):  FIX, TEST, VERIFY, EXPLORATION, PER_STACK_REVIEW,
-#                             INTENT, SUPPRESSION, SUPERVISE, DIAGRAM, RECON,
-#                             AUDIT
-#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, ARBITER, VET,
-#                             PLAN_WRITE
-#
-# ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
-# borderline uncontested findings; it runs on the cheap mid tier by design (never
-# per-finding Opus) -- one batched Sonnet call over all suppression targets.
-# ``supervise`` is the batched findings supervisor over canonical merged items;
-# it uses the same Sonnet tier by default.
-#
-# ``diagram`` (issue #1113) is the grounded-diagram author: one call per eligible
-# kind that emits a JSON spec whose every element carries ``file:line`` evidence.
-# It never writes mermaid (a pure renderer does), and everything it proposes is
-# verified deterministically afterwards, so the mid tier is the right cost point.
-#
-# ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
-# heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
-# while a single Opus arbiter re-reviews only the high-severity/contested
-# findings they surface. ``per_stack_review`` is independently overridable from
-# ``review``/``wonder``/``merge``.
-#
 # ``PHASE_DEFAULT_EFFORT`` supplies the matching per-phase reasoning-effort
 # defaults; see its own docstring below.
 #
@@ -370,19 +338,6 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
-
-# Issue #309: uncovered-diff-file sweep. After per-stack reviews + parse, the
-# deep flow re-reviews diff files no reviewer read with a cheap second-pass
-# agent. `uncovered_sweep` toggles the pass (default True);
-# `uncovered_sweep_max_files` caps how many uncovered files are swept in one run
-# (the remainder is recorded, not silently dropped);
-# `uncovered_sweep_min_hunk_lines` skips files whose hunks are trivially small.
-# After the profile-pipeline migration these are realized through the
-# review-profile pipeline defaults (see ``daydream/review_profile.py``); the
-# module constants remain the nominal defaults (True / 10 / 5).
-DEFAULT_UNCOVERED_SWEEP_ENABLED: bool = True
-DEFAULT_UNCOVERED_SWEEP_MAX_FILES: int = 10
-DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES: int = 5
 
 # Issue #731: deep-review sharding + coverage-evidence gated uncovered sweep.
 # Splits oversized per-language stacks into bounded, dependency-aware shards
