@@ -7,7 +7,7 @@ from pathlib import Path
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
-from tests.test_agent_recorder_integration import MockBackend
+from tests.harness.stub_backend import MockBackend
 
 _FILE_SCHEMA = {
     "type": "object",

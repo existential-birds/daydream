@@ -25,16 +25,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from daydream.agent import run_agent
 from daydream.atif import validate
 from daydream.backends import (
-    AgentEvent,
-    ContinuationToken,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -47,6 +42,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
     get_current_recorder,
 )
+from tests.harness.stub_backend import MockBackend
 
 # RFC 3339 / ISO 8601 UTC with mandatory Z suffix (now_iso() invariant).
 _ISO8601_Z_PATTERN = re.compile(
@@ -66,43 +62,6 @@ _VALID_PHASES = {
 }
 
 _VALID_RUN_FLOWS = {"normal", "ttt", "pr", "deep"}
-
-
-@dataclass
-class MockBackend:
-    """Reusable mock backend that replays a canned event list.
-
-    Mirrors the Plan 05 ``tests/test_agent_recorder_integration.py``
-    pattern (structural Backend protocol; no inheritance). Included
-    here for self-containment so the integration test does not depend
-    on internal helpers from another test module.
-    """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        events = self.events
-
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
 
 
 # Test 1 — ROADMAP #1: Claude metrics on every agent step; user/agent source split.

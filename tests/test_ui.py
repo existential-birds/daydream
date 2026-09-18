@@ -289,7 +289,7 @@ def test_task_prompt_truncation_uses_named_limit() -> None:
 def _taskoutput_backend() -> Any:
     """Build a backend stream containing a background task and its final output."""
     from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from tests.test_agent_recorder_integration import MockBackend
+    from tests.harness.stub_backend import MockBackend
 
     return MockBackend(
         [
@@ -364,7 +364,7 @@ async def test_run_agent_callback_coalesces_streaming_text_deltas(tmp_path: Path
     from daydream.agent import run_agent
     from daydream.backends import ResultEvent, TextEvent
     from daydream.trajectory import DaydreamPhase
-    from tests.test_agent_recorder_integration import MockBackend
+    from tests.harness.stub_backend import MockBackend
 
     backend = MockBackend(
         [
@@ -400,7 +400,7 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     from daydream.agent import run_agent
     from daydream.backends import ResultEvent, ToolStartEvent
     from daydream.trajectory import DaydreamPhase
-    from tests.test_agent_recorder_integration import MockBackend
+    from tests.harness.stub_backend import MockBackend
 
     backend = MockBackend(
         [

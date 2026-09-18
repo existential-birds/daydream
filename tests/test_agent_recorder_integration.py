@@ -39,43 +39,8 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
 )
+from tests.harness.stub_backend import MockBackend
 from tests.harness.trajectory import make_recorder
-
-
-@dataclass
-class MockBackend:
-    """Minimal Backend implementation that replays a canned event list.
-
-    Mirrors the Backend protocol surface (execute / cancel) without inheriting;
-    tests substitute this in place of ClaudeBackend / CodexBackend so the event
-    deterministic.
-    """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        events = self.events
-
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
 
 
 async def _run_with_recorder(
