@@ -131,6 +131,50 @@ def _create_table_sql(columns: Iterable[RunColumn]) -> str:
     return "\nCREATE TABLE IF NOT EXISTS runs (\n" + "\n".join(lines) + "\n)\n"
 
 
+_UPSERT_LINE_WIDTH = 92
+"""Maximum length of a generated upsert column/parameter line (4-space indent included)."""
+
+
+def _wrap_tokens(tokens: tuple[str, ...]) -> str:
+    """Greedily wrap *tokens* into 4-space-indented comma-separated lines.
+
+    The single formatting rule shared by both halves of the run upsert: fill a
+    line until the next token would push it past ``_UPSERT_LINE_WIDTH``, then
+    break *before* that token. Every line ends with a comma except the last.
+    """
+    lines: list[str] = []
+    current = "    "
+    for token in tokens:
+        separator = ", " if current.strip() else ""
+        candidate = current + separator + token
+        if current.strip() and len(candidate) > _UPSERT_LINE_WIDTH:
+            lines.append(current + ",")
+            current = "    " + token
+        else:
+            current = candidate
+    lines.append(current)
+    return "\n".join(lines)
+
+
+def _upsert_sql(columns: Iterable[RunColumn]) -> str:
+    """Render the run upsert statement from *columns*.
+
+    Only the columns declared ``upserted`` participate, in declaration order;
+    the column block and the ``:name`` parameter block are wrapped by the same
+    ``_wrap_tokens`` rule so their token sequences stay aligned. No trailing
+    comma on either block's last token.
+    """
+    participating = tuple(col.name for col in columns if col.upserted)
+    parameters = tuple(f":{name}" for name in participating)
+    return (
+        "\nINSERT OR REPLACE INTO runs (\n"
+        + _wrap_tokens(participating)
+        + "\n) VALUES (\n"
+        + _wrap_tokens(parameters)
+        + "\n)\n"
+    )
+
+
 _CREATE_TABLE = _create_table_sql(RUNS_COLUMNS)
 
 # Append-only bitemporal annotation history. ``observed_at`` is transaction
@@ -192,35 +236,7 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_label_obs_session ON label_observations(session_id)",
 ]
 
-_UPSERT_SQL = """
-INSERT OR REPLACE INTO runs (
-    session_id, archived_at, status, archive_status, pipeline_status, phase_states,
-    daydream_version, daydream_install_source, daydream_commit, daydream_dirty,
-    daydream_container_digest, run_flow, skill, model, backend,
-    review_backend, fix_backend, test_backend, per_stack_review_backend, per_stack_review_model,
-    review_only, deep, remote_url, repo_slug, source_path, branch, base_branch,
-    head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
-    grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
-    erosion, verbosity, location_in_hunk_rate, shipped_duplicate_pairs,
-    fix_quality_gate, recommended_patch_capture,
-    total_prompt_tokens, total_completion_tokens, total_cached_tokens,
-    outcome_labels, labeled_at, composite_reward, archive_path, schema_version,
-    profile_schema_version, profile_name, profile_source_kind, profile_digest
-) VALUES (
-    :session_id, :archived_at, :status, :archive_status, :pipeline_status, :phase_states,
-    :daydream_version, :daydream_install_source, :daydream_commit, :daydream_dirty,
-    :daydream_container_digest, :run_flow, :skill, :model, :backend,
-    :review_backend, :fix_backend, :test_backend, :per_stack_review_backend, :per_stack_review_model,
-    :review_only, :deep, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
-    :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
-    :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
-    :erosion, :verbosity, :location_in_hunk_rate, :shipped_duplicate_pairs,
-    :fix_quality_gate, :recommended_patch_capture,
-    :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
-    :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version,
-    :profile_schema_version, :profile_name, :profile_source_kind, :profile_digest
-)
-"""
+_UPSERT_SQL = _upsert_sql(RUNS_COLUMNS)
 
 
 def _alter_add_missing(

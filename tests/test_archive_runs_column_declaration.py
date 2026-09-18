@@ -11,6 +11,7 @@ deliberate edit is required to change them, which is the point.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 
 import pytest
@@ -148,3 +149,30 @@ def test_migrate_schema_applies_the_generated_entries_in_declaration_order(
     monkeypatch.setattr(_schema, "_alter_add_missing", _capture)
     _schema._migrate_schema(sqlite3.connect(":memory:"))
     assert captured == [("runs", _schema._migration_entries(RUNS_COLUMNS))]
+
+
+def _split_sql_columns(block: str) -> list[str]:
+    return [token.strip() for line in block.splitlines() for token in line.split(",") if token.strip()]
+
+
+def _upsert_statement_names() -> tuple[list[str], list[str]]:
+    """Return (column names, parameter names) in the generated upsert statement."""
+    column_block = re.search(r"runs \(\n(.*?)\n\) VALUES \(", _schema._UPSERT_SQL, re.S)
+    param_block = re.search(r"VALUES \(\n(.*?)\n\)\n", _schema._UPSERT_SQL, re.S)
+    assert column_block is not None and param_block is not None
+    return _split_sql_columns(column_block.group(1)), [
+        token.lstrip(":") for token in _split_sql_columns(param_block.group(1))
+    ]
+
+
+def test_upsert_statement_is_generated_from_the_declaration() -> None:
+    columns, params = _upsert_statement_names()
+    expected = [col.name for col in RUNS_COLUMNS if col.upserted]
+    assert columns == params == expected
+    assert _schema._UPSERT_SQL == _schema._upsert_sql(RUNS_COLUMNS)
+
+
+def test_writer_owned_columns_are_never_written_by_the_upsert() -> None:
+    columns, params = _upsert_statement_names()
+    assert not WRITER_OWNED & set(columns)
+    assert not WRITER_OWNED & set(params)
