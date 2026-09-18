@@ -27,7 +27,7 @@ from daydream.improve.command_contract import (
 from daydream.improve.command_contract import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
 )
-from daydream.output_schema import strict_object
+from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
 # Single source for the structured repository-command contract wording used by
@@ -126,10 +126,7 @@ VET_SCHEMA: dict[str, Any] = strict_object({
             "vet_id": {"type": "integer"},
             "keep": {"type": "boolean"},
             "reason": {"type": "string"},
-            "severity": {
-                "type": ["string", "null"],
-                "enum": ["high", "medium", "low", None],
-            },
+            "severity": severity_enum_schema(nullable=True),
             "impact": {
                 "type": ["string", "null"],
                 "enum": ["HIGH", "MED", "LOW", None],

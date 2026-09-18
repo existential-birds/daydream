@@ -5,6 +5,10 @@ sort-rank mapping, and the missing-severity fallback policy. It is a leaf
 module: it must not import from any other daydream module, so it stays
 importable everywhere in the pipeline.
 
+``CANONICAL_LEVELS`` is the only declaration of the levels. The model-facing
+order is its derived descending form, and the static typing form mirrors the
+same vocabulary.
+
 P6 rule: off-vocabulary severity values are never silently passed through.
 A boundary site that encounters an unknown or absent value must map it
 explicitly (via :func:`normalize_severity`, which returns ``None`` for
@@ -19,8 +23,19 @@ Default severity policy (R3.1, documented once):
 - No other fallback severity value is permitted.
 """
 
+from typing import Literal, TypeAlias
+
 CANONICAL_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 """The canonical severity vocabulary: the only declaration of the levels."""
+
+SeverityLevel: TypeAlias = Literal["high", "medium", "low"]
+"""Static mirror of the model-facing levels, bound to the runtime declaration by tests."""
+
+
+def model_facing_levels() -> tuple[str, ...]:
+    """Return the canonical levels in descending, model-facing order."""
+    return tuple(reversed(CANONICAL_LEVELS))
+
 
 SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 """Sort rank for the canonical levels (high < medium < low).

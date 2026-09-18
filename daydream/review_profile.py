@@ -77,8 +77,9 @@ STAGE_KEYS: frozenset[str] = frozenset(
 # Host-owned severity/confidence vocabularies (R5): severity derives from the
 # canonical vocabulary in daydream/severity.py (CANONICAL_LEVELS -- the only
 # declaration of the lowercase low|medium|high scale); confidence is the
-# uppercase HIGH|MEDIUM|LOW schema enum -- phases.py:4048,4250,
-# deep/prompts.py arbiter/suppression/merge).
+# uppercase HIGH|MEDIUM|LOW schema enum -- SUPERVISE_SCHEMA,
+# SUPPRESSION_SCHEMA, and the arbiter/suppression/merge prompts in
+# deep/prompts.py).
 _SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
 _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
 

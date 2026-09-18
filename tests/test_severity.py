@@ -1,8 +1,26 @@
+from typing import get_args
+
 from daydream import severity
 
 
 def test_canonical_levels_are_low_medium_high() -> None:
     assert severity.CANONICAL_LEVELS == ("low", "medium", "high")
+
+
+def test_model_facing_levels_are_the_derived_descending_order() -> None:
+    assert severity.model_facing_levels() == ("high", "medium", "low")
+    # Derived, not frozen: the function tracks the declaration.
+    original = severity.CANONICAL_LEVELS
+    try:
+        severity.CANONICAL_LEVELS = ("low", "medium", "high", "critical")
+        assert severity.model_facing_levels() == ("critical", "high", "medium", "low")
+    finally:
+        severity.CANONICAL_LEVELS = original
+
+
+def test_severity_level_alias_mirrors_the_declaration() -> None:
+    assert get_args(severity.SeverityLevel) == severity.model_facing_levels()
+    assert set(get_args(severity.SeverityLevel)) == set(severity.CANONICAL_LEVELS)
 
 
 def test_normalize_severity_maps_known_and_rejects_unknown() -> None:

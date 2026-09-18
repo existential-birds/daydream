@@ -61,7 +61,7 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.output_schema import strict_object
+from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
     AdvisoryCandidate,
@@ -1043,10 +1043,7 @@ FEEDBACK_SCHEMA: dict[str, Any] = strict_object({
 # schema and inject the extra ``severity`` field into the items sub-schema and
 # the top-level ``verdicts`` array.
 PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(FEEDBACK_SCHEMA)
-PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = {
-    "type": "string",
-    "enum": ["high", "medium", "low"],
-}
+PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = severity_enum_schema()
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
@@ -1090,7 +1087,7 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = strict_object({
             "title": {"type": "string"},
             "description": {"type": "string"},
             "recommendation": {"type": "string"},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
             "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
             "rationale": {"type": "string"},
@@ -1111,7 +1108,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = strict_object({
             "rationale": {"type": "string"},
             "evidence": {"type": "string"},
             "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             # Issue #744: a finding may span sibling files. Optional in
             # the merge model's semantics (null when single-file) but
             # strict-mode required (Codex rejects optional properties,
@@ -4929,7 +4926,7 @@ ARBITER_SCHEMA: dict[str, Any] = strict_object({
         "items": strict_object({
             "arb_id": {"type": "integer"},
             "keep": {"type": "boolean"},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
             "description": {"type": "string"},
             "rationale": {"type": "string"},
@@ -4946,12 +4943,7 @@ SUPERVISE_SCHEMA: dict[str, Any] = strict_object({
             "id": {"type": "integer"},
             "action": {"type": "string", "enum": ["allow", "drop", "edit", "hold"]},
             "reason": {"type": "string"},
-            "severity": {
-                "anyOf": [
-                    {"type": "string", "enum": ["high", "medium", "low"]},
-                    {"type": "null"},
-                ]
-            },
+            "severity": severity_enum_schema(nullable=True),
             "confidence": {
                 "anyOf": [
                     {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
@@ -5158,7 +5150,7 @@ SUPPRESSION_SCHEMA: dict[str, Any] = strict_object({
         "items": strict_object({
             "sup_id": {"type": "integer"},
             "keep": {"type": "boolean"},
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "severity": severity_enum_schema(),
             "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
             "description": {"type": "string"},
             "rationale": {"type": "string"},
