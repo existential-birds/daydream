@@ -337,9 +337,55 @@ _OWNER = "daydream/backends/_transport.py"
 _OWNER_SURFACE = frozenset({"reap", "raise_for_exit", "teardown"})
 
 
+def _is_transport_exit_error(node: ast.expr | None) -> bool:
+    """True when *node* names ``TransportExitError``, however it is referenced."""
+    if isinstance(node, ast.Name):
+        return node.id == "TransportExitError"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "TransportExitError"
+    if isinstance(node, ast.Tuple):
+        return any(_is_transport_exit_error(element) for element in node.elts)
+    return False
+
+
+def _names_cli_transport(annotation: ast.expr | None) -> bool:
+    """True when *annotation* is ``CliTransport``, possibly inside a union."""
+    if isinstance(annotation, ast.Name):
+        return annotation.id == "CliTransport"
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr == "CliTransport"
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _names_cli_transport(annotation.left) or _names_cli_transport(annotation.right)
+    return False
+
+
+def _constructs_cli_transport(value: ast.expr | None) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "CliTransport"
+    )
+
+
+def _transport_bound_names(tree: ast.AST) -> set[str]:
+    """Names bound to a ``CliTransport`` so a renamed receiver cannot evade the scan."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            names.update(arg.arg for arg in args if _names_cli_transport(arg.annotation))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if _names_cli_transport(node.annotation) or _constructs_cli_transport(node.value):
+                names.add(node.target.id)
+        elif isinstance(node, ast.Assign) and _constructs_cli_transport(node.value):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
+
+
 def _forbidden_sites(source: str) -> list[tuple[str, int]]:
     """(label, lineno) for every reap/raise shape that must live only in the owner."""
     tree = ast.parse(source)
+    transport_names = _transport_bound_names(tree)
     found: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
@@ -348,14 +394,10 @@ def _forbidden_sites(source: str) -> list[tuple[str, int]]:
                 isinstance(func, ast.Attribute)
                 and func.attr == "wait"
                 and isinstance(func.value, ast.Name)
-                and func.value.id == "transport"
+                and (func.value.id == "transport" or func.value.id in transport_names)
             ):
                 found.append(("awaits transport.wait()", node.lineno))
-        if (
-            isinstance(node, ast.ExceptHandler)
-            and isinstance(node.type, ast.Name)
-            and node.type.id == "TransportExitError"
-        ):
+        if isinstance(node, ast.ExceptHandler) and _is_transport_exit_error(node.type):
             found.append(("except TransportExitError", node.lineno))
         if (
             isinstance(node, ast.Raise)
@@ -375,7 +417,23 @@ def _forbidden_sites(source: str) -> list[tuple[str, int]]:
     ("source", "label"),
     [
         ("async def f(transport):\n    await transport.wait()\n", "awaits transport.wait()"),
+        (
+            "async def f():\n    t = CliTransport(...)\n    await t.wait()\n",
+            "awaits transport.wait()",
+        ),
+        (
+            "async def f(t: CliTransport):\n    await t.wait()\n",
+            "awaits transport.wait()",
+        ),
         ("try:\n    pass\nexcept TransportExitError:\n    pass\n", "except TransportExitError"),
+        (
+            "try:\n    pass\nexcept (TransportExitError, ValueError):\n    pass\n",
+            "except TransportExitError",
+        ),
+        (
+            "try:\n    pass\nexcept _transport.TransportExitError:\n    pass\n",
+            "except TransportExitError",
+        ),
         ('raise AdapterError("x", category="PROCESS_EXIT")\n', 'raise with category="PROCESS_EXIT"'),
     ],
 )

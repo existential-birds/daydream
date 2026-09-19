@@ -7,8 +7,11 @@ reap / exit-check / teardown sequence and the exit-diagnostic message builder
 (:func:`reap`, :func:`raise_for_exit`, :func:`teardown`,
 :func:`process_exit_message`), so each CLI adapter contributes only its own
 wording and parameters. Backends keep all protocol mapping: the transport
-yields raw decoded lines and surfaces only the exit code, so backend error
-messages stay byte-identical to what they were before the transport.
+yields raw decoded lines and surfaces only the exit code, so each backend
+owns its error wording. The shared PROCESS_EXIT builder reports the number
+of lines actually printed, so Pi's header differs from its pre-transport
+builder (which reported the raw capture length); Codex and Osprey wording
+is unchanged.
 """
 
 from __future__ import annotations
@@ -299,9 +302,12 @@ async def teardown(transport: CliTransport, transports: list[CliTransport]) -> N
     """Signal, drain and drop *transport* from the caller-owned *transports*.
 
     Idempotent: the reap (:meth:`CliTransport.terminate`) and the stderr drain
-    (:meth:`CliTransport.drain_finished`) are each shielded and idempotent, so
-    a second call re-signals nothing and re-drains nothing. Osprey calls this
-    early as well as in its ``finally``; the ``finally`` call is a no-op.
+    (:meth:`CliTransport.drain_finished`) are each shielded and safe to repeat.
+    A second call re-drains nothing; :meth:`terminate_process` still issues its
+    group SIGTERM before checking ``returncode``, but the process is already
+    reaped, so the extra signal is harmless and the wait is a no-op. Osprey
+    calls this early as well as in its ``finally``; the ``finally`` call is a
+    no-op.
     """
     await transport.terminate()
     await transport.drain_finished()

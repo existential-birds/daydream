@@ -116,7 +116,11 @@ async def test_backend_conformance(loader: Loader) -> None:
         assert all(m.message_id != "" for m in metrics)
     else:
         # Codex and Pi consult their declared deltas: equality (not identity)
-        # so a computed 0.0 cost cannot pass or fail on float identity.
+        # so a computed 0.0 cost cannot pass or fail on float identity.  The
+        # lists must be non-empty or ``all(...)`` above would hold vacuously
+        # (the earlier ``any`` guard only requires one of the two event kinds).
+        assert metrics
+        assert costs
         assert all(m.message_id == deltas["metrics_message_id"] for m in metrics)
         assert all(c.cost_usd == deltas["cost_usd"] for c in costs)
 
