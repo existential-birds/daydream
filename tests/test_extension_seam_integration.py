@@ -554,16 +554,13 @@ async def test_fork_inserts_custom_phase_into_review_flow(
 
 
 class ShallowRecordingBackend(PhaseDispatchBackend):
-    """The shared shallow phase-dispatch fake, plus full-prompt recording.
+    """The shared shallow phase-dispatch fake; prompt recording is inherited.
 
     ``PhaseDispatchBackend`` drives the shallow review-parse-fix-test flow
-    past every gate; ``prompts`` records the exact prompt each ``execute``
-    call received so the test can assert the fork phase's prompt arrived.
+    past every gate; its ``prompts`` property records the exact prompt each
+    ``execute`` call received so the test can assert the fork phase's prompt
+    arrived.
     """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.prompts: list[str] = []
 
     async def execute(
         self,
@@ -575,7 +572,6 @@ class ShallowRecordingBackend(PhaseDispatchBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
-        self.prompts.append(prompt)
         async for event in super().execute(
             cwd, prompt, output_schema, continuation, agents, max_turns, read_only
         ):
