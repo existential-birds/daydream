@@ -6,7 +6,6 @@ The fixture repository itself lives in the package
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import threading
