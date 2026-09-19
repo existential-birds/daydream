@@ -29,6 +29,7 @@ import pytest
 from daydream import git_ops
 from daydream.config import DIAGRAM_MAX_NODES
 from tests.harness import diagram_repos as dr
+from tests.harness.diagram_repos import load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
 from tests.harness.scripts import cli_main as _cli_main
@@ -115,14 +116,6 @@ def _issue_comments(fake_gh: FakeGh) -> list[dict[str, Any]]:
         call.payload
         for call in fake_gh.calls("POST", "/repos/acme/widgets/issues/7/comments")
     ]
-
-
-def _artifact(target: Path) -> dict[str, Any]:
-    path = target / ".daydream" / "deep" / "diagram.json"
-    assert path.is_file(), f"diagram artifact missing at {path}"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-    return data
 
 
 def _diagram_phase_end(target: Path) -> dict[str, Any]:

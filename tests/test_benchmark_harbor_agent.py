@@ -806,6 +806,30 @@ class Executed:
         self.child: dict[str, str] = {}
 
 
+def _capturing_env(executed: Executed) -> type:
+    """Fake Harbor Environment whose exec captures entrypoint command/cwd/child env."""
+    from harbor.environments.base import ExecResult
+
+    class Env:
+        async def exec(
+            self,
+            command: Any,
+            cwd: Any = None,
+            env: Any = None,
+            timeout_sec: Any = None,
+            user: Any = None,
+        ) -> ExecResult:
+            if "entrypoint" in command:
+                executed.command = command
+                executed.cwd = cwd
+                executed.child = env or {}
+            else:
+                executed.setup = command
+            return ExecResult(return_code=0, stdout="", stderr="")
+
+    return Env
+
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -832,7 +856,6 @@ def test_local_harbor_task_with_fake_backend(
     import pytest
 
     pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
 
     from daydream.benchmark.harbor import build, entrypoint
@@ -883,27 +906,7 @@ def test_local_harbor_task_with_fake_backend(
 
     executed = Executed()
 
-    class Env:
-        async def exec(
-            self,
-            command: Any,
-            cwd: Any=None,
-            env: Any=None,
-            timeout_sec: Any=None,
-            user: Any=None,
-        ) -> ExecResult:
-            if "entrypoint" in command:
-                # Harbor injects the per-case child env into the container;
-                # capture it so we can assert it is exactly the allowlist and
-                # then really execute the entrypoint against it below.
-                executed.command = command
-                executed.cwd = cwd
-                executed.child = env or {}
-            else:
-                executed.setup = command
-            return ExecResult(return_code=0, stdout="", stderr="")
-
-    env = Env()
+    env = _capturing_env(executed)()
     asyncio.run(agent.setup(env))
     asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
 
@@ -988,7 +991,6 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     import pytest
 
     pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
 
     from daydream.benchmark.harbor import entrypoint
@@ -1031,27 +1033,7 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
 
     executed = Executed()
 
-    class Env:
-        async def exec(
-            self,
-            command: Any,
-            cwd: Any=None,
-            env: Any=None,
-            timeout_sec: Any=None,
-            user: Any=None,
-        ) -> ExecResult:
-            if "entrypoint" in command:
-                # Harbor injects the per-case child env into the container;
-                # capture it so we can assert it keeps the claude credential and
-                # then really execute the entrypoint against it below.
-                executed.command = command
-                executed.cwd = cwd
-                executed.child = env or {}
-            else:
-                executed.setup = command
-            return ExecResult(return_code=0, stdout="", stderr="")
-
-    env = Env()
+    env = _capturing_env(executed)()
     asyncio.run(agent.setup(env))
     asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
 

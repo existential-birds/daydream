@@ -35,9 +35,7 @@ class VerifierError(Exception):
     """Raised on any invalid verifier input (validation-failures-as-exception)."""
 
 
-# ---------------------------------------------------------------------------
 # field validators
-# ---------------------------------------------------------------------------
 
 
 def _validate_hex64(value: object, field: str) -> str:
@@ -230,9 +228,7 @@ def parse_candidate_finding(raw: dict[str, object]) -> CandidateFinding:
     return CandidateFinding(**_finding_kwargs(raw, side="candidate", id_key="candidate_id"))  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
 # deterministic candidate-ID derivation
-# ---------------------------------------------------------------------------
 
 
 def _finding_component(finding: object, name: str) -> object:
@@ -256,9 +252,7 @@ def derive_candidate_id(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
 # candidate artifact + gold set validation
-# ---------------------------------------------------------------------------
 
 
 def _canonical_tuple(finding: object) -> tuple[object, ...]:
@@ -345,9 +339,7 @@ def validate_gold_set(
     return parsed
 
 
-# ---------------------------------------------------------------------------
 # verdicts + edge retention
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -383,9 +375,7 @@ def retained_edges(
     ]
 
 
-# ---------------------------------------------------------------------------
 # maximum-cardinality one-to-one matching
-# ---------------------------------------------------------------------------
 
 
 def _edge_key(v: Verdict) -> tuple[float, str, str]:
@@ -439,9 +429,7 @@ def maximum_matching(
     return {(match_candidate[c], c) for c in match_candidate}
 
 
-# ---------------------------------------------------------------------------
 # reward + score_review
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -610,18 +598,22 @@ def _f1(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def _finding_id(finding: object) -> str:
-    """Read a gold finding's id from either a GoldFinding or a raw dict."""
+def _read_id(finding: object, key: str, label: str) -> str:
     if isinstance(finding, dict):
         try:
-            value = finding["finding_id"]
+            value = finding[key]
         except KeyError as exc:
-            raise VerifierError("missing gold finding_id") from exc
+            raise VerifierError(f"missing {label}") from exc
     else:
-        value = getattr(finding, "finding_id")
+        value = getattr(finding, key)
     if not isinstance(value, str):
-        raise VerifierError("gold finding_id must be a string")
+        raise VerifierError(f"{label} must be a string")
     return value
+
+
+def _finding_id(finding: object) -> str:
+    """Read a gold finding's id from either a GoldFinding or a raw dict."""
+    return _read_id(finding, "finding_id", "gold finding_id")
 
 
 def _empty_side_error(gold_count: int) -> Reward:
@@ -762,9 +754,7 @@ def score_review(
     )
 
 
-# ---------------------------------------------------------------------------
 # reward / reward-details serialization
-# ---------------------------------------------------------------------------
 
 
 def reward_to_json(reward: Reward) -> str:
@@ -773,16 +763,7 @@ def reward_to_json(reward: Reward) -> str:
 
 
 def _candidate_id(finding: object) -> str:
-    if isinstance(finding, dict):
-        try:
-            value = finding["candidate_id"]
-        except KeyError as exc:
-            raise VerifierError("missing candidate_id") from exc
-    else:
-        value = getattr(finding, "candidate_id")
-    if not isinstance(value, str):
-        raise VerifierError("candidate_id must be a string")
-    return value
+    return _read_id(finding, "candidate_id", "candidate_id")
 
 
 def reward_details(
@@ -821,9 +802,7 @@ def reward_details(
     }
 
 
-# ---------------------------------------------------------------------------
 # corpus micro-metric aggregation
-# ---------------------------------------------------------------------------
 
 
 def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float | int]:

@@ -5,7 +5,6 @@ real local bare origin), the head-tree line-count read source (a shared bare
 mirror via ``git cat-file blob <head>:<path>``), and the full derivation /
 rejection / transition surface of :mod:`daydream.benchmark.curation`.
 """
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +24,7 @@ from daydream.benchmark.storage import (
     load_yaml_strict,
 )
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import git as _seed_git
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,17 +77,6 @@ def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) ->
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
-
-
-def _seed_git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
-    """Run git in *repo*, returning stripped stdout."""
-    proc = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True,
-        env={**os.environ, **env} if env else os.environ.copy(), check=check,
-    )
-    if check and proc.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
 
 
 def _seed_write(repo: Path, name: str, content: str) -> None:

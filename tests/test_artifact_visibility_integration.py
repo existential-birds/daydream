@@ -31,6 +31,7 @@ from tests.harness.claude_sdk import (
     patch_claude_sdk,
 )
 from tests.harness.git_helpers import bare_remote, commit, git
+from tests.harness.git_helpers import tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 
 SOURCE_CANARY = "SOURCE_CANARY"
@@ -578,17 +579,6 @@ async def _run_blocked_codex(*, fixture: ProtocolCli, config: RunConfig, private
         releaser.join(timeout=5)
         assert not releaser.is_alive()
         assert failures == []
-
-
-def _tracked_source_state(repo: Path) -> dict[str, Any]:
-    tracked = git(repo, "ls-files").splitlines()
-    return {
-        "head": git(repo, "rev-parse", "HEAD"),
-        "refs": git(repo, "show-ref"),
-        "index": git(repo, "ls-files", "--stage"),
-        "diff": git(repo, "diff", "--binary", "HEAD"),
-        "bytes": {name: (repo / name).read_bytes() for name in tracked},
-    }
 
 
 @pytest.mark.asyncio

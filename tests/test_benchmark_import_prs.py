@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -23,6 +22,7 @@ import pytest
 from daydream import git_ops
 from tests.harness import github_schema as gs
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import git as _seed_git
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
@@ -1092,17 +1092,6 @@ def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) ->
 
 
 # real-git local-origin seed for snapshot-freeze wiring (no network)
-
-
-def _seed_git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
-    """Run git in *repo*, returning stripped stdout."""
-    proc = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True,
-        env={**os.environ, **env} if env else os.environ.copy(), check=check,
-    )
-    if check and proc.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
 
 
 def _seed_write(repo: Path, name: str, content: str) -> None:

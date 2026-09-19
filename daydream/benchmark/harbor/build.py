@@ -25,6 +25,7 @@ from daydream import severity
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.manifest import load_benchmark_manifest
+from daydream.prompt_budget import truncate_utf8_to_budget
 
 TEMPLATE_VERSION = "4"
 
@@ -96,24 +97,6 @@ ASSIGNMENT_TEXT = (
 MAX_PR_CONTEXT_BYTES = 32 * 1024
 
 
-def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
-    """Truncate *text* to a whole-UTF-8-char prefix of at most *max_bytes* bytes.
-
-    Returns ``(text, False)`` when the text already fits; otherwise backs off
-    byte-by-byte until the slice decodes as UTF-8 (a valid character
-    boundary) and returns ``(decoded_slice, True)``. Pure and deterministic.
-    """
-    payload = text.encode("utf-8")
-    if len(payload) <= max_bytes:
-        return text, False
-    cut = payload[:max_bytes]
-    while True:
-        try:
-            return cut.decode("utf-8"), True
-        except UnicodeDecodeError:
-            cut = cut[:-1]
-
-
 _ESCAPED_HISTORICAL_TAGS = {
     "<historical_pr_context>": "&lt;historical_pr_context&gt;",
     "</historical_pr_context>": "&lt;/historical_pr_context&gt;",
@@ -169,7 +152,8 @@ def bounded_pr_context(
     title_line = f"title: {title}"
     body_line = f"body: {body}"
     full = f"{title_line}\n{body_line}"
-    truncated_text, truncated = _truncate_utf8(full, max_bytes)
+    truncated_text = truncate_utf8_to_budget(full, max_bytes)
+    truncated = truncated_text != full
     if not truncated:
         return (
             f"<historical_pr_context>\n{title_line}\n{body_line}\n"

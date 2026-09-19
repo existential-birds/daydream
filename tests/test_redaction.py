@@ -48,7 +48,6 @@ def _agent_step(
     )
 
 
-# ---- Single-token secret patterns in free text (REDA-01) ----
 
 _JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aBcDeF12345"
 
@@ -73,7 +72,6 @@ def test_redactor_scrubs_single_token_secret(text: str, raw_secret: str, marker:
     assert marker in out.message
 
 
-# ---- JWT negative case (TEST-03 gap fill) ----
 
 
 def test_redactor_preserves_short_eyj_non_jwt() -> None:
@@ -84,7 +82,6 @@ def test_redactor_preserves_short_eyj_non_jwt() -> None:
     assert "eyJhbG" in out.message
 
 
-# ---- Message surface (TEST-03 gap fill: explicit Step.message redaction) ----
 
 
 def test_redactor_applies_to_step_message_surface() -> None:
@@ -96,7 +93,6 @@ def test_redactor_applies_to_step_message_surface() -> None:
     assert "[REDACTED_API_KEY]" in out.message
 
 
-# ---- Git URL credentials (REDA-01: explicit "git remote URLs with embedded credentials") ----
 
 
 def test_redactor_scrubs_git_url_credentials() -> None:
@@ -113,7 +109,6 @@ def test_redactor_scrubs_git_url_credentials() -> None:
     assert "/user/repo.git" in out.message
 
 
-# ---- Username path patterns (REDA-02) ----
 
 
 @pytest.mark.parametrize(
@@ -135,7 +130,6 @@ def test_redactor_scrubs_username_path(text: str, absent: str, present: str, pre
         assert preserved_tail in out.message
 
 
-# ---- Env-var pattern (REDA-03) ----
 
 
 @pytest.mark.parametrize(
@@ -154,7 +148,6 @@ def test_redactor_scrubs_env_var(text: str, raw_value: str, expected_fragment: s
     assert expected_fragment in out.message
 
 
-# ---- Negative cases ----
 
 
 def test_redactor_preserves_non_secret_env_vars() -> None:
@@ -180,7 +173,6 @@ def test_redactor_preserves_clean_strings(clean_text: str) -> None:
     assert out.message == clean_text
 
 
-# ---- Surface coverage (REDA-04) ----
 
 
 def test_redactor_applies_to_reasoning_content() -> None:
@@ -221,7 +213,6 @@ def test_redactor_applies_to_observation_content() -> None:
     assert "[REDACTED_USER]" in first_content
 
 
-# ---- Fail-safe (REDA-05) ----
 
 
 def test_redactor_failure_mode_replaces_with_redaction_failed(
@@ -245,7 +236,6 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(
     assert "[REDACTION_FAILED]" in out.message
 
 
-# ---- Regression: CR-01 (inverted ternary preserved JSON-string instead of dict) ----
 
 
 def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
@@ -304,7 +294,6 @@ def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(
     assert out["edits"] == "[REDACTION_FAILED]"
 
 
-# ---- Regression: WR-03 (env-var pattern over-redacted via substring match) ----
 
 
 @pytest.mark.parametrize(
@@ -354,7 +343,6 @@ def test_env_var_pattern_redacts_legitimate_secret_segments(
     assert "[REDACTED_ENV_VAR]" in out.message
 
 
-# ---- Regression: WR-04 (top-level fallback wiped only message, leaked others) ----
 
 
 def test_redactor_failure_mode_wipes_all_text_bearing_fields(
@@ -401,7 +389,6 @@ def test_redactor_failure_mode_wipes_all_text_bearing_fields(
     assert out.observation.results[0].content == "[REDACTION_FAILED]"
 
 
-# ---- Multimodal message (list[ContentPart]) ----
 
 
 def test_redactor_scrubs_text_content_parts() -> None:
@@ -541,7 +528,6 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched
 
 
-# ---- Recursive sensitive-key redaction (issue #455, Task 1) ----
 
 
 @pytest.mark.parametrize("sensitive_key", [
@@ -587,7 +573,6 @@ def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -
     assert "[REDACTED_CREDENTIAL]" not in json.dumps(args)
 
 
-# ---- Structured key-value text + auth headers (issue #455, Task 2) ----
 
 
 @pytest.mark.parametrize("text", [
@@ -629,7 +614,6 @@ def test_redactor_scrubs_authorization_header_values(
         assert f"{header}: {scheme} " in out.message
 
 
-# ---- Follow-up regressions (mid-line headers, nested pairs, prose) ----
 
 
 def test_redactor_scrubs_mid_line_authorization_header() -> None:
@@ -717,7 +701,6 @@ def test_redactor_scrubs_scheme_pair_under_sensitive_key() -> None:
     assert "token: Bearer [REDACTED_CREDENTIAL]" in out
 
 
-# ---- Linear separator-anchored scan (issue #1236 Task 2, root-cause fix) ----
 
 
 def test_redactor_linear_scan_nested_pair_in_bare_value() -> None:
