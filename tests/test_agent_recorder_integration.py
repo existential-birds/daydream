@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +23,6 @@ from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     Backend,
-    ContinuationToken,
     CostEvent,
     MaxTurnsError,
     MetricsEvent,
@@ -39,6 +36,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
 )
+from tests.harness.backend import ScriptedBackend
 from tests.harness.stub_backend import MockBackend
 from tests.harness.trajectory import make_recorder
 
@@ -317,8 +315,7 @@ async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
     assert agent_steps[0]["message"] == "answer"
 
 
-@dataclass
-class MaxTurnsBackend:
+def _max_turns_backend(pre_events: list[AgentEvent]) -> ScriptedBackend:
     """Backend whose event stream raises MaxTurnsError mid-turn.
 
     Replays ``pre_events`` (an in-flight assistant turn), then raises
@@ -327,33 +324,13 @@ class MaxTurnsBackend:
     agent has already produced output. Exercises the realistic shape: the
     failure lands on a Step that already carries content, not an empty one.
     """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-    pre_events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        pre_events = self.pre_events
-
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            for event in pre_events:
-                yield event
-            raise MaxTurnsError("Claude agent run failed: error_max_turns", subtype="error_max_turns")
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
+    return ScriptedBackend(
+        events=[
+            *pre_events,
+            MaxTurnsError("Claude agent run failed: error_max_turns", subtype="error_max_turns"),
+        ],
+        model="mock-model",
+    )
 
 
 async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None:
@@ -368,13 +345,11 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
     """
     recorder = make_recorder(tmp_path)
     target_path = recorder.path
-    backend = MaxTurnsBackend(
-        pre_events=[
-            TextEvent(text="applying fix"),
-            ToolStartEvent(id="t1", name="Edit", input={"path": "a.py"}),
-            ToolResultEvent(id="t1", output="ok", is_error=False),
-        ]
-    )
+    backend = _max_turns_backend([
+        TextEvent(text="applying fix"),
+        ToolStartEvent(id="t1", name="Edit", input={"path": "a.py"}),
+        ToolResultEvent(id="t1", output="ok", is_error=False),
+    ])
 
     # (a) typed exception propagates through the production entrypoint.
     with pytest.raises(MaxTurnsError) as excinfo:

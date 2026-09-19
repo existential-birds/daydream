@@ -284,69 +284,40 @@ async def test_per_phase_cells_show_whole_invocation_tokens(
     Drives two phases through ``run_agent`` with a real recorder, each phase
     reporting usage once per turn, then reads the rendered per-phase table.
     """
-    from collections.abc import AsyncGenerator
-    from typing import Any
-
     from daydream.agent import run_agent
-    from daydream.backends import (
-        AgentEvent,
-        ContinuationToken,
-        MetricsEvent,
-        ResultEvent,
-        TextEvent,
-    )
+    from daydream.backends import AgentEvent, MetricsEvent, ResultEvent, TextEvent
     from daydream.trajectory import DaydreamPhase
+    from tests.harness.backend import ScriptedBackend
     from tests.harness.trajectory import make_recorder
 
-    class _MultiTurn:
-        model = "claude-opus-5"
-        fanout_concurrency = 4
-
-        def __init__(self, turns: int, in_tok: int, out_tok: int) -> None:
-            self.turns, self.in_tok, self.out_tok = turns, in_tok, out_tok
-
-        def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: ContinuationToken | None = None,
-            agents: dict[str, Any] | None = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            turns, in_tok, out_tok = self.turns, self.in_tok, self.out_tok
-
-            async def _gen() -> AsyncGenerator[AgentEvent, None]:
-                for i in range(turns):
-                    yield TextEvent(text=f"turn {i + 1}")
-                    yield MetricsEvent(
-                        message_id=f"m-{i}",
-                        prompt_tokens=in_tok,
-                        completion_tokens=out_tok,
-                        cached_tokens=0,
-                        cost_usd=None,
-                        model_name="claude-opus-5",
-                    )
-                yield ResultEvent(structured_output=None, continuation=None)
-
-            return _gen()
-
-        async def cancel(self) -> None:
-            return None
+    def _multi_turn(turns: int, in_tok: int, out_tok: int) -> ScriptedBackend:
+        turn: list[AgentEvent | BaseException] = []
+        for i in range(turns):
+            turn += [
+                TextEvent(text=f"turn {i + 1}"),
+                MetricsEvent(
+                    message_id=f"m-{i}",
+                    prompt_tokens=in_tok,
+                    completion_tokens=out_tok,
+                    cached_tokens=0,
+                    cost_usd=None,
+                    model_name="claude-opus-5",
+                ),
+            ]
+        turn.append(ResultEvent(structured_output=None, continuation=None))
+        return ScriptedBackend(events=turn, model="claude-opus-5")
 
     run_dir = tmp_path / ".daydream"
     recorder = make_recorder(tmp_path, agent_model_name="claude-opus-5")
     async with recorder:
         await run_agent(
-            _MultiTurn(turns=4, in_tok=25_000, out_tok=1_000),
+            _multi_turn(turns=4, in_tok=25_000, out_tok=1_000),
             tmp_path,
             "review",
             phase=DaydreamPhase.REVIEW,
         )
         await run_agent(
-            _MultiTurn(turns=2, in_tok=10_000, out_tok=500),
+            _multi_turn(turns=2, in_tok=10_000, out_tok=500),
             tmp_path,
             "fix",
             phase=DaydreamPhase.FIX,

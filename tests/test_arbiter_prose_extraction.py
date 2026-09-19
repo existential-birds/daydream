@@ -20,17 +20,18 @@ over the model's actual prose-wrapped message. Only the backend is mocked.
 """
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
+from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
+from tests.harness.backend import ScriptedBackend
 
 SELECTED_RECORDS: list[dict[str, Any]] = [
     {
@@ -85,32 +86,15 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     return diff_path, intent_path, alternatives_path
 
 
-class _PiLikeBackend:
+def _pi_like_backend(message: str) -> ScriptedBackend:
     """Mirrors the pi backend: structured_output = extract_json(final text)."""
-
-    model = "glm-5.2"
-    fanout_concurrency = 4
-
-    def __init__(self, message: str) -> None:
-        self._message = message
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
-        yield TextEvent(text=self._message)
-        structured = extract_json(self._message) if output_schema else None
-        yield ResultEvent(structured_output=structured, continuation=None)
-
-    async def cancel(self) -> None:
-        pass
+    return ScriptedBackend(
+        events=[
+            TextEvent(text=message),
+            ResultEvent(structured_output=extract_json(message), continuation=None),
+        ],
+        model="glm-5.2",
+    )
 
 
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(
@@ -120,7 +104,7 @@ async def test_arbiter_extracts_findings_from_prose_wrapped_message(
     """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _PiLikeBackend(ARBITER_MESSAGE)),
+        cast(Backend, _pi_like_backend(ARBITER_MESSAGE)),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,
         diff_path=diff_path,
@@ -144,7 +128,7 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     with pytest.raises(ValueError):
         await phase_arbiter_review(
-            cast(Backend, _PiLikeBackend(MALFORMED_MESSAGE)),
+            cast(Backend, _pi_like_backend(MALFORMED_MESSAGE)),
             make_work(tmp_path),
             selected_records=SELECTED_RECORDS,
             diff_path=diff_path,
@@ -196,39 +180,19 @@ STRUCTURED_OUTPUT: dict[str, Any] = {
 }
 
 
-class _SplitTextBackend:
+def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
     """Emits prose text and structured output separately (the real pi contract).
 
-    Unlike ``_PiLikeBackend``, the final ``TextEvent`` and the ResultEvent's
-    ``structured_output`` diverge: the text is prose the extractor cannot parse
-    into a findings object, while ``structured_output`` is the complete answer.
-    This is what exposes the log_mode result-capture bug -- a backend whose text
-    happens to also contain a parseable object would mask it via the fallback.
+    The final ``TextEvent`` and the ResultEvent's ``structured_output`` diverge:
+    the text is prose the extractor cannot parse into a findings object, while
+    ``structured_output`` is the complete answer. This is what exposes the
+    log_mode result-capture bug -- a backend whose text happens to also contain a
+    parseable object would mask it via the fallback.
     """
-
-    model = "glm-5.2"
-    fanout_concurrency = 4
-
-    def __init__(self, text: str, structured: Any) -> None:
-        self._text = text
-        self._structured = structured
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
-        yield TextEvent(text=self._text)
-        yield ResultEvent(structured_output=self._structured if output_schema else None, continuation=None)
-
-    async def cancel(self) -> None:
-        pass
+    return ScriptedBackend(
+        events=[TextEvent(text=text), ResultEvent(structured_output=structured, continuation=None)],
+        model="glm-5.2",
+    )
 
 
 async def test_arbiter_captures_structured_output_in_log_mode(
@@ -244,7 +208,7 @@ async def test_arbiter_captures_structured_output_in_log_mode(
     """
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _SplitTextBackend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)),
+        cast(Backend, _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,
         diff_path=diff_path,
