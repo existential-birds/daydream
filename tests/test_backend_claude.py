@@ -1300,9 +1300,7 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
     }
 
 
-# ---------------------------------------------------------------------------
 # fanout_concurrency
-# ---------------------------------------------------------------------------
 
 
 def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch: pytest.MonkeyPatch) -> None:

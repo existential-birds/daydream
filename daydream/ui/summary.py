@@ -6,7 +6,6 @@ deep-mode stage/verification/preflight notices.
 """
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -87,61 +86,6 @@ def print_fix_complete(
     else:
         text.append("Attempted, not fixed", style=STYLE_ORANGE)
     console.print(text)
-
-
-@dataclass
-class SummaryData:
-    """Data class for summary information.
-
-    Attributes:
-        skill: Name of the skill that was executed.
-        target: Target file or directory that was reviewed.
-        feedback_count: Number of issues found during review.
-        fixes_applied: Number of fixes that were applied.
-        test_retries: Number of times tests were retried.
-        tests_passed: Whether all tests passed after fixes.
-
-    """
-
-    skill: str
-    target: str
-    feedback_count: int
-    fixes_applied: int
-    test_retries: int
-    tests_passed: bool
-
-
-def print_summary(console: Console, data: SummaryData) -> None:
-    """Print a summary table with neon styling.
-
-    Displays a comprehensive summary of the review/fix session
-    with status badges for pass/fail.
-    """
-    table = Table(
-        title="✨ Review Summary",
-        title_style=STYLE_BOLD_GREEN,
-        box=box.ROUNDED,
-        border_style=STYLE_PURPLE,
-        show_header=False,
-        padding=(0, 1),
-    )
-
-    table.add_column("Field", style=STYLE_CYAN)
-    table.add_column("Value", style=STYLE_FG)
-
-    table.add_row("Skill", data.skill)
-    table.add_row("Target", data.target)
-    table.add_row("Issues Found", str(data.feedback_count))
-    table.add_row("Fixes Applied", str(data.fixes_applied))
-    table.add_row("Test Retries", str(data.test_retries))
-
-    if data.tests_passed:
-        status_badge = pill(" PASSED ", NEON_COLORS["green"], NEON_COLORS["background"])
-    else:
-        status_badge = pill(" FAILED ", NEON_COLORS["red"], NEON_COLORS["background"])
-    table.add_row("Tests", status_badge)
-
-    console.print(table)
 
 
 def _display_severity(issue: dict[str, Any]) -> str | None:

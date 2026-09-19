@@ -49,6 +49,26 @@ def read_trajectory(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
+def dispatch_descriptors(step: dict[str, Any]) -> list[str]:
+    return [
+        result["content"].removeprefix("Dispatched to ")
+        for result in step["observation"]["results"]
+    ]
+
+
+def dispatch_encloses_children(step: dict[str, Any], target_dir: Path) -> bool:
+    children = [
+        read_trajectory(target_dir / ".daydream" / ref["trajectory_path"])
+        for result in step["observation"]["results"]
+        for ref in result["subagent_trajectory_ref"]
+    ]
+    return bool(children) and all(
+        step["timestamp"] <= child["extra"]["run_started_at"]
+        and step["extra"]["dispatch_completed_at"] >= child["extra"]["run_ended_at"]
+        for child in children
+    )
+
+
 def step_token_sum(traj: dict[str, Any], key: str) -> int:
     """Sum ``metrics[key]`` across agent steps that carry it.
 

@@ -488,9 +488,7 @@ def test_spans_compose_v1_build_spans_per_sibling() -> None:
     assert segment_agents is segment
 
 
-# ---------------------------------------------------------------------------
 # Task 6: profile + stack provenance
-# ---------------------------------------------------------------------------
 
 
 def test_native_profile_fields_surface_from_manifest() -> None:
@@ -534,9 +532,7 @@ def test_stack_falls_back_to_none_when_unresolvable() -> None:
     assert prov["stack"] is None
 
 
-# ---------------------------------------------------------------------------
 # Task 7: per-finding projection + adjudication routing
-# ---------------------------------------------------------------------------
 
 from daydream.training.corpus_projection.projector import project_findings  # noqa: E402
 
@@ -585,9 +581,7 @@ def test_run_level_contested_aggregate_never_erases_split() -> None:
     assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
 
 
-# ---------------------------------------------------------------------------
 # Task 9: summary + full lineage + adjudication report
-# ---------------------------------------------------------------------------
 
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus  # noqa: E402
 
@@ -608,9 +602,7 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     assert "missing" in adj_report.read_text()
 
 
-# ---------------------------------------------------------------------------
 # Task 5: per-repo license decisions on projected records
-# ---------------------------------------------------------------------------
 
 _UNSET = object()
 
@@ -733,9 +725,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     assert records[0]["outcome_label"] is None
 
 
-# ---------------------------------------------------------------------------
 # Frozen-corpus loader surface (stacks.py)
-# ---------------------------------------------------------------------------
 
 from daydream.training.stacks import load_dataset_v2  # noqa: E402
 
@@ -969,9 +959,7 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
         BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
 
 
-# ---------------------------------------------------------------------------
 # Task 6: projection re-enforces C5/C8, accounts rejections, gates _SUCCESS
-# ---------------------------------------------------------------------------
 
 import daydream.archive.hydrate_rules as hydrate_rules  # noqa: E402
 
@@ -1114,9 +1102,7 @@ def test_multi_session_repo_license_decisions_all_recorded(
     assert report["distribution"] == {"admitted": 2}
 
 
-# ---------------------------------------------------------------------------
 # Task 9: digest-pinned license report artifact
-# ---------------------------------------------------------------------------
 
 
 def _sha256_of_exclusion_txt() -> str:
@@ -1167,9 +1153,7 @@ def test_license_report_written_before_success_marker(
     assert summary["license_distribution"] == {"admitted": 1}
 
 
-# ---------------------------------------------------------------------------
 # Task 10: publication gate end-to-end (AC6) + real-path verification
-# ---------------------------------------------------------------------------
 
 
 def _run_build_v2_cli(

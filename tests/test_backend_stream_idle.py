@@ -105,9 +105,7 @@ async def drain(backend: Any, cwd: Path) -> list[Any]:
     return [event async for event in backend.execute(cwd, "do the thing")]
 
 
-# --------------------------------------------------------------------------
 # A silent stream trips the idle timeout; the subprocess is torn down.
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -299,9 +297,7 @@ async def test_idle_window_restarts_after_each_line() -> None:
         await readline_with_idle_timeout(reader, cli="pi", timeout_s=window)
 
 
-# --------------------------------------------------------------------------
 # Operator configuration.
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

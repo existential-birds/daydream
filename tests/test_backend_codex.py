@@ -43,6 +43,7 @@ from daydream.backends.codex import (
 )
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from tests.harness.codex_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.fake_cli_process import ImmediateStdout, LimitAwareStdout
 from tests.harness.git_helpers import git as _git
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
@@ -586,7 +587,7 @@ async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
         ).stdout
         # Source-immutability sentinel: mutate a ref inside the clone, then
         # verify the source's refs and HEAD are untouched.
-        git_ops.update_ref(isolated, "refs/heads/main", git_ops.head_sha(isolated))
+        git_ops.update_refs(isolated, {"refs/heads/main": git_ops.head_sha(isolated)})
         return mock_proc
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
@@ -1032,26 +1033,12 @@ async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     ]
     captured_kwargs: dict[str, object] = {}
 
-    class _LimitAwareStdout:
-        def __init__(self, limit: int) -> None:
-            self._limit = limit
-            self._lines = iter(lines)
-
-        async def readline(self) -> bytes:
-            try:
-                line = next(self._lines)
-            except StopIteration:
-                return b""
-            if len(line) > self._limit:
-                raise ValueError("Separator is found, but chunk is longer than limit")
-            return line
-
     async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
         raw_limit = kwargs.get("limit", 64 * 1024)
         limit = raw_limit if isinstance(raw_limit, int) else 64 * 1024
         process = MagicMock()
-        process.stdout = _LimitAwareStdout(limit)
+        process.stdout = LimitAwareStdout(lines, limit)
         process.stdin = MagicMock()
         process.stdin.write = MagicMock()
         process.stdin.close = MagicMock()
@@ -1388,16 +1375,6 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend must keep reading their own process."""
     backend = CodexBackend(model="fixture-model")
 
-    class _ImmediateStdout:
-        def __init__(self, lines: list[str]) -> None:
-            self._lines = iter(lines)
-
-        async def readline(self) -> bytes:
-            try:
-                return (next(self._lines) + "\n").encode()
-            except StopIteration:
-                return b""
-
     class _BlockingStdout:
         def __init__(self) -> None:
             self.entered = asyncio.Event()
@@ -1428,7 +1405,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
         return process
 
     first_proc = _proc(
-        _ImmediateStdout(
+        ImmediateStdout(
             [
                 '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
                 '{"type":"turn.completed","usage":{}}',

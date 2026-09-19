@@ -20,18 +20,18 @@ from __future__ import annotations
 
 import base64
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import cli, git_ops
+from daydream import git_ops
 from daydream.config import DIAGRAM_MAX_NODES
 from tests.harness import diagram_repos as dr
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
+from tests.harness.scripts import cli_main as _cli_main
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 SEQUENCE_HEADING = "<details><summary><h3>Sequence Diagram</h3></summary>"
@@ -138,19 +138,6 @@ def _diagram_phase_end(target: Path) -> dict[str, Any]:
     end = ends[0]
     assert isinstance(end, dict)
     return end
-
-
-def _cli_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` and return its exit code."""
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    raise AssertionError("cli.main() must exit via sys.exit")
 
 
 # --- Spec test 12: end to end, per kind -------------------------------------

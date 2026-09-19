@@ -21,9 +21,7 @@ import pytest
 from daydream import git_ops
 from daydream.git_ops import GitError
 
-# ---------------------------------------------------------------------------
 # real-git seed helpers (deterministic commit SHAs)
-# ---------------------------------------------------------------------------
 
 _SEED_ENV = {
     "GIT_AUTHOR_NAME": "Tester",
@@ -166,9 +164,7 @@ _SHA_HEAD = 'd9a75fd29107db73ef6cb08f877e644381c31f25'
 _SHA_HEAD_TREE = '100c61d903cabfd705776af46193bc55d494940d'
 
 
-# ---------------------------------------------------------------------------
 # Task 0: spike -- the bare mirror retains full history for rename tracing
-# ---------------------------------------------------------------------------
 
 
 def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) -> None:
@@ -258,9 +254,7 @@ def _seed_double_rename_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str
     return str(bare), authoring_sha, head_sha
 
 
-# ---------------------------------------------------------------------------
 # Task 3 (plan): fail-closed authoring-path derivation over the pinned mirror
-# ---------------------------------------------------------------------------
 
 
 def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
@@ -315,9 +309,7 @@ def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
         assert expected_reason in str(exc.value)
 
 
-# ---------------------------------------------------------------------------
 # Task 1: shared bare-mirror establishment + PR ref fetch
-# ---------------------------------------------------------------------------
 
 
 def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
@@ -337,9 +329,7 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
 
 
-# ---------------------------------------------------------------------------
 # Task 2: ancestor-of-PR-head enforcement
-# ---------------------------------------------------------------------------
 
 
 def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
@@ -357,9 +347,7 @@ def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
     assert sn.head_reachability(m, "0" * 40, pr_head) == "head_unreachable"
 
 
-# ---------------------------------------------------------------------------
 # Task 3: merge-base resolution + tree reachability
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_base_and_trees(tmp_path: Path) -> None:
@@ -379,9 +367,7 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
 
 
-# ---------------------------------------------------------------------------
 # Task 4: degenerate-case detection + canonical diff sha
-# ---------------------------------------------------------------------------
 
 
 def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
@@ -398,9 +384,7 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", d)
 
 
-# ---------------------------------------------------------------------------
 # Task 5: synthetic commits + deterministic minimal bundle
-# ---------------------------------------------------------------------------
 
 
 def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
@@ -446,9 +430,7 @@ def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path) -> None
     assert heads_abs == {"refs/heads/base", "refs/heads/head"}
 
 
-# ---------------------------------------------------------------------------
 # Task 6: offline-clone validation
-# ---------------------------------------------------------------------------
 
 
 def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
@@ -592,9 +574,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
 
 
 
-# ---------------------------------------------------------------------------
 # Task 7: freeze_one ready / unreplayable reason matrix
-# ---------------------------------------------------------------------------
 
 
 def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
@@ -777,9 +757,7 @@ def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
     assert ur2["requested_base_sha"] == _SHA_BASE2
 
 
-# ---------------------------------------------------------------------------
 # Task 10: crash injection at case/bundle/manifest transaction boundaries
-# ---------------------------------------------------------------------------
 
 
 def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
@@ -825,9 +803,7 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
 
 
 
-# ---------------------------------------------------------------------------
 # Task 13: rich-origin fidelity seed + end-to-end matrix
-# ---------------------------------------------------------------------------
 
 
 def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
@@ -920,9 +896,7 @@ def _clone_offline(bundle: Path, workdir: Path) -> Path:
     return Path(clone)
 
 
-# ---------------------------------------------------------------------------
 # Task 0 spike (plan #879): mirror reads for commit-relation + anchor-delta facts
-# ---------------------------------------------------------------------------
 
 
 def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
@@ -1003,9 +977,7 @@ def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path)
     assert "-\t-\tblob.bin" in numstat.splitlines(), numstat
 
 
-# ---------------------------------------------------------------------------
 # Task 2 (plan #879): commit_relation + anchor_delta helpers
-# ---------------------------------------------------------------------------
 
 
 def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:

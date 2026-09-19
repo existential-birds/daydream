@@ -37,9 +37,7 @@ from daydream.deep.render import insert_diagrams_section, render_report
 
 FIXTURES = Path(__file__).parent / "fixtures" / "deep"
 
-# ---------------------------------------------------------------------------
 # Golden specs: the spec's "Target rendering" block, as a grounded spec_final.
-# ---------------------------------------------------------------------------
 
 SEQUENCE_SPEC: dict[str, Any] = {
     "participants": [
@@ -152,9 +150,7 @@ def _both_rendered() -> dict[str, dict[str, Any] | None]:
             "flowchart": _rendered(FLOWCHART_SPEC, FLOWCHART_GROUNDING)}
 
 
-# ---------------------------------------------------------------------------
 # Byte goldens
-# ---------------------------------------------------------------------------
 
 
 def test_sequence_mermaid_matches_golden_fixture_byte_for_byte() -> None:
@@ -217,9 +213,7 @@ def test_flowchart_block_reproduces_the_spec_target_layout() -> None:
     assert blocks.endswith("</details>\n</details>")
 
 
-# ---------------------------------------------------------------------------
 # Ordering, gating, and the "never read a stored mermaid" rule
-# ---------------------------------------------------------------------------
 
 
 def test_blocks_render_sequence_first_then_flowchart() -> None:
@@ -266,9 +260,7 @@ def test_rendering_is_deterministic_and_does_not_mutate_the_spec() -> None:
     assert render_flowchart_mermaid(FLOWCHART_SPEC) == render_flowchart_mermaid(copy.deepcopy(FLOWCHART_SPEC))
 
 
-# ---------------------------------------------------------------------------
 # <sub> line variants
-# ---------------------------------------------------------------------------
 
 
 def test_sub_line_singular_variants_and_cap_clause() -> None:
@@ -316,9 +308,7 @@ def test_sub_line_omits_the_optional_clauses_when_nothing_was_dropped() -> None:
     assert "diagram cap" not in blocks
 
 
-# ---------------------------------------------------------------------------
 # Render caps: asserted, not enforced
-# ---------------------------------------------------------------------------
 
 
 def _participants(n: int) -> list[dict[str, Any]]:
@@ -360,9 +350,7 @@ def test_over_cap_flowchart_specs_raise_value_error() -> None:
                               "edges": edges[:DIAGRAM_MAX_EDGES]})
 
 
-# ---------------------------------------------------------------------------
 # Sanitization and injection (spec test 11)
-# ---------------------------------------------------------------------------
 
 # Every payload from spec test 11, plus a control byte and an entity forgery.
 _PAYLOADS = (
@@ -511,9 +499,7 @@ def test_every_golden_line_matches_its_kind_grammar() -> None:
         assert not FLOWCHART_LINE_GRAMMAR.fullmatch(bad), bad
 
 
-# ---------------------------------------------------------------------------
 # Block structure edge cases
-# ---------------------------------------------------------------------------
 
 
 def test_opt_and_loop_blocks_and_a_message_outside_every_block() -> None:
@@ -617,9 +603,7 @@ def test_subroutine_row_without_a_definition_site_drops_that_clause() -> None:
     assert "| N2 | subroutine, called at `a.py:10` |  |" in blocks
 
 
-# ---------------------------------------------------------------------------
 # Omission notice
-# ---------------------------------------------------------------------------
 
 
 def test_omission_notice_reports_floor_codes_and_counts() -> None:
@@ -661,9 +645,7 @@ def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # render_report / insert_diagrams_section (deep/render.py)
-# ---------------------------------------------------------------------------
 
 
 def _items() -> list[dict[str, Any]]:

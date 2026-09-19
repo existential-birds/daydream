@@ -392,9 +392,7 @@ class TestBuildWiring:
         assert not (tmp_path / "out2" / "_SUCCESS").exists()
 
 
-# ---------------------------------------------------------------------------
 # Task 5: CLI wiring — build accepts share-cap flags (M2, M9)
-# ---------------------------------------------------------------------------
 
 
 class TestCliShareFlags:

@@ -1,6 +1,6 @@
 """TEST-07: Subagent trajectory shape validation.
 
-Uses MockBackend to drive the recorder's fork() path across the parallel
+Drives the recorder's fork() path across the parallel
 fan-out phases it must support: deep-mode per-stack reviews and exploration
 pre_scan specialists. Validates the resulting root + sibling trajectory file
 sets against the vendored ATIF validator.
@@ -11,15 +11,10 @@ No pre-recorded fixture files.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
-    AgentEvent,
-    ContinuationToken,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -35,35 +30,6 @@ from tests.harness.trajectory import (
     observe_text_and_result,
     read_trajectory,
 )
-
-
-@dataclass
-class MockBackend:
-    """Minimal Backend replaying a canned event list."""
-
-    model = "mock-model"
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        events = self.events
-
-        async def _gen() -> AsyncIterator[AgentEvent]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
 
 
 async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:

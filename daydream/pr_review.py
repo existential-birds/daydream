@@ -465,54 +465,6 @@ def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
     )
 
 
-def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
-    """Convert `phase_alternative_review` dicts into ParsedIssue objects.
-
-    Alt issues have a `files: list[str]` field and no line hint. When
-    multiple files are listed we emit one issue per file (classifier will
-    fold file-level issues into the review body).
-
-    Every emitted issue carries a stable cross-run ``fingerprint`` computed
-    from the file path, title, and description (``recommendation`` is
-    excluded from identity), so the per-file fan-out yields one distinct
-    fingerprint per file.
-    """
-    out: list[ParsedIssue] = []
-    for raw in alt_issues:
-        files = raw.get("files") or []
-        if not files:
-            continue
-        title = str(raw.get("title", "")).strip()
-        description = str(raw.get("description", "")).strip()
-        recommendation = str(raw.get("recommendation", "")).strip()
-        severity = _normalize_severity(raw)
-        confidence = str(raw.get("confidence", "")).strip().upper() or None
-        body_parts = []
-        if severity:
-            body_parts.append(f"**Severity:** {severity}")
-        if confidence:
-            body_parts.append(f"**Confidence:** {confidence}")
-        if description:
-            body_parts.append(description)
-        if recommendation:
-            body_parts.append(f"**Recommendation:** {recommendation}")
-        body = "\n\n".join(body_parts)
-        for path in files:
-            out.append(
-                ParsedIssue(
-                    path=str(path),
-                    line=None,
-                    title=title,
-                    body=body,
-                    confidence=confidence,
-                    severity=severity,
-                    severity_off_vocabulary=_severity_off_vocabulary(raw),
-                    fingerprint=compute_fingerprint(str(path), title, description),
-                )
-            )
-    return out
-
-
 def extract_item_fields(
     raw: dict[str, Any],
 ) -> ItemFields | None:
@@ -557,8 +509,7 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     nothing is filtered by section, so structural findings post too.
 
     Each item is one canonical finding with ``file``/``line`` already
-    resolved, so (unlike :func:`alt_issues_to_parsed`) there is no multi-file
-    fan-out.
+    resolved, so there is no multi-file fan-out.
     """
     out: list[ParsedIssue] = []
     for raw in items:

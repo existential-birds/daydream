@@ -148,9 +148,7 @@ def test_missing_fallback_fields_raises(tmp_path: Path) -> None:
         link_session_identity([record], hydrated_index={}, repo_slug_sha_lookup={})
 
 
-# ---------------------------------------------------------------------------
 # Task 3: dedupe across overlapping backups
-# ---------------------------------------------------------------------------
 
 
 def _seed_run(root: Path) -> None:
@@ -493,9 +491,7 @@ def test_buckets_account_for_every_row() -> None:
     assert total == 2
 
 
-# ---------------------------------------------------------------------------
 # Task 7: reason-coded accounting (M7, KD5)
-# ---------------------------------------------------------------------------
 
 SIX_BUCKET_CODES = IMPORT_REASON_CODES
 
@@ -638,9 +634,7 @@ def test_unclassifiable_row_raises_naming_it() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Task 6: merge imported observations via the canonical-harvest seam
-# ---------------------------------------------------------------------------
 
 
 def _row_with_digest(row: dict[str, Any]) -> dict[str, Any]:
@@ -1029,9 +1023,7 @@ def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path) -> 
     assert hist[0]["labeler_policy_version"] is None
     assert hist[0]["legacy"] == "legacy"
 
-# ---------------------------------------------------------------------------
 # Task 8: fail-closed secret scan + redaction before publication (M9, AC6)
-# ---------------------------------------------------------------------------
 
 from daydream.archive.hydrate_rules import (  # noqa: E402
     REASON_CODE_IMPORT_UNREDACTABLE_METADATA,

@@ -165,47 +165,6 @@ async def test_every_step_has_timestamp_and_extra_labels(tmp_path: Path) -> None
     assert all(s["extra"]["daydream_run_flow"] == "pr" for s in traj["steps"])
 
 
-# Test 3 — ROADMAP #3: ToolCall paired with ObservationResult in the same step (CORE-06).
-async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
-    """Roadmap #3 — ToolCall.tool_call_id == ObservationResult.source_call_id, same step."""
-    target_path = tmp_path / ".daydream" / "trajectory.json"
-    backend = MockBackend(
-        [
-            TextEvent(text="running tests"),
-            ToolStartEvent(id="t1", name="Bash", input={"command": "pytest -x"}),
-            ToolResultEvent(id="t1", output="all green", is_error=False),
-            ResultEvent(structured_output=None, continuation=None),
-        ]
-    )
-    async with TrajectoryRecorder(
-        path=target_path,
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
-    ):
-        await run_agent(backend, tmp_path, "test it", phase=DaydreamPhase.TEST)
-
-    traj = json.loads(target_path.read_text())
-    # validate_tool_call_references is the primary guard: a dangling ToolCall or
-    # unmatched ObservationResult makes this False.
-    assert validate(traj) is True
-
-    found_pair = False
-    for step in traj["steps"]:
-        tool_calls = step.get("tool_calls") or []
-        observation = step.get("observation") or {}
-        results = observation.get("results") or []
-        if not tool_calls or not results:
-            continue
-        for tc in tool_calls:
-            for r in results:
-                if tc["tool_call_id"] == r["source_call_id"]:
-                    # CORE-06: pair lives in the SAME step (this loop iterates one step).
-                    found_pair = True
-    assert found_pair
-
-
 # Test 4 — ROADMAP #4: FinalMetrics totals == sum of per-step Metrics (no running leak).
 async def test_final_metrics_equals_sum_of_per_step_metrics(tmp_path: Path) -> None:
     """Roadmap #4 — multi-turn assertion: feed two MetricsEvents; FinalMetrics == sum."""

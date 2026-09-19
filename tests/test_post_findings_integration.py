@@ -17,30 +17,16 @@ from __future__ import annotations
 import base64
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import cli
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers, validate_diagram_payload
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
-
-
-def cli_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` and return its exit code."""
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:  # main() always exits via sys.exit
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    raise AssertionError("cli.main() must exit via sys.exit")
+from tests.harness.scripts import cli_main
 
 
 def _console_text(capsys: pytest.CaptureFixture[str]) -> str:

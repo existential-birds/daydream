@@ -1227,9 +1227,7 @@ def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path: Path
     assert cur2["state"] == "ready" and cur2["task_spec_sha256"] == "c" * 64
 
 
-# ---------------------------------------------------------------------------
 # prioritized_evidence projection (issue #879)
-# ---------------------------------------------------------------------------
 
 BANDS = ["review_first", "needs_judgment", "possibly_actioned", "likely_actioned",
          "withdrawn", "context", "decided"]

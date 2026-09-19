@@ -566,9 +566,7 @@ _UI_FUNCS: tuple[str, ...] = (
     "print_dim",
     "print_issues_table",
     "print_iteration_divider",
-    "print_skipped_phases",
     "print_menu",
-    "print_summary",
     "print_fix_progress",
     "print_fix_complete",
 )

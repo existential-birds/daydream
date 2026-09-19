@@ -54,6 +54,7 @@ from daydream.backends.pi import (
     _schema_instruction,
     parse_pi_retry_hint,
 )
+from tests.harness.fake_cli_process import ImmediateStdout, LimitAwareStdout
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.stub_backend import silence as _silence
@@ -652,26 +653,12 @@ async def test_stdout_limit_allows_large_jsonl_events() -> None:
     ]
     captured: dict[str, object] = {}
 
-    class _LimitAwareStdout:
-        def __init__(self, limit: int) -> None:
-            self._limit = limit
-            self._lines = iter(lines)
-
-        async def readline(self) -> bytes:
-            try:
-                line = next(self._lines)
-            except StopIteration:
-                return b""
-            if len(line) > self._limit:
-                raise ValueError("Separator is found, but chunk is longer than limit")
-            return line
-
     async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
         captured.update(kwargs)
         raw_limit = kwargs.get("limit", 64 * 1024)
         limit = raw_limit if isinstance(raw_limit, int) else 64 * 1024
         process = MagicMock()
-        process.stdout = _LimitAwareStdout(limit)
+        process.stdout = LimitAwareStdout(lines, limit)
         process.wait = AsyncMock(return_value=0)
         process.returncode = 0
         process.terminate = MagicMock()
@@ -759,16 +746,6 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend keep reading their own process."""
     backend = PiBackend(model="glm-5.2")
 
-    class _ImmediateStdout:
-        def __init__(self, lines: list[str]) -> None:
-            self._lines = iter(lines)
-
-        async def readline(self) -> bytes:
-            try:
-                return (next(self._lines) + "\n").encode()
-            except StopIteration:
-                return b""
-
     class _BlockingStdout:
         def __init__(self) -> None:
             self.entered = asyncio.Event()
@@ -796,7 +773,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
         return process
 
     first_proc = _proc(
-        _ImmediateStdout(
+        ImmediateStdout(
             [
                 '{"type":"session","sessionId":"s1"}',
                 '{"type":"agent_start"}',
@@ -992,9 +969,7 @@ async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
     assert step.metrics.cost_usd == 0.0005
 
 
-# ---------------------------------------------------------------------------
 # Default --provider is nous; PI_PROVIDER overrides (extension-based provider)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1091,9 +1066,7 @@ async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(
     assert flat_args[flat_args.index("--provider") + 1] == "nous"
 
 
-# ---------------------------------------------------------------------------
 # Migration guards: GLM-pin and provider/model mismatch warnings
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1171,9 +1144,7 @@ async def test_zai_provider_with_fallback_model_warns(
     assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
 
 
-# ---------------------------------------------------------------------------
 # Real-path through runner.run: real PiBackend, only the pi subprocess mocked
-# ---------------------------------------------------------------------------
 
 
 def _capture_pi_subprocess(monkeypatch: pytest.MonkeyPatch, captured: list[list[str]]) -> None:
@@ -1263,9 +1234,7 @@ async def test_runner_real_path_pi_provider_axis(
     )
 
 
-# ---------------------------------------------------------------------------
 # System prompt preamble (--append-system-prompt)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1290,9 +1259,7 @@ async def test_append_system_prompt_preamble_in_args() -> None:
     assert "grep" in preamble.lower()
 
 
-# ---------------------------------------------------------------------------
 # PiError.retryable attribute
-# ---------------------------------------------------------------------------
 
 
 def test_pierror_retryable_default_and_kwarg_and_message() -> None:
@@ -1465,9 +1432,7 @@ async def test_pi_stream_timeout_is_retryable() -> None:
     assert raised.value.retryable is True
 
 
-# ---------------------------------------------------------------------------
 # _is_retryable_error_message
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1530,9 +1495,7 @@ def test_is_retryable_error_message(message: Any, expected: Any) -> None:
     assert _is_retryable_error_message(message) is expected
 
 
-# ---------------------------------------------------------------------------
 # _is_retryable_exit_code
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1544,9 +1507,7 @@ def test_is_retryable_exit_code(code: Any, expected: Any) -> None:
     assert _is_retryable_exit_code(code) is expected
 
 
-# ---------------------------------------------------------------------------
 # Error turn uses retryable classifier
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1606,9 +1567,7 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(
     assert exc_info.value.retryable is expected_retryable
 
 
-# ---------------------------------------------------------------------------
 # Retry env knobs
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1683,9 +1642,7 @@ def test_pi_retry_max_delay(
         assert f"using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}" in caplog.text
 
 
-# ---------------------------------------------------------------------------
 # fanout_concurrency
-# ---------------------------------------------------------------------------
 
 
 def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch: pytest.MonkeyPatch) -> None:

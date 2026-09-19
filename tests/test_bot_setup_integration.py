@@ -6,7 +6,6 @@ callback) is isolated behind :class:`daydream.bot_setup._ManifestListener` so
 the code-exchange behavior is testable without real GitHub: the test drives
 ``_handle_code`` directly, monkeypatching only the manifest-code exchange.
 """
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +13,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from daydream import bot_setup, cli, config, git_ops
+from daydream import bot_setup, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
 from tests.harness.fake_gh import FakeGh
+from tests.harness.scripts import cli_main
 
 
 def _real_pem() -> str:
@@ -352,19 +352,6 @@ def test_land_workflows_warns_before_overwriting_customized_workflow(
 
 
 # --- Task 9: CLI `setup` verb + run_setup orchestrator ----------------------
-
-
-def cli_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` (the production entrypoint) and return its exit code."""
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:  # main() always exits via sys.exit
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    raise AssertionError("cli.main() must exit via sys.exit")
 
 
 

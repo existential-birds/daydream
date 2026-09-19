@@ -105,14 +105,16 @@ def _install_model_capturing_stubs(
 
 def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
     """Build a test ResolvedProfile with the default strategies + pipeline overrides."""
-    from daydream.review_profile import (
-        ResolvedProfile,
-        build_default_profile,
-        clone_with_overrides,
-    )
+    from dataclasses import replace
 
-    profile = clone_with_overrides(build_default_profile(), {"pipeline": overrides})
-    return ResolvedProfile(profile=profile, source_kind="test")
+    from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
+
+    pipeline = "\n".join(f"{key} = {json.dumps(value)}" for key, value in overrides.items())
+    parsed = parse_profile(f"[pipeline]\n{pipeline}")
+    return ResolvedProfile(
+        profile=replace(build_default_profile(), pipeline=parsed.pipeline),
+        source_kind="test",
+    )
 
 
 async def _run_deep(

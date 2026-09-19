@@ -22,7 +22,6 @@ from daydream.pr_review import (
     _format_file_level_body,
     _format_inline_body,
     _parse_hunks,
-    alt_issues_to_parsed,
     build_payload,
     classify,
     default_render_finding,
@@ -264,32 +263,6 @@ def test_body_section_markers_one_per_fingerprinted_issue() -> None:
     assert parse_finding_markers(_format_body_section(issues, renderers=BUILTIN_RENDERERS)) == [
         f"{i:064x}" for i in range(2)
     ]
-
-
-def test_alt_issues_to_parsed_produces_one_per_file() -> None:
-    alt = [
-        {
-            "id": 1,
-            "title": "Extract helper",
-            "description": "Duplicated logic",
-            "recommendation": "Move to util",
-            "severity": "low",
-            "files": ["a.py", "b.py"],
-            "confidence": "HIGH",
-            "rationale": "r",
-        }
-    ]
-    issues = alt_issues_to_parsed(alt)
-    assert [i.path for i in issues] == ["a.py", "b.py"]
-    assert all(i.line is None for i in issues)
-    assert "Recommendation" in issues[0].body
-    assert "Severity" in issues[0].body
-    assert issues[0].severity == "low"
-    assert issues[0].confidence == "HIGH"
-
-
-def test_alt_issues_to_parsed_skips_no_files() -> None:
-    assert alt_issues_to_parsed([{"title": "t", "files": []}]) == []
 
 
 def test_extract_anchors_prefers_long_tokens() -> None:

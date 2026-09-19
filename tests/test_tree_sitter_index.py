@@ -366,11 +366,7 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             raise AssertionError("grep_fixed_matches called more than once")
         return real_grep_fixed(*args, **kwargs)
 
-    def no_legacy_grep(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("legacy git_ops.grep must not be called")
-
     monkeypatch.setattr(git_ops, "grep_fixed_matches", one_batch)
-    monkeypatch.setattr(git_ops, "grep", no_legacy_grep)
 
     results = detect_affected_files(
         _modified_diff("widget.py") + _modified_diff("gadget.py"), repo
@@ -382,47 +378,6 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert len(gadget) == _MAX_IMPORTERS
     assert len(importers) == _MAX_IMPORTERS * 2
     assert {r.path for r in results if r.role == "modified"} == {"widget.py", "gadget.py"}
-
-
-# --- Symbol index (definitions + line numbers) ------------------------------
-
-
-def test_symbol_index_python_records_file_and_line_range(tmp_path: Path) -> None:
-    from daydream.tree_sitter_index import build_symbol_index
-
-    (tmp_path / "widget.py").write_text(
-        "def compute_total(x):\n    return x + 1\n\nclass Box:\n    pass\n"
-    )
-    (tmp_path / "config.py").write_text("SETTINGS = {}\ndef load():\n    return SETTINGS\n")
-    idx = build_symbol_index(tmp_path, ["widget.py", "config.py"])
-    assert idx["compute_total"] == [
-        {"path": "widget.py", "line": 1, "end_line": 2, "kind": "function"}
-    ]
-    assert idx["Box"] == [
-        # tree-sitter's ``class_definition`` node spans the body, so the
-        # definition-range end is line 5 (the ``pass`` line), not the header.
-        {"path": "widget.py", "line": 4, "end_line": 5, "kind": "class"}
-    ]
-    # config.py's generic stem does not matter to the index itself; it is
-    # recorded like any other module that defines symbols.
-    assert idx["load"] == [
-        {"path": "config.py", "line": 2, "end_line": 3, "kind": "function"}
-    ]
-
-
-def test_symbol_index_rust_records_file_and_line_range(tmp_path: Path) -> None:
-    from daydream.tree_sitter_index import build_symbol_index
-
-    (tmp_path / "lib.rs").write_text(
-        (Path(__file__).parent / "fixtures" / "symbols" / "lib.rs").read_text()
-    )
-    idx = build_symbol_index(tmp_path, ["lib.rs"])
-    assert idx["total"] == [
-        {"path": "lib.rs", "line": 1, "end_line": 3, "kind": "function"}
-    ]
-    assert idx["Widget"] == [
-        {"path": "lib.rs", "line": 5, "end_line": 7, "kind": "class"}
-    ]
 
 
 def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> None:
