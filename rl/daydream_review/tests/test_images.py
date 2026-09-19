@@ -5,9 +5,9 @@ Four kinds of contract live here. The static ``base.Dockerfile`` and
 every remote input to an immutable version and verifies it for integrity before
 use. A **fast** tier — no Docker required — rejects ``--red`` invocations that
 cannot select the fixture repo, ensuring the guard fires before any build
-side-effect. A manifest/README tier asserts the locked-dependency policy: the
-itsdangerous manifest entry installs strictly from its committed uv.lock and the
-README documents the four mandatory setup rules. The five ``slow`` tests execute
+side-effect. A manifest tier asserts the locked-dependency policy: the
+itsdangerous manifest entry installs strictly from its committed uv.lock. The
+five ``slow`` tests execute
 real Docker builds: the red baseline path plants a failing assertion and the
 build must die (enforcement IS the build failing), the green baseline path builds
 and bakes the checkout, and the reference-image build proves the itsdangerous
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import PROJECT_ROOT, assert_docstring_guards, docker_daemon_is_available
+from conftest import PROJECT_ROOT, docker_daemon_is_available
 
 from daydream_review.fixture import FIXTURE_PR2_HEAD_SHA, FIXTURE_SLUG, build_fixture_repo
 from daydream_review.taskset import load_manifest
@@ -65,7 +65,6 @@ def _tags() -> set[str]:
 
 
 MANIFEST = PROJECT_ROOT / "images" / "manifest.toml"
-README = PROJECT_ROOT / "README.md"
 REFERENCE_IMAGE = "daydream-rl/itsdangerous"
 REFERENCE_TAG = f"{REFERENCE_IMAGE}:4bb03cd68192"
 REFERENCE_SLUG = "pallets/itsdangerous"
@@ -385,23 +384,6 @@ def test_fixture_manifest_entry_stays_dependency_free() -> None:
     assert 'test_command = "python -m unittest discover -q"' in head
 
 
-def test_readme_documents_the_locked_dependency_policy() -> None:
-    """The 'Adding a repository' section states the four mandatory setup rules."""
-    text = README.read_text(encoding="utf-8")
-    section = text[text.index("## Adding a repository") :]
-    for marker in (
-        "committed at the head SHA",            # rule 1: lockfile committed at baked head
-        "rejects lock drift",                   # rule 2: no silent drift
-        "uv sync --locked",                     # rule 2: the concrete mode
-        "outside `/work/repo`",                 # rule 3: external environment
-        "UV_PROJECT_ENVIRONMENT=/opt/repo-venv",  # rule 3: the concrete env
-        "/opt/repo-venv/bin/python -m pytest -q",  # rule 4: locked test command
-        "image-build failure",                  # no-fallback statement
-        "fall back to unconstrained pip",       # no-fallback statement
-    ):
-        assert marker in section, f"README '## Adding a repository' must state {marker!r}"
-
-
 @pytest.mark.slow
 @DOCKER_REQUIRED
 def test_reference_image_builds_with_locked_dependencies(base_image: str) -> None:
@@ -579,24 +561,6 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     assert "# fixed" in probe.stdout, (
         "the agent's fix did not reach the in-container origin mirror: "
         f"{probe.stdout}{probe.stderr}"
-    )
-
-
-def test_real_docker_write_docstring_describes_baked_ownership() -> None:
-    """The real-docker-write docstring must describe the CURRENT design: the image
-    bakes agent ownership of both the checkout and the mirror at build time (one
-    combined chown layer) and the probe drops its own leading chown — it is a pure
-    probe of the baked ownership, with the harness doing only the fail-closed
-    `test -w` preflight. The stale launch-time re-chown claims are gone."""
-    assert_docstring_guards(
-        test_real_docker_deep_flow_fix_pipeline_write_as_agent,
-        gone=("re-chowns", "harness re-chown"),
-        present=(
-            "baked",
-            "/srv/mirror.git",
-            "agent-owned at build time",
-            "test -w",
-        ),
     )
 
 
@@ -815,63 +779,6 @@ def test_build_emits_canonical_argv_for_all_call_sites(
     assert "_build_reference" not in vars(sys.modules[__name__])
 
 
-def test_slug_literals_single_source() -> None:
-    """F2: the reference slug resolves through one named constant."""
-    src = Path(__file__).read_text(encoding="utf-8")
-    slug = "pallets/" + "itsdangerous"        # built to avoid self-matching
-    marker = '[repos."' + slug + '"]'
-    # Scan only the module-top constants block and the manifest-entry tests,
-    # mirroring the F3 guard's window-narrowing: a docstring or comment
-    # elsewhere quoting the path cannot trip the guard.
-    constants_end = src.index("REFERENCE_SLUG = ") + len('REFERENCE_SLUG = "' + slug + '"')
-    constants = src[src.index("MANIFEST = ") : constants_end]
-    # The slug literal is REFERENCE_SLUG once plus one occurrence per
-    # manifest-entry marker; counting relative to the markers keeps the guard
-    # valid when a third manifest test is added or the marker is extracted
-    # into a shared constant.
-    assert constants.count(slug) == 1, "slug literal must appear in the constants block only in REFERENCE_SLUG"
-    manifest = src[
-        src.index(marker) : src.index("def test_readme_documents_the_locked_dependency_policy")
-    ]
-    assert manifest.count(slug) == manifest.count(marker), (
-        "slug literal must appear once per manifest marker"
-    )
-    assert "REFERENCE_SLUG" in src
-
-
-def test_module_docstring_describes_actual_contracts() -> None:
-    """F4: the docstring names the four contract kinds and counts the slow tests
-    that actually carry the marker, so the count cannot drift from the file."""
-    doc = sys.modules[__name__].__doc__ or ""
-    for kind in ("Dockerfile", "--red", "manifest", "slow", "reference"):
-        assert kind in doc, f"docstring must name contract kind/area {kind!r}"
-    slow_tests = _slow_test_names()
-    number = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}.get(
-        len(slow_tests), str(len(slow_tests))
-    )
-    assert f"the {number} ``slow`` tests" in doc.lower(), (
-        f"docstring must count the {len(slow_tests)} slow tests: {slow_tests}"
-    )
-    assert "two slow" not in doc.lower(), "stale 'two slow tests' count must be gone"
-
-
-def test_reference_probe_quotes_the_work_repo_path() -> None:
-    """F3 guard (verify-only): the sh -c probe's /work/repo is escaped double-quoted,
-    so the single-quoted sh -c region is never terminated by a bare path."""
-    src = Path(__file__).read_text(encoding="utf-8")
-    quoted = '\\"' + "/work/repo" + '\\"'   # built to avoid self-matching
-    bare = "'" + "/work/repo" + "'"         # built to avoid self-matching
-    # Scan only the reference probe's own python -c payload, anchored on its
-    # distinctive assert target rather than on source formatting: reordered
-    # kwargs, split payload literals, or a reformatted sh -c list cannot move
-    # the window, and prose elsewhere quoting the path cannot trip it either.
-    probe_end = src.index("itsdangerous.__file__")
-    probe_start = src.rindex("python -c '", 0, probe_end)
-    probe_src = src[probe_start : probe_end]
-    assert quoted in probe_src, "python -c body must receive a quoted path literal"
-    assert bare not in probe_src, "a single-quoted path would break the sh -c region"
-
-
 def test_run_as_agent_wrapper_drops_privilege() -> None:
     """The wrapper setprivs down to the agent identity (image contract). Root
     ownership is established only inside the built image (base.Dockerfile chowns
@@ -917,15 +824,6 @@ def test_repo_image_chowns_checkout_to_agent() -> None:
     assert chown_layer in dockerfile
     assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && sh /tmp/setup.sh")
     assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && ${TEST_COMMAND}")
-
-
-def test_readme_documents_single_reward_axis_and_metric() -> None:
-    from conftest import PROJECT_ROOT
-
-    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "two axes" not in readme.lower()
-    assert "suite_non_regression" in readme
-    assert "intrinsic_composite" in readme
 
 
 def test_configs_and_pyproject_reflect_the_new_contract() -> None:

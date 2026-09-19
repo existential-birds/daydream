@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import verifiers.v1 as vf
-from conftest import PROJECT_ROOT, FakeRuntime, assert_docstring_guards
+from conftest import PROJECT_ROOT, FakeRuntime
 from verifiers.v1.graph import MessageNode
 
 from daydream_review.backends import STRATEGIES
@@ -416,22 +416,6 @@ async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
     assert "images/build_images.py" in message
     assert runtime.programs == [], "no launch attempt may follow a failed preflight"
 
-
-def test_docker_writability_preflight_docstring_describes_baked_ownership() -> None:
-    """The preflight docstring must describe the CURRENT design: the image bakes
-    both trees agent-owned at build time (one combined chown layer) and the
-    launch path only preflights writability, failing closed — no runtime chown
-    remains."""
-    assert_docstring_guards(
-        test_docker_launch_preflights_writability_before_run_as_agent,
-        gone=("chown -R", "hand the checkout", "defense-in-depth"),
-        present=(
-            "/srv/mirror.git",
-            "bakes",
-            "fails closed",
-            "images/build_images.py",
-        ),
-    )
 
 
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:

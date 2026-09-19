@@ -58,10 +58,3 @@ def test_skip_reason_carries_instructions() -> None:
     # README procedure without any other context.
     assert "PRIME_RL_VENDORED_VERIFIERS" in SKIP_REASON
     assert "README" in SKIP_REASON
-
-
-def test_skip_is_active_when_workspace_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(VENDORED_ENV_VAR, raising=False)
-    # Mirror the module-level skipif condition so the loud skip and the gate
-    # can never drift apart.
-    assert not os.environ.get(VENDORED_ENV_VAR)

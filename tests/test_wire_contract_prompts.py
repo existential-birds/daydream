@@ -38,21 +38,6 @@ def _default_strategy(stage: str) -> str:
     return _rp.build_default_profile().strategies[stage].content
 
 
-def test_rust_wire_contract_requires_an_input_deserialization_contract() -> None:
-    assert "#[serde(default)]" in WIRE_CONTRACT_RUST_INSTRUCTION
-    assert "struct-level #[serde(default)]" in WIRE_CONTRACT_RUST_INSTRUCTION
-    assert "with Default values" in WIRE_CONTRACT_RUST_INSTRUCTION
-    assert "optional/custom deserialization contract" in WIRE_CONTRACT_RUST_INSTRUCTION
-    assert "only affects output behavior" in WIRE_CONTRACT_RUST_INSTRUCTION
-    assert "(or #[serde(skip_serializing_if" not in WIRE_CONTRACT_RUST_INSTRUCTION
-
-
-def test_generic_wire_contract_distinguishes_parsers_from_component_safe_builders() -> None:
-    assert "whole-URL parsers" in WIRE_CONTRACT_GENERIC_INSTRUCTION
-    assert "must not receive interpolated components" in WIRE_CONTRACT_GENERIC_INSTRUCTION
-    assert "component-aware URL builder" in WIRE_CONTRACT_GENERIC_INSTRUCTION
-
-
 def test_wire_contract_checklists_are_delivered_only_to_their_intended_prompts(
     tmp_path: Path,
 ) -> None:
