@@ -40,6 +40,14 @@ from tests.harness.git_helpers import init_repo as _init_repo
 # --- Helpers (workspace-specific: bare-origin push plumbing) ----------------
 
 
+def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        artifact_visibility,
+        "_default_private_base",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
+    )
+
+
 def test_resolve_base_falls_back_when_pr_lookup_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -302,11 +310,7 @@ async def test_open_workspace_migrates_unlocked_legacy_reanchor(
     legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
     git_ops.worktree_add(repo, legacy, "main", detach=True)
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     async with open_workspace(
         repo,
         branch=None,
@@ -404,11 +408,7 @@ async def test_open_workspace_refuses_unsafe_legacy_entry_without_mutation(
         (legacy / "retained.txt").write_text("operator bytes\n", encoding="utf-8")
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError, match="legacy operational"):
         async with open_workspace(
             repo,
@@ -449,11 +449,7 @@ async def test_open_workspace_refuses_registry_listed_broken_chain_worktree(
     gitfile.unlink()
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError, match="registry-listed but unprobeable"):
         async with open_workspace(
             repo,
@@ -497,11 +493,7 @@ async def test_open_workspace_refuses_live_registered_worktree_with_nonpattern_n
     )
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError, match="legacy operational"):
         async with open_workspace(
             repo,
@@ -536,11 +528,7 @@ async def test_open_workspace_retires_unregistered_legacy_directory_without_muta
     (legacy / "retained.txt").write_text("operator bytes\n", encoding="utf-8")
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     async with open_workspace(
         repo,
         branch=None,
@@ -575,11 +563,7 @@ async def test_open_workspace_retires_stale_legacy_audit_worktree(
     old = 1_600_000_000
     os.utime(locked, (old, old))
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     async with open_workspace(
         repo,
         branch=None,
@@ -608,11 +592,7 @@ async def test_open_workspace_removes_emptied_legacy_roots_after_migration(
     legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
     git_ops.worktree_add(repo, legacy, "main", detach=True)
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     async with open_workspace(
         repo,
         branch=None,
@@ -649,11 +629,7 @@ async def test_open_workspace_session_succeeds_with_empty_legacy_root_residue(
     (repo / ".daydream" / "worktrees").mkdir(parents=True)
     (repo / ".daydream" / "audit").mkdir()
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     async with open_workspace(
         repo,
         branch=None,
@@ -683,11 +659,7 @@ async def test_open_workspace_retires_unrecognized_legacy_entry_with_warning(
     (stray_file / "notes.txt").write_bytes(b"not a worktree")
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     with caplog.at_level(logging.WARNING, logger="daydream.workspace"):
         async with open_workspace(
             repo,
@@ -727,11 +699,7 @@ async def test_open_workspace_still_refuses_different_ownership_worktree(
     canary.write_bytes(b"foreign worktree bytes")
     before = _git(repo, "worktree", "list", "--porcelain")
 
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError, match="different Git ownership"):
         async with open_workspace(
             repo,
@@ -776,11 +744,7 @@ async def test_open_workspace_still_refuses_registered_worktree_when_lock_probe_
         return real_lock_mtime(repo_arg, path)
 
     monkeypatch.setattr(git_ops, "worktree_lock_mtime", flaky_lock_mtime)
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError):
         async with open_workspace(
             repo,

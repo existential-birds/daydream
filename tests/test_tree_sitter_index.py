@@ -946,14 +946,9 @@ def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
     ]
 
 
-def test_branch_lines_tsx_grammar_matches_typescript_on_the_same_source() -> None:
-    assert branch_statement_lines("tsx", TYPESCRIPT_CF) == branch_statement_lines(
-        "typescript", TYPESCRIPT_CF
-    )
-
-
-def test_branch_lines_javascript_grammar_matches_typescript_on_the_same_source() -> None:
-    assert branch_statement_lines("javascript", TYPESCRIPT_CF) == branch_statement_lines(
+@pytest.mark.parametrize("grammar", ["tsx", "javascript"])
+def test_branch_lines_other_grammars_match_typescript_on_the_same_source(grammar: str) -> None:
+    assert branch_statement_lines(grammar, TYPESCRIPT_CF) == branch_statement_lines(
         "typescript", TYPESCRIPT_CF
     )
 

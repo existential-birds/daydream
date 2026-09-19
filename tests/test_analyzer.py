@@ -1351,12 +1351,40 @@ def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
             6 / 8,
             id="clone-block",
         ),
+        pytest.param(
+            "def f(items):\n    return [x for x in items if x > 0]\n",
+            0.0,
+            id="filtered-comprehension",
+        ),
+        pytest.param(
+            "def f(a, b):\n    return [x for x in a for y in b]\n",
+            0.0,
+            id="multi-generator-comprehension",
+        ),
+        pytest.param(
+            "def f(items):\n    while should_continue(items):\n"
+            "        if not items:\n            break\n",
+            0.0,
+            id="predicate-guard",
+        ),
+        pytest.param(
+            "def f(items):\n    while items:\n        if not items:\n            break\n",
+            2 / 4,
+            id="bare-collection-guard",
+        ),
+        pytest.param(
+            "def f(items):\n    while len(items) > 0:\n        if not items:\n"
+            "            break\n",
+            2 / 4,
+            id="len-comparison-guard",
+        ),
     ],
 )
 def test_quality_verbosity_detects_redundancy(tmp_path: Path, source: str, expected: float) -> None:
     ws = _quality_workspace(tmp_path, {"app.py": source})
     entry = analyze_quality(ws / ".daydream")["per_file"]["app.py"]
-    assert entry["verbosity"] > 0
+    if expected:
+        assert entry["verbosity"] > 0
     assert entry["verbosity"] == pytest.approx(expected)
 
 
@@ -1594,46 +1622,6 @@ def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> No
     entry = result["per_file"]["app.py"]
     assert entry["high_cc_functions"] == 1
     assert entry["erosion"] == 1.0
-
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
-        pytest.param(
-            "def f(items):\n    return [x for x in items if x > 0]\n",
-            0.0,
-            id="filtered-comprehension",
-        ),
-        pytest.param(
-            "def f(a, b):\n    return [x for x in a for y in b]\n",
-            0.0,
-            id="multi-generator-comprehension",
-        ),
-        pytest.param(
-            "def f(items):\n    while should_continue(items):\n"
-            "        if not items:\n            break\n",
-            0.0,
-            id="predicate-guard",
-        ),
-        pytest.param(
-            "def f(items):\n    while items:\n        if not items:\n            break\n",
-            2 / 4,
-            id="bare-collection-guard",
-        ),
-        pytest.param(
-            "def f(items):\n    while len(items) > 0:\n        if not items:\n"
-            "            break\n",
-            2 / 4,
-            id="len-comparison-guard",
-        ),
-    ],
-)
-def test_quality_verbosity_collection_cases(tmp_path: Path, source: str, expected: float) -> None:
-    ws = _quality_workspace(tmp_path, {"app.py": source})
-    entry = analyze_quality(ws / ".daydream")["per_file"]["app.py"]
-    if expected:
-        assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(expected)
 
 
 @pytest.mark.parametrize(
