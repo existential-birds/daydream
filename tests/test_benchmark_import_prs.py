@@ -1091,9 +1091,7 @@ def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) ->
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
 
 
-# ---------------------------------------------------------------------------
 # real-git local-origin seed for snapshot-freeze wiring (no network)
-# ---------------------------------------------------------------------------
 
 
 def _seed_git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:

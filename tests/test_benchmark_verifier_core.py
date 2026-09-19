@@ -545,9 +545,7 @@ def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     assert r.reward == 1.0 and r.verifier_error == 0
 
 
-# ---------------------------------------------------------------------------
 # location-tier + severity-distance helpers (issue #971, task 2)
-# ---------------------------------------------------------------------------
 
 
 def test_location_tier_classification() -> None:
@@ -591,9 +589,7 @@ def test_severity_distance_unknown_raises() -> None:
         vc.severity_distance("high", "info")
 
 
-# ---------------------------------------------------------------------------
 # Task 3: reported location/severity axes over matched pairs (issue #971)
-# ---------------------------------------------------------------------------
 
 EXPECTED_24_KEYS = {
     "reward", "tp", "fp", "fn", "precision", "recall", "f1",

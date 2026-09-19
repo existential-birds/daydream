@@ -273,9 +273,7 @@ def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path)
     assert "Structural-stack handling:" not in prompt
 
 
-# =============================================================================
 # Issue #172 — Fix B: read-once inline diff hunks in per-stack / generic prompts
-# =============================================================================
 
 
 _DIFF_TWO_FILES = (
@@ -292,9 +290,7 @@ _DIFF_TWO_FILES = (
 )
 
 
-# =============================================================================
 # Issue #644 — bound the deep-flow diff at gather time (whole-block retention)
-# =============================================================================
 
 
 def _blk(path: str, body: str) -> str:
@@ -485,9 +481,7 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
     assert "Read it directly" in out   # structural prompt unchanged
 
 
-# =============================================================================
 # Issue #221 — cwd grounding injected into every deep prompt builder
-# =============================================================================
 
 
 @pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
@@ -585,9 +579,7 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
     assert "same-turn echo" in out or "file:line" in out
 
 
-# =============================================================================
 # Issue #279 — Authoritative-intent rule gate in the deep prompt builders
-# =============================================================================
 
 
 def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> str:
@@ -784,9 +776,7 @@ def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path)
         assert str(p["alternatives_path"]) in prompt
 
 
-# =============================================================================
 # Issue #308 — test-quality rubric in the per-stack review prompt
-# =============================================================================
 
 
 def test_per_stack_prompt_includes_test_quality_rubric(tmp_path: Path) -> None:
@@ -820,9 +810,7 @@ def test_per_stack_prompt_test_quality_rubric_follows_strategy(tmp_path: Path) -
     assert out.index("test-quality rubric") > out.index(_default_strategy("discovery.per_stack"))
 
 
-# =============================================================================
 # Issue #314 — anti-slop review rubric (structural erosion + verbosity patterns)
-# =============================================================================
 
 _ANTI_SLOP_ANCHORS = (
     "complexity concentration",
@@ -1106,9 +1094,7 @@ def test_structural_prompt_uses_profile_strategy_and_no_skill() -> None:
     assert "/beagle-" not in p and "Apply this specialist skill" not in p
 
 
-# =============================================================================
 # Issue #972 R1 — host-owned severity rubric reaches every assigning prompt
-# =============================================================================
 
 
 def _rubric_assigning_prompts(tmp_path: Path) -> list[str]:
@@ -1172,9 +1158,7 @@ def test_rubric_after_strategy_text(tmp_path: Path) -> None:
         )
 
 
-# =============================================================================
 # Issue #972 R1.3 — adjudication restatements cite the severity rubric
-# =============================================================================
 
 
 def _adjudication_prompts(tmp_path: Path) -> dict[str, str]:
@@ -1232,9 +1216,7 @@ def test_adjudication_prompts_no_divergent_severity_fragment(builder: str, tmp_p
     assert "high | medium" not in _adjudication_prompts(tmp_path)[builder]
 
 
-# =============================================================================
 # Issue #1113 — grounded diagram prompts
-# =============================================================================
 
 
 def _diagram_schema() -> dict[str, object]:

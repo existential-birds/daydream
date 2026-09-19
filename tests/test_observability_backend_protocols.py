@@ -199,9 +199,7 @@ def _pin_first_message_end_receipt(monkeypatch: pytest.MonkeyPatch, pinned_ns: i
     monkeypatch.setattr("daydream.backends.pi.time.time_ns", pinned_time_ns)
 
 
-# ============================================================================
 # Claude: real ClaudeBackend through the actual SDK option surface
-# ============================================================================
 
 
 @dataclass
@@ -386,9 +384,7 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
     assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in events)
 
 
-# ============================================================================
 # Codex: real CodexBackend replaying committed public JSONL + multi-turn fake
-# ============================================================================
 
 
 async def test_codex_real_backend_replays_public_golden_shape_through_runner(
@@ -506,9 +502,7 @@ async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
     _assert_leak_free(receiver, canary)
 
 
-# ============================================================================
 # Pi: real PiBackend with the explicitly labeled long-generation replay
-# ============================================================================
 
 
 async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
@@ -729,9 +723,7 @@ async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
     _assert_leak_free(receiver, canary)
 
 
-# ============================================================================
 # Osprey: real OspreyBackend with a strict fake-process protocol fixture
-# ============================================================================
 
 
 def _osprey_lines(canary: str) -> list[str]:
@@ -861,9 +853,7 @@ async def test_osprey_explicit_zero_temperature_reaches_argv_and_config(
     assert request.model_source == "native"
 
 
-# ============================================================================
 # Schema-valid content on the wire (pinned semconv message schemas)
-# ============================================================================
 
 
 async def test_attempt_input_messages_validate_against_pinned_schema(
@@ -893,9 +883,7 @@ async def test_attempt_input_messages_validate_against_pinned_schema(
     jsonschema.validate(messages, schema)
 
 
-# ============================================================================
 # Real generic HTTP/protobuf + gRPC integration for the destinations (plan 791)
-# ============================================================================
 
 
 def _vendor_env(monkeypatch: pytest.MonkeyPatch, vendor: str, base: str) -> None:
@@ -1003,9 +991,7 @@ async def test_grpc_outage_fails_open_and_review_completes(
     assert "Trace export failed" in caplog.text
 
 
-# ============================================================================
 # Step 3 lifecycle matrix: real-runner retry with a failed billed attempt
-# ============================================================================
 
 
 class _PiRetryFixture:

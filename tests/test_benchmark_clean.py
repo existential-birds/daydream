@@ -29,9 +29,7 @@ def _stub_harbor_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # shared hermetic fixtures (Tasks 2-9, 11)
-# ---------------------------------------------------------------------------
 
 
 def _seed_clean_ws(tmp_path: Path) -> Any:

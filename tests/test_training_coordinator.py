@@ -7,32 +7,10 @@ behavior itself is exercised against the projection loader in
 suite.
 """
 
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-
-@pytest.fixture
-def cli_runner() -> Any:
-    class _Runner:
-        def invoke(self, argv: list[str]) -> SimpleNamespace:
-            from daydream import cli
-
-            saved = sys.argv
-            sys.argv = ["daydream", *argv]
-            code = 0
-            try:
-                cli.main()
-            except SystemExit as exc:
-                code = int(exc.code or 0)
-            finally:
-                sys.argv = saved
-            return SimpleNamespace(exit_code=code)
-
-    return _Runner()
 
 
 def test_cli_verb_wired(cli_runner: Any) -> None:

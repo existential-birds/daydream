@@ -14,7 +14,16 @@ from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
-from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.harness.trajectory import (
+    dispatch_descriptors as _dispatch_descriptors,
+)
+from tests.harness.trajectory import (
+    dispatch_encloses_children as _dispatch_encloses_children,
+)
+from tests.harness.trajectory import (
+    make_recorder,
+    read_trajectory,
+)
 
 # The minimal turn a per-stack review agent has to emit to satisfy run_agent.
 # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
@@ -71,26 +80,6 @@ def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
     step = steps[0]
     assert isinstance(step, dict)
     return step
-
-
-def _dispatch_descriptors(step: dict[str, Any]) -> list[str]:
-    return [
-        result["content"].removeprefix("Dispatched to ")
-        for result in step["observation"]["results"]
-    ]
-
-
-def _dispatch_encloses_children(step: dict[str, Any], target_dir: Path) -> bool:
-    children = [
-        read_trajectory(target_dir / ".daydream" / ref["trajectory_path"])
-        for result in step["observation"]["results"]
-        for ref in result["subagent_trajectory_ref"]
-    ]
-    return bool(children) and all(
-        step["timestamp"] <= child["extra"]["run_started_at"]
-        and step["extra"]["dispatch_completed_at"] >= child["extra"]["run_ended_at"]
-        for child in children
-    )
 
 
 async def test_phase_per_stack_reviews_dispatch_interval_success(

@@ -673,9 +673,7 @@ def test_ready_declined_leaves_draft_and_no_digest(
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
 
 
-# ---------------------------------------------------------------------------
 # prioritized sectioned render + captured view binding (issue #879)
-# ---------------------------------------------------------------------------
 
 def _add_late_finding(cu_mod: Any, ws: Path, case_id: str) -> None:
     """A real post-render curator action: one authored finding, no sources."""

@@ -34,9 +34,7 @@ SEMCONV_COMMIT = "94f432d7126f5884d30a2cdde6f4e89908ebb6fd"
 _GENAI_LITERAL_RE = re.compile(r"[\"'](gen_ai\.[a-zA-Z0-9_.]+)[\"']")
 
 
-# ---------------------------------------------------------------------------
 # Manifest byte verification
-# ---------------------------------------------------------------------------
 
 
 def _load_manifest() -> dict[str, Any]:
@@ -71,9 +69,7 @@ def test_manifest_pins_expected_commit_and_files() -> None:
         ), f"{name}: url not pinned to {SEMCONV_COMMIT[:12]}"
 
 
-# ---------------------------------------------------------------------------
 # Registry-derived contract
-# ---------------------------------------------------------------------------
 
 
 def _registry_attributes() -> dict[str, dict[str, Any]]:
@@ -242,9 +238,7 @@ def test_client_invoke_agent_requires_provider_name() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Representative Daydream JSON validated against the four pinned schemas
-# ---------------------------------------------------------------------------
 
 
 def _schema(name: str) -> dict[str, Any]:
@@ -334,9 +328,7 @@ def test_output_finish_reason_members_are_registry_derived() -> None:
     assert {"stop", "tool_call", "error"} <= set(members)
 
 
-# ---------------------------------------------------------------------------
 # Native timestamp validator contract (frozen here for Task 1 reuse)
-# ---------------------------------------------------------------------------
 
 
 def _is_valid_native_unix_ms(value: Any) -> bool:

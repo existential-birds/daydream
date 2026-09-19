@@ -55,9 +55,7 @@ REPLAY_PATH = SCRIPTS / "replay_observability_acceptance.py"
 _SECRET_KEY = "sk-test-verifier-secret-9f3c"
 
 
-# ---------------------------------------------------------------------------
 # Loading the operator scripts (same pattern as conftest template assets)
-# ---------------------------------------------------------------------------
 
 
 def _load_script(path: Path, name: str) -> Any:
@@ -72,9 +70,7 @@ _verifier = _load_script(VERIFIER_PATH, "verify_observability_readback")
 _replay = _load_script(REPLAY_PATH, "replay_observability_acceptance")
 
 
-# ---------------------------------------------------------------------------
 # Fake vendor HTTP server (scriptable JSON responses)
-# ---------------------------------------------------------------------------
 
 
 class FakeVendorServer:
@@ -179,9 +175,7 @@ def fake_vendor() -> Iterator[FakeVendorServer]:
         server.close()
 
 
-# ---------------------------------------------------------------------------
 # Receipt helpers
-# ---------------------------------------------------------------------------
 
 
 def _receipt(
@@ -284,9 +278,7 @@ def _configure_verifier_env(monkeypatch: pytest.MonkeyPatch, *, base_url: str) -
     monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
 
 
-# ---------------------------------------------------------------------------
 # HoneyHive verifier behavior
-# ---------------------------------------------------------------------------
 
 
 def test_honeyhive_search_request_shape_and_pass(
@@ -491,9 +483,7 @@ def test_receipt_validation_fails_before_any_client(
     assert json.loads(result_path.read_text())["terminal"] == _verifier.DISPOSITION_SHAPE
 
 
-# ---------------------------------------------------------------------------
 # LangSmith verifier behavior
-# ---------------------------------------------------------------------------
 
 
 def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
@@ -623,9 +613,7 @@ def test_langsmith_unstable_tree_fails_closed(
     assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
 
 
-# ---------------------------------------------------------------------------
 # One immutable deadline: real loopback peers
-# ---------------------------------------------------------------------------
 
 
 class _LoopbackPeer:
@@ -744,9 +732,7 @@ def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pyte
         peer.close()
 
 
-# ---------------------------------------------------------------------------
 # Redaction
-# ---------------------------------------------------------------------------
 
 
 def test_verifier_output_never_leaks_keys_endpoints_or_bodies(
@@ -776,9 +762,7 @@ def test_verifier_output_never_leaks_keys_endpoints_or_bodies(
     assert result["stored_contract_passed"] is True
 
 
-# ---------------------------------------------------------------------------
 # Replay tool: fail-closed gates run BEFORE any send
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -981,9 +965,7 @@ def test_replay_fake_pi_marker_requirement(
         assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
 
 
-# ---------------------------------------------------------------------------
 # Gate integration (reviewer card t_d50a1bbe): replay→verify chain + HH stability
-# ---------------------------------------------------------------------------
 
 
 def test_replay_receipt_is_accepted_by_verifier_validator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

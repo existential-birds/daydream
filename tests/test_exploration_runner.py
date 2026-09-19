@@ -32,7 +32,16 @@ from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
-from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.harness.trajectory import (
+    dispatch_descriptors as _ref_descriptors,
+)
+from tests.harness.trajectory import (
+    dispatch_encloses_children as _dispatch_encloses_children,
+)
+from tests.harness.trajectory import (
+    make_recorder,
+    read_trajectory,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -50,26 +59,6 @@ def _dispatch_steps(trajectory: dict[str, Any], *, phase: str) -> list[dict[str,
         and step.get("extra", {}).get("daydream_phase") == phase
         and "dispatch_id" in step.get("extra", {})
     ]
-
-
-def _ref_descriptors(step: dict[str, Any]) -> list[str]:
-    return [
-        result["content"].removeprefix("Dispatched to ")
-        for result in step["observation"]["results"]
-    ]
-
-
-def _dispatch_encloses_children(step: dict[str, Any], target_dir: Path) -> bool:
-    children = [
-        read_trajectory(target_dir / ".daydream" / ref["trajectory_path"])
-        for result in step["observation"]["results"]
-        for ref in result["subagent_trajectory_ref"]
-    ]
-    return bool(children) and all(
-        step["timestamp"] <= child["extra"]["run_started_at"]
-        and step["extra"]["dispatch_completed_at"] >= child["extra"]["run_ended_at"]
-        for child in children
-    )
 
 
 # Subagent prompt sanity checks (Plan 03)

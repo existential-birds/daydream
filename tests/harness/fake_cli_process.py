@@ -51,6 +51,32 @@ class _FakeStdin:
         self.closed = True
 
 
+class LimitAwareStdout:
+    def __init__(self, lines: list[bytes], limit: int) -> None:
+        self._limit = limit
+        self._lines = iter(lines)
+
+    async def readline(self) -> bytes:
+        try:
+            line = next(self._lines)
+        except StopIteration:
+            return b""
+        if len(line) > self._limit:
+            raise ValueError("Separator is found, but chunk is longer than limit")
+        return line
+
+
+class ImmediateStdout:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = iter(lines)
+
+    async def readline(self) -> bytes:
+        try:
+            return (next(self._lines) + "\n").encode()
+        except StopIteration:
+            return b""
+
+
 class _FakePipeTransport:
     """The fd owner ``terminate_process`` closes to release the pipe read ends.
 

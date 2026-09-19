@@ -25,9 +25,7 @@ from daydream.backends.pi import PiBackend
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.pi_replay import make_mock_process as make_mock_process_pi
 
-# ---------------------------------------------------------------------------
 # Claude loader — synthesize SDK message objects, mock receive_response()
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -182,9 +180,7 @@ async def claude_loader(
             yield event
 
 
-# ---------------------------------------------------------------------------
 # Codex loader — synthesize JSONL byte stream, mock subprocess
-# ---------------------------------------------------------------------------
 
 
 def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
@@ -323,9 +319,7 @@ async def codex_loader(
             yield event
 
 
-# ---------------------------------------------------------------------------
 # Pi loader — synthesize JSONL byte stream, mock subprocess
-# ---------------------------------------------------------------------------
 
 
 def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:

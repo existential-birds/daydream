@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -277,27 +275,6 @@ def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="base_sha"):
         run_pipeline(cfg, dry_run=False)
-
-
-@pytest.fixture
-def cli_runner() -> Any:
-    """Invoke ``daydream`` in-process; SystemExit code becomes exit_code."""
-    class _Runner:
-        def invoke(self, argv: list[str]) -> Any:
-            from daydream import cli
-
-            saved = sys.argv
-            sys.argv = ["daydream", *argv]
-            code = 0
-            try:
-                cli.main()
-            except SystemExit as exc:
-                code = int(exc.code or 0)
-            finally:
-                sys.argv = saved
-            return SimpleNamespace(exit_code=code)
-
-    return _Runner()
 
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:

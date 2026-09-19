@@ -8,28 +8,14 @@ variant and asserts the nonzero exit plus the gate message on stderr.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import cli
+from tests.harness.scripts import cli_main as _run_main
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "training" / "calibration"
-
-
-def _run_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` and return its exit code."""
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:  # main() always exits via sys.exit
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    return 0
 
 
 @pytest.fixture

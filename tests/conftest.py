@@ -6,6 +6,7 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -748,6 +749,28 @@ def ext_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ExtDir:
     ``sys.modules``.
     """
     return ExtDir(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def cli_runner() -> Any:
+    """Invoke ``daydream`` in-process; the SystemExit code becomes ``exit_code``."""
+
+    class _Runner:
+        def invoke(self, argv: list[str]) -> SimpleNamespace:
+            from daydream import cli
+
+            saved = sys.argv
+            sys.argv = ["daydream", *argv]
+            code = 0
+            try:
+                cli.main()
+            except SystemExit as exc:
+                code = int(exc.code or 0)
+            finally:
+                sys.argv = saved
+            return SimpleNamespace(exit_code=code)
+
+    return _Runner()
 
 
 @pytest.fixture

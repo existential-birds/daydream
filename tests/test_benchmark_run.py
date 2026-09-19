@@ -44,9 +44,7 @@ def _stub_harbor_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # shared hermetic fixtures (Tasks 2-8)
-# ---------------------------------------------------------------------------
 
 
 def _ws(tmp_path: Path, **privacy: Any) -> Any:
@@ -690,9 +688,7 @@ def test_ledger_records_reviewer_effort_when_present(tmp_path: Path) -> None:
     assert doc["runs"][0]["reviewer_effort"] == "high"
 
 
-# ---------------------------------------------------------------------------
 # Oracle mapping accepts the legacy calibration field without using it.
-# ---------------------------------------------------------------------------
 
 
 def test_default_run_accepts_old_receipt_with_legacy_calibration_field(tmp_path: Path) -> None:

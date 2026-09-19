@@ -243,9 +243,7 @@ def test_record_dedup_uid_totally_orders_pairs_that_tie_on_both_ids() -> None:
     assert build_record_dedup_candidates(records, sources=sources) == pairs
 
 
-# ---------------------------------------------------------------------------
 # descriptions_match: the scalar form of the pre-filter's similarity gate
-# ---------------------------------------------------------------------------
 
 
 def test_descriptions_match_agrees_with_the_pairwise_builder() -> None:

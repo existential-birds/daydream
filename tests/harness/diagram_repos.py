@@ -18,9 +18,7 @@ from typing import Any
 
 from tests.harness.git_helpers import commit, git, init_repo
 
-# ---------------------------------------------------------------------------
 # Repository builders
-# ---------------------------------------------------------------------------
 
 
 def _finish(repo: Path) -> Path:
@@ -252,9 +250,7 @@ def build_flat_repo(root: Path) -> Path:
     return _finish(repo)
 
 
-# ---------------------------------------------------------------------------
 # File bodies (line numbers below are load-bearing for the specs)
-# ---------------------------------------------------------------------------
 
 #: ``pkg_a/core.py`` at head. Line 2 calls ``normalize_payload``; line 3
 #: returns; line 6 defines ``normalize_payload``.
@@ -319,9 +315,7 @@ BOTH_RUN_PY = (
 )
 
 
-# ---------------------------------------------------------------------------
 # Canonical grounded specs
-# ---------------------------------------------------------------------------
 
 
 def sequence_spec() -> dict[str, Any]:

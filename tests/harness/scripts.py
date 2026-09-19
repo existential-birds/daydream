@@ -21,10 +21,12 @@ synthesis.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from daydream import cli
 from daydream.backends import AgentEvent
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase
@@ -32,6 +34,19 @@ from tests.contract._loaders import _build_claude_messages, _build_codex_jsonl
 from tests.harness.codex_replay import make_mock_process
 
 PhaseScripts = dict[DaydreamPhase, dict[str, Any]]
+
+
+def cli_main(argv: list[str]) -> int:
+    """Drive ``cli.main`` with ``argv`` and return its exit code."""
+    saved = sys.argv
+    sys.argv = ["daydream", *argv]
+    try:
+        cli.main()
+    except SystemExit as exc:  # main() always exits via sys.exit
+        return int(exc.code or 0)
+    finally:
+        sys.argv = saved
+    raise AssertionError("cli.main() must exit via sys.exit")
 
 
 def _with_structured_output(script: dict[str, Any]) -> dict[str, Any]:

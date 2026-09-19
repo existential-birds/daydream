@@ -32,7 +32,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,65 +45,15 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
 )
-
-# Fake SDK message types matching real claude_agent_sdk shapes. We patch the
-# symbols imported into daydream.backends.claude so its isinstance checks pass.
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeThinkingBlock:
-    thinking: str
-
-
-@dataclass
-class FakeToolUseBlock:
-    id: str
-    name: str
-    input: dict[str, Any] | None = None
-
-
-@dataclass
-class FakeToolResultBlock:
-    tool_use_id: str
-    content: str | None = None
-    is_error: bool = False
-
-
-@dataclass
-class FakeAssistantMessage:
-    """Real-shape AssistantMessage: has ``content`` + ``model``, NO ``usage``."""
-
-    content: list[Any]
-    model: str
-    parent_tool_use_id: str | None = None
-    error: object | None = None
-
-
-@dataclass
-class FakeUserMessage:
-    content: list[Any] = field(default_factory=list)
-
-
-@dataclass
-class FakeResultMessage:
-    """Real-shape ResultMessage: ``usage`` + ``total_cost_usd`` live here."""
-
-    total_cost_usd: float | None = None
-    usage: dict[str, Any] | None = None
-    structured_output: Any = None
-    subtype: str = "success"
-    duration_ms: int = 0
-    duration_api_ms: int = 0
-    is_error: bool = False
-    num_turns: int = 1
-    session_id: str = "fake-session"
-    result: str | None = None
-
+from tests.test_deep_pr_comment_integration import (
+    FakeAssistantMessage,
+    FakeResultMessage,
+    FakeTextBlock,
+    FakeThinkingBlock,
+    FakeToolResultBlock,
+    FakeToolUseBlock,
+    FakeUserMessage,
+)
 
 # Per-test FakeClient factory: each test queues a message sequence, then patches
 # ClaudeSDKClient to a class whose instances replay it.

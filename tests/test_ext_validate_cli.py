@@ -7,12 +7,11 @@ fixture (``$DAYDREAM_EXT_DIR`` seam), so the loader, version gate, and
 registry resolve-check all run for real.
 """
 import re
-import sys
 
 import pytest
 
-from daydream import cli
 from tests.conftest import ExtDir
+from tests.harness.scripts import cli_main as _run_main
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -20,19 +19,6 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 def strip_ansi(text: str) -> str:
     """Strip ANSI escape codes from text for assertion comparisons."""
     return _ANSI_ESCAPE.sub("", text)
-
-
-def _run_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` and return its exit code."""
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:  # main() always exits via sys.exit
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    return 0
 
 
 def test_ext_validate_ok(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
