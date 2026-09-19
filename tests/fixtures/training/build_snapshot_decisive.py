@@ -11,20 +11,11 @@ contract, and the profile/stack fields mirror ``_snapshot_trajectory``.
 
 from __future__ import annotations
 
-import json
-
 from daydream.archive.hydrate_client import FakeHub
-from daydream.archive.hydrate_rules import (
-    ADMISSION_POLICY_VERSION,
-    HYDRATION_INDEX_SCHEMA_VERSION,
-    SANITIZER_VERSION,
-    derive_pre_identity_curation_id,
-)
-from tests.fixtures.training.build_archive import FIXTURE_SESSIONS
 from tests.fixtures.training.build_hub_snapshot import (
     REPO_ID,
     SNAPSHOT_REVISION,
-    _snapshot_manifest,
+    _snapshot_files,
 )
 
 __all__ = ["REPO_ID", "SNAPSHOT_REVISION", "build_snapshot_decisive"]
@@ -47,42 +38,19 @@ def _snapshot_trajectory_decisive(session_id: str) -> dict[str, object]:
     return trajectory
 
 
+def _add_license_evidence(data: dict[str, object]) -> None:
+    # Required by the projection admission gate and bundle loader for every
+    # admitted batch (MIT, accepted by the policy the projector run pins).
+    data["license_evidence"] = {"spdx_id": "MIT", "source": "github-api"}
+
+
 def build_snapshot_decisive(*, hostile: bool = False) -> FakeHub:
     """Materialize the pinned three-session snapshot as an in-memory FakeHub."""
-    files: dict[str, bytes] = {}
-    for session_id, session in zip(
-        ("sess-a", "sess-b", "sess-c"), FIXTURE_SESSIONS, strict=False
-    ):
-        manifest = _snapshot_manifest(
-            session_id, session.repo_slug, session.skill, session.outcome_labels
-        )
-        data = manifest.to_dict()
-        # License evidence the projection admission gate and bundle loader
-        # require for every admitted batch (MIT, accepted by the policy the
-        # projector run in the test pins).
-        data["license_evidence"] = {"spdx_id": "MIT", "source": "github-api"}
-        files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
-        files[f"{session_id}/trajectory.json"] = json.dumps(
-            _snapshot_trajectory_decisive(session_id), indent=2
-        ).encode()
-    # Non-run metadata and derived outputs: hydration must ignore them.
-    files["README.md"] = b"production trajectory archive\n"
-    files["dataset_info.json"] = b'{"dataset": "daydream-trajectories"}\n'
-    files["curated/cur-old/batches/old/manifest.json"] = b'{"derived": true}\n'
-    files["annotations/latest/sessions.jsonl"] = b'{"derived": true}\n'
-    files["bronze/manifest.json"] = b'{"bronze": true}\n'
-    curation_id = derive_pre_identity_curation_id(
-        SNAPSHOT_REVISION,
-        SANITIZER_VERSION,
-        HYDRATION_INDEX_SCHEMA_VERSION,
-        ADMISSION_POLICY_VERSION,
+    files = _snapshot_files(
+        trajectory_fn=_snapshot_trajectory_decisive,
+        manifest_hook=_add_license_evidence,
+        hostile=hostile,
     )
-    files[f"curated/{curation_id}/resume/ledger.jsonl"] = b""
-
-    if hostile:
-        files["../../escape.txt"] = b"pwned"
-        files["/etc/daydream-escape"] = b"pwned"
-
     hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
     hub.commit_revision(SNAPSHOT_REVISION)
     return hub

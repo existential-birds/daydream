@@ -121,18 +121,6 @@ PHASE_SUBTITLES = {
         "the quiet work of becoming",
         "drift into clarity",
     ],
-    "REFLECT": [
-        "gathering scattered thoughts",
-        "seeing what surfaces",
-        "listening to the echoes",
-        "patterns emerge from stillness",
-    ],
-    "HEAL": [
-        "mending what was found",
-        "gentle corrections",
-        "restoring harmony",
-        "the wounds close softly",
-    ],
     "AWAKEN": [
         "returning to waking life",
         "does the dream hold?",

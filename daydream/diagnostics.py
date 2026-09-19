@@ -176,8 +176,6 @@ def _assemble_diagnostic(value: str) -> str:
     head_budget = _MAX_DIAGNOSTIC_BYTES - _ROOT_CAUSE_TAIL_BYTES - len(marker)
     head = _utf8_prefix(raw, head_budget).decode("utf-8")
     tail = _utf8_suffix(raw, _ROOT_CAUSE_TAIL_BYTES).decode("utf-8")
-    # The head/tail budgets plus the marker always fit the hard cap; the assert
-    # protects the invariant from future budget edits.
     assert len(head.encode("utf-8")) + len(tail.encode("utf-8")) + len(
         marker.encode("utf-8")
     ) <= _MAX_DIAGNOSTIC_BYTES
