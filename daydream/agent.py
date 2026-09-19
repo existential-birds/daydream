@@ -1444,7 +1444,7 @@ async def _run_agent(
                         # backend_s, or backend_s + backoff_s would overcount.
                         charged = telemetry.charge_attempt(clock.monotonic())
                         if telemetry.attempt_is_retry:
-                            recovery.charge_attempt(charged)
+                            recovery.charge(charged)
                         # The backoff sleep is retry overhead: charge it to the
                         # cumulative allowance before sleeping so a later
                         # failure sees the un-rebased remainder.
@@ -1481,7 +1481,7 @@ async def _run_agent(
                             clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
                         )
                         if telemetry.attempt_is_retry:
-                            recovery.charge_attempt(charged)
+                            recovery.charge(charged)
 
             # One honest stop record when a time budget ended the invocation --
             # best-effort and recorder-optional, so a recorder failure never

@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import daydream
@@ -76,11 +75,6 @@ FALLBACK_NOTE = "*run details unavailable*"
 _GENERIC_MODEL_LABELS: frozenset[str] = frozenset(
     {"claude", "codex", "osprey", "unknown", ""}
 )
-
-
-def _parse_ts(ts: str) -> datetime:
-    """Parse an ATIF ISO 8601 timestamp (Z-suffix) to a timezone-aware datetime."""
-    return parse_iso_timestamp(ts)
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -143,7 +137,7 @@ class _PhaseAgg:
     def duration_s(self) -> float | None:
         if self.first_timestamp is None or self.last_timestamp is None:
             return None
-        return (_parse_ts(self.last_timestamp) - _parse_ts(self.first_timestamp)).total_seconds()
+        return (parse_iso_timestamp(self.last_timestamp) - parse_iso_timestamp(self.first_timestamp)).total_seconds()
 
 
 @dataclass
@@ -194,7 +188,7 @@ class _RunAgg:
         lasts = [p.last_timestamp for p in self.phases.values() if p.last_timestamp]
         if not firsts or not lasts:
             return None
-        return (_parse_ts(max(lasts)) - _parse_ts(min(firsts))).total_seconds()
+        return (parse_iso_timestamp(max(lasts)) - parse_iso_timestamp(min(firsts))).total_seconds()
 
 
 def render_run_info(
@@ -298,9 +292,13 @@ def _aggregate(trajectories: Sequence[Trajectory], prices: dict[str, ModelPrice]
             phase = _ensure_phase(agg, phase_key)
             # Track timestamps from ALL sources (user + agent) for latency.
             if step.timestamp:
-                if phase.first_timestamp is None or _parse_ts(step.timestamp) < _parse_ts(phase.first_timestamp):
+                if phase.first_timestamp is None or parse_iso_timestamp(
+                    step.timestamp
+                ) < parse_iso_timestamp(phase.first_timestamp):
                     phase.first_timestamp = step.timestamp
-                if phase.last_timestamp is None or _parse_ts(step.timestamp) > _parse_ts(phase.last_timestamp):
+                if phase.last_timestamp is None or parse_iso_timestamp(
+                    step.timestamp
+                ) > parse_iso_timestamp(phase.last_timestamp):
                     phase.last_timestamp = step.timestamp
             if step.source != "agent":
                 continue
@@ -393,7 +391,7 @@ def _accumulate_metrics(
         cached_input_tokens=cached,
         output_tokens=completion,
         prices=prices,
-        effective_date=_parse_ts(step.timestamp).date() if step.timestamp else None,
+        effective_date=parse_iso_timestamp(step.timestamp).date() if step.timestamp else None,
     )
     if synth is None:
         phase.cost_unknown = True

@@ -1906,6 +1906,27 @@ class _GenerationDraft:
         return record
 
 
+def _usage_dict(
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cached_tokens: int | None,
+    cost_usd: float | None,
+    reasoning_tokens: int | None,
+) -> dict[str, Any]:
+    """Map present usage fields to a sparse dict, dropping absent ones."""
+    return {
+        key: value
+        for key, value in (
+            ("input_tokens", input_tokens),
+            ("output_tokens", output_tokens),
+            ("cached_tokens", cached_tokens),
+            ("cost_usd", cost_usd),
+            ("reasoning_tokens", reasoning_tokens),
+        )
+        if value is not None
+    }
+
+
 class _GenerationLedger:
     """Invocation-local pending-generation lifecycle and billing ownership.
 
@@ -2044,17 +2065,13 @@ class _GenerationLedger:
         draft = self._by_id.get(generation_id)
         if draft is None or draft.usage:
             return
-        usage: dict[str, Any] = {}
-        for key, value in (
-            ("input_tokens", input_tokens),
-            ("output_tokens", output_tokens),
-            ("cached_tokens", cached_tokens),
-            ("cost_usd", cost_usd),
-            ("reasoning_tokens", reasoning_tokens),
-        ):
-            if value is not None:
-                usage[key] = value
-        draft.usage = usage
+        draft.usage = _usage_dict(
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            cost_usd,
+            reasoning_tokens,
+        )
 
     def record_authoritative_total(
         self,
@@ -2066,17 +2083,13 @@ class _GenerationLedger:
         reasoning_tokens: int | None,
     ) -> None:
         """Record the authoritative terminal total once; contradictions fail closed."""
-        incoming = {
-            key: value
-            for key, value in (
-                ("input_tokens", input_tokens),
-                ("output_tokens", output_tokens),
-                ("cached_tokens", cached_tokens),
-                ("cost_usd", cost_usd),
-                ("reasoning_tokens", reasoning_tokens),
-            )
-            if value is not None
-        }
+        incoming = _usage_dict(
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            cost_usd,
+            reasoning_tokens,
+        )
         if self._authoritative_total is None:
             self._authoritative_total = incoming or None
             return
@@ -2967,6 +2980,48 @@ def _phase_scope_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return {"stage": stage}
 
 
+def _emit_phase_start(
+    recorder: "TrajectoryRecorder | None",
+    phase: DaydreamPhase,
+    scope_id: str,
+    safe_metadata: dict[str, Any],
+) -> None:
+    if recorder is not None:
+        recorder._emit_phase_event(
+            phase,
+            "phase_start",
+            session_id=recorder.session_id,
+            scope_id=scope_id,
+            **safe_metadata,
+        )
+
+
+def _emit_phase_end(
+    recorder: "TrajectoryRecorder | None",
+    phase: DaydreamPhase,
+    scope_id: str,
+    safe_metadata: dict[str, Any],
+    status: LifecycleStatus,
+    reason_code: LifecycleReasonCode | None,
+    **extra: Any,
+) -> None:
+    if recorder is None:
+        return
+    try:
+        recorder._emit_phase_event(
+            phase,
+            "phase_end",
+            session_id=recorder.session_id,
+            scope_id=scope_id,
+            status=status,
+            reason_code=reason_code,
+            **safe_metadata,
+            **extra,
+        )
+    except Exception as exc:  # noqa: BLE001 - recording never masks the body
+        print_warning(_console, f"Trajectory phase recording failed: {type(exc).__name__}")
+
+
 @asynccontextmanager
 async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[PhaseScopeHandle]:
     """Async context manager that emits ``phase_start``/``phase_end`` events.
@@ -2979,14 +3034,7 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[Ph
     recorder = get_current_recorder()
     safe_metadata = _phase_scope_metadata(metadata)
     handle = PhaseScopeHandle(scope_id=recorder._next_phase_scope_id() if recorder is not None else "")
-    if recorder is not None:
-        recorder._emit_phase_event(
-            phase,
-            "phase_start",
-            session_id=recorder.session_id,
-            scope_id=handle.scope_id,
-            **safe_metadata,
-        )
+    _emit_phase_start(recorder, phase, handle.scope_id, safe_metadata)
     try:
         yield handle
     except BaseException as exc:
@@ -2994,22 +3042,7 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[Ph
         raise
     finally:
         handle._close()
-        if recorder is not None:
-            try:
-                recorder._emit_phase_event(
-                    phase,
-                    "phase_end",
-                    session_id=recorder.session_id,
-                    scope_id=handle.scope_id,
-                    status=handle.status,
-                    reason_code=handle.reason_code,
-                    **safe_metadata,
-                )
-            except Exception as exc:  # noqa: BLE001 - recording never masks the body
-                print_warning(
-                    _console,
-                    f"Trajectory phase recording failed: {type(exc).__name__}",
-                )
+        _emit_phase_end(recorder, phase, handle.scope_id, safe_metadata, handle.status, handle.reason_code)
 
 
 @dataclass
@@ -3038,14 +3071,7 @@ async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterat
     lifecycle = PhaseScopeHandle(scope_id=recorder._next_phase_scope_id() if recorder is not None else "")
     safe_metadata = _phase_scope_metadata(metadata)
     started = time.monotonic()
-    if recorder is not None:
-        recorder._emit_phase_event(
-            phase,
-            "phase_start",
-            session_id=recorder.session_id,
-            scope_id=lifecycle.scope_id,
-            **safe_metadata,
-        )
+    _emit_phase_start(recorder, phase, lifecycle.scope_id, safe_metadata)
     try:
         yield handle
     except BaseException as exc:
@@ -3058,24 +3084,16 @@ async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterat
             lifecycle.status = status
             lifecycle.reason_code = reason_code
         lifecycle._close()
-        if recorder is not None:
-            try:
-                recorder._emit_phase_event(
-                    phase,
-                    "phase_end",
-                    session_id=recorder.session_id,
-                    scope_id=lifecycle.scope_id,
-                    status=lifecycle.status,
-                    reason_code=lifecycle.reason_code,
-                    duration_ms=max(0, round((time.monotonic() - started) * 1000)),
-                    stop_reason=handle.stop_reason,
-                    **safe_metadata,
-                )
-            except Exception as exc:  # noqa: BLE001 - recording never masks the body
-                print_warning(
-                    _console,
-                    f"Trajectory phase recording failed: {type(exc).__name__}",
-                )
+        _emit_phase_end(
+            recorder,
+            phase,
+            lifecycle.scope_id,
+            safe_metadata,
+            lifecycle.status,
+            lifecycle.reason_code,
+            duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+            stop_reason=handle.stop_reason,
+        )
 
 
 @dataclass(frozen=True)
