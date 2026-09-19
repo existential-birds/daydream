@@ -12,31 +12,13 @@ import anyio
 
 logger = logging.getLogger(__name__)
 
-# Idle-stall detection for the CLI backends' stdout stream.
-#
-# Fires on the ABSENCE of stream activity, never on slow output: the window
-# restarts on every line, so a CLI that trickles tokens is never interrupted.
-#
-# The default is calibrated from two measurements (July 2026):
-#
-# 1. 403 archived runs (~/.daydream/archive/runs). Grouping ATIF steps by
-#    ``extra.subtrajectories`` gives the wall-clock span of a single backend
-#    turn, which upper-bounds the silent window inside it. Largest healthy
-#    within-invocation span: codex 989.4s (41 runs), pi 1925.0s (186 runs).
-# 2. Live capture of both CLIs with per-line arrival timestamps. pi streams
-#    token-level ``message_update`` deltas (16901 lines over a 259s reasoning
-#    block; largest gap 11.7s) and ``tool_execution_update`` per output chunk,
-#    so its only silent construct is an output-silent tool call. codex 0.144.6
-#    ``--experimental-json`` emits NO ``item.updated`` at all: it was silent for
-#    the full 151s of a 7038-token generation and for the full 120s of a chatty
-#    ticking shell command. codex is therefore the binding constraint — its
-#    stream is legitimately dead for the whole duration of any single tool call
-#    or generation block.
-#
-# 2700s is 2.7x codex's largest observed turn span and remains the tool-active
-# window for pi, where an output-silent build or test may legitimately run for
-# most of a phase's wall budget. Pi model responses use a shorter default below:
-# unlike codex, pi emits token-level message updates while the model is alive.
+# Idle-stall detection for the CLI backends' stdout stream. Fires on the
+# ABSENCE of stream activity, never on slow output: the window restarts on
+# every line. Codex is the binding constraint (its ``--experimental-json``
+# stream is legitimately dead for a whole generation or tool call), so the
+# tool-active window is 2700s, 2.7x its largest observed turn span. Pi emits
+# token-level updates while the model is alive and uses the shorter default
+# below for model responses.
 DEFAULT_STREAM_IDLE_TIMEOUT_S = 2700.0
 DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S = 300.0
 STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"

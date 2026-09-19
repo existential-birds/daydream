@@ -771,12 +771,7 @@ def _records_issues(records: Any) -> list[Any] | None:
 def _records_issues_or_empty(records: Any) -> list[Any]:
     """Normalize a loaded per-stack records file to a bare issues list.
 
-    Collapses the ``None`` -> ``[]`` fallback idiom that every per-stack
-    records reader previously re-implemented verbatim (orchestrator merge
-    resume, analyzer findings, and the test harness). A non-list load yields
-    the same degenerate value as the callers' explicit fallback
-    (``[]`` for a dict, otherwise the raw load), preserving prior
-    warn-and-continue semantics exactly.
+    A non-list load yields ``[]`` for a dict, otherwise the raw load.
     """
     issues = _records_issues(records)
     if issues is None:
@@ -943,27 +938,8 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
         pairs = dedup.get("record_alt_pairs", [])
         dupes = dedup.get("record_duplicate_pairs", [])
         avg_sim = sum(p.get("similarity", 0) for p in pairs) / len(pairs) if pairs else 0
-        # These are INPUT counters, not escapes: ``dedup-candidates.json`` holds
-        # the pre-merge candidate pairs the pre-filter handed the merge agent, so
-        # ``record_duplicate_candidates`` measures adjudication workload -- a
-        # higher value is not "worse", it is "more pairs were reviewed". The
-        # escapes (near-duplicates that survived merge into the shipped set) are
-        # the separate ``shipped_duplication`` axis over ``merged-items.json``
-        # (:func:`analyze_shipped_duplication`). Renamed from ``record_duplicates``
-        # (issue #1106) because that name read as an escape count.
-        #
-        # Known gap, deliberate and not closable here: the candidate pool is
-        # built from the language-stack record pool only -- structural meta-stack
-        # records are partitioned out upstream, and #1103/#1110 keep that
-        # partition because the pool is what the merge agent reads and it must
-        # not be pointed at records it was not given. So this counter has never
-        # been able to see a structural/language twin, in either direction. The
-        # shipped axis can, because the host appends structural items into
-        # ``merged-items.json``.
-        #
-        # This block is field-agnostic for the duplicate pairs -- it only counts
-        # them -- so widening ``RecordDuplicatePair`` (e.g. the ``uid`` fields
-        # added for issue #1111) cannot change these numbers.
+        # INPUT counters, not escapes: ``dedup-candidates.json`` holds the
+        # pre-merge candidate pairs the pre-filter handed the merge agent.
         dedup_stats = {
             "record_alt_overlaps": len(pairs),
             "record_duplicate_candidates": len(dupes),
@@ -1260,67 +1236,36 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     candidate pool, this axis DOES see a structural/language twin, because the
     host appends structural items into ``merged-items.json``.
 
-    A threshold-only count is deliberately not sufficient. The issue's own
+    A threshold-only count is deliberately not sufficient: the issue's own
     worked example scores ~0.15 similarity, far under the pre-filter's 0.5 bar,
-    so a bare ``pairs >= threshold`` metric would silently never fire -- the
-    same "metric never fires" failure the issue warns about for a ``uid``-keyed
-    count. The full distribution (``max_similarity``, ``mean_similarity``,
+    so the full distribution (``max_similarity``, ``mean_similarity``,
     ``same_file_pairs``, and the top ``pairs`` rows) is reported so a mis-set
     threshold is observable instead of invisible.
 
     Pairs come from ``build_record_dedup_candidates(..., threshold=0.0)``, which
-    returns every comparable pair with its similarity. That function compares
-    ``description`` and deliberately does NOT require file overlap, so
-    ``same_file_pairs`` is reported separately rather than used as a gate. Its
-    ``sources`` argument must be parallel to the records, and this caller uses
-    it as an index channel back to the item each pair side came from (see the
-    body); ``a_lens``/``b_lens`` are then read off the mapped items.
-    ``comparable_pairs`` counts the pairs the similarity could actually be
-    computed over -- an item with an empty description is not comparable and
-    contributes no pair.
+    returns every comparable pair. It compares ``description`` and deliberately
+    does NOT require file overlap, so ``same_file_pairs`` is reported separately
+    rather than used as a gate; ``comparable_pairs`` counts the pairs the
+    similarity could actually be computed over (an item with an empty
+    description contributes no pair).
 
     Each pair row also carries ``a_source_uids``/``b_source_uids``: the
-    host-assigned per-stack record uids (issue #1111) that side's shipped item
-    derives from, via :func:`daydream.deep.records.item_source_uids`. **These
-    are lists, not scalars**, because a merged item is a synthesis -- the merge
-    agent may consolidate several per-stack records into one shipped finding,
-    and the structural fold unions two lenses' provenance into one survivor --
-    so the honest answer to "which records produced this?" is a list. Items
-    that never passed through the merge agent (the single-stack bypass, the
-    host-appended structural items, and legacy artifacts written before
-    ``source_uids`` existed) report their own birth ``uid`` as a one-element
-    list.
-
-    An empty list means the merge agent declined to attribute that item.
-    **That is a real answer, not an error**: no uid is ever fabricated to fill
-    it. Tracing a shipped duplicate back to the records that produced it is
-    precisely the measurement gap issue #1106 describes -- knowing that two
-    shipped findings restate one defect is only actionable if you can name the
-    reviews that emitted them -- so the provenance is read off the ITEM rather
-    than off ``RecordDuplicatePair.record_a_uid``, which reads the record's own
-    ``uid`` and is therefore ``""`` for exactly the merge-agent items this axis
-    exists to catch.
+    per-stack record uids that side's shipped item derives from, via
+    :func:`daydream.deep.records.item_source_uids`. **These are lists, not
+    scalars**, because a merged item is a synthesis of several records. An
+    empty list means the merge agent declined to attribute that item; that is a
+    real answer, never an error, and no uid is ever fabricated to fill it.
 
     ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
     comparable pairs: undefined, not perfect -- the ``grounding_rate``
-    precedent. A present-but-empty ``merged-items.json`` (a review-only run
-    that shipped nothing) yields real zeros -- there was a shipped set, it was
-    empty. When ``merged-items.json`` itself does not exist -- via
-    :func:`_load_shipped_items` returning ``None``, the same "merge ran"
-    discriminator ``archive/pipeline.py`` uses -- the shipped set was never
-    produced at all (this run never reached merge), so ``near_duplicate_pairs``
-    -- the value archived as ``manifest.shipped_duplicate_pairs`` -- is
-    ``None`` rather than an imputed zero, mirroring
-    ``location_in_hunk_rate``'s "undefined, never 0.0" contract. Note that
-    ``deep/`` itself is created earlier, in the coverage phase, so its mere
-    existence is NOT evidence merge ran. A present-but-corrupt file still
-    raises via :func:`_load_shipped_items`. ``pairs`` is capped at
-    ``_DUPLICATION_PAIR_CAP`` (20), highest similarity first; the comparison
-    itself is bounded by ``_DUPLICATION_INPUT_CAP`` (200) shipped items, since
-    the scan is O(n^2) -- ``input_truncated`` reports whether that cap dropped
-    any items, so a truncated (and therefore possibly incomplete) scan is
-    never silently indistinguishable from a complete one; ``shipped_items``
-    still reports the true, uncapped total.
+    precedent. A present-but-empty ``merged-items.json`` yields real zeros;
+    a missing file (:func:`_load_shipped_items` returning ``None``) makes
+    ``near_duplicate_pairs`` -- archived as ``manifest.shipped_duplicate_pairs``
+    -- ``None`` rather than an imputed zero. ``pairs`` is capped at
+    ``_DUPLICATION_PAIR_CAP`` (20), highest similarity first; the scan is
+    bounded by ``_DUPLICATION_INPUT_CAP`` (200) shipped items, and
+    ``input_truncated`` reports whether that cap dropped any items while
+    ``shipped_items`` still reports the true, uncapped total.
     """
     # Function-local import: ``daydream.deep.orchestrator`` imports this module
     # at module level, so a module-level ``daydream.deep.dedup`` import here
@@ -1420,52 +1365,34 @@ def analyze_grounding(
 ) -> dict[str, Any]:
     """Grounding: the cited file was read AND the cited line resolves to a hunk.
 
-    The predicate is::
-
-        grounded = file_was_read and not unread_refs and line_grounded
-
+    The predicate is ``file_was_read and not unread_refs and line_grounded``,
     where ``line_grounded`` is ``location_tier in ("in_hunk",
-    "within_tolerance")`` against the run's diff hunks (issue #1106). Before
-    that tightening the predicate answered only "did the agent open the files it
-    names?", so a finding anchored 81 lines outside every hunk still scored
-    fully grounded.
+    "within_tolerance")`` against the run's diff hunks (issue #1106).
 
     Exemptions -- every one is COUNTED and visible in ``tiers``, never silently
     swallowed:
 
     - **Structural whole-file anchor** (line ``0``): a whole-file citation, not
       a line citation, mirroring the location validator's own carve-out.
-      Structural is detected as ``lens == "structural"`` OR ``_stack ==
-      "structure"``, because records read from ``stack-structure-records.json``
-      carry no ``lens`` key and are tagged by :func:`analyze_findings`.
+      Detected as ``lens == "structural"`` OR ``_stack == "structure"``.
       -> ``line_grounded`` True, tier ``"whole_file"``.
     - **No usable integer line** (missing, non-int, or ``bool``)
       -> ``line_grounded`` True, tier ``"no_line"``.
-    - **``hunk_source == "none"``**: neither ``hunk-index.json`` nor
-      ``diff.patch`` yielded hunks, so nothing can be checked. Every finding
-      falls back to the file-only predicate with tier ``"unchecked"`` and
-      ``hunk_source`` is surfaced in the output. A run is never penalized for
-      an artifact the analyzer could not read.
+    - **``hunk_source == "none"``**: nothing can be checked, so every finding
+      falls back to the file-only predicate with tier ``"unchecked"``.
 
-    Two populations, deliberately separate: the denominator here is the
-    PRE-MERGE per-stack finding list held in ``findings_data["findings"]``
-    (records tagged with ``_stack`` to match against a deep-stack reader), NOT
-    the shipped set. Shipped wonder/structural items are absent because they
-    have no per-stack reader stream to ground to, so they neither inflate the
-    denominator nor get grounding credit. The shipped set is scored separately
-    by :func:`analyze_location` and :func:`analyze_shipped_duplication`.
+    The denominator is the PRE-MERGE per-stack finding list in
+    ``findings_data["findings"]``, NOT the shipped set (scored separately by
+    :func:`analyze_location` and :func:`analyze_shipped_duplication`).
 
-    ``grounding_rate`` is ``None`` over an empty finding set: the ratio is
-    undefined, not perfect. It feeds the RL/SFT reward as a credit axis
-    (``daydream/training/reward.py``), where scoring absence of evidence as 1.0
-    made "report nothing" the cheapest path to a maximal composite.
-    ``file_grounding_rate``/``line_grounding_rate`` follow the same convention
-    and are reported alongside the composite so the tightening is observable as
-    components rather than one opaque number.
+    ``grounding_rate`` is ``None`` over an empty finding set: undefined, not
+    perfect. It feeds the RL/SFT reward (``daydream/training/reward.py``), where
+    scoring absence of evidence as 1.0 made "report nothing" the cheapest path
+    to a maximal composite. ``file_grounding_rate``/``line_grounding_rate``
+    follow the same convention and are reported alongside the composite.
 
     An artifact-owned primary file or rationale reference forces the finding
-    ungrounded and is kept in redacted ``artifact_*`` fields; it is neither
-    source credit nor an ordinary unread source reference.
+    ungrounded and is kept in redacted ``artifact_*`` fields.
     """
     roots = _artifact_path_roots(daydream_dir, artifact_provenance)
     agent_reads: dict[str, set[str]] = {}

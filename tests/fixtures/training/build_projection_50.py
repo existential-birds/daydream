@@ -52,7 +52,6 @@ REJECTED_TEXT = "rejected finding body"
 AMBIGUOUS_TEXT = "ambiguous finding body"
 
 _GOLD_SESSIONS = 23  # 2 gold findings each -> 46 gold outcome-finding records
-_AMBIGUOUS_SESSIONS = 2  # 1 non-decisive finding each -> 2 derived records
 # 46 gold + 2 process-trace + 2 task-only = 50 records.
 
 _SESSION_ORDER = ["sess-a"] + [
