@@ -13,7 +13,6 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,7 +23,6 @@ from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
     Backend,
-    ContinuationToken,
     ResultEvent,
     RetryPolicy,
     TextEvent,
@@ -38,6 +36,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
     _reset_recorder_for_tests,
 )
+from tests.harness.backend import ScriptedBackend
 
 
 @pytest.fixture(autouse=True)
@@ -47,43 +46,27 @@ def _reset_recorder() -> Any:
     _reset_recorder_for_tests()
 
 
-@dataclass
-class _BurstBackend:
-    """Backend that yields many ToolStartEvents and never a ResultEvent.
+def _burst_backend(*, count: int = 200, sleep_s: float = 0.0) -> ScriptedBackend:
+    """A ScriptedBackend that streams many ToolStartEvents and never a ResultEvent.
 
-    Optionally sleeps between events so a wall-clock budget can trip.
+    With no ``sleep_s`` the stream is a plain ``events=`` turn; a positive
+    ``sleep_s`` streams through a responder so a wall-clock budget can trip.
     """
+    if not sleep_s:
+        events: list[AgentEvent] = [
+            ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"}) for i in range(count)
+        ]
+        return ScriptedBackend(events=events, model="mock-model", fanout_concurrency=4)
 
-    model = "mock-model"
-    fanout_concurrency: int = 4
-    count: int = 200
-    sleep_s: float = 0.0
-    cancel_calls: int = 0
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        count = self.count
-        sleep_s = self.sleep_s
-
+    async def responder(*args: Any, **kwargs: Any) -> Any:
         async def _gen() -> AsyncGenerator[AgentEvent, None]:
             for i in range(count):
-                if sleep_s:
-                    await anyio.sleep(sleep_s)
+                await anyio.sleep(sleep_s)
                 yield ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"})
 
         return _gen()
 
-    async def cancel(self) -> None:
-        self.cancel_calls += 1
+    return ScriptedBackend(responder=responder, model="mock-model", fanout_concurrency=4)
 
 
 class _RetryableBackendError(RuntimeError):
@@ -92,80 +75,42 @@ class _RetryableBackendError(RuntimeError):
     retryable = True
 
 
-@dataclass
-class _RetryableFailingBackend:
-    """Backend that advances an injected clock per attempt, then fails retryably."""
+def _retryable_failing_backend(*, advance: Callable[[float], None], advance_s: float) -> ScriptedBackend:
+    """A ScriptedBackend that advances an injected clock per attempt, then fails retryably."""
 
-    advance: Callable[[float], None]
-    advance_s: float
-    model = "mock-model"
-    fanout_concurrency: int = 4
-    calls: int = 0
-    retry_policy: RetryPolicy = field(
-        default_factory=lambda: RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    async def responder(*args: Any, **kwargs: Any) -> Any:
+        advance(advance_s)
+        return [_RetryableBackendError("transient")]
+
+    return ScriptedBackend(
+        responder=responder,
+        model="mock-model",
+        fanout_concurrency=4,
+        retry_policy=RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0),
     )
 
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            self.calls += 1
-            self.advance(self.advance_s)
-            raise _RetryableBackendError("transient")
-            yield  # pragma: no cover - unreachable, marks this a generator  # noqa
 
-        return _gen()
-
-    async def cancel(self) -> None:
-        pass
-
-
-@dataclass
-class _RetryableThenSucceedingBackend:
+def _retryable_then_succeeding_backend(
+    *, advance: Callable[[float], None], retry_advance_s: float, success_advance_s: float
+) -> ScriptedBackend:
     """Attempt 1 fails retryably; attempt 2 spends a large, legitimate turn then succeeds."""
+    attempts = 0
 
-    advance: Callable[[float], None]
-    retry_advance_s: float
-    success_advance_s: float
-    model = "mock-model"
-    fanout_concurrency: int = 4
-    calls: int = 0
-    retry_policy: RetryPolicy = field(
-        default_factory=lambda: RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    async def responder(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            advance(retry_advance_s)
+            return [_RetryableBackendError("transient")]
+        advance(success_advance_s)
+        return [TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)]
+
+    return ScriptedBackend(
+        responder=responder,
+        model="mock-model",
+        fanout_concurrency=4,
+        retry_policy=RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0),
     )
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            self.calls += 1
-            if self.calls == 1:
-                self.advance(self.retry_advance_s)
-                raise _RetryableBackendError("transient")
-            self.advance(self.success_advance_s)
-            yield TextEvent(text="done")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        pass
 
 
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
@@ -188,7 +133,7 @@ def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
 
 async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     """A 200-event burst with tool_call_budget=5 returns under budget, marked aborted."""
-    backend = _BurstBackend(count=200, sleep_s=0.0)
+    backend = _burst_backend(count=200, sleep_s=0.0)
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -212,27 +157,16 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
 async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path) -> None:
     """Invocation cleanup failures must not replace the successful abort result."""
 
-    class _RaisingCloseBackend(_BurstBackend):
-        def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: ContinuationToken | None = None,
-            agents: dict[str, Any] | None = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            async def _gen() -> AsyncGenerator[AgentEvent, None]:
-                try:
-                    yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
-                finally:
-                    raise RuntimeError("stream close exploded")
+    async def responder(*args: Any, **kwargs: Any) -> Any:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            try:
+                yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
+            finally:
+                raise RuntimeError("stream close exploded")
 
-            return _gen()
+        return _gen()
 
-    backend = _RaisingCloseBackend()
+    backend = ScriptedBackend(responder=responder, model="mock-model", fanout_concurrency=4)
 
     with anyio.fail_after(5):
         result, _, reason = await run_agent(
@@ -283,7 +217,7 @@ async def test_run_agent_abort_records_reason_and_turn_end(
     monkeypatch.setattr("daydream.agent.get_current_recorder", lambda: _RecorderSpy())
 
     await run_agent(
-        _BurstBackend(),
+        _burst_backend(),
         tmp_path,
         "go",
         phase=DaydreamPhase.FIX,
@@ -303,7 +237,7 @@ async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     # retry_policy: attempts=20, delays=0.0; advances the injected clock per attempt.
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=400.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=400.0)
 
     output, _, reason = await run_agent(
         backend, tmp_path, "go",
@@ -313,7 +247,7 @@ async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
     )
 
     assert reason == "wall_budget_exceeded"
-    assert backend.calls == 2            # 1000 -> 1400 (attempt 1) -> 1800 (attempt 2), then spent
+    assert backend.call_count == 2            # 1000 -> 1400 (attempt 1) -> 1800 (attempt 2), then spent
     assert fake.monotonic_value == 1_800.0
     assert output == ""
 
@@ -324,7 +258,7 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
     from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -350,7 +284,7 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
 
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
     """A slow stream with wall_budget_s=0.2 returns, step marked wall_budget_exceeded."""
-    backend = _BurstBackend(count=200, sleep_s=0.05)
+    backend = _burst_backend(count=200, sleep_s=0.05)
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -431,7 +365,10 @@ async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
 
     fake = FakeClock(monotonic_value=1_000.0)
 
-    class _HangingCloseBackend(_BurstBackend):
+    class _HangingCloseBackend:
+        model = "mock-model"
+        fanout_concurrency = 4
+
         def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
             async def _gen() -> AsyncGenerator[AgentEvent, None]:
                 try:
@@ -443,6 +380,9 @@ async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
                     await anyio.sleep(3_600)  # teardown that never completes
 
             return _gen()
+
+        async def cancel(self) -> None:
+            pass
 
     fake.install(monkeypatch)
     monkeypatch.setattr("daydream.agent.BUDGET_CLEANUP_GRACE_S", 0.2)
@@ -463,49 +403,32 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
 ) -> None:
     """An invocation budget abort closes its stream without cancelling a sibling."""
 
-    class _SharedBackend:
-        model = "mock-model"
-        fanout_concurrency = 2
+    sibling_started = anyio.Event()
+    release_sibling = anyio.Event()
+    closed_prompts: set[str] = set()
+    backend_ref: list[ScriptedBackend] = []
 
-        def __init__(self) -> None:
-            self.cancel_calls = 0
-            self.closed_prompts: set[str] = set()
-            self.sibling_started = anyio.Event()
-            self.release_sibling = anyio.Event()
-
-        def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: ContinuationToken | None = None,
-            agents: dict[str, Any] | None = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            async def _gen() -> AsyncGenerator[AgentEvent, None]:
-                try:
-                    if prompt == "sibling":
-                        self.sibling_started.set()
-                        await self.release_sibling.wait()
-                        if self.cancel_calls:
-                            return
-                        yield TextEvent(text="sibling completed")
-                        yield ResultEvent(structured_output=None, continuation=None)
+    async def responder(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            try:
+                if prompt == "sibling":
+                    sibling_started.set()
+                    await release_sibling.wait()
+                    if backend_ref[0].cancel_calls:
                         return
+                    yield TextEvent(text="sibling completed")
+                    yield ResultEvent(structured_output=None, continuation=None)
+                    return
 
-                    await self.sibling_started.wait()
-                    yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
-                finally:
-                    self.closed_prompts.add(prompt)
+                await sibling_started.wait()
+                yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
+            finally:
+                closed_prompts.add(prompt)
 
-            return _gen()
+        return _gen()
 
-        async def cancel(self) -> None:
-            self.cancel_calls += 1
-
-    backend = _SharedBackend()
+    backend = ScriptedBackend(responder=responder, model="mock-model", fanout_concurrency=2)
+    backend_ref.append(backend)
     results: dict[str, str | bool] = {}
 
     async def run_sibling() -> None:
@@ -526,8 +449,8 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
             tool_call_budget=0,
         )
         results["abort_reason"] = reason or ""
-        results["abort_iterator_closed"] = "abort" in backend.closed_prompts
-        backend.release_sibling.set()
+        results["abort_iterator_closed"] = "abort" in closed_prompts
+        release_sibling.set()
 
     with anyio.fail_after(5):
         async with anyio.create_task_group() as task_group:
@@ -588,8 +511,8 @@ async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_agai
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=30.0)
-    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=30.0)
+    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0))
 
     with pytest.raises(_RetryableBackendError):
         await run_agent(
@@ -598,7 +521,7 @@ async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_agai
         )
 
     # 1000 (+30 attempt 1) -> backoff 60 -> 1090 (+30 attempt 2) -> allowance spent -> stop
-    assert backend.calls == 2
+    assert backend.call_count == 2
     assert slept == [60.0]
     assert fake.monotonic_value == 1_120.0
 
@@ -611,8 +534,8 @@ async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
-    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
+    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0))
 
     with pytest.raises(_RetryableBackendError):
         await run_agent(
@@ -620,7 +543,7 @@ async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
             retry_recovery_allowance_s=100.0,
         )
 
-    assert backend.calls == 4  # 1 + 40 + 40 + 20, then the allowance is spent
+    assert backend.call_count == 4  # 1 + 40 + 40 + 20, then the allowance is spent
     assert slept == [40.0, 40.0, 20.0]  # a re-basing implementation would sleep 40 forever
 
 
@@ -631,8 +554,8 @@ async def test_group_deadline_still_wins_over_a_larger_allowance(
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=20.0)
-    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=20.0)
+    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
 
     _, _, reason = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.FIX,
@@ -640,7 +563,7 @@ async def test_group_deadline_still_wins_over_a_larger_allowance(
     )
 
     assert reason == "wall_budget_exceeded"
-    assert backend.calls == 2  # stopped at the group deadline, not the allowance
+    assert backend.call_count == 2  # stopped at the group deadline, not the allowance
 
 
 async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
@@ -650,7 +573,7 @@ async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
 
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    backend = _RetryableThenSucceedingBackend(
+    backend = _retryable_then_succeeding_backend(
         advance=fake.advance, retry_advance_s=0.0, success_advance_s=1_200.0
     )
 
@@ -661,7 +584,7 @@ async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
 
     assert output == "done"
     assert reason is None  # 1200 s of legitimate post-retry work is not cancelled
-    assert backend.calls == 2
+    assert backend.call_count == 2
 
 
 async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry(
@@ -682,8 +605,8 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
     patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
     # 5000 (+300 attempt 1) -> 5300 -> retry -> 5600 (+300 retry) -> deadline spent.
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
-    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
+    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -694,7 +617,7 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
             )
 
     assert reason == "wall_budget_exceeded"
-    assert backend.calls == 2
+    assert backend.call_count == 2
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
     assert len(stops) == 1
@@ -732,8 +655,8 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
     patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
     # 1000 (+300 attempt 1) -> 1300 -> 100 s backoff -> 1400 = the deadline.
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=300.0)
-    backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=100.0, max_delay_s=100.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
+    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=100.0, max_delay_s=100.0))
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -744,7 +667,7 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
             )
 
     assert reason == "wall_budget_exceeded"
-    assert backend.calls == 1                  # the retry never got to dispatch
+    assert backend.call_count == 1                  # the retry never got to dispatch
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
     assert len(stops) == 1
@@ -770,7 +693,7 @@ async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
     from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=2_000.0).install(monkeypatch)
-    backend = _RetryableFailingBackend(advance=fake.advance, advance_s=250.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=250.0)
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -781,7 +704,7 @@ async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
                     wall_budget_s=10_000.0, retry_recovery_allowance_s=0.0,
                 )
 
-    assert backend.calls == 1
+    assert backend.call_count == 1
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
     assert len(stops) == 1
@@ -794,7 +717,7 @@ async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
 
 def _ending_backend(
     monkeypatch: pytest.MonkeyPatch, ending: str
-) -> tuple[Any, _RetryableFailingBackend, RunContext]:
+) -> tuple[Any, ScriptedBackend, RunContext]:
     """Build ``(fake_clock, backend, run_context)`` for one ladder ending."""
     from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
     from tests.harness.fake_clock import FakeClock, patch_retry_sleep
@@ -805,17 +728,17 @@ def _ending_backend(
     run_context = RunContext(InteractionPolicy(interactive=False))
     if ending == "deadline":
         # The 1_800 s wall budget is spent inside the first dispatched attempt.
-        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=1_800.0)
+        backend = _retryable_failing_backend(advance=fake.advance, advance_s=1_800.0)
     elif ending == "allowance":
         # The 60 s allowance is spent by the first 60 s backoff sleep.
-        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=30.0)
-        backend.retry_policy = RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0)
+        backend = _retryable_failing_backend(advance=fake.advance, advance_s=30.0)
+        setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0))
     elif ending == "attempts":
-        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
-        backend.retry_policy = RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0)
+        backend = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
+        setattr(backend, "retry_policy", RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0))
     elif ending == "circuit":
         # Open the one run-scoped circuit first; the ladder is then suppressed.
-        backend = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
+        backend = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
         circuit = run_context.outage_circuit
         for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
             circuit.record_failure(fake.monotonic_value)
@@ -869,7 +792,7 @@ async def test_every_ladder_ending_records_one_budget_stop(
 
 
 async def _expect_retryable_failure(
-    backend: _RetryableFailingBackend, tmp_path: Path, run_context: RunContext
+    backend: ScriptedBackend, tmp_path: Path, run_context: RunContext
 ) -> None:
     """Drive one invocation to its circuit-suppressed failure."""
     with pytest.raises(_RetryableBackendError):
@@ -899,14 +822,14 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
     run_context = RunContext(InteractionPolicy(interactive=False))
     backends = [
-        _RetryableFailingBackend(advance=fake.advance, advance_s=1.0) for _ in range(3)
+        _retryable_failing_backend(advance=fake.advance, advance_s=1.0) for _ in range(3)
     ]
 
     async with anyio.create_task_group() as tg:
         for backend in backends:
             tg.start_soon(_expect_retryable_failure, backend, tmp_path, run_context)
 
-    assert sum(b.calls for b in backends) <= 3 + 1  # threshold + the one probe
+    assert sum(b.call_count for b in backends) <= 3 + 1  # threshold + the one probe
     assert len(slept) <= 3
     assert run_context.outage_circuit.state(fake.monotonic_value) in {"open", "half_open"}
 
@@ -936,8 +859,8 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
         run_context.outage_circuit.record_failure(fake.monotonic_value)
 
-    probe_ladder = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
-    probe_ladder.retry_policy = RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0)
+    probe_ladder = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
+    setattr(probe_ladder, "retry_policy", RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0))
     recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -962,8 +885,8 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     assert meta["circuit_state"] == "half_open"
 
     # While that probe is outstanding, a second ladder gets no probe of its own.
-    sibling = _RetryableFailingBackend(advance=fake.advance, advance_s=0.0)
-    sibling.retry_policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    sibling = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
+    setattr(sibling, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
     sibling_recorder = _make_recorder(tmp_path)
 
     with anyio.fail_after(5):
@@ -986,7 +909,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
         if e["event"] == "agent_budget_stop"
     ]
     assert sibling_stops[0]["metadata"]["retry_stop_reason"] == "circuit_open"
-    assert sibling.calls == 1  # suppressed before its own probe could dispatch
+    assert sibling.call_count == 1  # suppressed before its own probe could dispatch
 
 
 async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
