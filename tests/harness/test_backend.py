@@ -75,10 +75,6 @@ _ALLOWED: frozenset[str] = frozenset({
     "test_deep_orchestrator.py::_ExtraEditBackend",
     "test_deep_orchestrator.py::_PromptHookStub",
     "test_deep_wonder_concurrency.py::_WonderRendezvousStub",
-    "test_exploration_runner.py::_FailingPatternScanner",
-    "test_exploration_runner.py::_FailingSurveyBackend",
-    "test_exploration_runner.py::_PartlyBlockedBackend",
-    "test_exploration_runner.py::_SpecialistMockBackend",
     "test_extension_seam_integration.py::DeferredWriteBackend",
     "test_extension_seam_integration.py::ShallowRecordingBackend",
     "test_fix_footprint.py::BarrierBackend",
@@ -96,7 +92,6 @@ _ALLOWED: frozenset[str] = frozenset({
     "test_integration.py::_WorktreeMutatingBackend",
     "test_phases_render.py::_PerStackBackend",
     "test_trajectory_phase_events.py::_OverlappingReviewBackend",
-    "test_worktree_cwd_grounding.py::_PromptCapturingBackend",
 })
 
 

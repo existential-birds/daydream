@@ -32,6 +32,7 @@ from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
+from tests.harness.backend import Responder, ScriptedBackend
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
 )
@@ -163,42 +164,37 @@ _VALID_ENVELOPE: dict[str, Any] = {
 }
 
 
-class _SpecialistMockBackend:
-    """Mock backend that returns specialist results based on output_schema."""
+def _specialist_backend(
+    results: dict[str, dict[str, Any]] | None = None,
+    *,
+    responder: Responder | None = None,
+) -> ScriptedBackend:
+    """Schema-keyed specialist backend: each output_schema gets its envelope slice.
 
-    model = "mock-model"
-
-    def __init__(self, results: dict[str, dict[str, Any]] | None = None) -> None:
-        self.execute_calls: list[dict[str, Any]] = []
-        self._results = results or _VALID_ENVELOPE
-
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: Any,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: bool=False,
-        persist_session: bool=True,
-    ) -> AsyncIterator[AgentEvent]:
-        self.execute_calls.append(
-            {"prompt": prompt, "schema": output_schema, "agents": agents, "read_only": read_only}
-        )
-        result: dict[str, Any] = {}
-        if output_schema == PATTERN_SCANNER_SCHEMA:
-            result = self._results.get("pattern_scanner", {})
-        elif output_schema == DEPENDENCY_TRACER_SCHEMA:
-            result = self._results.get("dependency_tracer", {})
-        elif output_schema == TEST_MAPPER_SCHEMA:
-            result = self._results.get("test_mapper", {})
-        else:
-            result = self._results
-        yield ResultEvent(structured_output=result, continuation=None)
-
-    async def cancel(self) -> None:
-        return None
+    Mirrors the old per-schema branches: a schema absent from the envelope gets
+    an empty payload, and an unmatched schema falls back to the whole envelope.
+    An optional ``responder`` hook runs before schema selection (so it can fail
+    one specialist or block it without changing the rest).
+    """
+    payload = results or _VALID_ENVELOPE
+    return ScriptedBackend(
+        responses_by_schema=[
+            (
+                PATTERN_SCANNER_SCHEMA,
+                [ResultEvent(structured_output=payload.get("pattern_scanner", {}), continuation=None)],
+            ),
+            (
+                DEPENDENCY_TRACER_SCHEMA,
+                [ResultEvent(structured_output=payload.get("dependency_tracer", {}), continuation=None)],
+            ),
+            (
+                TEST_MAPPER_SCHEMA,
+                [ResultEvent(structured_output=payload.get("test_mapper", {}), continuation=None)],
+            ),
+            (None, [ResultEvent(structured_output=payload, continuation=None)]),
+        ],
+        responder=responder,
+    )
 
 
 # Pure helpers
@@ -224,30 +220,30 @@ def test_select_tier_thresholds() -> None:
 # Orchestrator tier dispatch
 def test_skip_tier_no_subagents(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "trivial_single.diff").read_text()
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
 
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
-    assert backend.execute_calls == []
+    assert backend.calls == []
     assert ctx is not None
 
 
 def test_single_tier_dependency_tracer_only(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
 
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
-    assert len(backend.execute_calls) == 1
-    assert backend.execute_calls[0]["schema"] == DEPENDENCY_TRACER_SCHEMA
-    assert all(call["read_only"] is True for call in backend.execute_calls)
+    assert backend.call_count == 1
+    assert backend.calls[0]["output_schema"] == DEPENDENCY_TRACER_SCHEMA
+    assert all(call["read_only"] is True for call in backend.calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
 
 
 def test_specialist_rows_carry_llm_provenance(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    backend = _SpecialistMockBackend(results=_VALID_ENVELOPE)
+    backend = _specialist_backend(results=_VALID_ENVELOPE)
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
     by_path = {f.path: f for f in ctx.affected_files}
     assert by_path["daydream/extra.py"].provenance == "llm"
@@ -259,7 +255,7 @@ def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path: 
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts  # 4 files -> parallel tier, so the test_mapper specialist runs
 
-    backend = _SpecialistMockBackend(results=_VALID_ENVELOPE)
+    backend = _specialist_backend(results=_VALID_ENVELOPE)
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     exploration_dir = tmp_path / "exploration"
@@ -274,15 +270,15 @@ def test_parallel_tier_launches_three_agents(tmp_path: Path) -> None:
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts
 
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
-    assert len(backend.execute_calls) == 3
-    schemas = {call["schema"]["type"] for call in backend.execute_calls}
+    assert backend.call_count == 3
+    schemas = {call["output_schema"]["type"] for call in backend.calls}
     assert len(schemas) >= 1
-    assert all(call["read_only"] is True for call in backend.execute_calls)
+    assert all(call["read_only"] is True for call in backend.calls)
     # No agents= passed and no raw diff leaked into specialist prompts.
-    for call in backend.execute_calls:
+    for call in backend.calls:
         assert call["agents"] is None
         assert "<diff>" not in call["prompt"]
     assert any(c.name == "snake_case" for c in ctx.conventions)
@@ -295,7 +291,7 @@ def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path: Path) -> N
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts
 
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
     anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     # Paths are cwd-absolute (issue #221): rooted at repo_root (tmp_path).
@@ -305,12 +301,12 @@ def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path: Path) -> N
     }
 
     calls_by_schema = {}
-    for call in backend.execute_calls:
-        if call["schema"] == PATTERN_SCANNER_SCHEMA:
+    for call in backend.calls:
+        if call["output_schema"] == PATTERN_SCANNER_SCHEMA:
             calls_by_schema["pattern_scanner"] = call
-        elif call["schema"] == DEPENDENCY_TRACER_SCHEMA:
+        elif call["output_schema"] == DEPENDENCY_TRACER_SCHEMA:
             calls_by_schema["dependency_tracer"] = call
-        elif call["schema"] == TEST_MAPPER_SCHEMA:
+        elif call["output_schema"] == TEST_MAPPER_SCHEMA:
             calls_by_schema["test_mapper"] = call
 
     assert set(calls_by_schema.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
@@ -340,7 +336,7 @@ def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
             "dependencies": [],
         }
     }
-    backend = _SpecialistMockBackend(results=envelope)
+    backend = _specialist_backend(results=envelope)
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
     assert any(f.path == "daydream/x.py" for f in ctx.affected_files)
     assert ctx.conventions == []
@@ -352,39 +348,25 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts  # 4 files -> parallel tier
 
-    call_count = 0
+    def responder(
+        cwd: Any,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> Any:
+        if output_schema == PATTERN_SCANNER_SCHEMA:
+            raise RuntimeError("pattern scanner exploded")
+        return None
 
-    class _FailingPatternScanner:
-        model = "mock-model"
-
-        async def execute(
-            self,
-            cwd: Any,
-            prompt: Any,
-            output_schema: Any=None,
-            continuation: Any=None,
-            agents: Any=None,
-            max_turns: Any=None,
-            read_only: bool=False,
-            persist_session: bool=True,
-        ) -> AsyncIterator[AgentEvent]:
-            nonlocal call_count
-            call_count += 1
-            if output_schema == PATTERN_SCANNER_SCHEMA:
-                raise RuntimeError("pattern scanner exploded")
-            result = _VALID_ENVELOPE.get("dependency_tracer", {})
-            if output_schema == TEST_MAPPER_SCHEMA:
-                result = _VALID_ENVELOPE.get("test_mapper", {})
-            yield ResultEvent(structured_output=result, continuation=None)
-
-        async def cancel(self) -> None:
-            return None
-
-    backend = _FailingPatternScanner()
+    backend = _specialist_backend(responder=responder)
     ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     # Pattern scanner failed, but others should have run
-    assert call_count == 3
+    assert backend.call_count == 3
     assert not ctx.completed
     assert ctx.conventions == []  # pattern scanner failed
     assert any(f.path == "daydream/extra.py" for f in ctx.affected_files)
@@ -404,7 +386,7 @@ async def test_pre_scan_dispatch_interval_success(tmp_path: Path) -> None:
 
     async with recorder:
         context = await pre_scan(
-            cast(Backend, _SpecialistMockBackend()), tmp_path, diff_text,
+            cast(Backend, _specialist_backend()), tmp_path, diff_text,
         )
 
     assert context.completed is True
@@ -430,25 +412,23 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
     """A pre-scan timeout is terminal evidence and retains only completed refs."""
     import daydream.exploration_runner as exploration_runner
 
-    class _PartlyBlockedBackend(_SpecialistMockBackend):
-        async def execute(
-            self,
-            cwd: Any,
-            prompt: Any,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            if output_schema != DEPENDENCY_TRACER_SCHEMA:
-                await anyio.sleep_forever()
-            async for event in super().execute(
-                cwd, prompt, output_schema, continuation, agents, max_turns,
-                read_only, persist_session,
-            ):
-                yield event
+    async def _never_yield() -> AsyncIterator[AgentEvent]:
+        await anyio.sleep_forever()
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    def responder(
+        cwd: Any,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> Any:
+        if output_schema != DEPENDENCY_TRACER_SCHEMA:
+            return _never_yield()
+        return None
 
     monkeypatch.setattr(exploration_runner, "_SPECIALIST_TIMEOUT_SECONDS", 0.05)
     diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
@@ -456,7 +436,7 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
 
     async with recorder:
         context = await pre_scan(
-            cast(Backend, _PartlyBlockedBackend()), tmp_path, diff_text,
+            cast(Backend, _specialist_backend(responder=responder)), tmp_path, diff_text,
         )
 
     assert context.completed is False
@@ -479,25 +459,14 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
 
 async def test_repo_scan_dispatch_records_survey_failure(tmp_path: Path) -> None:
     """The best-effort repository survey still records its failed outcome."""
-    class _FailingSurveyBackend(_SpecialistMockBackend):
-        async def execute(
-            self,
-            cwd: Any,
-            prompt: Any,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            yield TextEvent(text="Starting repository survey")
-            raise RuntimeError("survey failed")
+    backend = ScriptedBackend(
+        events=[TextEvent(text="Starting repository survey"), RuntimeError("survey failed")]
+    )
 
     recorder = make_recorder(tmp_path)
     async with recorder:
         context = await repo_scan(
-            cast(Backend, _FailingSurveyBackend()), tmp_path,
+            cast(Backend, backend), tmp_path,
         )
 
     assert context.conventions == []
@@ -516,11 +485,11 @@ def test_pre_scan_passes_cwd_absolute_paths(tmp_path: Path) -> None:
     # 4 files => parallel tier => all specialists receive the affected-files list.
     paths = [f"services/taste/file{i}.py" for i in range(4)]
     diff_text = _multifile_diff(paths)
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
 
     anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
-    joined = "\n".join(c["prompt"] for c in backend.execute_calls)
+    joined = "\n".join(c["prompt"] for c in backend.calls)
     # Specialists receive cwd-absolute paths, never bare relatives.
     for p in paths:
         assert str(tmp_path / p) in joined
@@ -584,11 +553,11 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: 
     )
     # 2 files => single tier => dependency_tracer gets static_files.
     diff_text = _multifile_diff(["services/taste/a.py", "services/taste/b.py"])
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
 
     anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
-    dep_prompt = backend.execute_calls[0]["prompt"]
+    dep_prompt = backend.calls[0]["prompt"]
     assert str(tmp_path / "services/taste/dep.py") in dep_prompt
     assert "- services/taste/dep.py (" not in dep_prompt
 
@@ -613,11 +582,11 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pyt
         "@@ -1 +1 @@\n-old\n+new\n"
     )
     diff_text = rename_diff + _multifile_diff(["services/taste/other.py"])
-    backend = _SpecialistMockBackend()
+    backend = _specialist_backend()
 
     anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
-    dep_prompt = backend.execute_calls[0]["prompt"]
+    dep_prompt = backend.calls[0]["prompt"]
     assert str(tmp_path / "services/taste/new_name.py") in dep_prompt
     assert "old_name.py" not in dep_prompt
 
@@ -641,7 +610,7 @@ def test_pre_scan_threads_profile_strategy(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     ctx = anyio.run(
         lambda: er.pre_scan(
-            cast(Backend, _SpecialistMockBackend()),
+            cast(Backend, _specialist_backend()),
             tmp_path,
             diff_text,
             diff_ref="HEAD",

@@ -10,13 +10,12 @@ the cwd-grounding instruction — the deterministic contract the fix locks.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import anyio
 
-from daydream.backends import AgentEvent, ResultEvent
+from daydream.backends import Backend, ResultEvent
 from daydream.exploration_runner import pre_scan
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
@@ -24,39 +23,7 @@ from daydream.prompts.exploration_subagents import (
     TEST_MAPPER_SCHEMA,
 )
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
-
-
-class _PromptCapturingBackend:
-    """Backend stub: captures every prompt and returns schema-shaped output."""
-
-    model = "mock-model"
-
-    def __init__(self) -> None:
-        self.prompts: list[str] = []
-
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: Any,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        self.prompts.append(prompt)
-        result: dict[str, Any] = {}
-        if output_schema == PATTERN_SCANNER_SCHEMA:
-            result = {"conventions": [], "guidelines": []}
-        elif output_schema == DEPENDENCY_TRACER_SCHEMA:
-            result = {"affected_files": [], "dependencies": []}
-        elif output_schema == TEST_MAPPER_SCHEMA:
-            result = {"affected_files": []}
-        yield ResultEvent(structured_output=result, continuation=None)
-
-    async def cancel(self) -> None:
-        return None
+from tests.harness.backend import ScriptedBackend
 
 
 def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[Path, Path]) -> None:
@@ -76,10 +43,33 @@ def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[
     # 4 changed files => parallel tier => all three specialists run.
     assert "services/taste/parser.go" in diff_text
 
-    backend = _PromptCapturingBackend()
+    backend = ScriptedBackend(
+        responses_by_schema=[
+            (
+                PATTERN_SCANNER_SCHEMA,
+                [
+                    ResultEvent(
+                        structured_output={"conventions": [], "guidelines": []}, continuation=None
+                    )
+                ],
+            ),
+            (
+                DEPENDENCY_TRACER_SCHEMA,
+                [
+                    ResultEvent(
+                        structured_output={"affected_files": [], "dependencies": []}, continuation=None
+                    )
+                ],
+            ),
+            (
+                TEST_MAPPER_SCHEMA,
+                [ResultEvent(structured_output={"affected_files": []}, continuation=None)],
+            ),
+        ]
+    )
 
     async def run_pre_scan() -> None:
-        await pre_scan(backend, linked, diff_text)
+        await pre_scan(cast(Backend, backend), linked, diff_text)
 
     anyio.run(run_pre_scan)
 
