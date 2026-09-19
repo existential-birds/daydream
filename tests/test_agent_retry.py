@@ -7,7 +7,6 @@ outcomes (returned output, call count) never on internal implementation details.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +16,7 @@ import anyio
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
+from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _is_retryable_error_message
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -243,55 +242,37 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
     """
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
 
-    cancel_calls: list[str] = []
+    call_counts: dict[str, int] = {}
 
-    class _SharedBackend:
+    def responder(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> list[Any]:
         """Three named prompt → behaviour mappings on one shared instance.
 
         - prompt containing "fail-once": retryable PiError on first call, succeeds on retry.
         - prompt containing "ok-a" / "ok-b": always succeeds immediately.
 
-        cancel() is tracked; the test asserts it is NOT called during retry so that
-        sibling concurrent invocations are unaffected.
+        ``cancel()`` is tracked by the harness; the test asserts it is NOT called during
+        retry so that sibling concurrent invocations are unaffected.
         """
+        key = (
+            "fail-once"
+            if "fail-once" in prompt
+            else "ok-a"
+            if "ok-a" in prompt
+            else "ok-b"
+        )
+        call_counts[key] = call_counts.get(key, 0) + 1
+        if key == "fail-once" and call_counts[key] == 1:
+            return [PiError("429 overload", retryable=True)]
+        return [TextEvent(text=f"done-{key}"), ResultEvent(structured_output=None, continuation=None)]
 
-        model = "test-model"
-        fanout_concurrency = 3
+    backend = ScriptedBackend(
+        responder=responder,
+        model="test-model",
+        fanout_concurrency=3,
         # retry_attempts read by agent.py via getattr(backend, "retry_attempts", 20)
-        retry_attempts = 3
-        retry_base_delay_s = 0.01
-
-        def __init__(self) -> None:
-            self.call_counts: dict[str, int] = {}
-
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            key = (
-                "fail-once"
-                if "fail-once" in prompt
-                else "ok-a"
-                if "ok-a" in prompt
-                else "ok-b"
-            )
-            self.call_counts[key] = self.call_counts.get(key, 0) + 1
-            if key == "fail-once" and self.call_counts[key] == 1:
-                raise PiError("429 overload", retryable=True)
-            yield TextEvent(text=f"done-{key}")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-        async def cancel(self) -> None:
-            cancel_calls.append("cancel")
-
-    backend = _SharedBackend()
+        retry_attempts=3,
+        retry_base_delay_s=0.01,
+    )
 
     results: list[tuple[str, str]] = []
 
@@ -317,15 +298,15 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 
     # backend.cancel() must NOT have been called during retry — calling it would kill
     # all subprocesses on the shared backend, terminating sibling concurrent tasks.
-    assert cancel_calls == [], (
-        f"backend.cancel() was called {len(cancel_calls)} time(s) during retry; "
+    assert backend.cancel_calls == 0, (
+        f"backend.cancel() was called {backend.cancel_calls} time(s) during retry; "
         "this would kill sibling concurrent invocations"
     )
 
     # The fail-once slot was called twice (fail + retry); others exactly once.
-    assert backend.call_counts.get("fail-once", 0) == 2
-    assert backend.call_counts.get("ok-a", 0) == 1
-    assert backend.call_counts.get("ok-b", 0) == 1
+    assert call_counts.get("fail-once", 0) == 2
+    assert call_counts.get("ok-a", 0) == 1
+    assert call_counts.get("ok-b", 0) == 1
 
 
 @pytest.mark.asyncio

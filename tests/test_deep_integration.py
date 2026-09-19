@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -11,66 +11,80 @@ import pytest
 
 from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
+from tests.harness.backend import ScriptedBackend
 
 
-class _DeepMockBackend:
-    """Prompt-dispatching mock backend. Subclasses tune cost + agents behavior."""
+class _DeepMockBackend(ScriptedBackend):
+    """Prompt-dispatching mock backend keyed on the prompt's stage wording.
 
-    model = "mock-model"
-    cost_usd: float | None = 0.01
-    raise_on_agents: bool = False
+    The dispatch itself lives in the ``ScriptedBackend`` responder seam, so the
+    harness owns call recording: ``calls`` (one dict per call, including
+    ``agents``) and the ``prompts`` observable come from the shared fake. This
+    subclass only records the stage tag of each dispatched prompt in ``stages``
+    -- naming it ``calls`` would collide with the harness's dict list.
+    """
 
-    def __init__(self, target_dir: Path) -> None:
+    def __init__(
+        self,
+        target_dir: Path,
+        *,
+        cost_usd: float | None = 0.01,
+        raise_on_agents: bool = False,
+    ) -> None:
+        super().__init__(model="mock-model", cost_usd=cost_usd, responder=self._dispatch)
         self.target_dir = target_dir
-        self.calls: list[str] = []
-        self.agents_kwargs_seen: list[object] = []
-        self.prompts: list[str] = []
+        self.cost_usd = cost_usd
+        self.raise_on_agents = raise_on_agents
+        self.stages: list[str] = []
 
     async def execute(
         self,
         cwd: Any,
         prompt: str,
-        output_schema: Any=None,
-        continuation: Any=None,
-        *,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-    ) -> AsyncIterator[AgentEvent]:
+        *args: Any,
+        **kwargs: Any,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
+            yield event
+
+    def _dispatch(
+        self,
+        cwd: Any,
+        prompt: str,
+        _output_schema: Any = None,
+        _continuation: Any = None,
+        agents: Any = None,
+        _max_turns: Any = None,
+        _read_only: Any = False,
+        _persist_session: Any = True,
+    ) -> list[Any]:
+        """Return this turn's events for *prompt*, recording its stage tag."""
         # Record parity evidence -- D-38: no stage may pass `agents=`.
-        self.agents_kwargs_seen.append(agents)
-        # Record the delivered prompt at the backend seam (no builder spies).
-        self.prompts.append(prompt)
         if agents and self.raise_on_agents:
-            raise NotImplementedError("Mock Codex: agents kwarg not supported")
+            return [NotImplementedError("Mock Codex: agents kwarg not supported")]
 
-        yield CostEvent(
-            cost_usd=self.cost_usd, input_tokens=None, output_tokens=None
-        )
-
+        events: list[Any] = [CostEvent(cost_usd=self.cost_usd, input_tokens=None, output_tokens=None)]
         pl = prompt.lower()
 
         # Checked before the alt branch: the alt-review prompt also contains "intent".
         if "understand" in pl and "intent" in pl:
-            self.calls.append("intent")
-            yield TextEvent(text="Intent summary stub.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
+            self.stages.append("intent")
+            events += [TextEvent(text="Intent summary stub."), ResultEvent(structured_output=None, continuation=None)]
+            return events
 
         # Alternative-review prompt contains "architectural alternatives".
         if "architectural alternatives" in pl or (
             "alternative" in pl and "given this intent" in pl
         ):
-            self.calls.append("alternatives")
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": []}, continuation=None)
-            return
+            self.stages.append("alternatives")
+            events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None)]
+            return events
 
         # Checked before per-stack: the structural prompt lacks "you are reviewing the
         # ... stack" but embeds the stack-structure-review.md path, so it would
         # otherwise fall through to the "other" fallback and write no artifact.
         if "structural reviewer" in pl:
-            self.calls.append("structure")
+            self.stages.append("structure")
             m = re.search(r"stack-(\S+?)-review\.md", prompt)
             if m:
                 name = m.group(1)
@@ -81,32 +95,34 @@ class _DeepMockBackend:
                         f"# Structural Review ({name})\n\n## Issues\n"
                         "1. [api.py:1] hello() leaks a god-object boundary\n"
                     )
-            yield TextEvent(text="")
             # Issue #745: the structural reviewer emits PER_STACK_RECORD_SCHEMA
             # structured output directly (its finding lands lens="structural").
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": "hello() leaks a god-object boundary",
-                            "file": "api.py",
-                            "line": 1,
-                            "severity": "medium",
-                            "confidence": "MEDIUM",
-                            "rationale": "stub",
-                            "evidence": "api.py:1",
-                        }
-                    ],
-                    "verdicts": [],
-                },
-                continuation=None,
-            )
-            return
+            events += [
+                TextEvent(text=""),
+                ResultEvent(
+                    structured_output={
+                        "issues": [
+                            {
+                                "id": 1,
+                                "description": "hello() leaks a god-object boundary",
+                                "file": "api.py",
+                                "line": 1,
+                                "severity": "medium",
+                                "confidence": "MEDIUM",
+                                "rationale": "stub",
+                                "evidence": "api.py:1",
+                            }
+                        ],
+                        "verdicts": [],
+                    },
+                    continuation=None,
+                ),
+            ]
+            return events
 
         # Per-stack review prompt contains "You are reviewing the ... stack".
         if "you are reviewing the" in pl and "stack" in pl:
-            self.calls.append("per-stack")
+            self.stages.append("per-stack")
             # Write the per-stack review file to the path embedded in the prompt
             # (the session's live artifact tree).
             m = re.search(r"stack-(\S+?)-review\.md", prompt)
@@ -116,56 +132,59 @@ class _DeepMockBackend:
                 if out is not None:
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
-            yield TextEvent(text="")
             # Issue #745: per-stack reviewer emits structured output directly.
-            yield ResultEvent(
-                structured_output={"issues": [], "verdicts": []},
-                continuation=None,
-            )
-            return
+            events += [
+                TextEvent(text=""),
+                ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None),
+            ]
+            return events
 
         # Parse-feedback prompt contains "Read the review output file at".
         if "read the review output file" in pl or "extract only actionable issues" in pl:
-            self.calls.append("parse")
-            yield TextEvent(text="")
+            self.stages.append("parse")
             # Parsing the structural review yields a finding (tagged lens="structural"
             # in merge, rendering the ## Structural Review section); other stacks yield none.
             # Issue #742: the per-stack parse schema requires a ``verdicts`` property.
             if "stack-structure-review.md" in prompt:
-                yield ResultEvent(
-                    structured_output={
-                        "issues": [
-                            {
-                                "id": 1,
-                                "description": "hello() leaks a god-object boundary",
-                                "file": "api.py",
-                                "line": 1,
-                                "evidence": "api.py:1",
-                            }
-                        ],
-                        "verdicts": [],
-                    },
-                    continuation=None,
-                )
+                events += [
+                    TextEvent(text=""),
+                    ResultEvent(
+                        structured_output={
+                            "issues": [
+                                {
+                                    "id": 1,
+                                    "description": "hello() leaks a god-object boundary",
+                                    "file": "api.py",
+                                    "line": 1,
+                                    "evidence": "api.py:1",
+                                }
+                            ],
+                            "verdicts": [],
+                        },
+                        continuation=None,
+                    ),
+                ]
             else:
-                yield ResultEvent(
-                    structured_output={"issues": [], "verdicts": []},
-                    continuation=None,
-                )
-            return
+                events += [
+                    TextEvent(text=""),
+                    ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None),
+                ]
+            return events
 
         # Merge: return an empty item list (no language-stack issues in this fixture),
         # so the host's canonical report carries only the appended structural section.
         if "cross-stack merge agent" in pl:
-            self.calls.append("merge")
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output={"items": []}, continuation=None)
-            return
+            self.stages.append("merge")
+            events += [
+                TextEvent(text=""),
+                ResultEvent(structured_output={"items": []}, continuation=None),
+            ]
+            return events
 
         # Fallback -- unexpected prompt, but keep the pipeline alive.
-        self.calls.append("other")
-        yield TextEvent(text="")
-        yield ResultEvent(structured_output=None, continuation=None)
+        self.stages.append("other")
+        events += [TextEvent(text=""), ResultEvent(structured_output=None, continuation=None)]
+        return events
 
     def _review_output_path(self, prompt: str) -> Path | None:
         """The review-file path the delivered prompt names.
@@ -178,19 +197,6 @@ class _DeepMockBackend:
         """
         m = re.search(r"Write your full review to (\S+\.md)\.", prompt)
         return Path(m.group(1)) if m else None
-
-    async def cancel(self) -> None:
-        pass
-
-
-class _ClaudeShape(_DeepMockBackend):
-    cost_usd = 0.0123
-    raise_on_agents = False  # Claude accepts agents kwarg silently
-
-
-class _CodexShape(_DeepMockBackend):
-    cost_usd = None          # Codex does not report cost
-    raise_on_agents = True   # Codex rejects agents kwarg (parity contract)
 
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,7 +302,7 @@ async def _run_deep(
 
 async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes end-to-end on a Claude-shaped backend (cost_usd populated)."""
-    backend = _ClaudeShape(multi_stack_target)
+    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
 
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
@@ -307,14 +313,14 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     # parse-<stack> stage was removed (issue #745) -- reviewers emit records
     # directly.
     required = {"intent", "alternatives", "per-stack", "merge"}
-    assert required.issubset(set(backend.calls)), (
-        f"missing stages; saw only: {sorted(set(backend.calls))}"
+    assert required.issubset(set(backend.stages)), (
+        f"missing stages; saw only: {sorted(set(backend.stages))}"
     )
 
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes on Codex-shape (cost_usd=None, no agents= ever passed)."""
-    backend = _CodexShape(multi_stack_target)
+    backend = _DeepMockBackend(multi_stack_target, cost_usd=None, raise_on_agents=True)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
 
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
@@ -323,8 +329,9 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest
     )
     # Parity guarantee: any stage passing agents= would have raised
     # NotImplementedError above; this asserts it directly too.
-    assert all(a in (None, False, [], {}, 0, "") for a in backend.agents_kwargs_seen), (
-        f"agents kwarg was passed somewhere: {backend.agents_kwargs_seen}"
+    agents_kwargs_seen = [call["agents"] for call in backend.calls]
+    assert all(a in (None, False, [], {}, 0, "") for a in agents_kwargs_seen), (
+        f"agents kwarg was passed somewhere: {agents_kwargs_seen}"
     )
 
 
@@ -399,7 +406,7 @@ async def test_deep_default_backend_line_is_phase_agnostic(
     from daydream.exploration import ExplorationContext
     from daydream.runner import RunConfig, run
 
-    backend = _ClaudeShape(multi_stack_target)
+    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     _wire_mocks(monkeypatch, backend)
     # Capture orchestrator print_info messages (override the _silence_ui noop).
     captured: list[str] = []
@@ -469,7 +476,7 @@ async def test_structural_meta_stack_flows_end_to_end(
     # patch the source module so the late import resolves to the spy.
     monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _spy_merge)
 
-    backend = _ClaudeShape(multi_stack_target)
+    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
 
@@ -535,7 +542,7 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
         TRUST_MODEL_INSTRUCTION,
     )
 
-    backend = _ClaudeShape(multi_stack_target)
+    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
 
@@ -623,7 +630,7 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
         WIRE_CONTRACT_RUST_INSTRUCTION,
     )
 
-    backend = _ClaudeShape(rust_wire_target)
+    backend = _DeepMockBackend(rust_wire_target, cost_usd=0.0123)
     exit_code = await _run_deep(
         rust_wire_target, backend, monkeypatch, shallow_fanout_threshold=0
     )

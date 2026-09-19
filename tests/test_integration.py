@@ -239,22 +239,13 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
 
     class RelatedOnlyBackend(PhaseDispatchBackend):
         async def execute(
-            self,
-            cwd: Any,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: Any = False,
+            self, cwd: Any, prompt: str, *args: Any, **kwargs: Any,
         ) -> AsyncGenerator[AgentEvent, None]:
             if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
                 (Path(cwd) / "b.py").write_text("B = 2\n")
                 if protect_untracked_related:
                     (Path(cwd) / "scratch.py").write_text("PRIVATE_USER_DRAFT = 2\n")
-            async for event in super().execute(
-                cwd, prompt, output_schema, continuation, agents, max_turns, read_only
-            ):
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
     install_backend(RelatedOnlyBackend(parse_results=[[issue]]))
@@ -303,14 +294,7 @@ async def test_shallow_staged_fix_preflight_preserves_review_evidence_and_git_st
         staged_index: str | None = None
 
         async def execute(
-            self,
-            cwd: Any,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: Any = False,
+            self, cwd: Any, prompt: str, *args: Any, **kwargs: Any,
         ) -> AsyncGenerator[AgentEvent, None]:
             prompt_lower = prompt.lower()
             review_markers = (
@@ -330,15 +314,7 @@ async def test_shallow_staged_fix_preflight_preserves_review_evidence_and_git_st
                 (repo / "main.py").write_bytes(staged_source)
                 _git(repo, "add", "main.py")
                 self.staged_index = _git(repo, "write-tree")
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema,
-                continuation,
-                agents,
-                max_turns,
-                read_only,
-            ):
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
     backend = ReviewStagingBackend(parse_results=[[_FULL_FLOW_ISSUE]])
@@ -390,14 +366,7 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
     """
 
     async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
+        self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
     ) -> AsyncGenerator[AgentEvent, None]:
         if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
             (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
@@ -410,15 +379,7 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
                 f"fix: add type hints\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}",
             )
 
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 

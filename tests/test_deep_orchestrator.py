@@ -476,18 +476,15 @@ class _PromptHookStub(_StubBackend):
         self,
         cwd: Path,
         prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> AsyncIterator[AgentEvent]:
         own = self.intercept(cwd, prompt)
         if own is not None:
             for event in own:
                 yield event
             return
-        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -522,13 +519,10 @@ class _ExtraEditBackend(_StubBackend):
         self,
         cwd: Path,
         prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> AsyncIterator[AgentEvent]:
-        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
         if prompt.lower().startswith(("fix this issue", "fix these")):
             before = self._extra.read_text() if self._append else ""

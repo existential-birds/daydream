@@ -60,6 +60,9 @@ class PhaseDispatchBackend:
             assertions inspect ``git diff`` targets per iteration).
         last_prompt: The most recent prompt passed to ``execute``.
         call_count: Total ``execute`` invocations.
+        calls: One dict per ``execute`` invocation, keyed by the same nine
+            protocol arguments ``StubBackend`` records.
+        prompts: Full prompt of each recorded call, in call order.
     """
 
     model = "mock-model"
@@ -96,11 +99,17 @@ class PhaseDispatchBackend:
         self.review_prompts: list[str] = []
         self.last_prompt: str = ""
         self.call_count = 0
+        self.calls: list[dict[str, Any]] = []
 
     @property
     def parse_calls(self) -> int:
         """Number of parse-feedback phases dispatched so far (observable)."""
         return self._parse_call
+
+    @property
+    def prompts(self) -> list[str]:
+        """Full prompt of each recorded call, in call order."""
+        return [call["prompt"] for call in self.calls]
 
     async def execute(
         self,
@@ -111,9 +120,23 @@ class PhaseDispatchBackend:
         agents: Any=None,
         max_turns: Any=None,
         read_only: Any=False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.last_prompt = prompt
         self.call_count += 1
+        self.calls.append(
+            {
+                "cwd": cwd,
+                "prompt": prompt,
+                "output_schema": output_schema,
+                "agents": agents,
+                "model": self.model,
+                "continuation": continuation,
+                "max_turns": max_turns,
+                "read_only": read_only,
+                "persist_session": persist_session,
+            }
+        )
 
         if self._events is not None:
             for event in self._events:

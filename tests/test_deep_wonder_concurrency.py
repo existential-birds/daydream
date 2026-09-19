@@ -129,11 +129,8 @@ class _WonderRendezvousStub(StubBackend):
         self,
         cwd: Path,
         prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> AsyncIterator[AgentEvent]:
         pl = prompt.lower()
         if "you are reviewing the" in pl:
@@ -142,10 +139,7 @@ class _WonderRendezvousStub(StubBackend):
         elif "would you have done this differently" in pl or "evaluate the implementation" in pl:
             self.wonder_started.set()
             await self.per_stack_started.wait()
-        async for event in super().execute(
-            cwd, prompt, output_schema=output_schema, continuation=continuation,
-            agents=agents, max_turns=max_turns, read_only=read_only,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 

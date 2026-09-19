@@ -2,7 +2,7 @@
 import json
 import re
 import subprocess
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from daydream import git_ops
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import (
     FINDINGS_SCHEMA_VERSION,
     MAX_ARTIFACT_BYTES,
@@ -22,6 +22,7 @@ from daydream.findings import (
 )
 from daydream.pr_review import ParsedIssue, PRInfo
 from daydream.runner import RunConfig, run
+from tests.harness.backend import ScriptedBackend
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 
@@ -209,32 +210,21 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
 
     out = tmp_path / "findings.json"
 
-    class ErroringBackend:
-        model = None
-
-        async def execute(
-            self,
-            cwd: Any,
-            prompt: Any,
-            output_schema: Any=None,
-            continuation: Any=None,
-            agents: Any=None,
-            max_turns: Any=None,
-            read_only: Any=False,
-        ) -> AsyncIterator[AgentEvent]:
-            yield TextEvent(text="Invalid API key · Fix external API key")
-            raise ClaudeAgentError(
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text="Invalid API key · Fix external API key"),
+            ClaudeAgentError(
                 "Claude agent run failed: Invalid API key · Fix external API key"
-            )
-
-        async def cancel(self) -> None:
-            pass
+            ),
+        ],
+        model=None,
+    )
 
     head = git_ops.head_sha(feature_branch_repo)
     pr = PRInfo(number=7, head_sha=head, base_sha=head, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="https://example.invalid/pr/7")
 
-    with _review_run_env(feature_branch_repo, monkeypatch, out, ErroringBackend(), pr) as config:
+    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr) as config:
         with pytest.raises(ClaudeAgentError, match="Invalid API key"):
             await run(config)
 

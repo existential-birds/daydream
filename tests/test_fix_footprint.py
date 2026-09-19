@@ -9,6 +9,7 @@ import stat
 import subprocess
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from daydream.repository_paths import (
     git_observed_path_is_confined,
 )
 from daydream.workspace import WorkContext
+from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo
@@ -652,7 +654,7 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
     """Real fix dispatch uses a join barrier before the one complete index restore."""
     import anyio
 
-    from daydream.backends import AgentEvent, ResultEvent
+    from daydream.backends import AgentEvent, Backend, ResultEvent
     from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.phases import phase_fix_parallel
 
@@ -675,53 +677,40 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
     a_fallback_started = anyio.Event()
     b_observed_sibling_index = anyio.Event()
 
-    class BarrierBackend:
-        model = "barrier-backend"
-        fanout_concurrency = 2
-        retry_attempts = 0
+    a_fallback_calls = 0
+    b_cached_while_live = ""
 
-        def __init__(self) -> None:
-            self.a_fallback_calls = 0
-            self.prompts: list[str] = []
-            self.b_cached_while_live = ""
-
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: object = None,
-            continuation: object = None,
-            agents: object = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            del output_schema, continuation, agents, max_turns, read_only, persist_session
-            self.prompts.append(prompt)
+    def responder(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            nonlocal a_fallback_calls, b_cached_while_live
             if prompt.startswith("Fix these 2 issues") and "b one" in prompt:
                 (cwd / "b.py").write_bytes(b"B = sibling\n")
                 _git(cwd, "add", "b.py")
                 b_staged.set()
                 await a_fallback_started.wait()
-                self.b_cached_while_live = _git(cwd, "diff", "--cached", "--name-only")
+                b_cached_while_live = _git(cwd, "diff", "--cached", "--name-only")
                 b_observed_sibling_index.set()
             elif prompt.startswith("Fix these 2 issues") and "a one" in prompt:
                 await b_staged.wait()
                 (cwd / "a.py").write_bytes(b"A = partial\n")
                 raise RuntimeError("force batch fallback")
             elif prompt.startswith("Fix this issue:") and ("a one" in prompt or "a two" in prompt):
-                self.a_fallback_calls += 1
+                a_fallback_calls += 1
                 (cwd / "a.py").write_bytes(b"A = fixed\n")
                 a_fallback_started.set()
                 await b_observed_sibling_index.wait()
             yield ResultEvent(structured_output=None, continuation=None)
 
-        async def cancel(self) -> None:
-            return None
+        return _gen()
 
-    backend = BarrierBackend()
+    backend = ScriptedBackend(
+        responder=responder,
+        model="barrier-backend",
+        fanout_concurrency=2,
+        retry_attempts=0,
+    )
     failures = await phase_fix_parallel(
-        backend,
+        cast(Backend, backend),
         _work(git_repo),
         items,
         footprint=footprint,
@@ -730,9 +719,9 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
     )
 
     assert failures == {}
-    assert backend.a_fallback_calls == 2, backend.prompts
+    assert a_fallback_calls == 2, backend.prompts
     assert b_observed_sibling_index.is_set()
-    assert backend.b_cached_while_live == "b.py"
+    assert b_cached_while_live == "b.py"
     assert (git_repo / "a.py").read_bytes() == b"A = fixed\n"
     assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
     assert git_ops.snapshot_index(git_repo) == round_index
@@ -744,7 +733,7 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
 ) -> None:
     import anyio
 
-    from daydream.backends import AgentEvent, ResultEvent
+    from daydream.backends import AgentEvent, Backend, ResultEvent
     from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.phases import phase_fix_parallel
 
@@ -762,23 +751,8 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
     stream_closed = anyio.Event()
     never = anyio.Event()
 
-    class CancelBackend:
-        model = "cancel-backend"
-        fanout_concurrency = 1
-        retry_attempts = 0
-
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: object = None,
-            continuation: object = None,
-            agents: object = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            del prompt, output_schema, continuation, agents, max_turns, read_only, persist_session
+    def responder(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
             try:
                 (cwd / "a.py").write_bytes(b"A = staged by live fixer\n")
                 _git(cwd, "add", "a.py")
@@ -788,12 +762,18 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
             finally:
                 stream_closed.set()
 
-        async def cancel(self) -> None:
-            return None
+        return _gen()
+
+    backend = ScriptedBackend(
+        responder=responder,
+        model="cancel-backend",
+        fanout_concurrency=1,
+        retry_attempts=0,
+    )
 
     async def _run_phase() -> None:
         await phase_fix_parallel(
-            CancelBackend(),
+            cast(Backend, backend),
             _work(git_repo),
             [item],
             footprint=footprint,

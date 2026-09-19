@@ -15,7 +15,7 @@ structured, salvageable failure instead of a fatal run abort:
   R6  -- a ``--start-at fix`` relaunch picks up the salvaged partial items
          without re-reviewing completed stacks or re-running the merge agent.
   R7  -- a ``str``-shaped merge response (mirroring the arbiter
-         ``_SplitTextBackend`` "got str" pattern) triggers the salvage path,
+         ``_split_text_backend`` "got str" pattern) triggers the salvage path,
          while a bare-``list`` response containing a parseable item list is
          merged normally.
 
@@ -28,22 +28,23 @@ back to the tuple.
 
 The phase-level tests drive the real production path
 (``phase_cross_stack_merge -> run_agent -> backend ResultEvent``) with only the
-backend mocked; ``_MergeTextBackend`` reproduces the pi contract faithfully
+backend mocked; ``_merge_text_backend`` reproduces the pi contract faithfully
 (structured output delivered via ``ResultEvent``, prose via ``TextEvent``).
 Integration tests run the full deep pipeline through ``runner.run``.
 """
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
+from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
+from tests.harness.backend import ScriptedBackend
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
@@ -217,40 +218,22 @@ def _merge_args(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-class _MergeTextBackend:
-    """Emits prose text and a structured merge result (the real pi contract).
+def _merge_text_backend(text: str, structured: Any) -> ScriptedBackend:
+    """Responder-backed fake emitting the real pi contract (prose + merge result).
 
-    Mirrors the arbiter ``_SplitTextBackend`` in
+    Mirrors the arbiter ``_split_text_backend`` in
     ``tests/test_arbiter_prose_extraction.py``: when a structured output schema
     is requested the ResultEvent carries the structured answer, otherwise the
     caller drives the unparseable-text path by passing ``structured=None``.
     """
 
-    model = "op-5"
-    fanout_concurrency = 4
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        return [
+            TextEvent(text=text),
+            ResultEvent(structured_output=structured if output_schema else None, continuation=None),
+        ]
 
-    def __init__(self, text: str, structured: Any) -> None:
-        self._text = text
-        self._structured = structured
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
-        yield TextEvent(text=self._text)
-        yield ResultEvent(
-            structured_output=self._structured if output_schema else None, continuation=None
-        )
-
-    async def cancel(self) -> None:
-        pass
+    return ScriptedBackend(responder=respond, model="op-5")
 
 
 async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
@@ -259,7 +242,7 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work: Callabl
 
     args = _merge_args(tmp_path)
     await phase_cross_stack_merge(
-        cast(Backend, _MergeTextBackend(
+        cast(Backend, _merge_text_backend(
             "prose",
             [
                 {
@@ -301,7 +284,7 @@ async def test_merge_raises_structured_error_on_str(
     args = _merge_args(tmp_path)
     with pytest.raises(CrossStackMergeError) as excinfo:
         await phase_cross_stack_merge(
-            cast(Backend, _MergeTextBackend(merge_text, None)),
+            cast(Backend, _merge_text_backend(merge_text, None)),
             make_work(tmp_path),
             **args,
         )

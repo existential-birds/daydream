@@ -7,7 +7,6 @@ loop. Mocks only the Backend (no real AI) and the github_app network helpers
 from __future__ import annotations
 
 import subprocess
-from collections.abc import AsyncIterator
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,8 +17,9 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
+from tests.harness.backend import ScriptedBackend
 
 
 @pytest.fixture(autouse=True)
@@ -35,29 +35,20 @@ def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", guarded_run)
 
 
-class _MinimalBackend:
-    model = "mock"
+def _minimal_backend() -> ScriptedBackend:
+    """Responder-backed fake: structured calls get an empty issue list, else prose."""
 
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: Any,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-    ) -> AsyncIterator[AgentEvent]:
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
         # Alternative-review structured call → emit empty issue list so the
         # review-only flow reports "no issues" and exits 0 fast.
         if output_schema is not None:
-            yield TextEvent(text='{"issues": []}')
-            yield ResultEvent(structured_output={"issues": []}, continuation=None)
-        else:
-            yield TextEvent(text="No issues found.")
-            yield ResultEvent(structured_output=None, continuation=None)
+            return [
+                TextEvent(text='{"issues": []}'),
+                ResultEvent(structured_output={"issues": []}, continuation=None),
+            ]
+        return [TextEvent(text="No issues found."), ResultEvent(structured_output=None, continuation=None)]
 
-    def cancel(self) -> None: ...
+    return ScriptedBackend(responder=respond, model="mock")
 
 async def test_app_identity_shown_and_token_injected(
     feature_branch_repo: Path,
@@ -83,7 +74,7 @@ async def test_app_identity_shown_and_token_injected(
                return_value=SimpleNamespace(
                    token="ghs_injected", identity="my-app[bot]", expires_at=float("inf")
                )) as mock_mint, \
-         patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
+         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
         exit_code = await run(config)
 
     out = rec.export_text()
@@ -106,7 +97,7 @@ async def test_fallback_identity_without_app_creds(
 
     with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
          patch("daydream.github_app._mint_installation_token") as mock_mint, \
-         patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
+         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
         exit_code = await run(config)
 
     out = capsys.readouterr().out
@@ -132,7 +123,7 @@ async def test_fallback_run_cannot_replace_an_existing_session_auth(
                        output_mode="review", shallow=True, stack="python", quiet=False)
 
     with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
-         patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
+         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
         exit_code = await run(config)
 
     out = capsys.readouterr().out
@@ -159,7 +150,7 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
 
     with patch("daydream.git_ops.gh_repo_view", return_value=None), \
          patch("daydream.github_app._mint_installation_token") as mock_mint, \
-         patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
+         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
         exit_code = await run(config)
 
     out = capsys.readouterr().out
@@ -182,7 +173,7 @@ async def test_minting_failure_aborts_run(
 
     with patch("daydream.github_app._mint_installation_token",
                side_effect=ValueError("no App installation found for owner 'myorg'")), \
-         patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
+         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
         exit_code = await run(config)
 
     out = capsys.readouterr().out

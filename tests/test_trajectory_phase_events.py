@@ -579,9 +579,7 @@ class _OverlappingReviewBackend(StubBackend):
         self.finished: set[str] = set()
 
     async def execute(
-        self, cwd: Path, prompt: str, output_schema: Any = None,
-        continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False,
+        self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
     ) -> AsyncIterator[AgentEvent]:
         lowered = prompt.lower()
         role = None
@@ -594,7 +592,7 @@ class _OverlappingReviewBackend(StubBackend):
             with anyio.fail_after(10):
                 await self.entered["wonder"].wait()
                 await self.entered["review"].wait()
-        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
         if role is not None:
             self.finished.add(role)

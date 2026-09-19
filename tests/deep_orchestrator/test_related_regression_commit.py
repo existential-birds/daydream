@@ -74,11 +74,8 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
             self,
             cwd: Path,
             prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
+            *args: Any,
+            **kwargs: Any,
         ) -> AsyncIterator[AgentEvent]:
             lowered = prompt.lower()
             if lowered.startswith(("fix this issue", "fix these")):
@@ -109,7 +106,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
                 return
             if "post-fix fix-verifier agent" in lowered:
                 self.verify_round += 1
-                assert read_only is True
+                assert kwargs.get("read_only") is True
                 assert (cwd / "tests/test_a.py").is_file()
                 assert (cwd / "other.py").read_text() == "C = 1\n"
                 first = (
@@ -132,15 +129,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
                 yield TextEvent(text="healed")
                 yield ResultEvent(structured_output=None, continuation=None)
                 return
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-            ):
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
     backend = FootprintBackend(repo)
