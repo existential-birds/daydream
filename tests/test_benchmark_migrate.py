@@ -11,6 +11,7 @@ import yaml
 from daydream.benchmark import migrate, schema, storage
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import seed_write
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
 _HEAD_HEX = "0123456789abcdef0123456789abcdef01234567"
@@ -102,8 +103,7 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     }
 
     def seed_file(name: str, content: str, message: str) -> str:
-        (repo / name).write_text(content)
-        _git(repo, "add", name, env=env)
+        seed_write(repo, name, content)
         return _commit(repo, message, env=env)
 
     merge_base = seed_file("base.py", "BASE = 1\n", "base")

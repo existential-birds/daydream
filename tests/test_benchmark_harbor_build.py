@@ -9,12 +9,11 @@ import pytest
 
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git
-from tests.harness.git_helpers import seed_commit, seed_write
+from tests.harness.git_helpers import init_repo, seed_commit, seed_write
 
 REPO = Path(__file__).resolve().parents[1]
 
 _BUNDLE_ENV: dict[str, str] = {
-    **os.environ,
     "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
     "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
 }
@@ -275,6 +274,25 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     bundle = tmp_path / "b.bundle"
     snapshot.build_bundle(m, base, head, bundle)
     return m, bundle.read_bytes()
+
+
+def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_BUNDLE_ENV`` must not replay an import-time snapshot of ``os.environ``.
+
+    ``tests/conftest.py`` installs ``GIT_CONFIG_*`` entries at import time; a
+    module constant that copied ``os.environ`` would later override call-time
+    values (it is the later mapping in ``git()``'s ``{**os.environ, **env}``
+    merge), silently reverting any ``GIT_CONFIG_*`` a test adds. Assert the
+    call-time entry reaches git.
+    """
+    repo = tmp_path / "env-shadow"
+    init_repo(repo)
+    index = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", "user.email")
+    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", "call-time@example.com")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(index + 1))
+
+    assert _seed_git(repo, "config", "--get", "user.email", env=_BUNDLE_ENV) == "call-time@example.com"
 
 
 def test_spike_bundle_heads_is_exactly_base_head(tmp_path: Path) -> None:
