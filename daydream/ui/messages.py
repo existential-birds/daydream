@@ -1,6 +1,6 @@
 """Simple message and prompt components.
 
-Feedback table, the error/warning/success/cost/info/skipped/dim print helpers,
+The error/warning/success/cost/info/skipped/dim print helpers,
 the selection menu, and the interactive ``prompt_user`` input.
 """
 
@@ -9,69 +9,17 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.style import Style
-from rich.table import Table
 from rich.text import Text
 
 from daydream.ui.theme import (
     NEON_COLORS,
-    STATUS_CONFIG,
     STYLE_BOLD_CYAN,
-    STYLE_BOLD_PINK,
     STYLE_CYAN,
     STYLE_FG,
-    STYLE_ORANGE,
     STYLE_PINK,
-    STYLE_PURPLE,
     STYLE_RED,
     STYLE_YELLOW,
-    pill,
 )
-
-
-def print_feedback_table(console: Console, items: list[dict[str, object]]) -> None:
-    """Print a table of feedback items/issues.
-
-    Creates a styled table with columns for issue number, status,
-    description, file, and line number.
-
-    Args:
-        items: List of dicts with keys: status, description, file, line.
-
-    """
-    table = Table(
-        title="📋 Issues to Fix",
-        title_style=STYLE_BOLD_CYAN,
-        box=box.ROUNDED,
-        border_style=STYLE_PURPLE,
-        header_style=STYLE_BOLD_PINK,
-        show_lines=True,
-    )
-
-    table.add_column("#", justify="right", style=STYLE_CYAN)
-    table.add_column("Status", justify="center")
-    table.add_column("Description", style=STYLE_FG)
-    table.add_column("File", style=STYLE_ORANGE)
-    table.add_column("Line", justify="right", style=STYLE_YELLOW)
-
-    for i, item in enumerate(items, 1):
-        status = str(item.get("status", "pending"))
-        config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
-
-        status_pill = pill(
-            f" {config['icon']} {status.upper()} ",
-            config["color"],
-            NEON_COLORS["background"],
-        )
-
-        table.add_row(
-            str(i),
-            status_pill,
-            str(item.get("description", "")),
-            str(item.get("file", "")),
-            str(item.get("line", "")),
-        )
-
-    console.print(table)
 
 
 def print_error(console: Console, title: str, message: str) -> None:

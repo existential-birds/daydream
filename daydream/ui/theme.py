@@ -58,7 +58,6 @@ STYLE_FG = Style(color=NEON_COLORS["foreground"])
 
 STYLE_BOLD_PINK = Style(color=NEON_COLORS["pink"], bold=True)
 STYLE_BOLD_CYAN = Style(color=NEON_COLORS["cyan"], bold=True)
-STYLE_BOLD_PURPLE = Style(color=NEON_COLORS["purple"], bold=True)
 STYLE_BOLD_GREEN = Style(color=NEON_COLORS["green"], bold=True)
 STYLE_BOLD_YELLOW = Style(color=NEON_COLORS["yellow"], bold=True)
 STYLE_BOLD_RED = Style(color=NEON_COLORS["red"], bold=True)
