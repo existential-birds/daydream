@@ -7,15 +7,57 @@ here rather than left to be inferred from its consumers.
 
 from __future__ import annotations
 
+import inspect
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
+
+# The shared ``tests/harness`` backend fakes, by (label, module, class). Every
+# fake the suite constructs directly or installs through ``create_backend`` is
+# listed here so the protocol-parity check below covers the whole harness.
+_SHARED_HARNESS_BACKENDS = (
+    ("ScriptedBackend", "tests.harness.backend", "ScriptedBackend"),
+    ("MockBackend", "tests.harness.stub_backend", "MockBackend"),
+    ("StubBackend", "tests.harness.stub_backend", "StubBackend"),
+    ("PhaseDispatchBackend", "tests.harness.phase_backend", "PhaseDispatchBackend"),
+    ("ImproveStubBackend", "tests.harness.improve_backend", "ImproveStubBackend"),
+    ("AuditAbsoluteWorkingDirectoryBackend", "tests.harness.improve_backend", "AuditAbsoluteWorkingDirectoryBackend"),
+    ("ProductionPathBackend", "tests.harness.improve_backend", "ProductionPathBackend"),
+    ("IncrementalPlanBackend", "tests.harness.improve_backend", "IncrementalPlanBackend"),
+    ("OutOfOrderPlanBackend", "tests.harness.improve_backend", "OutOfOrderPlanBackend"),
+)
+
+
+def test_shared_harness_backends_satisfy_the_backend_protocol_signature() -> None:
+    """A harness fake that drops or renames a protocol parameter silently under-exercises it."""
+    def _params(func: Any) -> dict[str, tuple[Any, Any]]:
+        return {
+            name: (param.kind, param.default)
+            for name, param in inspect.signature(func).parameters.items()
+            if name != "self"
+        }
+
+    expected = _params(Backend.execute)
+    for label, module_name, class_name in _SHARED_HARNESS_BACKENDS:
+        declared = _params(getattr(import_module(module_name), class_name).execute)
+        missing = [name for name in expected if name not in declared]
+        extra = [name for name in declared if name not in expected]
+        drift = [name for name in expected if name in declared and declared[name] != expected[name]]
+        order = [name for name in declared if name in expected]
+        assert order == [name for name in expected if name in declared], (
+            f"{label}.execute declares the protocol parameters out of order"
+        )
+        assert not (missing or extra or drift), (
+            f"{label}.execute drifted from daydream.backends.Backend.execute: "
+            f"missing={missing} extra={extra} kind/default drift={drift}"
+        )
 
 
 async def _drain(backend: ScriptedBackend, prompt: str = "go", **kwargs: Any) -> list[AgentEvent]:
