@@ -6,9 +6,8 @@ gate raises :class:`CalibrationError` naming the offending record/field, and no
 artifact is ever written unless all gates pass.
 
 Split membership is re-derived read-only from ``lineage.json`` (salt +
-holdout/val rates) via a deterministic hash of the record id - the
-split derivation whose canonical definition lives in this module and in
-``docs/calibration.md``. Each record's stored ``lineage['split']`` must match
+holdout/val rates) via :func:`daydream.training.corpus_projection.splits.assign_split`.
+Each record's stored ``lineage['split']`` must match
 its re-derived split, and the derived train/val/holdout sets must stay
 pairwise disjoint (a duplicated record id means the corpus was hand-edited).
 
@@ -31,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.json_utils import atomic_write_pair, umask_derived_mode
+from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.labeler_versions import (
     LABELER_POLICY_VERSION,
@@ -39,7 +39,7 @@ from daydream.training.labeler_versions import (
 )
 from daydream.training.reward import REWARD_VERSION
 
-__all__ = ["CalibrationConfig", "CalibrationError", "assign_split", "run_calibration"]
+__all__ = ["CalibrationConfig", "CalibrationError", "run_calibration"]
 
 #: Artifact schema version for calibration output.
 ARTIFACT_SCHEMA_VERSION = "calibration-artifact"
@@ -113,22 +113,6 @@ class CalibrationConfig:
             raise CalibrationError(f"unknown corruption flags: {sorted(unknown)}")
         if self.stage0_scores is not None and self.model_digest is None:
             raise CalibrationError("--model-digest is required when --stage0-scores is given")
-
-
-def assign_split(record_id: str, *, holdout_rate: float, val_rate: float, salt: str) -> str:
-    """Deterministically re-derive a record's split from its id (read-only).
-
-    The split derivation (canonical here; documented in
-    ``docs/calibration.md``): a seeded hash of ``salt:record_id`` selects
-    holdout / val / train in fixed rate order.
-    """
-    digest = hashlib.sha256(f"{salt}:{record_id}".encode("utf-8")).digest()
-    u = int.from_bytes(digest[:8], "big") / float(1 << 64)
-    if u < holdout_rate:
-        return "holdout"
-    if u < holdout_rate + val_rate:
-        return "val"
-    return "train"
 
 
 def _gate(condition: bool, message: str) -> None:
@@ -241,7 +225,7 @@ def _check_version_stamps(record: dict[str, Any], rid: str) -> None:
 def _check_splits(
     records: list[dict[str, Any]], salt: str, holdout_rate: float, val_rate: float
 ) -> dict[str, set[str]]:
-    derived: dict[str, set[str]] = {"train": set(), "val": set(), "holdout": set()}
+    derived: dict[str, set[str]] = {"train": set(), "validation": set(), "holdout": set()}
     seen: dict[str, str] = {}
     for record in records:
         rid = str(record["record_id"])
@@ -250,7 +234,7 @@ def _check_splits(
         _gate(
             stored == split,
             f"record {rid}: stored split {stored!r} does not match the split "
-            f"re-derived from lineage.json ({split!r}) via calibration.assign_split",
+            f"re-derived from lineage.json ({split!r}) via corpus_projection.splits.assign_split",
         )
         derived[split].add(rid)
         prior = seen.get(rid)

@@ -44,12 +44,6 @@ def _accept_intent_decline_other(_console: Any, message: str, _default: str = ""
     return "y" if "understanding correct" in message.lower() else "n"
 
 
-def _default_strategy(stage: str) -> str:
-    from daydream import review_profile as _rp
-
-    return _rp.build_default_profile().strategies[stage].content
-
-
 def _add_bare_remote(repo: Path) -> Path:
     """Give *repo* a real, pushable ``origin``: a sibling bare clone.
 

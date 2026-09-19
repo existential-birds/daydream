@@ -6,7 +6,6 @@ The fixture repository itself lives in the package
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import threading
@@ -17,6 +16,7 @@ import pytest
 import verifiers.v1 as vf
 from verifiers.v1.runtimes.subprocess import SubprocessConfig, SubprocessRuntime, SubprocessRuntimeInfo
 
+from daydream_review.gate_refusal import _evidence_digest
 from daydream_review.stub_upstream import serve
 from images import build_images
 
@@ -82,11 +82,6 @@ _GATE_EVIDENCE: dict[str, Any] = {
     "calibration": 0.75,
     "accepted_ratio": 0.5,
 }
-
-
-def _evidence_digest(payload: dict[str, Any]) -> str:
-    """SHA-256 over the sorted evidence payload (mirror of ``gate.py``)."""
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 @pytest.fixture

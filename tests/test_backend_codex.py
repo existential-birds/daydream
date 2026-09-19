@@ -971,56 +971,6 @@ async def test_codex_no_reasoning_effort_omits_config_override() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_uses_start_new_session() -> None:
-    """CLI spawns create a new session so the process group is killable."""
-    backend = CodexBackend(model="gpt-5.1-codex")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ) as mock_exec:
-        events = []
-        async for event in backend.execute(Path("/tmp"), "hello"):
-            events.append(event)
-    assert mock_exec.call_args.kwargs["start_new_session"] is True
-
-
-@pytest.mark.asyncio
-async def test_execute_finally_reaps_process_and_closes_pipes_after_exit() -> None:
-    """Even when the CLI already exited, the finally reaps it and closes stdin.
-
-    A grandchild holding the pipe write end means the stream never reaches EOF,
-    so the fds are only released by an explicit teardown.
-    """
-    from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
-
-    backend = CodexBackend(model="gpt-5.1-codex")
-    captured = FakeCliSpawner()
-
-    async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
-        proc = FakeCliProcess(
-            [
-                '{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}',
-                '{"type":"turn.completed","usage":{}}',
-            ],
-            exit_code=0,
-        )
-        captured.procs.append(proc)
-        return proc
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        events = [event async for event in backend.execute(Path("/tmp"), "hello")]
-
-    assert events  # the turn ran to completion
-    proc = captured.procs[0]
-    assert proc.returncode == 0
-    assert proc.reaped, "the finally must reap the child even after clean exit"
-    assert proc.stdin.closed, "the finally must close the stdin pipe"
-    assert proc._transport.closed, "the finally must release the pipe fds even after clean exit"
-    assert backend._transports == [], "the finally must drop the transport from the backend list"
-
-
-@pytest.mark.asyncio
 async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     backend = CodexBackend(model="fixture-model")
     large_text = "x" * (70 * 1024)

@@ -47,8 +47,6 @@ def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -
         from harbor.models.task.task import Task  # noqa: PLC0415
     assert Task(str(case), disable_verification=True) is not None
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_build_candidate_findings_maps_and_skips() -> None:
@@ -113,8 +111,6 @@ def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None
     assert mapped["severity"] is None
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
@@ -179,8 +175,6 @@ def test_artifact_write_failure_raises(tmp_path: Path) -> None:
     assert write_fail.value.kind == "write_failure"
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh) -> None:
@@ -245,8 +239,6 @@ def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
     assert "reviewer.example.com" not in verifier_block
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_entrypoint_build_run_config_is_controlled() -> None:
@@ -297,8 +289,6 @@ def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
     assert entrypoint.require_supported_backend({}) == "pi"
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
@@ -351,8 +341,6 @@ def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
     assert loaded["findings"] == []
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 import subprocess  # noqa: E402
@@ -461,8 +449,6 @@ def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
         asyncio.run(agent.setup(Env()))
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 _BANNED = [
@@ -601,8 +587,6 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
     assert "--findings-out" not in cmd                     # no live-PR emission path
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
@@ -668,8 +652,6 @@ def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Pa
     assert ctx.is_empty()
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_validate_compiled_imports_agent_path_same_interpreter(
@@ -708,8 +690,6 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
     assert "pip install 'daydream[benchmark]'" in str(rejected.value)
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 # The stub-produced findings are the deterministic output of the real deep
@@ -830,8 +810,6 @@ def _capturing_env(executed: Executed) -> type:
     return Env
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_local_harbor_task_with_fake_backend(

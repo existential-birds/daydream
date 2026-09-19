@@ -21,7 +21,6 @@ from tests.harness.trajectory import make_manifest
 
 
 def test_label_command_sets_human_label_and_shows_prior(
-    tmp_path: Path,
     archive_dir: Any,
     capsys: pytest.CaptureFixture[str],
 ) -> None:

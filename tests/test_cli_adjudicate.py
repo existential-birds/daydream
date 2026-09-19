@@ -63,7 +63,7 @@ def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
     return "".join((captured.out + captured.err).split()).replace("║", "")
 
 
-def test_adjudicate_label_records_human_observation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
     _write_sessions(tmp_path)
     cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                 "--state-dir", str(tmp_path / "adj")])

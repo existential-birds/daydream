@@ -12,6 +12,7 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
+from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 class _PromptPaths(TypedDict):
@@ -30,12 +31,6 @@ def _paths(tmp_path: Path) -> _PromptPaths:
         "output_path": tmp_path / ".daydream" / "deep" / "stack-review.md",
         "cwd": tmp_path,
     }
-
-
-def _default_strategy(stage: str) -> str:
-    from daydream import review_profile as _rp
-
-    return _rp.build_default_profile().strategies[stage].content
 
 
 def test_wire_contract_checklists_are_delivered_only_to_their_intended_prompts(

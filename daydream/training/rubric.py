@@ -183,13 +183,8 @@ def derive_per_finding_labels(
     return [resolution.disposition for resolution in per_finding]
 
 
-# ---------------------------------------------------------------------------
 # Stage-0 scoring rubric (M2, M5, M6, M7): learned outcome term + CR-Bench FP
 # penalty.
-#
-# Composes, never rewrites, the shipped intrinsic composite from
-# :mod:`daydream.training.reward`. This section adds two components the
-# intrinsic composite does not have:
 #
 # - a **learned outcome term** from the Stage-0 two-class model
 #   (:func:`daydream.training.reward_model.score_comment`) — the model's
@@ -206,18 +201,6 @@ def derive_per_finding_labels(
 # Stage-0 gate (M6). Missing signals are ``None`` and renormalized out of the
 # composite — never imputed ``0.0`` (mirrors ``reward.py``'s ``axes_present``
 # rule).
-#
-# Version discipline (M7 / PATTERN golden-update): :data:`REWARD_VERSION_RUBRIC`
-# stamps every breakdown; scoring under a non-default :class:`RubricV2Weights`
-# appends a ``+custom-{fingerprint}`` suffix so an analysis-time override can
-# never be mistaken for the canonical rubric score. Changing any default weight
-# is a deliberate golden-update: re-pin the golden values and bump
-# :data:`REWARD_VERSION_RUBRIC`. So is redefining what an input label *means*
-# while the weights hold still — the stamp identifies the label semantics as
-# much as the algebra.
-#
-# Pure: no filesystem, network, or subprocess access.
-# ---------------------------------------------------------------------------
 
 import hashlib  # noqa: E402  (rubric-scoring section)
 import json  # noqa: E402  (rubric-scoring section)

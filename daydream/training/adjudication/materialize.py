@@ -20,6 +20,7 @@ from typing import Any, cast, get_args
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
+from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
@@ -46,8 +47,11 @@ _MANIFEST_FILENAME = "preview-manifest.json"
 _CONFLICTED_DISPOSITION = "ambiguous"
 
 
-def _canonical(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def index_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
+    """Load sessions from ``sessions.jsonl`` when present, else the hydrated index."""
+    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
+        return _load_sessions(index_root)
+    return _sessions_from_hydrated_stage(index_root)
 
 
 def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
@@ -241,12 +245,14 @@ def _raise_on_uncheckpointed_wal(db_path: Path) -> None:
         )
 
 
-def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
-    """Read all ``runs`` rows over a **read-only** connection (``mode=ro``
-    URI — ``query_runs`` goes through ``_get_connection``, which opens
-    read-write, runs ``PRAGMA journal_mode=WAL`` against the hydrated
-    staging index, and leaves ``-wal``/``-shm`` sidecars behind). Callers
-    must reject an uncheckpointed ``index.db-wal`` first
+def _readonly_query(
+    db_path: Path, sql: str, params: tuple[Any, ...] = ()
+) -> list[dict[str, Any]]:
+    """Run one SELECT over a **read-only** ``mode=ro&immutable=1`` URI —
+    never ``_get_connection``, which opens read-write and runs WAL pragmas
+    against the hydrated staging index; ``immutable=1`` also keeps a WAL-mode
+    db from materializing ``-shm``/``-wal`` sidecars on read. Callers must
+    reject an uncheckpointed ``index.db-wal`` first
     (``_raise_on_uncheckpointed_wal``): ``immutable=1`` skips it entirely.
     """
     import sqlite3
@@ -254,29 +260,21 @@ def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        return [dict(r) for r in conn.execute("SELECT * FROM runs").fetchall()]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
+
+
+def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
+    return _readonly_query(db_path, "SELECT * FROM runs")
 
 
 def _label_observations_readonly(db_path: Path, session_id: str) -> list[dict[str, Any]]:
-    """Read one session's ``label_observations`` rows over a **read-only**
-    connection (``mode=ro&immutable=1`` URI — never ``_get_connection``,
-    which opens read-write and runs WAL pragmas against the hydrated
-    staging index; ``immutable=1`` also keeps a WAL-mode db from
-    materializing ``-shm``/``-wal`` sidecars on read).
-    """
-    import sqlite3
-
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        cursor = conn.execute(
-            "SELECT * FROM label_observations WHERE session_id = ?", (session_id,)
-        )
-        return [dict(r) for r in cursor.fetchall()]
-    finally:
-        conn.close()
+    return _readonly_query(
+        db_path,
+        "SELECT * FROM label_observations WHERE session_id = ?",
+        (session_id,),
+    )
 
 
 def _winning_observation(
@@ -422,12 +420,7 @@ def run_materialize(
     ``dry_run=True`` validates everything and returns the summary without
     writing any file.
     """
-    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
-        sessions, index_revision = _load_sessions(index_root)
-    else:
-        # Hydrated staging archive: derive the sessions from the SQLite
-        # index's label_observations (read-only).
-        sessions, index_revision = _sessions_from_hydrated_stage(index_root)
+    sessions, index_revision = index_sessions(index_root)
 
     # Validate the pin before touching its components in the loop body:
     # ``snapshot_id`` raises the documented ValueError naming the missing

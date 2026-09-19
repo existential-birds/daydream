@@ -73,6 +73,7 @@ from tests.harness.improve_backend import (
     install_per_phase_improve_stubs,
     stub_recon_commands,
 )
+from tests.harness.review_profile import default_strategy as _default_strategy
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -87,10 +88,6 @@ def test_improve_dir_uses_active_artifact_route(
 
     assert artifacts.improve_dir(tmp_path / "model-cwd", allow_standalone=True) == routed / "improve"
     assert (routed / "improve").is_dir()
-
-
-def _default_strategy(stage: str) -> str:
-    return rp.build_default_profile().strategies[stage].content
 
 
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
@@ -5199,7 +5196,6 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
 
 
 def test_audit_prompt_uses_category_strategy_no_skill() -> None:
-    from daydream import review_profile as rp
 
     p = rp.build_default_profile()
     strategy = p.strategies["improve.audit.security"].content
@@ -5221,7 +5217,6 @@ def test_audit_prompt_uses_category_strategy_no_skill() -> None:
 
 
 def test_vet_prompt_uses_native_vet_strategy_no_skill() -> None:
-    from daydream import review_profile as rp
 
     strategy = rp.build_default_profile().strategies["improve.vetting"].content
     prompt = build_vet_prompt(strategy=strategy, findings=[], cwd=Path("/c"))

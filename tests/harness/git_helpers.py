@@ -13,6 +13,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+SEED_ENV = {
+    "GIT_AUTHOR_NAME": "Tester",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "Tester",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
+
 
 def git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
     """Run a git command in *repo* and return stripped stdout (test helper)."""
@@ -32,8 +41,8 @@ def configure_identity(repo: Path) -> None:
     git(repo, "config", "user.name", "Tester")
 
 
-def commit(repo: Path, message: str) -> str:
-    git(repo, "commit", "-m", message)
+def commit(repo: Path, message: str, *, env: dict[str, str] | None = None) -> str:
+    git(repo, "commit", "-m", message, env=env)
     return git(repo, "rev-parse", "HEAD")
 
 

@@ -14,6 +14,7 @@ import pytest
 
 from daydream_review.gate_refusal import (
     Stage0GateRefused,
+    _evidence_digest,
     require_outcome_model_bound,
     require_stage0_gate,
 )
@@ -28,10 +29,6 @@ MODEL_STATE = {
     "held_out_accuracy": 0.75,
     "model_fingerprint": "abc12345",
 }
-
-
-def _evidence_digest(payload: dict[str, object]) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _bound_gate_report() -> dict[str, object]:

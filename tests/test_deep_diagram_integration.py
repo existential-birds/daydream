@@ -54,6 +54,18 @@ SEQUENCE_HEADING = "<details><summary><h3>Sequence Diagram</h3></summary>"
 FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
 
 
+def _legacy_sequence_builder(
+    *,
+    diff_path: Path,
+    inline_diff: str | None,
+    files_by_module: dict[str, list[str]],
+    cwd: Path,
+    exploration_dir: Path | None,
+    schema: dict[str, Any],
+) -> str:
+    return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+
 # --- Harness -----------------------------------------------------------------
 
 
@@ -1403,17 +1415,6 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     from daydream.deep import diagram_steps as deep
     from daydream.extensions.registry import Registry
 
-    def _legacy_sequence_builder(
-        *,
-        diff_path: Path,
-        inline_diff: str | None,
-        files_by_module: dict[str, list[str]],
-        cwd: Path,
-        exploration_dir: Path | None,
-        schema: dict[str, Any],
-    ) -> str:
-        return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
-
     registry = Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
@@ -1782,11 +1783,6 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     from daydream.deep import diagram_steps as deep
     from daydream.deep.diagram_grounding import RepoSymbols
     from daydream.extensions.registry import Registry as _Registry
-
-    def _legacy_sequence_builder(*, diff_path: Path, inline_diff: str | None,
-                                files_by_module: dict[str, list[str]], cwd: Path,
-                                exploration_dir: Path | None, schema: dict[str, Any]) -> str:
-        return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
 
     registry = _Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)

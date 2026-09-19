@@ -73,7 +73,6 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
     make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object],
     mute_side_effects: Callable[..., None],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--shallow <repo>`` without ``--stack`` preserves the detected language scope (#6).
 

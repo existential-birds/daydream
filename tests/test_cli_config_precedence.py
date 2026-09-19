@@ -27,7 +27,7 @@ from daydream.runner import (
 )
 
 
-def test_model_precedence_cli_over_file_over_table(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(model="file-model", backend=None, phases={"fix": {"model": "file-fix"}})
     cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
     assert _resolved_model(cfg, "fix") == "file-fix"        # file phase override, nothing higher

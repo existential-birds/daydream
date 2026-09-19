@@ -92,7 +92,7 @@ artifact schema version is `calibration-artifact`.
 The command fails with a non-zero exit and a named error for: missing or
 digest-mismatched bundle files, unrecognized or absent version stamps,
 records whose stored split does not match the split re-derived from
-`lineage.json` via `daydream.training.calibration.assign_split`,
+`lineage.json` via `daydream.training.corpus_projection.splits.assign_split`,
 gold/breakdown records that do not join cleanly on `record_id`, Stage-0
 scores whose `model_digest` does not match `--model-digest` (and a missing
 `--model-digest` whenever `--stage0-scores` is given), and a re-run that

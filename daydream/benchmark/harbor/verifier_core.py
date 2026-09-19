@@ -378,10 +378,6 @@ def retained_edges(
 # maximum-cardinality one-to-one matching
 
 
-def _edge_key(v: Verdict) -> tuple[float, str, str]:
-    return (-v.confidence, v.gold_id, v.candidate_id)
-
-
 def maximum_matching(
     verdicts: list[Verdict],
     gold_ids: list[str],
@@ -394,7 +390,7 @@ def maximum_matching(
     the fixed adjacency order, so the result is stable run-to-run. Never
     iterates a set/dict for an ordering decision.
     """
-    ordered = sorted(verdicts, key=_edge_key)
+    ordered = sorted(verdicts, key=lambda v: (-v.confidence, v.gold_id, v.candidate_id))
     adjacency: dict[str, list[str]] = {}
     for v in ordered:
         adjacency.setdefault(v.gold_id, []).append(v.candidate_id)
@@ -616,10 +612,6 @@ def _finding_id(finding: object) -> str:
     return _read_id(finding, "finding_id", "gold finding_id")
 
 
-def _empty_side_error(gold_count: int) -> Reward:
-    return Reward(reward=0.0, gold_count=gold_count, verifier_error=0)
-
-
 def _score_axes(
     gold: list[GoldFinding],
     candidates: list[CandidateFinding],
@@ -701,7 +693,7 @@ def score_review(
     try:
         candidates = validate_candidate_artifact(candidate_artifact)
     except VerifierError:
-        return _empty_side_error(gold_count)
+        return Reward(reward=0.0, gold_count=gold_count, verifier_error=0)
     candidate_count = len(candidates)
 
     if gold_count == 0 and candidate_count == 0:

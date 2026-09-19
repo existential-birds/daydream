@@ -2669,10 +2669,8 @@ def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh
     assert "task_spec_sha256" not in case["curation"] and "task_spec_approved_at" not in case["curation"]
 
 
-# ---------------------------------------------------------------------------
 # widened evidence signature (issue #813): projection-relevant provenance keyed
 # per physical database_id; kind/source_id/url/timestamps excluded
-# ---------------------------------------------------------------------------
 
 
 def _one_evidence() -> dict[str, Any]:
@@ -2724,10 +2722,8 @@ def test_signature_ignores_format_drift_duplicate_and_kind() -> None:
         == gi._evidence_signature_from_raw({"evidence": canon})
 
 
-# ---------------------------------------------------------------------------
 # per-case staleness via reference intersection (issue #813): a case stales
 # only when its own referenced evidence changed (or the PR-wide task input)
-# ---------------------------------------------------------------------------
 
 
 def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dict[str, Any]:
@@ -2779,10 +2775,8 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fa
     assert case["curation"]["snapshot_attested"] is False
 
 
-# ---------------------------------------------------------------------------
 # head-immutability (issue #813): an existing case resolves to its pinned head,
 # so a live head advance reproduces the same case_id with no orphan
-# ---------------------------------------------------------------------------
 
 
 def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -2808,10 +2802,8 @@ def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeG
     assert case["curation"]["state"] == "ready"       # unchanged evidence -> stays ready
 
 
-# ---------------------------------------------------------------------------
 # non-destructive failed refresh (issue #813): a failed refresh on an already-
 # fetched PR preserves last-good linkage and records the attempt in latest_error
-# ---------------------------------------------------------------------------
 
 
 def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, fake_gh: FakeGh) -> None:

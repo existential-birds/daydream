@@ -16,11 +16,11 @@ overstate gold coverage.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
+from daydream.json_utils import canonical_json as _canonical
 from daydream.training.corpus_projection.identity import record_id as compute_record_id
 
 __all__ = ["EXPORT_KEYS", "validate_export_rows", "write_export_rows"]
@@ -41,10 +41,6 @@ EXPORT_KEYS = (
     "posterior_eligible",
     "rubric_version",
 )
-
-def _canonical(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
 
 def validate_export_rows(rows: list[dict[str, Any]]) -> None:
     """Validate the export shape; raise ``ValueError`` naming key + record_id.

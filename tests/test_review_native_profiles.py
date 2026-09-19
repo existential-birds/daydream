@@ -2,10 +2,7 @@
 from pathlib import Path
 
 from daydream import review_profile as rp
-
-
-def _default_strategy(stage: str) -> str:
-    return rp.build_default_profile().strategies[stage].content
+from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 def test_golden_baseline_generic_fallback() -> None:

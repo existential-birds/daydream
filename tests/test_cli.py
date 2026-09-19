@@ -181,7 +181,7 @@ def test_log_flag_rejected_improve(capsys: pytest.CaptureFixture[str]) -> None:
     assert "unrecognized arguments" in capsys.readouterr().err
 
 
-def test_verbose_joined_equals_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+def test_verbose_joined_equals_rejected() -> None:
     with pytest.raises(SystemExit):
         _parse_improve_args(["improve", "/tmp/x", "--verbose=true"])
     with pytest.raises(SystemExit):
