@@ -2,7 +2,13 @@
 
 The harness is depended on by ~30 test modules, so its own semantics — turn
 sequencing, last-turn repeat, mid-stream raise, argument recording — are pinned
-here rather than left to be inferred from its consumers.
+here rather than left to be inferred from its consumers. Two enforcement layers
+sit alongside those semantics: ``test_shared_harness_backends_satisfy_the_backend_protocol_signature``
+checks every shared harness fake's ``execute`` against the real
+``daydream.backends.Backend.execute`` signature via ``inspect.signature``, and
+``test_no_module_outside_the_harness_declares_the_protocol_execute`` statically
+scans ``tests/**`` (via ``ast``) for a re-typed protocol signature outside
+``tests/harness/`` against the ratchet allowlist.
 """
 
 from __future__ import annotations
@@ -54,15 +60,7 @@ _TESTS_ROOT = _HARNESS_DIR.parent
 # at 0030596a (58 entries; the plan's 60 predates the #1247 dead-code sweep). Every
 # migration task deletes its own entries; the guard fails on a stale entry as well as
 # an unmigrated one, so this set must end up exactly empty.
-_ALLOWED: frozenset[str] = frozenset({
-    "test_improve_flow.py::BlockingAuditBackend",
-    "test_improve_flow.py::BlockingBackend",
-    "test_improve_flow.py::_AuditCommittingBackend",
-    "test_improve_flow.py::_AuditGitBoundaryBackend",
-    "test_improve_flow.py::_DirectoryToFileBackend",
-    "test_improve_flow.py::_SymlinkGuardBackend",
-    "test_improve_flow.py::_UnbornAuditBackend",
-})
+_ALLOWED: frozenset[str] = frozenset()
 
 
 def _protocol_shaped_declarations() -> set[str]:

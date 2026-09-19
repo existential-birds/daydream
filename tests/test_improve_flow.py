@@ -50,6 +50,7 @@ from daydream.runner import RunConfig, run
 from daydream.services import enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
+from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
     bare_remote,
     commit,
@@ -293,17 +294,7 @@ class _UnbornAuditBackend(ImproveStubBackend):
         self.first_was_unborn: bool | None = None
         self.ignored_visible: bool | None = None
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if not self.audit_paths:
             self.first_was_unborn = git_ops.is_unborn_head(cwd)
             self.first_symbolic_head = git(cwd, "symbolic-ref", "--short", "HEAD")
@@ -328,16 +319,7 @@ class _UnbornAuditBackend(ImproveStubBackend):
             self.audit_paths.append(cwd)
         if self.failure is not None:
             raise self.failure
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -349,17 +331,7 @@ class _AuditGitBoundaryBackend(ImproveStubBackend):
         self.absent_oid = absent_oid
         self.git_observations: list[dict[str, object]] = []
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         self.git_observations.append(
             {
                 "outside_source": not cwd.is_relative_to(self._target.resolve()),
@@ -372,16 +344,7 @@ class _AuditGitBoundaryBackend(ImproveStubBackend):
                 ),
             }
         )
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -395,17 +358,7 @@ class _DirectoryToFileBackend(ImproveStubBackend):
         self.replacement_bytes: bytes | None = None
         self.observed_status: str | None = None
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if cwd not in self.audit_paths:
             self.audit_paths.append(cwd)
         if self.staged and self.replacement_bytes is None:
@@ -416,16 +369,7 @@ class _DirectoryToFileBackend(ImproveStubBackend):
             assert not (cwd / "x").is_file()
             assert not (cwd / "x" / "child.txt").exists()
             self.observed_status = git(cwd, "status", "--short")
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -438,17 +382,7 @@ class _SymlinkGuardBackend(ImproveStubBackend):
         self.glob_denied: bool | None = None
         self.external_enumeration_attempted = False
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         from daydream.backends.claude import ClaudeBackend
 
         if cwd not in self.audit_paths:
@@ -476,16 +410,7 @@ class _SymlinkGuardBackend(ImproveStubBackend):
             if not self.glob_denied:
                 self.external_enumeration_attempted = True
                 list((cwd / "sub" / "loop" / "escape").iterdir())
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -632,31 +557,30 @@ async def test_unborn_improve_cancellation_cleans_snapshot(
 ) -> None:
     repo = _make_unborn_improve_repo(tmp_path)
     started = anyio.Event()
+    audit_paths: list[Path] = []
 
-    class BlockingBackend(ImproveStubBackend):
-        def __init__(self) -> None:
-            super().__init__(repo, n_findings=0)
-            self.audit_paths: list[Path] = []
+    async def _blocking_stream() -> AsyncIterator[AgentEvent]:
+        yield TextEvent(text="Audit cancellation fixture ready")
+        started.set()
+        await anyio.sleep_forever()
 
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            del prompt, output_schema, continuation, agents, max_turns
-            del read_only, persist_session
-            self.audit_paths.append(cwd)
-            yield TextEvent(text="Audit cancellation fixture ready")
-            started.set()
-            await anyio.sleep_forever()
+    def responder(cwd: Any, *_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
+        audit_paths.append(cwd)
+        return _blocking_stream()
 
-    backend = install_capable_improve_backend(monkeypatch, BlockingBackend())
+    backend: Any = install_capable_improve_backend(
+        monkeypatch,
+        cast(
+            ImproveStubBackend,
+            ScriptedBackend(
+                responder=responder,
+                audit_paths=audit_paths,
+                retry_attempts=20,
+                retry_base_delay_s=0.0,
+                retry_max_delay_s=0.0,
+            ),
+        ),
+    )
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(run, make_config(repo, flow_name="improve"))
@@ -686,33 +610,14 @@ async def test_audit_dispatch_interval_cancelling_two_blocked_auditors(
             )
             self.blocked = 0
 
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
+        async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
             if "read-only improve audit specialist" in prompt:
                 self.blocked += 1
                 if self.blocked == 2:
                     two_started.set()
                 yield TextEvent(text="blocked audit child started")
                 await anyio.sleep_forever()
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
-            ):
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
     backend = install_capable_improve_backend(monkeypatch, BlockingAuditBackend())
@@ -4085,17 +3990,7 @@ class _AuditCommittingBackend(ImproveStubBackend):
         self.escape_attempts = 0
         self.local_identities: list[tuple[str, str]] = []
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: Any,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-        persist_session: Any=True,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         self._commit_count += 1
         # A standalone snapshot deliberately does not inherit source-local
         # config. This committing test actor needs its own fixture identity.
@@ -4115,11 +4010,7 @@ class _AuditCommittingBackend(ImproveStubBackend):
         escape_target = os.path.relpath(self._target, cwd)
         git(cwd, "add", escape_target, check=False)
         git(cwd, "commit", "-m", "escaped model commit", check=False)
-        async for event in super().execute(
-            cwd, prompt, output_schema=output_schema, continuation=continuation,
-            agents=agents, max_turns=max_turns, read_only=read_only,
-            persist_session=persist_session,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 

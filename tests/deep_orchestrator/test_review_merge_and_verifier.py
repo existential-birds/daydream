@@ -191,6 +191,7 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
         agents: Any = None,
         max_turns: Any = None,
         read_only: Any = False,
+        persist_session: Any = True,
     ) -> Any:
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
@@ -211,6 +212,7 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
             agents,
             max_turns=max_turns,
             read_only=read_only,
+            persist_session=persist_session,
         )
 
     stub.execute = _maybe_fail  # type: ignore[method-assign]
