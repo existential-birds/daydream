@@ -7,6 +7,7 @@ here rather than left to be inferred from its consumers.
 
 from __future__ import annotations
 
+import ast
 import inspect
 from importlib import import_module
 from pathlib import Path
@@ -33,6 +34,115 @@ _SHARED_HARNESS_BACKENDS = (
     ("IncrementalPlanBackend", "tests.harness.improve_backend", "IncrementalPlanBackend"),
     ("OutOfOrderPlanBackend", "tests.harness.improve_backend", "OutOfOrderPlanBackend"),
 )
+
+
+_PROTOCOL_PARAMS = (
+    "cwd",
+    "prompt",
+    "output_schema",
+    "continuation",
+    "agents",
+    "max_turns",
+    "read_only",
+    "persist_session",
+)
+_HARNESS_DIR = Path(__file__).resolve().parent
+_TESTS_ROOT = _HARNESS_DIR.parent
+
+# Ratchet: the protocol-shaped execute() declarations measured outside tests/harness/
+# at 0030596a (58 entries; the plan's 60 predates the #1247 dead-code sweep). Every
+# migration task deletes its own entries; the guard fails on a stale entry as well as
+# an unmigrated one, so this set must end up exactly empty.
+_ALLOWED: frozenset[str] = frozenset({
+    "deep_orchestrator/support.py::_RejectingArbiterBackend",
+    "deep_orchestrator/test_related_regression_commit.py::FootprintBackend",
+    "test_agent_budget.py::_BurstBackend",
+    "test_agent_budget.py::_RaisingCloseBackend",
+    "test_agent_budget.py::_RetryableFailingBackend",
+    "test_agent_budget.py::_RetryableThenSucceedingBackend",
+    "test_agent_budget.py::_SharedBackend",
+    "test_agent_recorder_integration.py::MaxTurnsBackend",
+    "test_agent_retry.py::_SharedBackend",
+    "test_arbiter_prose_extraction.py::_PiLikeBackend",
+    "test_arbiter_prose_extraction.py::_SplitTextBackend",
+    "test_archive_data_capture.py::MalformedToolBackend",
+    "test_archive_data_capture.py::_ArchiveCaptureBackend",
+    "test_archive_data_capture.py::_CodexEvidenceBackend",
+    "test_archive_data_capture.py::_FixEditingBackend",
+    "test_archive_data_capture.py::_JoinedArtifactEvidenceBackend",
+    "test_archive_integration.py::_SecretFailureBackend",
+    "test_deep_fanout.py::_FlakyBackend",
+    "test_deep_integration.py::_DeepMockBackend",
+    "test_deep_merge_recovery.py::_MergeTextBackend",
+    "test_deep_orchestrator.py::_ExtraEditBackend",
+    "test_deep_orchestrator.py::_PromptHookStub",
+    "test_deep_wonder_concurrency.py::_WonderRendezvousStub",
+    "test_exploration_runner.py::_FailingPatternScanner",
+    "test_exploration_runner.py::_FailingSurveyBackend",
+    "test_exploration_runner.py::_PartlyBlockedBackend",
+    "test_exploration_runner.py::_SpecialistMockBackend",
+    "test_extension_seam_integration.py::DeferredWriteBackend",
+    "test_extension_seam_integration.py::ShallowRecordingBackend",
+    "test_findings.py::ErroringBackend",
+    "test_fix_footprint.py::BarrierBackend",
+    "test_fix_footprint.py::CancelBackend",
+    "test_github_app_integration.py::_MinimalBackend",
+    "test_improve_flow.py::BlockingAuditBackend",
+    "test_improve_flow.py::BlockingBackend",
+    "test_improve_flow.py::_AuditCommittingBackend",
+    "test_improve_flow.py::_AuditGitBoundaryBackend",
+    "test_improve_flow.py::_DirectoryToFileBackend",
+    "test_improve_flow.py::_SymlinkGuardBackend",
+    "test_improve_flow.py::_UnbornAuditBackend",
+    "test_integration.py::RelatedOnlyBackend",
+    "test_integration.py::ReviewStagingBackend",
+    "test_integration.py::_WorktreeMutatingBackend",
+    "test_integration_workspace.py::MockBackend",
+    "test_multi_turn_tokens.py::_CostOnlyBackend",
+    "test_multi_turn_tokens.py::_MetricsAndCostBackend",
+    "test_multi_turn_tokens.py::_MetricsOnlyBackend",
+    "test_multi_turn_tokens.py::_PiShapedBackend",
+    "test_phase_parse_input_path.py::_SpyBackend",
+    "test_phases.py::_FallbackThenFailureBackend",
+    "test_phases.py::_HostCommitBackend",
+    "test_phases.py::_OneFixFailsBackend",
+    "test_phases_render.py::_PerStackBackend",
+    "test_runner.py::InitialExplorationBarrierBackend",
+    "test_runner.py::_CommitWritingBackend",
+    "test_summarize.py::_MultiTurn",
+    "test_trajectory_phase_events.py::_OverlappingReviewBackend",
+    "test_worktree_cwd_grounding.py::_PromptCapturingBackend",
+})
+
+
+def _protocol_shaped_declarations() -> set[str]:
+    """Every class outside tests/harness/ whose execute() re-types >=5 protocol parameters."""
+    found: set[str] = set()
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        if _HARNESS_DIR in path.parents:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == "execute":
+                    names = {a.arg for a in (*member.args.posonlyargs, *member.args.args, *member.args.kwonlyargs)}
+                    if len(names & set(_PROTOCOL_PARAMS)) >= 5:
+                        found.add(f"{path.relative_to(_TESTS_ROOT)}::{node.name}")
+    return found
+
+
+def test_no_module_outside_the_harness_declares_the_protocol_execute() -> None:
+    """The acceptance criterion: one declaration of the protocol signature, in the harness."""
+    violations = _protocol_shaped_declarations()
+
+    assert violations - _ALLOWED == set(), (
+        "these declarations re-type the Backend protocol's execute() outside tests/harness/ — "
+        f"migrate them or narrow them to a forwarding override: {sorted(violations - _ALLOWED)}"
+    )
+    assert _ALLOWED - violations == set(), (
+        f"stale ratchet allowlist entries (already migrated) — delete them: {sorted(_ALLOWED - violations)}"
+    )
 
 
 def test_shared_harness_backends_satisfy_the_backend_protocol_signature() -> None:
