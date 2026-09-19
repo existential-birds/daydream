@@ -3,11 +3,13 @@
 ``ScriptedBackend`` yields pre-built events and records its calls so tests can
 exercise orchestration through the production seams.
 
-``ScriptedBackend`` is the *scripted* fake: it yields a pre-built turn script
-and records what it was called with. It is deliberately not a dispatch fake —
-prompt-heuristic routing for the shallow review-fix-test loop lives in
-``tests.harness.phase_backend.PhaseDispatchBackend``, and phase-keyed replay of
-real driver output lives in ``tests.harness.phase_replay``.
+``ScriptedBackend`` is the *scripted* fake: it yields a pre-built turn script,
+records what it was called with, and can key responses by the call's
+``output_schema`` (a constructor seam) so a parallel fan-out whose completion
+order is not fixed still gets the right turn. Prompt-heuristic routing for the
+shallow review-fix-test loop stays
+``tests.harness.phase_backend.PhaseDispatchBackend``'s job, and phase-keyed
+replay of real driver output stays ``tests.harness.phase_replay``'s.
 
 A *script* is a list of turns, one per ``execute`` call. A turn is a sequence of
 items, each either an ``AgentEvent`` to yield or a ``BaseException`` to raise at
@@ -53,6 +55,7 @@ class ScriptedBackend:
         script: Sequence[Turn] | None = None,
         *,
         events: Turn | None = None,
+        responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
         model: str = "test-model",
         fanout_concurrency: int = 4,
         **attrs: Any,
@@ -65,6 +68,12 @@ class ScriptedBackend:
             events: Shorthand for a one-turn script (``script=[events]``) — the
                 every-call-yields-the-same-stream mode. Mutually exclusive with
                 ``script``.
+            responses_by_schema: Ordered pairs, each a ``(output_schema, turn)``
+                whose first pair comparing ``==`` to a call's ``output_schema``
+                supplies that call's turn. A ``None`` key is the fallback for
+                any unmatched call. With no match (and no fallback) the normal
+                per-call script selection applies. Matching never hashes the
+                schema, so the real dict schemas work as keys.
             model: Value of the ``model`` attribute.
             fanout_concurrency: The optional ``Backend`` scheduling hint.
             **attrs: Extra instance attributes, for the optional protocol
@@ -80,6 +89,9 @@ class ScriptedBackend:
         if events is not None:
             script = [events]
         self._script: list[Turn] = [list(turn) for turn in script] if script else [list(_DEFAULT_TURN)]
+        self._responses_by_schema: list[tuple[dict[str, Any] | None, Turn]] = [
+            (schema, list(turn)) for schema, turn in (responses_by_schema or [])
+        ]
         self.model = model
         self.fanout_concurrency = fanout_concurrency
         for name, value in attrs.items():
@@ -149,10 +161,27 @@ class ScriptedBackend:
             }
         )
         index = min(len(self.calls) - 1, len(self._script) - 1)
-        for item in self._script[index]:
+        turn = self._turn_for_schema(output_schema)
+        if turn is None:
+            turn = self._script[index]
+        for item in turn:
             if isinstance(item, BaseException):
                 raise item
             yield item
+
+    def _turn_for_schema(self, output_schema: dict[str, Any] | None) -> Turn | None:
+        """The turn for ``output_schema``, or ``None`` to fall through to the script.
+
+        The first pair comparing ``==`` wins; a ``None``-keyed pair is the
+        fallback for any unmatched schema.
+        """
+        for schema, turn in self._responses_by_schema:
+            if schema is not None and schema == output_schema:
+                return turn
+        for schema, turn in self._responses_by_schema:
+            if schema is None:
+                return turn
+        return None
 
     async def cancel(self) -> None:
         pass

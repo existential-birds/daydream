@@ -220,6 +220,33 @@ def test_script_and_events_together_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_responses_are_selected_by_output_schema_regardless_of_call_order() -> None:
+    """A parallel fan-out completes in any order; the schema key still picks the right turn."""
+    schema_a = {"type": "object", "title": "a"}
+    schema_b = {"type": "object", "title": "b"}
+    backend = ScriptedBackend(
+        responses_by_schema=[(schema_a, [TextEvent(text="A")]), (schema_b, [TextEvent(text="B")])],
+        events=[TextEvent(text="script")],
+    )
+
+    assert _texts(await _drain(backend, output_schema=schema_b)) == ["B"]
+    assert _texts(await _drain(backend, output_schema=schema_a)) == ["A"]
+    assert _texts(await _drain(backend, output_schema={"type": "object", "title": "z"})) == ["script"]
+
+
+@pytest.mark.asyncio
+async def test_a_none_schema_pair_is_the_fallback_for_an_unmatched_schema() -> None:
+    backend = ScriptedBackend(
+        responses_by_schema=[({"title": "a"}, [TextEvent(text="A")]), (None, [TextEvent(text="fallback")])],
+        events=[TextEvent(text="script")],
+    )
+
+    assert _texts(await _drain(backend, output_schema={"title": "a"})) == ["A"]
+    assert _texts(await _drain(backend, output_schema=None)) == ["fallback"]
+    assert _texts(await _drain(backend, output_schema={"title": "z"})) == ["fallback"]
+
+
+@pytest.mark.asyncio
 async def test_every_execute_argument_is_recorded() -> None:
     """Each execute argument is retained for inspection."""
     backend = ScriptedBackend()
