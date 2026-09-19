@@ -1844,24 +1844,17 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
             pass
 
 
-async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
-    """Both normal and TTT flows surface confidence + rationale on parsed issues.
+async def test_alternative_review_surfaces_confidence_and_rationale(
+    tmp_path: Path, make_work: Callable[..., WorkContext]
+) -> None:
+    """Alternative review surfaces confidence + rationale on parsed issues.
 
-    Exercises `phase_parse_feedback` (normal flow) and `phase_alternative_review`
-    (TTT flow) directly: both return parsed issue lists, and both must carry the
-    schema-enforced confidence/rationale fields per QUAL-02.
+    Exercises `phase_alternative_review` directly: it returns a parsed issue
+    list that must carry the schema-enforced confidence/rationale fields per
+    QUAL-02.
     """
-    from daydream.phases import phase_alternative_review, phase_parse_feedback
+    from daydream.phases import phase_alternative_review
 
-    enriched_normal_issue = {
-        "id": 1,
-        "description": "x",
-        "file": "a.py",
-        "line": 1,
-        "confidence": "HIGH",
-        "rationale": "verified by Convention snake_case_modules",
-        "evidence": "a.py:1",
-    }
     enriched_trust_issue = {
         "id": 1,
         "title": "t",
@@ -1883,14 +1876,7 @@ async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work:
         )
 
     work = make_work(tmp_path)
-    # Normal flow: phase_parse_feedback returns list of validated issues
-    (tmp_path / ".review-output.md").write_text("# Review\n")
-    normal_backend = _issue_backend({"issues": [enriched_normal_issue]})
-    normal_issues = await phase_parse_feedback(
-        normal_backend, work, allow_standalone=True
-    )
-
-    # TTT flow: phase_alternative_review returns list of issues
+    # phase_alternative_review returns a list of parsed issues.
     diff_path = tmp_path / "diff.txt"
     diff_path.write_text("diff")
     trust_backend = _issue_backend({"issues": [enriched_trust_issue]})
@@ -1902,7 +1888,6 @@ async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work:
         exploration_dir=tmp_path,
     )
 
-    for issues in (normal_issues, trust_issues):
-        assert issues
-        assert "confidence" in issues[0]
-        assert "rationale" in issues[0]
+    assert trust_issues
+    assert "confidence" in trust_issues[0]
+    assert "rationale" in trust_issues[0]

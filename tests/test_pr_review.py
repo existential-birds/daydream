@@ -19,8 +19,7 @@ from daydream.pr_review import (
     PRInfo,
     ReviewRenderers,
     _format_body_section,
-    _format_file_level_body,
-    _format_inline_body,
+    _format_comment_body,
     _parse_hunks,
     build_payload,
     classify,
@@ -64,9 +63,9 @@ def test_finding_and_summary_markdown_is_byte_stable() -> None:
     i = ParsedIssue(
         path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH", fingerprint="a" * 64
     )
-    assert _format_inline_body(i, renderers=BUILTIN_RENDERERS) == (SNAP / "inline.md").read_text()
+    assert _format_comment_body(i, "inline", renderers=BUILTIN_RENDERERS) == (SNAP / "inline.md").read_text()
     assert (
-        _format_file_level_body(replace(i, is_cross_stack=True), renderers=BUILTIN_RENDERERS)
+        _format_comment_body(replace(i, is_cross_stack=True), "file_level", renderers=BUILTIN_RENDERERS)
         == (SNAP / "file_level.md").read_text()
     )
     section = _format_body_section(
@@ -82,8 +81,9 @@ def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    body = _format_inline_body(
+    body = _format_comment_body(
         ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64),
+        "inline",
         renderers=resolve_review_renderers(reg),
     )
     assert "CUSTOM::inline::T" in body
@@ -102,7 +102,7 @@ def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptur
     register_builtins(reg)
     reg.override_renderer("finding", boom)
     with caplog.at_level("WARNING"):
-        body = _format_inline_body(
+        body = _format_comment_body(
             ParsedIssue(
                 path="a.py",
                 line=3,
@@ -112,6 +112,7 @@ def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptur
                 confidence="HIGH",
                 fingerprint="a" * 64,
             ),
+            "inline",
             renderers=resolve_review_renderers(reg),
         )
     assert body == (SNAP / "inline.md").read_text()
@@ -229,7 +230,7 @@ def test_inline_body_has_footer_and_tags() -> None:
         confidence="HIGH",
         severity="high",
     )
-    body = pr_review._format_inline_body(issue, renderers=BUILTIN_RENDERERS)
+    body = pr_review._format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
     assert "**Null deref**" in body
     assert "severity: `high`" in body
     assert "confidence: `HIGH`" in body
@@ -244,7 +245,7 @@ def test_inline_body_has_footer_and_tags() -> None:
 
 def test_inline_body_carries_parseable_marker() -> None:
     issue = ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="ab12" * 16)
-    body = _format_inline_body(issue, renderers=BUILTIN_RENDERERS)
+    body = _format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
     assert parse_finding_markers(body) == ["ab12" * 16]
     assert DAYDREAM_FOOTER in body  # marker does not displace the footer
 
@@ -252,7 +253,9 @@ def test_inline_body_carries_parseable_marker() -> None:
 def test_no_marker_without_fingerprint() -> None:
     assert (
         parse_finding_markers(
-            _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B"), renderers=BUILTIN_RENDERERS)
+            _format_comment_body(
+                ParsedIssue(path="a.py", line=3, title="T", body="B"), "inline", renderers=BUILTIN_RENDERERS
+            )
         )
         == []
     )

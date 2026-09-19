@@ -54,7 +54,6 @@ STAGE_KEYS: frozenset[str] = frozenset(
         "discovery.per_stack",
         "discovery.structural",
         "discovery.generic_fallback",
-        "parse",
         "uncovered_review",
         "arbitration",
         "suppression",
@@ -412,28 +411,6 @@ def build_default_profile() -> ReviewProfile:
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",
         ),
-        "parse": Strategy(
-            content=(
-                "Read the review output file at {review_output_path}.\n\n"
-                "Extract ONLY actionable issues that need fixing. Skip these sections entirely:\n"
-                "- \"Good Patterns\" or \"Strengths\"\n"
-                "- \"Summary\" sections\n"
-                "- Any positive observations\n"
-                "{verdicts_hint}\n"
-                "For each issue found, return a JSON object with this structure:\n"
-                "{{\"issues\": [\n"
-                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42}}\n"  # noqa: E501 (mirrors the phase_parse_feedback example shape)
-                "]{verdicts_example}}}\n\n"
-                "If there are no actionable issues, return: {{\"issues\": []{verdicts_empty}}}\n"
-            ),
-            # The parse stage itself is removed (issue #745); this copy is kept
-            # only as schema documentation. It no longer mirrors a live literal
-            # byte-for-byte: the host-appended severity rubric
-            # (daydream.severity.SEVERITY_RUBRIC) now carries all severity
-            # instruction, and the former {severity_hint} fallback fragment is gone
-            # (issue #972 R3/A2).
-            source="mirrors: daydream.phases.phase_parse_feedback (parse stage removed, issue #745)",
-        ),
         "uncovered_review": Strategy(
             content=(
                 "You are the uncovered file sweep reviewer for the deep-review "
@@ -571,7 +548,6 @@ _ENVELOPE_BY_STAGE: dict[str, str] = {
     "discovery.generic_fallback": (
         "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION"
     ),
-    "parse": "daydream.improve.prompts.FINDING_FORMAT",
     "uncovered_review": (
         "daydream.deep.prompts.CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION"
     ),

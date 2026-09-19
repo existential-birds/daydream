@@ -18,7 +18,6 @@ def test_stage_keys_cover_every_model_bearing_stage() -> None:
         "discovery.per_stack",
         "discovery.structural",
         "discovery.generic_fallback",
-        "parse",
         "uncovered_review",
         "arbitration",
         "suppression",
@@ -172,13 +171,6 @@ uncovered_sweep_max_files = 999''')   # above host cap
 
 def test_suppression_severity_classes_default_narrowed() -> None:
     assert rp.Suppression.severity_classes == ("low",)
-
-
-def test_parse_review_strategy_has_no_default_to_high_hint() -> None:
-    """R3/A2: the mirrored parse-hint copy is dead — the profile's ``parse``
-    strategy must no longer carry the "Default to high" severity instruction
-    (parse stage removed, issue #745)."""
-    assert "Default to high" not in rp.build_default_profile().strategies["parse"].content
 
 
 def test_review_profile_severity_levels_derive_from_severity_module() -> None:

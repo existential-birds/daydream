@@ -835,55 +835,6 @@ class StubBackend:
             )
             return
 
-        if "extract only actionable issues" in pl:  # phase_parse_feedback
-            # Evidence gate (#227): every parsed finding carries a grounded
-            # citation so it survives _is_evidenced downstream (structural items
-            # and the tiny-diff bypass route these records straight to the gate).
-            parse_issue: dict[str, Any] = {
-                "id": 1,
-                "description": "Sample issue",
-                "file": "api.py",
-                "line": 1,
-                "evidence": "api.py:1",
-            }
-            # Deep per-stack parse requests severity (PER_STACK_RECORD_SCHEMA,
-            # #168); every stack -- language or the structural meta-stack
-            # (#314) -- parses with this schema, so all emit the configured
-            # severity so a test can drive arbiter selection.
-            if self.parse_severity is not None and "severity" in pl:
-                parse_issue["severity"] = self.parse_severity
-                parse_issue["confidence"] = "MEDIUM"
-                parse_issue["rationale"] = "stub"
-            # Issue #309: the uncovered-sweep parse (prompt points at an
-            # `uncovered-<n>-review.md`) emits its finding for the swept file.
-            if self.sweep_file is not None and re.search(r"uncovered-\d+-review\.md", prompt):
-                parse_issue["file"] = self.sweep_file
-                parse_issue["line"] = 1
-                parse_issue["description"] = f"Sweep finding for {self.sweep_file}"
-                parse_issue["evidence"] = f"{self.sweep_file}:1"
-                if "severity" in pl:
-                    parse_issue["severity"] = self.parse_severity or "low"
-                    parse_issue["confidence"] = "MEDIUM"
-                    parse_issue["rationale"] = "stub"
-            # #232: per-stack override keyed off the review-file path the parse
-            # prompt points at (``stack-<name>-review.md``). Lets one stack emit a
-            # HIGH finding and another a borderline LOW one at DISTINCT locations,
-            # so they stay uncontested and drive the suppression predicate.
-            parse_issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(
-                prompt, parse_issue
-            )
-            yield TextEvent(text="")
-            # Issue #742: PER_STACK_RECORD_SCHEMA requires a ``verdicts``
-            # property (Codex strict-mode output schemas list every key in
-            # ``required``), so the parse payload always carries the key --
-            # declared per-file verdicts when the knob is set, else empty.
-            parse_payload: dict[str, Any] = {
-                "issues": parse_issues,
-                "verdicts": self.parse_declared_verdicts or [],
-            }
-            yield ResultEvent(structured_output=parse_payload, continuation=None)
-            return
-
         # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
         # points at, echoes every arb_id back with keep=true, and stamps the
         # description so the arbitrated finding is observable downstream.

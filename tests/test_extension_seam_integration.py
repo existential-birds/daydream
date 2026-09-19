@@ -1045,9 +1045,11 @@ def test_ext_dir_renderer_override_reaches_pr_review(
     prev = get_registry()
     set_registry(build_registry())
     try:
-        body = pr_review._format_inline_body(
-            ParsedIssue(path="a.py", line=1, title="T", body="B", fingerprint="a" * 64)
-        , renderers=pr_review.resolve_review_renderers(get_registry()))
+        body = pr_review._format_comment_body(
+            ParsedIssue(path="a.py", line=1, title="T", body="B", fingerprint="a" * 64),
+            "inline",
+            renderers=pr_review.resolve_review_renderers(get_registry()),
+        )
     finally:
         set_registry(prev)
     assert "EXT::inline::T" in body and pr_review.DAYDREAM_FOOTER in body

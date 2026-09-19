@@ -181,13 +181,6 @@ def _resolve_real_git_dir() -> str | None:
         return _REAL_GIT_DIR
 
 
-def _reset_real_git_resolution() -> None:
-    """Restore the real-git resolver singleton to its initial state (test seam)."""
-    global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
-    _REAL_GIT_DIR = None
-    _REAL_GIT_RESOLVED = False
-
-
 class _SharedCheckout:
     """A disposable read-only checkout shared by concurrent ``execute()`` calls.
 
