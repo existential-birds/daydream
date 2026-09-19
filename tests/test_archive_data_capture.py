@@ -38,6 +38,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.runner import RunConfig, run
+from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
@@ -57,16 +58,7 @@ from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
 
 
 class _ArchiveCaptureBackend(StubBackend):
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: str,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if prompt.startswith("The daydream changes are already staged"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
             version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
@@ -83,15 +75,7 @@ class _ArchiveCaptureBackend(StubBackend):
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -871,7 +855,7 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
 # --- AC3 (shallow path): recommended.patch captured through the shallow runner ---
 
 
-class _FixEditingBackend:
+def _fix_editing_backend(repo: Path) -> ScriptedBackend:
     """Shallow-dispatch backend whose fix stage edits a tracked file.
 
     Mirrors ``PhaseDispatchBackend`` dispatch but writes a real change to
@@ -879,21 +863,7 @@ class _FixEditingBackend:
     has a non-empty diff to record.
     """
 
-    model = "mock-model"
-
-    def __init__(self, repo: Path) -> None:
-        self._repo = repo
-
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: str,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-    ) -> AsyncIterator[AgentEvent]:
+    def responder(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> list[AgentEvent]:
         from daydream.backends import ResultEvent, TextEvent
 
         pl = prompt.lower()
@@ -906,57 +876,59 @@ class _FixEditingBackend:
             or "assigned to this stack" in pl
             or "repository-wide interactions" in pl
         ):
-            yield TextEvent(text="Review complete.")
-            # Issue #745: the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
-            # structured output directly (no separate parse step).
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": "Add a guard",
-                            "file": "main.py",
-                            "line": 1,
-                            "severity": "medium",
-                            "confidence": "HIGH",
-                            "rationale": "guard missing",
-                            "evidence": "main.py:1",
-                        }
-                    ],
-                    "verdicts": [],
-                },
-                continuation=None,
-            )
-        elif "fix this issue" in pl or pl.startswith("fix these"):
-            main_py = self._repo / "main.py"
+            return [
+                TextEvent(text="Review complete."),
+                # Issue #745: the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
+                # structured output directly (no separate parse step).
+                ResultEvent(
+                    structured_output={
+                        "issues": [
+                            {
+                                "id": 1,
+                                "description": "Add a guard",
+                                "file": "main.py",
+                                "line": 1,
+                                "severity": "medium",
+                                "confidence": "HIGH",
+                                "rationale": "guard missing",
+                                "evidence": "main.py:1",
+                            }
+                        ],
+                        "verdicts": [],
+                    },
+                    continuation=None,
+                ),
+            ]
+        if "fix this issue" in pl or pl.startswith("fix these"):
+            main_py = repo / "main.py"
             main_py.write_text(main_py.read_text() + "# daydream recommended change\n")
-            yield TextEvent(text="Fixed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "post-fix fix-verifier agent" in pl:
+            return [TextEvent(text="Fixed."), ResultEvent(structured_output=None, continuation=None)]
+        if "post-fix fix-verifier agent" in pl:
             ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
-            yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "verdicts": [
-                        {
-                            "issue_id": issue_id,
-                            "verdict": "resolved",
-                            "reason": "complete",
-                        }
-                        for issue_id in ids
-                    ]
-                },
-                continuation=None,
-            )
-        elif "test suite" in pl or "run the project" in pl:
-            yield TextEvent(text="All 1 tests passed. 0 failed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        else:
-            yield TextEvent(text="OK")
-            yield ResultEvent(structured_output=None, continuation=None)
+            return [
+                TextEvent(text=""),
+                ResultEvent(
+                    structured_output={
+                        "verdicts": [
+                            {
+                                "issue_id": issue_id,
+                                "verdict": "resolved",
+                                "reason": "complete",
+                            }
+                            for issue_id in ids
+                        ]
+                    },
+                    continuation=None,
+                ),
+            ]
+        if "test suite" in pl or "run the project" in pl:
+            return [
+                TextEvent(text="All 1 tests passed. 0 failed."),
+                ResultEvent(structured_output=None, continuation=None),
+            ]
+        return [TextEvent(text="OK"), ResultEvent(structured_output=None, continuation=None)]
 
-    async def cancel(self) -> None:
-        pass
+    return ScriptedBackend(responder=responder, model="mock-model")
 
 
 async def test_shallow_run_captures_recommended_patch(
@@ -978,7 +950,7 @@ async def test_shallow_run_captures_recommended_patch(
     # pushes to 'origin' for real, so give the repo a bare remote.
     remote = bare_remote(archive_dir.parent / "origin.git")
     no_ci_remote.connect(feature_branch_repo, remote)
-    backend = _FixEditingBackend(feature_branch_repo)
+    backend = _fix_editing_backend(feature_branch_repo)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     exit_code = await run(
@@ -1225,16 +1197,7 @@ class _CodexEvidenceBackend(StubBackend):
         super().__init__(target)
         self.evidence = evidence
 
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if "you are reviewing the python stack" in prompt.lower():
             if self.evidence:
                 for index in range(311):
@@ -1281,15 +1244,7 @@ class _CodexEvidenceBackend(StubBackend):
                     output="file content",
                     is_error=False,
                 )
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
@@ -1433,16 +1388,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     from tests.harness.codex_replay import make_mock_process
 
     class MalformedToolBackend(StubBackend):
-        async def execute(
-            self,
-            cwd: Any,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-        ) -> AsyncIterator[AgentEvent]:
+        async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
             if "you are reviewing the python stack" in prompt.lower():
                 item = {
                     "id": "malformed-mcp", "type": "mcp_tool_call",
@@ -1467,10 +1413,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
                     async for event in CodexBackend(model="fixture-model").execute(cwd, prompt):
                         if isinstance(event, (ToolStartEvent, ToolResultEvent, DiagnosticEvent)):
                             yield event
-            async for event in super().execute(
-                cwd, prompt, output_schema=output_schema, continuation=continuation,
-                agents=agents, max_turns=max_turns, read_only=read_only,
-            ):
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -1503,18 +1446,7 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
         self.python_prompts: list[str] = []
         self.python_entry_visibility: list[tuple[bool, bool]] = []
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
-        del persist_session  # StubBackend has no resumable external session.
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         lowered = prompt.lower()
         python_request = "you are reviewing the python stack" in lowered
         generic_request = "you are reviewing the generic-fallback stack" in lowered
@@ -1556,15 +1488,7 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
         elif generic_request:
             artifact_reference = ".daydream/deep/intent.md"
 
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             if isinstance(event, ResultEvent) and artifact_reference is not None:
                 call_id = (
                     "joined-private-intent"

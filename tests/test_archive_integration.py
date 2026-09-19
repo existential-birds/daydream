@@ -48,15 +48,11 @@ class _SecretFailureBackend(StubBackend):
         super().__init__(target)
         self.failures = 0
 
-    async def execute(
-        self, cwd: Path, prompt: str, output_schema: Any = None,
-        continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if "you are the **dependency-tracer** specialist" in prompt.lower():
             self.failures += 1
             raise RuntimeError("backend rejected " + " ".join(self.secrets))
-        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
