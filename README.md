@@ -443,13 +443,7 @@ Configure the LLM supervisor model under `[tool.daydream.phases.supervise]`.
 
 ### Uncovered-diff-file sweep
 
-A second-pass reviewer covers diff files that no per-stack reviewer read:
-
-| Key | Default | Semantics |
-|-----|---------|-----------|
-| `uncovered_sweep` | `true` | Toggle the second pass. |
-| `uncovered_sweep_max_files` | `10` | Cap on swept files per run. `0` sweeps nothing. |
-| `uncovered_sweep_min_hunk_lines` | `5` | Minimum added/removed hunk lines to be sweepable. `0` removes the floor. |
+A second-pass reviewer covers diff files that no per-stack reviewer read.
 
 ### Quality gate
 

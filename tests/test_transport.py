@@ -57,27 +57,20 @@ async def test_transport_writes_stdin_then_closes() -> None:
     assert t.stdin_closed is True
 
 
-async def test_transport_nonzero_exit_raises_exit_error_with_diagnostics() -> None:
-    diagnostics: list[str] = []
+async def test_transport_nonzero_exit_raises_exit_error() -> None:
     t = CliTransport(
         limit=LIMIT,
         cli="fake",
         argv=[sys.executable, "-c", emit_lines("not json", exit_code=3)],
-        diagnostics_sink=diagnostics.append,
     )
     await t.start()
     seen: list[str] = []
     async for line in t.lines(timeout_for_line=lambda: 5.0):
         seen.append(line)
-        if not line.startswith("{"):
-            # Backend-side protocol mapping: non-JSON stdout goes to the sink.
-            t.note_diagnostic(line)
     assert seen == ["not json"]
     with pytest.raises(TransportExitError) as excinfo:
         await t.wait()
     assert excinfo.value.returncode == 3
-    assert diagnostics == ["not json"]
-    assert excinfo.value.diagnostics == ["not json"]
     assert t.returncode == 3
 
 

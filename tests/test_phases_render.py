@@ -29,7 +29,6 @@ from daydream.deep.detection import StackAssignment
 from daydream.phases import (
     phase_arbiter_review,
     phase_cross_stack_merge,
-    phase_parse_feedback,
     phase_per_stack_reviews,
 )
 from daydream.workspace import WorkContext
@@ -41,37 +40,6 @@ def _rec(monkeypatch: Any) -> Console:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100, height=25)
     monkeypatch.setattr("daydream.phases.console", rec)
     return rec
-
-
-async def test_parse_feedback_renders_issue_table(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-) -> None:
-    rec = _rec(monkeypatch)
-    payload = {
-        "issues": [
-            {
-                "id": 1,
-                "description": "Missing null check",
-                "file": "f.py",
-                "line": 3,
-                "confidence": "HIGH",
-                "rationale": "crashes on None",
-                "evidence": "f.py:3",
-            }
-        ]
-    }
-    backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
-
-    items = await phase_parse_feedback(backend, make_work(tmp_path), allow_standalone=True)
-
-    out = rec.export_text()
-    assert items == payload["issues"]
-    assert "Found 1 actionable issue" in out
-    assert "f.py" in out
-    assert "Missing null check" in out
-    assert "{" not in out
 
 
 async def test_merge_prints_item_count(

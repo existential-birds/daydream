@@ -664,18 +664,6 @@ def list_local_branches(repo: Path) -> dict[str, str]:
     return branches
 
 
-def head_commit_message(repo: Path) -> str:
-    """Return the full commit message of ``HEAD``.
-
-    Raises:
-        GitError: If ``git log`` fails (e.g. empty repository).
-    """
-    proc = _run_git(repo, ["log", "-1", "--format=%B", "HEAD"], timeout=5)
-    if proc.returncode != 0:
-        raise GitError(f"cannot read HEAD message in {repo}: {proc.stderr.strip()}")
-    return proc.stdout.strip()
-
-
 def remote_url(repo: Path, remote: str = "origin") -> str | None:
     """Return the URL configured for *remote*, or ``None`` when unset/missing.
 
@@ -2768,32 +2756,11 @@ def clone(
     _run_clone(remote_url, cmd, timeout)
 
 
-def checkout_paths(repo: Path, paths: list[Path]) -> None:
-    """Run ``git checkout -- <paths>`` to discard local changes for *paths*.
-
-    Args:
-        paths: Paths (relative to *repo*) to restore from the index. Pass
-            ``[Path(".")]`` to restore the entire working tree.
-
-    Raises:
-        GitError: If the checkout fails.
-    """
-    if not paths:
-        return
-    args = ["checkout", "--", *(str(p) for p in paths)]
-    proc = _run_git(repo, args, timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git checkout -- {paths} failed in {repo}: {proc.stderr.strip()}")
-
-
 def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
     """Restore *paths* to their content at *ref* (``git checkout <ref> -- <paths>``).
 
     Discards working-tree edits for exactly *paths*, replacing them with the
-    *ref* version (and staging that version). Distinct from :func:`checkout_paths`,
-    which restores from the index (``git checkout -- <paths>``) rather than a ref.
-    Used to roll a single path back to its pre-fix content after a fix group
-    failed mid-edit, leaving the rest of the tree untouched.
+    *ref* version (and staging that version).
 
     Args:
         paths: Repo-relative paths to restore. No-op when empty.

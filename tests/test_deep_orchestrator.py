@@ -116,7 +116,6 @@ async def _run_deep(
     *,
     start_at: str = "review",
     precision_mode: bool = False,
-    uncovered_sweep: bool | None = None,
     approve_on_clean: bool = False,
     review_profile: "ResolvedProfile | None" = None,
 ) -> int:
@@ -128,7 +127,6 @@ async def _run_deep(
         start_at=start_at,
         cleanup=False,
         precision_mode=precision_mode,
-        uncovered_sweep=uncovered_sweep,
         approve_on_clean=approve_on_clean,
         review_profile=review_profile,
     )

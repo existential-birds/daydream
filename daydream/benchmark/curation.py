@@ -410,9 +410,7 @@ def _evidence_projection(
     return projection
 
 
-# ---------------------------------------------------------------------------
 # prioritized evidence projection (issue #879)
-# ---------------------------------------------------------------------------
 
 # The seven bands in fixed display order (lowest rank first).
 BAND_RANK: dict[str, int] = {
@@ -728,9 +726,7 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
     return {"entries": entries, "by_source": by_source}
 
 
-# ---------------------------------------------------------------------------
 # derivation + validation
-# ---------------------------------------------------------------------------
 
 MAX_GOLD_FINDINGS = 50
 

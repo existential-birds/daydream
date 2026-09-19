@@ -426,7 +426,7 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
     stub.per_stack_emit_reads = True
     stub.per_stack_unread = frozenset({"zzuncovered.py"})
 
-    assert await _run_deep(multi_stack_target, uncovered_sweep=True) == 0
+    assert await _run_deep(multi_stack_target) == 0
 
     # Prove the discriminating setup actually held: the bounded in-memory diff
     # dropped zzuncovered.py's block (truncation marker present, the file's

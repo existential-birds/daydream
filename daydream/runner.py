@@ -215,14 +215,6 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     improve_prune_name: str | None = None
-    # Issue #309: uncovered-diff-file sweep (second-pass reviewer). Retained
-    # fields: sweep resolution reads the review-profile pipeline
-    # (``uncovered_sweep_enabled`` / ``_max_files`` / ``_min_hunk_lines``), not
-    # these fields nor the file-config scalar, after the profile-pipeline
-    # migration.
-    uncovered_sweep: bool | None = None
-    uncovered_sweep_max_files: int | None = None
-    uncovered_sweep_min_hunk_lines: int | None = None
     # Issue #731: deep-review sharding (split oversized per-language stacks into
     # bounded, dependency-aware shards that ride the stack_name-keyed pipeline).
     # CLI-tier overrides; ``None`` falls through to the file-config scalar then

@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
 from rich.text import Text
@@ -109,7 +109,6 @@ from daydream.ui import (
     phase_subtitle,
     print_dim,
     print_error,
-    print_feedback_table,
     print_fix_complete,
     print_fix_progress,
     print_info,
@@ -1731,40 +1730,6 @@ def build_alternative_review_prompt(
     return "\n".join(parts)
 
 
-def build_parse_prompt(
-    *,
-    strategy: str,
-    review_output_path: Path,
-    verdicts_hint: str,
-    verdicts_example: str,
-    verdicts_empty: str,
-) -> str:
-    """Render the parse-stage prompt from the profile strategy + host envelope.
-
-    The profile-owned ``parse`` strategy carries the extraction/dedup judgment
-    prose as a template (``copied: daydream.phases.phase_parse_feedback``); the
-    host fills the runtime ``review_output_path`` and the verdict
-    envelope placeholders so the rendered prompt matches the profile-owned
-    extraction strategy (the host-owned severity rubric in
-    ``daydream.severity`` now carries all severity instruction; the former
-    in-prompt severity hint died with the parse stage (issue #972 R3).
-
-    Args:
-        strategy: The profile-owned ``parse`` strategy content.
-        review_output_path: Absolute path to the review markdown to parse.
-        verdicts_hint: Per-file verdict-surface instruction (empty when
-            ``include_verdicts`` is False).
-        verdicts_example: The schema's verdicts example fragment.
-        verdicts_empty: The schema's empty-verdicts fragment.
-    """
-    return strategy.format(
-        review_output_path=review_output_path,
-        verdicts_hint=verdicts_hint,
-        verdicts_example=verdicts_example,
-        verdicts_empty=verdicts_empty,
-    )
-
-
 def _prior_daydream_commits(work: WorkContext) -> str | None:
     """Return oneline log of prior daydream commits on this branch."""
     return git_ops.daydream_commits(work.repo, work.base_branch)
@@ -1811,213 +1776,6 @@ def _git_branch(cwd: Path) -> str:
     except GitError:
         return ""
     return name or ""
-
-
-@overload
-async def phase_parse_feedback(
-    backend: Backend,
-    work: WorkContext,
-    *,
-    input_path: Path | None = None,
-    output_schema: dict[str, Any] | None = None,
-    include_verdicts: Literal[False] = False,
-    strategy: str | None = None,
-    artifact_session: ArtifactSession | None = None,
-    allow_standalone: bool = False,
-    run_context: RunContext | None = None,
-) -> list[dict[str, Any]]: ...
-
-
-@overload
-async def phase_parse_feedback(
-    backend: Backend,
-    work: WorkContext,
-    *,
-    input_path: Path | None = None,
-    output_schema: dict[str, Any] | None = None,
-    include_verdicts: Literal[True],
-    strategy: str | None = None,
-    artifact_session: ArtifactSession | None = None,
-    allow_standalone: bool = False,
-    run_context: RunContext | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
-
-
-@bind_resolved_run_context
-async def phase_parse_feedback(
-    backend: Backend,
-    work: WorkContext,
-    *,
-    input_path: Path | None = None,
-    output_schema: dict[str, Any] | None = None,
-    include_verdicts: bool = False,
-    strategy: str | None = None,
-    artifact_session: ArtifactSession | None = None,
-    allow_standalone: bool = False,
-    run_context: RunContext | None = None,
-) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Phase 2: Parse feedback from review output and return validated items.
-
-    Public, intentionally tested parse helper. It has no remaining production
-    caller: its former feedback teardown caller and the deep pre-merge per-stack
-    parse stage were removed, and the production deep path parses via
-    ``deep.orchestrator._step_per_stack_parse``, which consumes on-disk
-    ``PER_STACK_RECORD_SCHEMA`` records instead of re-parsing here. It is kept
-    (not deleted) because tests exercise its schema, ``input_path`` and
-    ``include_verdicts`` behavior directly.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context. ``work.repo`` doubles as the agent's cwd
-            and the source of the default review path.
-        input_path: Optional explicit path to the review markdown to parse.
-            When None (default), reads ``work.repo / REVIEW_OUTPUT_FILE``.
-            When provided, reads that path instead — useful for callers that
-            want to parse a specific review output without writing to the
-            shared ``REVIEW_OUTPUT_FILE`` location.
-        output_schema: Optional structured-output schema. Defaults to
-            ``FEEDBACK_SCHEMA``. A schema may require a ``severity`` field on
-            each issue (e.g. ``PER_STACK_RECORD_SCHEMA``); when it does, the
-            prompt instructs the agent to extract it.
-        include_verdicts: When True (issue #742), the declared per-file
-            verdicts from the parse output are surfaced alongside the issues
-            list and the return is a ``(feedback_items, verdicts)`` tuple; a
-            malformed ``verdicts`` value (non-list / non-dict entries) is
-            coerced to ``[]`` (fail-open, never raises, never fabricates
-            verdicts). When False (default), the return is the bare issues
-            list.
-
-    Returns:
-        List of validated feedback items with id, description, file, line
-        — or, with ``include_verdicts=True``, a ``(items, verdicts)`` tuple.
-
-    Note:
-        Unparseable agent output degrades gracefully: an empty response, prose
-        instead of JSON, or a dict missing the ``issues`` key returns ``[]``
-        and emits a warning rather than raising ``ValueError``.
-
-    """
-    run_context = resolve_run_context(run_context)
-    print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
-    print_dim(console, f"Model: {backend.model}")
-
-    schema = output_schema if output_schema is not None else FEEDBACK_SCHEMA
-    # Per-file verdict surface (issue #742). Deep-mode's per-stack parse emits
-    # the schema-required ``verdicts`` array, so the prompt must teach the
-    # verdict-line shape and its sub-fields; otherwise the strict-mode model
-    # emits ``[]``/``lines_read: 0`` in production. Shallow / sweep callers
-    # pass ``include_verdicts=False`` and get no verdict
-    # instruction, keeping their prompt byte-identical to prior behavior.
-    verdict_line = (
-        '{"path": "path/to/file.py", "lines_read": 42, '
-        '"verdict": "clean|has_findings|not_reviewed", "n_findings": 0}'
-    )
-    verdicts_hint = (
-        "\nEmit a `verdicts` array, one entry per file the review examined, so a "
-        "file marked `clean` stays distinguishable from one never reviewed. Each "
-        f"entry is: {verdict_line}. "
-        "Use `clean` for a file read with no findings, `has_findings` for a file "
-        "the review flagged, and `not_reviewed` for a file never read. Set "
-        "`lines_read` to the real number of lines read and `n_findings` to that "
-        "file's issue count (0 if none).\n"
-        if include_verdicts
-        else ""
-    )
-    verdicts_example = (
-        f', "verdicts": [{verdict_line}]'
-        if include_verdicts
-        else ""
-    )
-    verdicts_empty = ', "verdicts": []' if include_verdicts else ""
-
-    # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = input_path if input_path is not None else review_output_path_for(
-        work.repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
-    if strategy is None:
-        strategy = _rp.build_default_profile().strategies["parse"].content
-    prompt = build_parse_prompt(
-        strategy=strategy,
-        review_output_path=review_output_path,
-        verdicts_hint=verdicts_hint,
-        verdicts_example=verdicts_example,
-        verdicts_empty=verdicts_empty,
-    )
-    sanctioned_inputs = _prepare_existing_phase_inputs(backend, work, {"review-output": review_output_path})
-
-    result, _, budget_reason = await run_agent(
-        backend,
-        work.repo,
-        prompt,
-        output_schema=schema,
-        phase=DaydreamPhase.PARSE,
-        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=DEFAULT_WALL_BUDGET_S,
-        sanctioned_inputs=sanctioned_inputs,
-        run_context=run_context,
-    )
-
-    # A truncated parse would silently drop the whole stack's findings, so it
-    # fails the run. The degrade path below stays for genuinely unparseable
-    # model output only.
-    if budget_reason:
-        raise RuntimeError(f"Feedback parse hit its budget: {budget_reason}")
-
-    if not isinstance(result, dict) or "issues" not in result:
-        # When structured output and JSON fallback both fail (e.g. empty
-        # response or model returns prose instead of JSON), treat as "no
-        # issues" rather than crashing the entire run.
-        preview = str(result)[:200] if result else "empty"
-        print_warning(
-            console,
-            f"Agent returned no parseable issues (got {type(result).__name__}); "
-            f"treating as no actionable issues. Preview: {preview}",
-        )
-        if include_verdicts:
-            return [], []
-        return []
-
-    raw_items = result["issues"]
-    feedback_items: list[dict[str, Any]] = raw_items if isinstance(raw_items, list) else []
-
-    # Structural evidence gate (issue #227, AC3): the default parse path
-    # (the shallow loop, ``input_path is None``) never
-    # produces merged-items.json, so it bypasses the gate in
-    # ``_append_structural_and_write_merged``. Apply the same ``_is_evidenced``
-    # drop the deep merge path uses, but ONLY here: the deep pre-merge
-    # per-stack parse passes ``input_path`` and defers grounding to the merge
-    # epilogue, where structural records are tagged ``lens="structural"`` before
-    # the gate so the structural carve-out applies. Drop (not raise) to match
-    # deep-path semantics and the graceful-degradation contract below.
-    if input_path is None:
-        evidenced: list[dict[str, Any]] = []
-        dropped: list[dict[str, Any]] = []
-        for it in feedback_items:
-            (evidenced if _is_evidenced(it) else dropped).append(it)
-        if dropped:
-            print_info(
-                console,
-                f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
-                f"from the shallow parse (ids: {[d.get('id') for d in dropped]})",
-            )
-        feedback_items = evidenced
-
-    issue_count = len(feedback_items)
-    print_info(console, f"Found {issue_count} actionable {'issue' if issue_count == 1 else 'issues'}")
-    if feedback_items:
-        print_feedback_table(console, feedback_items)
-    if not include_verdicts:
-        return feedback_items
-    # Per-file verdict surfacing (issue #742). Fail-open: a malformed
-    # ``verdicts`` value (non-list, or non-dict entries) coerces to ``[]`` —
-    # never raises, never fabricates verdicts.
-    declared = result.get("verdicts", [])
-    if not isinstance(declared, list):
-        declared = []
-    verdicts = [v for v in declared if isinstance(v, dict)]
-    return feedback_items, verdicts
 
 
 def _coerce_verdicts_payload(value: Any) -> dict[str, Any]:

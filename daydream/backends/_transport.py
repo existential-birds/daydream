@@ -53,14 +53,12 @@ class StderrPolicy(enum.Enum):
 class TransportExitError(Exception):
     """The child exited non-zero.
 
-    The transport only surfaces the code and the caller-noted diagnostics —
-    the backend formats its own user-visible message from these.
+    The backend formats its own user-visible message from the exit code.
     """
 
-    def __init__(self, cli: str, returncode: int, diagnostics: list[str]) -> None:
+    def __init__(self, cli: str, returncode: int) -> None:
         self.cli = cli
         self.returncode = returncode
-        self.diagnostics = diagnostics
 
 
 class CliTransport:
@@ -80,7 +78,6 @@ class CliTransport:
         stdin_data: bytes | None = None,
         stderr_policy: StderrPolicy = StderrPolicy.MERGE_INTO_STDOUT,
         stderr_sink: Callable[[str], None] | None = None,
-        diagnostics_sink: Callable[[str], None] | None = None,
         decode_errors: str = "strict",
         limit: int,
         env: dict[str, str] | None = None,
@@ -94,8 +91,6 @@ class CliTransport:
         self._stdin_data = stdin_data
         self._stderr_policy = stderr_policy
         self._stderr_sink = stderr_sink
-        self._diagnostics: list[str] = []
-        self._diagnostics_sink = diagnostics_sink
         # Backend decode policy: codex/pi were strict pre-transport; osprey
         # decoded with errors="replace" and must keep doing so (see the
         # backend's ``decode_errors="replace"`` construction below).
@@ -194,24 +189,18 @@ class CliTransport:
                 return
             yield raw.decode(errors=self._decode_errors).strip()
 
-    def note_diagnostic(self, line: str) -> None:
-        """Record *line* as a diagnostic via the caller's sink."""
-        self._diagnostics.append(line)
-        if self._diagnostics_sink is not None:
-            self._diagnostics_sink(line)
-
     async def wait(self) -> int:
         """Await the child and return its exit code.
 
         Raises:
-            TransportExitError: On a non-zero exit; ``.returncode`` and
-                ``.diagnostics`` carry the code and caller-noted lines.
+            TransportExitError: On a non-zero exit; ``.returncode`` carries
+                the code.
         """
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
         returncode = await self._proc.wait()
         if returncode != 0:
-            raise TransportExitError(self._cli, returncode, self._diagnostics)
+            raise TransportExitError(self._cli, returncode)
         return returncode
 
     async def drain_finished(self) -> None:

@@ -2035,9 +2035,11 @@ def _reset_real_git_resolution() -> Iterator[Any]:
     """Clear the real-git resolver cache before AND after every test (S1 cache)."""
     from daydream.backends import codex
 
-    codex._reset_real_git_resolution()
+    codex._REAL_GIT_DIR = None
+    codex._REAL_GIT_RESOLVED = False
     yield
-    codex._reset_real_git_resolution()
+    codex._REAL_GIT_DIR = None
+    codex._REAL_GIT_RESOLVED = False
 
 
 class TestResolveRealGitDir:

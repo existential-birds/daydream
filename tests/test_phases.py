@@ -615,8 +615,8 @@ async def test_host_commit_push_verifies_remote_before_success(
 
     sha = git_ops.head_sha(work_repo)
     assert git_ops.remote_contains_commit(work_repo, "main", sha, remote="origin") is True
-    assert git_ops.head_commit_message(work_repo).startswith("fix:")
-    assert "fix.py: fix bug" in git_ops.head_commit_message(work_repo)
+    assert git(work_repo, "log", "-1", "--format=%B").startswith("fix:")
+    assert "fix.py: fix bug" in git(work_repo, "log", "-1", "--format=%B")
 
 
 @pytest.mark.asyncio
@@ -744,9 +744,7 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
             preexisting_untracked=set(),
         )
     # The local commit was still created with the deterministic message.
-    from daydream import git_ops
-
-    assert git_ops.head_commit_message(work_repo).startswith("fix:")
+    assert git(work_repo, "log", "-1", "--format=%B").startswith("fix:")
     out = capsys.readouterr().out
     assert "Commit and push complete" not in out
 
@@ -976,7 +974,6 @@ async def test_hook_aware_push_red_suite_blocks_push(
     is a failure even though the local commit exists) — the hook never becomes
     a license to push unvalidated code."""
     import daydream.phases
-    from daydream import git_ops
     from daydream.phases import _do_commit
 
     repo = _pushable_repo(tmp_path)
@@ -1001,7 +998,7 @@ async def test_hook_aware_push_red_suite_blocks_push(
     # Nothing was pushed: the remote still reports the baseline sha only.
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
     # The local commit exists but is unpushed.
-    assert git_ops.head_commit_message(repo).startswith("fix:")
+    assert git(repo, "log", "-1", "--format=%B").startswith("fix:")
 
 
 def test_test_command_wall_budget_resolves_file_config_override() -> None:
@@ -1201,123 +1198,6 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
     assert "- src/handler.py" not in fix_prompt
     # No turn ceiling on any call, including the FIX run_agent call (2nd execute).
     assert backend.max_turns == [None, None, None]
-
-
-@pytest.mark.asyncio
-async def test_phase_parse_feedback_empty_response_returns_empty_list(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """When the agent returns empty text (schema miss), treat as no issues."""
-    from daydream.phases import phase_parse_feedback
-
-    silence_console("daydream.phases")
-
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Verdict\n\nReady: Yes\n")
-
-    # Default script = a bare ResultEvent: a schema miss with no structured output, no text.
-    result = await phase_parse_feedback(
-        ScriptedBackend(), make_work(tmp_path), allow_standalone=True
-    )
-    assert result == []
-
-
-@pytest.mark.asyncio
-async def test_phase_parse_feedback_requires_explicit_session_or_standalone_opt_in(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """Direct callers must affirmatively select legacy public-path routing."""
-    from daydream.artifact_visibility import ArtifactVisibilityError
-    from daydream.phases import phase_parse_feedback
-
-    silence_console("daydream.phases")
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Review\n", encoding="utf-8")
-
-    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
-        await phase_parse_feedback(ScriptedBackend(), make_work(tmp_path))
-
-
-@pytest.mark.asyncio
-async def test_phase_parse_feedback_json_fallback(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """When structured output fails but raw text is valid JSON, parse it."""
-    from daydream.phases import phase_parse_feedback
-
-    silence_console("daydream.phases")
-
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. [foo.py:10] Bug\n")
-
-    # A schema miss where the model outputs JSON as plain text.
-    backend = ScriptedBackend(events=[
-        TextEvent(
-            text=(
-                '{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", '
-                '"line": 10, "confidence": "HIGH", "rationale": "r", '
-                '"evidence": "foo.py:10"}]}'
-            )
-        ),
-        _RESULT,
-    ])
-
-    result = await phase_parse_feedback(backend, make_work(tmp_path), allow_standalone=True)
-    assert len(result) == 1
-    assert result[0]["file"] == "foo.py"
-
-
-@pytest.mark.asyncio
-async def test_phase_parse_feedback_default_path_drops_speculative(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """Issue #227 (AC3): the default (shallow) parse path drops speculative
-    findings before they reach the fix loop -- the grounding gate the deep
-    merge path applies is enforced here too, so AC3 holds for ``--shallow``
-    and PR-feedback ingestion.
-
-    Real path through ``phase_parse_feedback`` (input_path=None): the backend
-    returns one grounded finding and one evidence-free speculative finding;
-    only the grounded one survives.
-    """
-    from daydream.phases import phase_parse_feedback
-
-    silence_console("daydream.phases")
-
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Issues\n")
-
-    backend = ScriptedBackend(events=_structured_turn({
-        "issues": [
-            {
-                "id": 1,
-                "description": "grounded",
-                "file": "a.py",
-                "line": 7,
-                "confidence": "HIGH",
-                "rationale": "r",
-                "evidence": "a.py:7",
-            },
-            {
-                "id": 2,
-                "description": "speculative gut feeling",
-                "file": "",
-                "line": 0,
-                "confidence": "MEDIUM",
-                "rationale": "inferred from the diff alone",
-                "evidence": "gut feeling",
-            },
-        ]
-    }))
-
-    result = await phase_parse_feedback(backend, make_work(tmp_path), allow_standalone=True)
-    assert [i["description"] for i in result] == ["grounded"], (
-        f"speculative finding leaked past the shallow-path gate: {result}"
-    )
 
 
 @pytest.mark.asyncio
@@ -3304,9 +3184,8 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     await phase_commit_push(backend, work)
 
     import daydream
-    from daydream import git_ops
 
-    message = git_ops.head_commit_message(repo)
+    message = git(repo, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in message
     assert work.run_id in message
     assert f"Daydream-Version: {daydream.__version__}" in message
@@ -5128,11 +5007,6 @@ def _install_hero_dim_spies(
     return heroes, dim_messages
 
 
-def _setup_parse_feedback(tmp_path: Path) -> dict[str, object]:
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Verdict\n\nReady: Yes\n")
-    return {}
-
-
 def _setup_no_kwargs(tmp_path: Path) -> dict[str, object]:
     return {}
 
@@ -5181,10 +5055,6 @@ _MERGE_ITEMS = {
     ("phase_name", "model", "events", "expected_hero", "setup"),
     [
         pytest.param(
-            "phase_parse_feedback", "claude-haiku-4-5", _structured_turn({"issues": []}),
-            "REFLECT", _setup_parse_feedback, id="parse_feedback",
-        ),
-        pytest.param(
             "phase_test_and_heal", "claude-sonnet-4-6",
             (TextEvent(text="All tests passed"), _RESULT),
             "AWAKEN", _setup_no_kwargs, id="test_and_heal",
@@ -5224,7 +5094,7 @@ async def test_phase_prints_model_line_after_hero(
     kwargs = setup(tmp_path)
     backend = ScriptedBackend(events=events, model=model)
 
-    if phase_name in {"phase_parse_feedback", "phase_cross_stack_merge"}:
+    if phase_name == "phase_cross_stack_merge":
         kwargs["allow_standalone"] = True
     await getattr(phases, phase_name)(backend, make_work(tmp_path), **kwargs)
 

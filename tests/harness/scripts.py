@@ -30,7 +30,7 @@ from daydream import cli
 from daydream.backends import AgentEvent
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase
-from tests.contract._loaders import _build_claude_messages, _build_codex_jsonl
+from tests.contract._loaders import _build_codex_jsonl
 from tests.harness.codex_replay import make_mock_process
 
 PhaseScripts = dict[DaydreamPhase, dict[str, Any]]
@@ -91,21 +91,6 @@ def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
             )
         return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))
-
-
-def build_claude_messages_for_phase(script: dict[str, Any]) -> list[Any]:
-    """Synthesize Claude SDK messages for one phase's script (parity path).
-
-    Reuses ``tests/contract/_loaders.py:_build_claude_messages`` and threads
-    ``script["structured_output"]`` onto the trailing ``ResultMessage`` so the
-    real Claude backend yields it on ``ResultEvent.structured_output``.
-    """
-    messages = _build_claude_messages(script)
-    structured = script.get("structured_output")
-    if structured is not None:
-        # The trailing message is the ResultMessage (see _build_claude_messages).
-        messages[-1].structured_output = structured
-    return messages
 
 
 def render_codex(phase_scripts: PhaseScripts) -> dict[DaydreamPhase, list[str]]:

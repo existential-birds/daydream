@@ -71,13 +71,18 @@ class InvalidRepositoryFilePath(ValueError):
     """
 
 
-def valid_repository_file_path(value: str) -> bool:
-    """Return whether ``value`` has the safe repository-file grammar."""
+def _valid_lexical(value: str, pattern: re.Pattern[str]) -> bool:
+    """Return whether ``value`` fits the byte budget and *pattern* grammar."""
     try:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return len(encoded) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(_REPOSITORY_FILE_PATH.fullmatch(value))
+    return len(encoded) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(pattern.fullmatch(value))
+
+
+def valid_repository_file_path(value: str) -> bool:
+    """Return whether ``value`` has the safe repository-file grammar."""
+    return _valid_lexical(value, _REPOSITORY_FILE_PATH)
 
 
 def canonicalize_repository_file_path(repo: Path, value: object) -> str:
@@ -121,11 +126,7 @@ def git_observed_path_is_confined(repo: Path, value: str) -> bool:
 
 def valid_directory_scope_lexical(value: str) -> bool:
     """Return whether ``value`` is a safe file-or-directory scope."""
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return len(encoded) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(_DIRECTORY_SCOPE.fullmatch(value))
+    return _valid_lexical(value, _DIRECTORY_SCOPE)
 
 
 def _strip_prefix(

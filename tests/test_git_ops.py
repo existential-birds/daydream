@@ -1573,14 +1573,6 @@ def test_fetch_pulls_new_commits(tmp_path: Path) -> None:
     assert _git(repo, "rev-parse", "origin/main") == new_sha
 
 
-def test_checkout_paths_restores_working_tree(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "base.txt").write_text("MUTATED\n")
-    assert (repo / "base.txt").read_text() == "MUTATED\n"
-    git_ops.checkout_paths(repo, [Path(".")])
-    assert (repo / "base.txt").read_text() == "base\n"
-
-
 def test_worktree_add_and_remove_round_trip(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     head = _git(repo, "rev-parse", "HEAD")

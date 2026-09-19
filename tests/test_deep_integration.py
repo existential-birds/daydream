@@ -347,27 +347,8 @@ def test_phase_primitives_unmodified() -> None:
         phase_alternative_review,
         phase_commit_push,
         phase_fix,
-        phase_parse_feedback,
         phase_test_and_heal,
         phase_understand_intent,
-    )
-
-    # phase_parse_feedback gained an OPTIONAL keyword-only kwarg per plan 05-06.
-    sig = inspect.signature(phase_parse_feedback)
-    params = list(sig.parameters.values())
-    assert params[0].name == "backend", (
-        f"phase_parse_feedback first param: {params[0].name}"
-    )
-    assert params[1].name == "work", (
-        f"phase_parse_feedback second param: {params[1].name}"
-    )
-    input_path = sig.parameters.get("input_path")
-    assert input_path is not None, "phase_parse_feedback missing input_path kwarg"
-    assert input_path.kind == inspect.Parameter.KEYWORD_ONLY, (
-        f"input_path kind: {input_path.kind}"
-    )
-    assert input_path.default is None, (
-        f"input_path default: {input_path.default!r}"
     )
 
     # Other primitives: first two params are (backend, work).

@@ -1089,7 +1089,7 @@ def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -
         "path": issue.path,
         "line": line,
         "side": "RIGHT",
-        "body": _format_inline_body(issue, renderers),
+        "body": _format_comment_body(issue, "inline", renderers),
     }
 
 
@@ -1182,21 +1182,14 @@ def _render_finding(issue: ParsedIssue, placement: str, renderers: ReviewRendere
     return result
 
 
-def _format_inline_body(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
-    parts = [_render_finding(issue, "inline", renderers), DAYDREAM_FOOTER]
-    if issue.fingerprint:
-        parts.append(finding_marker(issue.fingerprint))
-    return "\n\n".join(parts).strip()
+def _format_comment_body(issue: ParsedIssue, kind: str, renderers: ReviewRenderers) -> str:
+    """Render an inline/file-level comment body through the ``finding`` renderer.
 
-
-def _format_file_level_body(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
-    """Render the body of a file-level review comment.
-
-    Carries the same :data:`DAYDREAM_FOOTER` badge and hidden finding marker
-    as an inline comment, so the labeler's author check and fingerprint join
-    recognise it without any read-side special-casing.
+    Both placements carry the same :data:`DAYDREAM_FOOTER` badge and hidden
+    finding marker, so the labeler's author check and fingerprint join
+    recognise a file-level comment without any read-side special-casing.
     """
-    parts = [_render_finding(issue, "file_level", renderers), DAYDREAM_FOOTER]
+    parts = [_render_finding(issue, kind, renderers), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
@@ -1777,7 +1770,7 @@ def post_classified_review(
             commit_id=plan.pr.head_sha,
             path=finding.path,
             subject_type="file",
-            body=_format_file_level_body(finding.to_parsed(), plan.renderers),
+            body=_format_comment_body(finding.to_parsed(), "file_level", plan.renderers),
         )
         if transport.post_file_comment(plan.pr, payload):
             posted.append(finding)

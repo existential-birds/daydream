@@ -834,70 +834,20 @@ def test_human_source_appended_verbatim(tmp_path: Path) -> None:
     assert hist[0]["labels"] == json.dumps(["rejected"])
 
 
-def test_non_iso_observed_at_fails_closed_before_any_write(tmp_path: Path) -> None:
-    """A hand-edited non-ISO observed_at must abort the merge at the pre-write
-    gate, not mid-append: ValueError naming the row and zero rows written
-    (S2/M9)."""
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
-    row: dict[str, Any] = {
-        "session_id": SID,
-        "source": "auto",
-        "observed_at": "not-an-iso-stamp",
-        "labels": ["accepted"],
-        "pr_state": None,
-        "labeler_version": "980-rubric-r2",
-        "evidence_sha": "e" * 64,
-        "rubric_json": None,
-        "valid_at": None,
-        "reward_version": None,
-        "reward_json": None,
-        "composite_reward": None,
-        "reviewer_logins": None,
-        "has_posterior": 0,
-        "labeler_policy_version": "980-policy-r1",
-        "reply_classifier_version": None,
-        "reply_evidence_digest": None,
-    }
-    with pytest.raises(ValueError, match=SID):
-        merge_imported_observations(target, [_row_with_digest(row)])
-    assert label_observation_history(target, SID) == []
-
-
-def test_naive_observed_at_fails_closed_before_any_write(tmp_path: Path) -> None:
-    """A naive observed_at (no UTC offset) is rejected at the pre-write gate
-    exactly like the writer rejects it per row (S2/M9)."""
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
-    row: dict[str, Any] = {
-        "session_id": SID,
-        "source": "auto",
-        "observed_at": "2026-05-01T00:00:00",
-        "labels": ["accepted"],
-        "pr_state": None,
-        "labeler_version": "980-rubric-r2",
-        "evidence_sha": "e" * 64,
-        "rubric_json": None,
-        "valid_at": None,
-        "reward_version": None,
-        "reward_json": None,
-        "composite_reward": None,
-        "reviewer_logins": None,
-        "has_posterior": 0,
-        "labeler_policy_version": "980-policy-r1",
-        "reply_classifier_version": None,
-        "reply_evidence_digest": None,
-    }
-    with pytest.raises(ValueError, match=SID):
-        merge_imported_observations(target, [_row_with_digest(row)])
-    assert label_observation_history(target, SID) == []
-
-
-def test_non_iso_valid_at_fails_closed_before_any_write(tmp_path: Path) -> None:
-    """A non-ISO valid_at is also caught by the pre-write gate, not inside
-    the writer's per-row canonical_utc_iso call (S2/M9)."""
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("observed_at", "not-an-iso-stamp"),
+        ("observed_at", "2026-05-01T00:00:00"),
+        ("valid_at", "not-a-valid-time"),
+    ],
+)
+def test_bad_timestamp_fails_closed_before_any_write(
+    tmp_path: Path, field: str, bad_value: str
+) -> None:
+    """A hand-edited bad timestamp (non-ISO observed_at, naive observed_at, or
+    non-ISO valid_at) must abort the merge at the pre-write gate, not
+    mid-append: ValueError naming the row and zero rows written (S2/M9)."""
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
@@ -910,7 +860,7 @@ def test_non_iso_valid_at_fails_closed_before_any_write(tmp_path: Path) -> None:
         "labeler_version": "980-rubric-r2",
         "evidence_sha": "e" * 64,
         "rubric_json": None,
-        "valid_at": "not-a-valid-time",
+        "valid_at": None,
         "reward_version": None,
         "reward_json": None,
         "composite_reward": None,
@@ -920,6 +870,7 @@ def test_non_iso_valid_at_fails_closed_before_any_write(tmp_path: Path) -> None:
         "reply_classifier_version": None,
         "reply_evidence_digest": None,
     }
+    row[field] = bad_value
     with pytest.raises(ValueError, match=SID):
         merge_imported_observations(target, [_row_with_digest(row)])
     assert label_observation_history(target, SID) == []

@@ -5,7 +5,7 @@ file/line ranges, symbol definitions, and finding ``file:line`` validity -- by
 re-running ``git diff`` / ``sed`` on ``diff.patch``. This module owns the single
 unified-diff parser and the persisted ``hunk-index.json`` write/load, and
 exposes the consumer views (``head_side_ranges``, ``head_side_ranges_by_file``,
-``added_line_numbers``, ``change_line_count``) so ``pr_review``,
+``added_line_numbers``) so ``pr_review``,
 ``quote_scrub``, ``coverage`` and the grounded-diagram pass all count from the
 same source and cannot drift.
 """
@@ -232,18 +232,6 @@ def added_line_numbers(parsed: dict[str, dict[str, Any]]) -> dict[str, set[int]]
     numbers).
     """
     return {path: set(info["added_lines"]) for path, info in parsed.items()}
-
-
-def change_line_count(parsed: dict[str, dict[str, Any]], file: str) -> int:
-    """Return the count of changed content lines for one file in a parse result.
-
-    The single shared hunk-line counter (the count of changed content lines,
-    file headers excluded) consumed by ``coverage.filter_sweepable_files``.
-    """
-    info = parsed.get(file)
-    if info is None:
-        return 0
-    return int(info["added_total"]) + int(info["removed_total"])
 
 
 def hunk_index_path(daydream_dir: Path) -> Path:
