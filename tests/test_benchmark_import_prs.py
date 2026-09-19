@@ -23,17 +23,9 @@ from daydream import git_ops
 from tests.harness import github_schema as gs
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git
-
-# Deterministic seed identity so a local bare origin's commits are stable and
-# reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
-_SEED_ENV = {
-    "GIT_AUTHOR_NAME": "Tester",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_NAME": "Tester",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
-}
+from tests.harness.git_helpers import seed_pr_origin
+from tests.harness.git_helpers import seeded_commit as _seed_commit
+from tests.harness.git_helpers import write_and_stage as _seed_write
 
 _PR_HEADER = {
     "number": 101,
@@ -1094,18 +1086,6 @@ def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) ->
 # real-git local-origin seed for snapshot-freeze wiring (no network)
 
 
-def _seed_write(repo: Path, name: str, content: str) -> None:
-    path = repo / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    _seed_git(repo, "add", name)
-
-
-def _seed_commit(repo: Path, message: str) -> str:
-    _seed_git(repo, "commit", "-m", message, env=_SEED_ENV)
-    return _seed_git(repo, "rev-parse", "HEAD")
-
-
 def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
     """Build a real local bare origin whose base/head are the PR's SHAs.
 
@@ -1117,38 +1097,13 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
 
     Returns ``(origin_url, base_sha, head_sha)``.
     """
-    import shutil as _sh
-
-    repo = tmp_path / "local_wt"
-    if repo.exists():
-        _sh.rmtree(repo)
-    repo.mkdir()
-    _seed_git(repo, "init", "-b", "main")
-    _seed_write(repo, "readme.txt", "base1\n")
-    _seed_commit(repo, "base1")
-    _seed_write(repo, "base.py", "BASE = 2\n")
-    base_sha = _seed_commit(repo, "base2")
-    _seed_write(repo, "beyond.py", "BEYOND = 3\n")
-    _seed_commit(repo, "base3")
-    _seed_git(repo, "checkout", "--detach", base_sha)
-    (repo / "base.py").write_text("BASE = 20\n")
-    _seed_git(repo, "add", "base.py")
-    _seed_write(repo, "feature.py", "FEATURE = 1\n")
-    head_sha = _seed_commit(repo, "feature")
-    bare = tmp_path / "origin_local.git"
-    if bare.exists():
-        _sh.rmtree(bare)
-    bare.mkdir()
-    _seed_git(bare, "init", "--bare")
-    _seed_git(repo, "remote", "add", "origin", str(bare))
-    _seed_git(repo, "push", "origin", "main:main")
-    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
+    origin_url, base_sha, head_sha = seed_pr_origin(tmp_path)
     # Re-seed the canned PR header so base.sha/head.sha are the real origin SHAs.
     header = dict(_PR_HEADER)
     header["base"] = {"ref": "main", "sha": base_sha}
     header["head"] = {"ref": "feature/cache", "sha": head_sha}
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    return str(bare), base_sha, head_sha
+    return origin_url, base_sha, head_sha
 
 
 def _seed_stacked_origin(

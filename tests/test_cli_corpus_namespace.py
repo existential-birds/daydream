@@ -36,30 +36,20 @@ def _run_main(argv: list[str]) -> int:
     return 0
 
 
-def test_corpus_harvest_exits_nonzero_on_aborted_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("summary, expected", [
+    ({"considered": 3, "annotated": 1, "skipped": 0, "errors": 0, "aborted": 1}, 1),
+    ({"considered": 3, "annotated": 1, "skipped": 0, "errors": 2, "aborted": 0}, 1),
+    # Unresolved findings in the data are not process failure (spec KD).
+    ({"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}, 0),
+])
+def test_corpus_harvest_exit_code_maps_summary(
+    monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any], expected: int
+) -> None:
     async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
-        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 0, "aborted": 1}
+        return summary
 
     monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
-
-
-def test_corpus_harvest_exits_nonzero_on_row_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
-        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 2, "aborted": 0}
-
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
-
-
-def test_corpus_harvest_still_exits_zero_on_clean_partial(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unresolved findings in the data are not process failure (spec KD)."""
-
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
-        return {"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}
-
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == expected
 
 
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:

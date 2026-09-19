@@ -64,8 +64,6 @@ axes only, renormalized so present weights sum to one
 that axis ``None`` and ``axes_present[axis] = False`` — never impute ``0.0``
 for a missing axis, never raise. If no credit axis is present while
 ``format_valid`` is ``True``, the composite is ``None`` (uncomputable).
-:attr:`RewardWeights.w_fp` is **not** applied here — it survives as a
-documented training-time combination weight (pending recalibration #114).
 
 Changing any default weight is a deliberate golden-update: it requires
 re-pinning the golden test values *and* bumping :data:`REWARD_VERSION`. So does
