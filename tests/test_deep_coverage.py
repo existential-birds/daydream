@@ -17,7 +17,7 @@ from daydream.deep.coverage import (
     diff_block_for_file,
     filter_sweepable_files,
 )
-from daydream.hunk_index import change_line_count, parse_hunks, write_hunk_index
+from daydream.hunk_index import parse_hunks, write_hunk_index
 
 _DIFF = (
     "diff --git a/api.py b/api.py\n"
@@ -323,13 +323,6 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
     swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept
-
-
-def test_hunk_change_line_count_excludes_headers() -> None:
-    """+++/--- file headers are not counted as added/removed lines."""
-    parsed = parse_hunks(_DIFF)
-    assert change_line_count(parsed, "api.py") == 2
-    assert change_line_count(parsed, "notes.txt") == 6
 
 
 def test_filter_sweepable_files_from_index_with_patch_unreadable(tmp_path: Path) -> None:

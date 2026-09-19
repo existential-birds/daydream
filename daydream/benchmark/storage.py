@@ -210,9 +210,7 @@ class WorkspaceLock:
         return False
 
 
-# ---------------------------------------------------------------------------
 # Transaction journal (prepared | committing | complete) + startup recovery
-# ---------------------------------------------------------------------------
 #
 # A transaction persists a same-filesystem journal under
 # ``<root>/transactions/<op_id>/journal.json`` describing the exact ordered
@@ -296,9 +294,7 @@ class Transaction:
         doc = self._build_document()
         atomic_write_json(self._journal_path(), doc, mode=0o600)
 
-    # -----------------------------------------------------------------------
     # pipeline
-    # -----------------------------------------------------------------------
 
     def create_dir(self, target_rel: str | Path) -> None:
         """Create a ``0700`` directory that this journal atomically owns.
@@ -506,9 +502,7 @@ class Transaction:
         return False
 
 
-# ---------------------------------------------------------------------------
 # fsync helpers
-# ---------------------------------------------------------------------------
 
 
 def _fsync_file(path: Path) -> None:
@@ -581,9 +575,7 @@ def resolve_authoring_path(root: Path, rel: str | Path) -> Path:
     return root / _resolve_target(root, rel)
 
 
-# ---------------------------------------------------------------------------
 # startup recovery + orphan rules
-# ---------------------------------------------------------------------------
 
 
 def recover_startup(

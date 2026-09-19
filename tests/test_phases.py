@@ -615,8 +615,8 @@ async def test_host_commit_push_verifies_remote_before_success(
 
     sha = git_ops.head_sha(work_repo)
     assert git_ops.remote_contains_commit(work_repo, "main", sha, remote="origin") is True
-    assert git_ops.head_commit_message(work_repo).startswith("fix:")
-    assert "fix.py: fix bug" in git_ops.head_commit_message(work_repo)
+    assert git(work_repo, "log", "-1", "--format=%B").startswith("fix:")
+    assert "fix.py: fix bug" in git(work_repo, "log", "-1", "--format=%B")
 
 
 @pytest.mark.asyncio
@@ -744,9 +744,7 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
             preexisting_untracked=set(),
         )
     # The local commit was still created with the deterministic message.
-    from daydream import git_ops
-
-    assert git_ops.head_commit_message(work_repo).startswith("fix:")
+    assert git(work_repo, "log", "-1", "--format=%B").startswith("fix:")
     out = capsys.readouterr().out
     assert "Commit and push complete" not in out
 
@@ -976,7 +974,6 @@ async def test_hook_aware_push_red_suite_blocks_push(
     is a failure even though the local commit exists) — the hook never becomes
     a license to push unvalidated code."""
     import daydream.phases
-    from daydream import git_ops
     from daydream.phases import _do_commit
 
     repo = _pushable_repo(tmp_path)
@@ -1001,7 +998,7 @@ async def test_hook_aware_push_red_suite_blocks_push(
     # Nothing was pushed: the remote still reports the baseline sha only.
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
     # The local commit exists but is unpushed.
-    assert git_ops.head_commit_message(repo).startswith("fix:")
+    assert git(repo, "log", "-1", "--format=%B").startswith("fix:")
 
 
 def test_test_command_wall_budget_resolves_file_config_override() -> None:
@@ -3187,9 +3184,8 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     await phase_commit_push(backend, work)
 
     import daydream
-    from daydream import git_ops
 
-    message = git_ops.head_commit_message(repo)
+    message = git(repo, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in message
     assert work.run_id in message
     assert f"Daydream-Version: {daydream.__version__}" in message

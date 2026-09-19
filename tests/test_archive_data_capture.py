@@ -176,7 +176,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
     assert git(remote, "rev-parse", "refs/heads/feature") == head_after
-    commit_message = git_ops.head_commit_message(multi_stack_target)
+    commit_message = git(multi_stack_target, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in commit_message
     assert "Daydream-Version:" in commit_message
 

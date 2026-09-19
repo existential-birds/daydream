@@ -49,9 +49,7 @@ from daydream.config import (
     DIAGRAM_MAX_PARTICIPANTS,
 )
 
-# ---------------------------------------------------------------------------
 # Sanitization
-# ---------------------------------------------------------------------------
 
 # Characters dropped outright from a mermaid label. Each one is either a mermaid
 # statement terminator (``;``), a comment opener (``%%``, handled separately), a
@@ -142,9 +140,7 @@ def _code_span(value: Any) -> str:
     return f"`{text}`" if text else ""
 
 
-# ---------------------------------------------------------------------------
 # Line grammars
-# ---------------------------------------------------------------------------
 
 # One label character: anything the sanitizer cannot remove, plus our three
 # escapes. ``>`` is excluded, so no label can contain ``->>`` or ``-->>``; ``|``
@@ -185,9 +181,7 @@ FLOWCHART_LINE_GRAMMAR: re.Pattern[str] = re.compile(
 )
 
 
-# ---------------------------------------------------------------------------
 # Small typed readers over the untyped spec/result dicts
-# ---------------------------------------------------------------------------
 
 
 def _dicts(value: Any) -> list[dict[str, Any]]:
@@ -232,9 +226,7 @@ def _evidence_location(evidence: Any) -> str:
     return f"{path}:{line}"
 
 
-# ---------------------------------------------------------------------------
 # Sequence renderer
-# ---------------------------------------------------------------------------
 
 _REPLY_ARROW = "-->>"
 _CALL_ARROW = "->>"
@@ -359,9 +351,7 @@ def render_sequence_mermaid(spec_final: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # Flowchart renderer
-# ---------------------------------------------------------------------------
 
 _BARE_NODE_KINDS = ("start", "end", "process", "decision", "io")
 
@@ -461,9 +451,7 @@ def _assert_cap(collection: str, size: int, cap: int) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Markdown blocks
-# ---------------------------------------------------------------------------
 
 _KIND_TITLES = {"sequence": "Sequence Diagram", "flowchart": "Flowchart"}
 _KIND_PHRASES = {"sequence": "sequence diagram", "flowchart": "flowchart"}

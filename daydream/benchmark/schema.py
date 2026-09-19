@@ -112,9 +112,7 @@ def _normalize_host_list(values: list[str], what: str) -> list[str]:
     return [normalize_hostname(str(h)) for h in values]
 
 
-# ---------------------------------------------------------------------------
 # manifest blocks
-# ---------------------------------------------------------------------------
 
 
 class Source(BaseModel):
@@ -269,9 +267,7 @@ class BenchmarkManifest(BaseModel):
         return self
 
 
-# ---------------------------------------------------------------------------
 # ID derivation
-# ---------------------------------------------------------------------------
 
 
 def case_id_for(pr_number: int, head_sha: str) -> str:
@@ -325,9 +321,7 @@ def derive_finding_id(finding: "Finding | dict[str, Any]", *, case_id: str) -> s
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
 # snapshot union
-# ---------------------------------------------------------------------------
 
 
 class _SnapshotBase(BaseModel):
@@ -442,9 +436,7 @@ Snapshot = Annotated[
     Field(discriminator="status"),
 ]
 
-# ---------------------------------------------------------------------------
 # location / finding / provenance / exclusions
-# ---------------------------------------------------------------------------
 
 
 def exact_git_tree_path(value: Any) -> str:
@@ -1132,9 +1124,7 @@ def derive_gold_mode(curation: Curation) -> str:
     return "historical"
 
 
-# ---------------------------------------------------------------------------
 # state transitions, derived workspace state, 0/2/1 classifier
-# ---------------------------------------------------------------------------
 
 
 class TransitionError(Exception):

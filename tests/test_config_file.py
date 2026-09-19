@@ -198,34 +198,6 @@ def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
     assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 
 
-def test_uncovered_sweep_toggle_is_bool_only(tmp_path: Path) -> None:
-    """``uncovered_sweep`` is bool-only: an accidental int degrades to unset."""
-    (tmp_path / ".daydream.toml").write_text("uncovered_sweep = false\n")
-    assert load_file_config(tmp_path).uncovered_sweep is False
-    (tmp_path / ".daydream.toml").write_text("uncovered_sweep = 1\n")
-    assert load_file_config(tmp_path).uncovered_sweep is None
-
-
-def test_uncovered_sweep_numerics_accept_zero_and_keep_non_negative(tmp_path: Path) -> None:
-    """Non-negative-only coercion: ``0`` is meaningful, negatives degrade to None."""
-    (tmp_path / ".daydream.toml").write_text(
-        "uncovered_sweep_max_files = 0\nuncovered_sweep_min_hunk_lines = 0\n"
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.uncovered_sweep_max_files == 0
-    assert cfg.uncovered_sweep_min_hunk_lines == 0
-
-
-def test_uncovered_sweep_numerics_negative_degrade_to_none(tmp_path: Path) -> None:
-    """A negative capacity cap or hunk floor is never meaningful: degrade to None."""
-    (tmp_path / ".daydream.toml").write_text(
-        "uncovered_sweep_max_files = -1\nuncovered_sweep_min_hunk_lines = -5\n"
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.uncovered_sweep_max_files is None
-    assert cfg.uncovered_sweep_min_hunk_lines is None
-
-
 @pytest.mark.parametrize(
     ("content", "expected"),
     [

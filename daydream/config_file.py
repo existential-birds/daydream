@@ -85,19 +85,6 @@ class DaydreamFileConfig:
             junk -- negative, NaN, inf, bool, or non-number) falls through to
             ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S`` (300.0); an invalid
             declared value is warned about so the degradation is observable.
-        uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep
-            (second-pass reviewer over diff files no per-stack reviewer read).
-            ``None`` falls through to the RunConfig field / orchestrator default
-            (``True``); ``False`` disables the pass.
-        uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
-            are swept in one run. Non-negative only: ``0`` disables the sweep;
-            a negative value degrades to ``None`` (the named default applies).
-            ``None`` falls through to the review-profile pipeline default (10).
-        uncovered_sweep_min_hunk_lines: Issue #309. Minimum added/removed lines
-            a file's hunks must contain to warrant a sweep. Non-negative only:
-            ``0`` removes the floor; a negative value degrades to ``None`` (the
-            named default applies). ``None`` falls through to the review-profile
-            pipeline default (5).
         quality_gate_enabled: Issue #315. Toggle the fix-phase anti-degradation
             quality gate. ``None`` falls through to the orchestrator default
             (``config.DEFAULT_QUALITY_GATE_ENABLED``, ``True``); ``False`` skips
@@ -183,9 +170,6 @@ class DaydreamFileConfig:
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
     retry_recovery_allowance_s: float | None = None
-    uncovered_sweep: bool | None = None
-    uncovered_sweep_max_files: int | None = None
-    uncovered_sweep_min_hunk_lines: int | None = None
     deep_shard_enabled: bool | None = None
     deep_shard_max_files: int | None = None
     deep_shard_max_bytes: int | None = None
@@ -503,16 +487,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # ``scope_issue_filing = 1`` is treated as unset, not enabled.
     raw_scope = merged.get("scope_issue_filing")
     scope_issue_filing: bool | None = raw_scope if isinstance(raw_scope, bool) else None
-    # uncovered_sweep: bool only, same degrade-to-None rule as precision_mode so
-    # an accidental ``uncovered_sweep = 1`` is treated as unset, not enabled.
-    raw_uncovered_sweep = merged.get("uncovered_sweep")
-    uncovered_sweep: bool | None = (
-        raw_uncovered_sweep if isinstance(raw_uncovered_sweep, bool) else None
-    )
     # deep_shard_enabled: bool only, same degrade-to-None rule as precision_mode
     # so an accidental ``deep_shard_enabled = 1`` is treated as unset, not
     # enabled. The shard bounds are non-negative ints (reject bool/float via
-    # _coerce_non_negative_int, mirroring uncovered_sweep_max_files).
+    # _coerce_non_negative_int).
     raw_deep_shard_enabled = merged.get("deep_shard_enabled")
     deep_shard_enabled: bool | None = (
         raw_deep_shard_enabled if isinstance(raw_deep_shard_enabled, bool) else None
@@ -560,9 +538,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
         retry_recovery_allowance_s=_coerce_retry_recovery_allowance(merged),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
-        uncovered_sweep=uncovered_sweep,
-        uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
-        uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),
         deep_shard_enabled=deep_shard_enabled,
         deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),
         deep_shard_max_bytes=_coerce_non_negative_int(merged.get("deep_shard_max_bytes")),
