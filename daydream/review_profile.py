@@ -569,15 +569,6 @@ _ENVELOPE_BY_STAGE: dict[str, str] = {
 }
 
 
-ENVELOPE_CLASSIFICATION: dict[str, dict[str, str]] = {
-    key: {
-        "strategy": strategy.source,
-        "envelope": _ENVELOPE_BY_STAGE[key],
-    }
-    for key, strategy in build_default_profile().strategies.items()
-}
-
-
 def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     """Strictly parse TOML into a fully-defaulted ``ReviewProfile`` (R3/R4).
 

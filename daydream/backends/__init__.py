@@ -262,7 +262,6 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
 
 
-# --- Effective Configuration Admission Contract (P18 Task 1) ---------------
 #
 # The helpers below admit only the exact typed representations the P18 plan's
 # Effective Configuration Admission Contract allows: closed bool/int64/finite
@@ -1046,7 +1045,6 @@ class TurnEndEvent:
     timestamp_source: Literal["host_observed", "native"] = "host_observed"
 
 
-# --- Generation lifecycle (P18 Task 1) --------------------------------------
 #
 # Provider-generation evidence, frozen per the plan's Task 1 shape. Only Pi
 # currently exposes a real generation boundary (assistant message_start /
@@ -1440,9 +1438,7 @@ __all__ = [
     "AUDIT_ROOT_ISOLATION",
     "AgentEvent",
     "AgentEventStream",
-    "AssistantChoicePart",
     "AuditIsolationError",
-    "AuditIsolationReason",
     "Backend",
     "BackendExecutionInput",
     "ClaudeBackend",
@@ -1451,8 +1447,6 @@ __all__ = [
     "ContinuationToken",
     "CostEvent",
     "DiagnosticEvent",
-    "EvidenceDiagnostic",
-    "EvidenceSource",
     "GenerationEndEvent",
     "GenerationStartEvent",
     "JsonValue",

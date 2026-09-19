@@ -25,19 +25,12 @@ from daydream.github_app import (
     resolve_run_identity,
     resolve_user_identity,
 )
+from tests.harness.fake_gh import block_real_gh
 
 
 @pytest.fixture(autouse=True)
 def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep this suite hermetic even when the developer is authenticated."""
-    real_run = subprocess.run
-
-    def guarded_run(args: list[Any], *pargs: Any, **kwargs: Any) -> Any:
-        if args and args[0] == "gh":
-            raise AssertionError("test attempted to execute the real gh CLI")
-        return real_run(args, *pargs, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", guarded_run)
+    block_real_gh(monkeypatch)
 
 
 def test_static_auth_copies_environment_and_returns_fresh_mappings() -> None:

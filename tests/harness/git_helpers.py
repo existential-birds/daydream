@@ -5,9 +5,10 @@ previously duplicated across tests/conftest.py and several test modules.
 tests/test_workspace.py builds on these too, keeping only the extra plumbing
 its bare-origin push semantics genuinely need.
 
-The seed family (identity + write + commit) is the single source of truth for
-deterministic test seed repositories. Deliberate exceptions are migrate's
-dateless identity, ``harbor_build``'s bundle identity, and the identities in
+The seed family (``SEED_ENV`` + :func:`write_and_stage` +
+:func:`seeded_commit`) is the single source of truth for deterministic
+test seed repositories. Deliberate exceptions are migrate's dateless
+identity, ``harbor_build``'s bundle identity, and the identities in
 production ``daydream/benchmark/snapshot.py`` and RL ``fixture.py``.
 """
 
@@ -51,8 +52,8 @@ def commit(repo: Path, message: str, *, env: dict[str, str] | None = None) -> st
     return git(repo, "rev-parse", "HEAD")
 
 
-def seed_write(repo: Path, name: str, content: str | bytes) -> None:
-    """Write ``content`` to ``repo/name`` (creating parents) and stage it.
+def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:
+    """Write *name* under *repo* and stage it (``str`` or ``bytes``).
 
     Half of the deterministic seed family — see the module docstring.
     """
@@ -65,9 +66,49 @@ def seed_write(repo: Path, name: str, content: str | bytes) -> None:
     git(repo, "add", name)
 
 
-def seed_commit(repo: Path, message: str) -> str:
-    """Commit the staged tree under :data:`SEED_ENV`; return the HEAD SHA."""
-    return commit(repo, message, env=SEED_ENV)
+def seeded_commit(repo: Path, message: str) -> str:
+    """Commit with the deterministic ``SEED_ENV`` identity and return the new SHA."""
+    git(repo, "commit", "-m", message, env=SEED_ENV)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def seed_pr_origin(
+    tmp_path: Path,
+    *,
+    repo_name: str = "local_wt",
+    bare_name: str = "origin_local.git",
+    feature_body: str = "FEATURE = 1\n",
+    feature_message: str = "feature",
+    number: int = 101,
+) -> tuple[str, str, str]:
+    """Build a real local bare origin whose base/head are the PR's SHAs."""
+    import shutil as _sh
+
+    repo = tmp_path / repo_name
+    if repo.exists():
+        _sh.rmtree(repo)
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    write_and_stage(repo, "readme.txt", "base1\n")
+    seeded_commit(repo, "base1")
+    write_and_stage(repo, "base.py", "BASE = 2\n")
+    base_sha = seeded_commit(repo, "base2")
+    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
+    seeded_commit(repo, "base3")
+    git(repo, "checkout", "--detach", base_sha)
+    (repo / "base.py").write_text("BASE = 20\n")
+    git(repo, "add", "base.py")
+    write_and_stage(repo, "feature.py", feature_body)
+    head_sha = seeded_commit(repo, feature_message)
+    bare = tmp_path / bare_name
+    if bare.exists():
+        _sh.rmtree(bare)
+    bare.mkdir()
+    git(bare, "init", "--bare")
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "origin", "main:main")
+    git(repo, "push", "origin", f"{head_sha}:refs/pull/{number}/head", check=False)
+    return str(bare), base_sha, head_sha
 
 
 def init_repo(repo: Path) -> None:

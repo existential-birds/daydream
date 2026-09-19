@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from daydream.config_file import DaydreamFileConfig
-from daydream.improve.services import enumerate_services, filter_scope
+from daydream.services import enumerate_services, filter_scope
 
 
 @pytest.fixture

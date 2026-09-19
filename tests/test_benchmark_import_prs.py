@@ -23,7 +23,9 @@ from daydream import git_ops
 from tests.harness import github_schema as gs
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git
-from tests.harness.git_helpers import seed_commit, seed_write
+from tests.harness.git_helpers import seed_pr_origin
+from tests.harness.git_helpers import seeded_commit as _seed_commit
+from tests.harness.git_helpers import write_and_stage as _seed_write
 
 _PR_HEADER = {
     "number": 101,
@@ -1095,38 +1097,13 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
 
     Returns ``(origin_url, base_sha, head_sha)``.
     """
-    import shutil as _sh
-
-    repo = tmp_path / "local_wt"
-    if repo.exists():
-        _sh.rmtree(repo)
-    repo.mkdir()
-    _seed_git(repo, "init", "-b", "main")
-    seed_write(repo, "readme.txt", "base1\n")
-    seed_commit(repo, "base1")
-    seed_write(repo, "base.py", "BASE = 2\n")
-    base_sha = seed_commit(repo, "base2")
-    seed_write(repo, "beyond.py", "BEYOND = 3\n")
-    seed_commit(repo, "base3")
-    _seed_git(repo, "checkout", "--detach", base_sha)
-    (repo / "base.py").write_text("BASE = 20\n")
-    _seed_git(repo, "add", "base.py")
-    seed_write(repo, "feature.py", "FEATURE = 1\n")
-    head_sha = seed_commit(repo, "feature")
-    bare = tmp_path / "origin_local.git"
-    if bare.exists():
-        _sh.rmtree(bare)
-    bare.mkdir()
-    _seed_git(bare, "init", "--bare")
-    _seed_git(repo, "remote", "add", "origin", str(bare))
-    _seed_git(repo, "push", "origin", "main:main")
-    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
+    origin_url, base_sha, head_sha = seed_pr_origin(tmp_path)
     # Re-seed the canned PR header so base.sha/head.sha are the real origin SHAs.
     header = dict(_PR_HEADER)
     header["base"] = {"ref": "main", "sha": base_sha}
     header["head"] = {"ref": "feature/cache", "sha": head_sha}
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    return str(bare), base_sha, head_sha
+    return origin_url, base_sha, head_sha
 
 
 def _seed_stacked_origin(
@@ -1141,16 +1118,16 @@ def _seed_stacked_origin(
     repo = tmp_path / "stacked_wt"
     repo.mkdir()
     _seed_git(repo, "init", "-b", "main")
-    seed_write(repo, "readme.txt", "base\n")
-    base_sha = seed_commit(repo, "base")
-    seed_write(repo, "upstream.py", "UPSTREAM = 1\n")
-    base_tip = seed_commit(repo, "advanced base")
+    _seed_write(repo, "readme.txt", "base\n")
+    base_sha = _seed_commit(repo, "base")
+    _seed_write(repo, "upstream.py", "UPSTREAM = 1\n")
+    base_tip = _seed_commit(repo, "advanced base")
     _seed_git(repo, "checkout", "--detach", base_sha)
-    seed_write(repo, "legacy.py", "LEGACY = 1\n")
-    seed_write(repo, "feature.py", "FEATURE = 1\n")
-    explicit_sha = seed_commit(repo, "historical feature")
+    _seed_write(repo, "legacy.py", "LEGACY = 1\n")
+    _seed_write(repo, "feature.py", "FEATURE = 1\n")
+    explicit_sha = _seed_commit(repo, "historical feature")
     _seed_git(repo, "rm", "legacy.py")
-    final_sha = seed_commit(repo, "revert historical path")
+    final_sha = _seed_commit(repo, "revert historical path")
 
     bare = tmp_path / "stacked_origin.git"
     bare.mkdir()
@@ -1189,16 +1166,16 @@ def _seed_anchor_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str,
         _sh.rmtree(repo)
     repo.mkdir()
     _seed_git(repo, "init", "-b", "main")
-    seed_write(repo, "readme.txt", "README\n")
-    seed_write(repo, "a.py", "A1 = 1\nA2 = 1\nA3 = 1\nA4 = 1\nA5 = 1\n")
-    seed_write(repo, "old.py", "O1 = 1\nO2 = 1\n")
-    seed_commit(repo, "base")
+    _seed_write(repo, "readme.txt", "README\n")
+    _seed_write(repo, "a.py", "A1 = 1\nA2 = 1\nA3 = 1\nA4 = 1\nA5 = 1\n")
+    _seed_write(repo, "old.py", "O1 = 1\nO2 = 1\n")
+    _seed_commit(repo, "base")
     base_sha = _seed_git(repo, "rev-parse", "HEAD")
     _seed_git(repo, "checkout", "-b", "feature")
-    seed_write(repo, "a.py", "A1 = 1\nA1b = 1\nA2 = 1\nA3 = 1\nA4 = 1\nA5 = 1\n")
-    authoring_sha = seed_commit(repo, "edit a.py on feature")
+    _seed_write(repo, "a.py", "A1 = 1\nA1b = 1\nA2 = 1\nA3 = 1\nA4 = 1\nA5 = 1\n")
+    authoring_sha = _seed_commit(repo, "edit a.py on feature")
     _seed_git(repo, "mv", "old.py", "new.py")
-    head_sha = seed_commit(repo, "rename old.py to new.py")
+    head_sha = _seed_commit(repo, "rename old.py to new.py")
     bare = tmp_path / "anchor_origin.git"
     if bare.exists():
         _sh.rmtree(bare)
@@ -2877,9 +2854,9 @@ def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path:
     # the pinned head (a rebased branch), so the pinned head is unreachable.
     repo = tmp_path / "local_wt"
     _seed_git(repo, "checkout", "main")
-    seed_write(repo, "rebased.py", "REBASED = 1\n")
+    _seed_write(repo, "rebased.py", "REBASED = 1\n")
     _seed_git(repo, "add", "rebased.py")
-    new_head = seed_commit(repo, "force-pushed rebased head")
+    new_head = _seed_commit(repo, "force-pushed rebased head")
     _seed_git(repo, "push", "-f", "origin", f"{new_head}:refs/pull/101/head", check=False)
     hdr = dict(_PR_HEADER)
     hdr["head"] = {"ref": "feature/cache", "sha": new_head}

@@ -55,7 +55,6 @@ _LEGACY_AUDIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _OPERATIONAL_LOCK_STALE_AFTER_S = 24 * 3600
 
 
-# --- Public types ------------------------------------------------------------
 
 
 class WorkspaceCopyPathError(GitError):
@@ -111,7 +110,6 @@ class WorkContext:
         return self.head_sha is None
 
 
-# --- Public API --------------------------------------------------------------
 
 
 @asynccontextmanager
@@ -474,7 +472,6 @@ def copy_files_into_ephemeral(
     return copied
 
 
-# --- Internal helpers --------------------------------------------------------
 
 
 def _warn_removal_failed(path: Path, exc: GitError, *, kind: str = "worktree") -> None:

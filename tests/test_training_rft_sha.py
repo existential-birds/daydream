@@ -14,24 +14,7 @@ from pathlib import Path
 import pytest
 
 from daydream.training.rft import RftConfig, run_rft
-from tests.test_training_rft import _write_corpus
-
-
-def _record(rid: str = "r1", **overrides: object) -> dict[str, object]:
-    rec: dict[str, object] = {
-        "id": rid,
-        "repo_slug": "owner/repo",
-        "base_sha": "a" * 40,
-        "head_sha": "b" * 40,
-        "diff": f"diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ {rid}\n",
-        "findings": [
-            {"id": f"{rid}-f1", "text": "Fix the off-by-one.", "grounded": True, "verdict": "consistent"},
-        ],
-        "format_valid": True,
-        "length": 400,
-    }
-    rec.update(overrides)
-    return rec
+from tests.test_training_rft import _record, _write_corpus
 
 
 def _config(tmp_path: Path, records: list[dict[str, object]]) -> RftConfig:

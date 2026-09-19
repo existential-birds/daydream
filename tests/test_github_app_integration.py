@@ -6,7 +6,6 @@ loop. Mocks only the Backend (no real AI) and the github_app network helpers
 """
 from __future__ import annotations
 
-import subprocess
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,19 +19,12 @@ from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import block_real_gh
 
 
 @pytest.fixture(autouse=True)
 def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail instead of contacting GitHub if an integration seam is missed."""
-    real_run = subprocess.run
-
-    def guarded_run(args: list[Any], *pargs: Any, **kwargs: Any) -> Any:
-        if args and args[0] == "gh":
-            raise AssertionError("test attempted to execute the real gh CLI")
-        return real_run(args, *pargs, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", guarded_run)
+    block_real_gh(monkeypatch)
 
 
 def _minimal_backend() -> ScriptedBackend:

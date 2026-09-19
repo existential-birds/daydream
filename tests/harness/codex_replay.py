@@ -6,10 +6,25 @@ that ``CodexBackend.execute`` drives via
 ``daydream.backends._transport.asyncio.create_subprocess_exec``.
 """
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "codex_jsonl"
+
+
+class GapThenBlockingStdout:
+    """A stdout that yields one parser-gap line, then blocks forever."""
+
+    def __init__(self) -> None:
+        self.sent_gap = False
+
+    async def readline(self) -> bytes:
+        if not self.sent_gap:
+            self.sent_gap = True
+            return b'{"type":"future.before.stall"}\n'
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 def make_mock_process(lines: list[str]) -> MagicMock:

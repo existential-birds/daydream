@@ -24,8 +24,7 @@ from daydream.benchmark.storage import (
     load_yaml_strict,
 )
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git as _seed_git
-from tests.harness.git_helpers import seed_commit, seed_write
+from tests.harness.git_helpers import seed_pr_origin
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,32 +75,9 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tu
     ``f"LINE {i}\\n"``), so the frozen head file's line count is deterministic
     for the location-vs-head assertions. Returns ``(origin_url, base_sha, head_sha)``.
     """
-    import shutil as _sh
-
-    repo = tmp_path / "local_wt"
-    if repo.exists():
-        _sh.rmtree(repo)
-    repo.mkdir()
-    _seed_git(repo, "init", "-b", "main")
-    seed_write(repo, "readme.txt", "base1\n")
-    seed_commit(repo, "base1")
-    seed_write(repo, "base.py", "BASE = 2\n")
-    base_sha = seed_commit(repo, "base2")
-    seed_write(repo, "beyond.py", "BEYOND = 3\n")
-    seed_commit(repo, "base3")
-    _seed_git(repo, "checkout", "--detach", base_sha)
-    (repo / "base.py").write_text("BASE = 20\n")
-    _seed_git(repo, "add", "base.py")
-    seed_write(repo, "feature.py", "".join(f"LINE {i}\n" for i in range(1, lines + 1)))
-    head_sha = seed_commit(repo, "feature")
-    bare = tmp_path / "origin_local.git"
-    if bare.exists():
-        _sh.rmtree(bare)
-    bare.mkdir()
-    _seed_git(bare, "init", "--bare")
-    _seed_git(repo, "remote", "add", "origin", str(bare))
-    _seed_git(repo, "push", "origin", "main:main")
-    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
+    origin_url, base_sha, head_sha = seed_pr_origin(
+        tmp_path, feature_body="".join(f"LINE {i}\n" for i in range(1, lines + 1))
+    )
     # Seed the preflight identity + repo-access responses (idempotent — this
     # helper is used directly by this test, which does not call
     # ``_seed_preflight``), then re-seed the canned PR header so
@@ -117,7 +93,7 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tu
     header["base"] = {"ref": "main", "sha": base_sha}
     header["head"] = {"ref": "feature/cache", "sha": head_sha}
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    return str(bare), base_sha, head_sha
+    return origin_url, base_sha, head_sha
 
 
 _SEED_SEQ = {"n": 0}

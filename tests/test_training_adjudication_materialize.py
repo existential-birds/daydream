@@ -7,34 +7,8 @@ import pytest
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.trajectory import run_directory, run_document_path
-
-
-def _index(tmp_path: Path) -> Path:
-    root = tmp_path / "index"
-    root.mkdir()
-    sessions = [{
-        "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
-        "resolutions": [{
-            "fingerprint": "fp-1", "disposition": "unanswered",
-            "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
-            "comment_id": 7,
-        }],
-    }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
-    (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
-    return root
-
-
-_PIN = {
-    "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
-    "source_hub_commit": "b" * 40, "archive_index_digest": "c" * 64,
-    "evidence_observed_at": "2026-01-01T00:00:00+00:00",
-    "as_of": "2026-02-01T00:00:00+00:00",
-    "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1",
-}
+from tests.harness.adjudication import make_hydrated_sqlite_index
+from tests.test_training_adjudication_canonical import _PIN, _index
 
 
 def test_materialize_emits_deterministic_sessions_and_manifest(tmp_path: Path) -> None:
@@ -136,29 +110,10 @@ def test_materialize_emits_every_disposition(tmp_path: Path) -> None:
 def _hydrated_sqlite_index(tmp_path: Path) -> Path:
     """Hydrated staging archive whose per-finding data lives ONLY in
     label_observations.rubric_json — no trajectory.json resolutions key."""
-    from daydream.archive.index import _get_connection
-    root = tmp_path / "hydrated"
-    conn = _get_connection(root)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    return make_hydrated_sqlite_index(
+        tmp_path,
+        [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted")],
     )
-    rubric = {"posterior_source": "pr_review",
-              "per_finding_resolutions": [{
-                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
-                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-                  "evidence_digest": "d" * 32}]}
-    conn.execute(
-        "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
-        "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
-        "VALUES ('s1', '2026-01-02T00:00:00+00:00', '[\"finding-accepted\"]', 'v1', "
-        "'e' * 64, ?, 0, 'auto', '980-rubric-r2')",
-        (json.dumps(rubric),),
-    )
-    conn.commit()
-    conn.close()
-    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
-    return root
 
 
 def test_materialize_reads_resolutions_from_sqlite_not_trajectory(tmp_path: Path) -> None:
@@ -258,39 +213,16 @@ def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(
 
 
 def _hydrated_sqlite_index_agreeing_generations(tmp_path: Path) -> Path:
-    """Task 3's ``_hydrated_sqlite_index`` shape, extended with a second
-    generation for ``s1`` that agrees on the disposition (identical labels)
-    but splits the dedup tuple on non-disposition members (evidence_sha and
-    policy version) — exactly what ``append_label_observation`` produces on a
-    policy-version bump or an edited-reply digest change."""
-    from daydream.archive.index import _get_connection
-
-    root = tmp_path / "hydrated"
-    conn = _get_connection(root)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    """Two agreeing ``s1`` generations whose dedup tuple splits only on
+    evidence_sha and policy version — what ``append_label_observation``
+    produces on a policy-version bump or an edited-reply digest change."""
+    return make_hydrated_sqlite_index(
+        tmp_path,
+        [
+            ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r1", "accepted"),
+            ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "980-rubric-r2", "accepted"),
+        ],
     )
-    rubric = {"posterior_source": "pr_review",
-              "per_finding_resolutions": [{
-                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
-                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-                  "evidence_digest": "d" * 32}]}
-    rubric_json = json.dumps(rubric)
-    for observed_at, policy_version, evidence_sha in (
-        ("2026-01-02T00:00:00+00:00", "980-rubric-r1", "e" * 64),
-        ("2026-01-03T00:00:00+00:00", "980-rubric-r2", "f" * 64),
-    ):
-        conn.execute(
-            "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
-            "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
-            "VALUES ('s1', ?, '[\"finding-accepted\"]', 'v1', ?, ?, 0, 'auto', ?)",
-            (observed_at, evidence_sha, rubric_json, policy_version),
-        )
-    conn.commit()
-    conn.close()
-    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
-    return root
 
 
 def test_materialize_serves_human_labeled_session_from_trajectory(tmp_path: Path) -> None:
@@ -336,38 +268,15 @@ def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
 
 
 def _hydrated_sqlite_index_evolving(tmp_path: Path) -> Path:
-    """Two auto generations for ``s1``: a pre-adjudication generation whose
-    labels carry no decisive finding- label, resolved by a later decisive
-    accepted generation — distinct dedup keys, distinct label sets, but an
-    evolution (resolved-unanswered -> accepted), not a harvester
-    disagreement (issue #336 item 3)."""
-    from daydream.archive.index import _get_connection
-
-    root = tmp_path / "hydrated"
-    conn = _get_connection(root)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    """A pre-adjudication ``s1`` generation resolved by a later decisive one:
+    an evolution (resolved-unanswered -> accepted), not a disagreement."""
+    return make_hydrated_sqlite_index(
+        tmp_path,
+        [
+            ("2026-01-02T00:00:00+00:00", '["finding-unanswered"]', "e" * 64, "980-rubric-r2", "unanswered"),
+            ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "980-rubric-r2", "accepted"),
+        ],
     )
-    for observed_at, labels, evidence_sha, disposition in (
-        ("2026-01-02T00:00:00+00:00", '["finding-unanswered"]', "e" * 64, "unanswered"),
-        ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "accepted"),
-    ):
-        rubric = {"posterior_source": "pr_review",
-                  "per_finding_resolutions": [{
-                      "fingerprint": "fp-1", "comment_id": 7, "disposition": disposition,
-                      "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-                      "evidence_digest": "d" * 32}]}
-        conn.execute(
-            "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
-            "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
-            "VALUES ('s1', ?, ?, 'v1', ?, ?, 0, 'auto', '980-rubric-r2')",
-            (observed_at, labels, evidence_sha, json.dumps(rubric)),
-        )
-    conn.commit()
-    conn.close()
-    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
-    return root
 
 
 def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(

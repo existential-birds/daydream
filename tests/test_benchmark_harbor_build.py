@@ -9,10 +9,15 @@ import pytest
 
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git
-from tests.harness.git_helpers import init_repo, seed_commit, seed_write
+from tests.harness.git_helpers import init_repo, seed_pr_origin
 
 REPO = Path(__file__).resolve().parents[1]
 
+# Bundle-seed env: only the dates travel in ``env``; identity and other
+# config must come from the live ``os.environ`` at call time, because
+# ``git()`` merges ``{**os.environ, **env}`` with ``env`` later — an
+# import-time ``os.environ`` snapshot would shadow call-time
+# ``GIT_CONFIG_*`` entries added by tests after import.
 _BUNDLE_ENV: dict[str, str] = {
     "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
     "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
@@ -56,32 +61,14 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
     The feature head adds ``feature.py`` with exactly *lines* lines. Returns
     ``(origin_url, base_sha, head_sha)``.
     """
-    import shutil as _sh
-
-    repo = tmp_path / f"local_wt_{number}"
-    if repo.exists():
-        _sh.rmtree(repo)
-    repo.mkdir()
-    _seed_git(repo, "init", "-b", "main")
-    seed_write(repo, "readme.txt", "base1\n")
-    seed_commit(repo, "base1")
-    seed_write(repo, "base.py", "BASE = 2\n")
-    base_sha = seed_commit(repo, "base2")
-    seed_write(repo, "beyond.py", "BEYOND = 3\n")
-    seed_commit(repo, "base3")
-    _seed_git(repo, "checkout", "--detach", base_sha)
-    (repo / "base.py").write_text("BASE = 20\n")
-    _seed_git(repo, "add", "base.py")
-    seed_write(repo, "feature.py", "".join(f"LINE {i}\n" for i in range(1, lines + 1)))
-    head_sha = seed_commit(repo, f"feature{number}")
-    bare = tmp_path / f"origin_{number}.git"
-    if bare.exists():
-        _sh.rmtree(bare)
-    bare.mkdir()
-    _seed_git(bare, "init", "--bare")
-    _seed_git(repo, "remote", "add", "origin", str(bare))
-    _seed_git(repo, "push", "origin", "main:main")
-    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/{number}/head", check=False)
+    origin_url, base_sha, head_sha = seed_pr_origin(
+        tmp_path,
+        repo_name=f"local_wt_{number}",
+        bare_name=f"origin_{number}.git",
+        feature_body="".join(f"LINE {i}\n" for i in range(1, lines + 1)),
+        feature_message=f"feature{number}",
+        number=number,
+    )
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response(
         "repo-view-full",
@@ -91,7 +78,7 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
     )
     header = _pr_header(number, base_sha=base_sha, head_sha=head_sha)
     fake_gh.set_response("GET", f"repos/o/r/pulls/{number}", header)
-    return str(bare), base_sha, head_sha
+    return origin_url, base_sha, head_sha
 
 
 def _seed_candidate(
@@ -249,7 +236,6 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     from daydream.benchmark import snapshot
     src = tmp_path / "src"
     src.mkdir()
-
     _seed_git(src, "init", "-q", env=_BUNDLE_ENV)
     _seed_git(src, "config", "user.email", "t@t", env=_BUNDLE_ENV)
     _seed_git(src, "config", "user.name", "t", env=_BUNDLE_ENV)
@@ -276,7 +262,9 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     return m, bundle.read_bytes()
 
 
-def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bundle_env_honours_call_time_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``_BUNDLE_ENV`` must not replay an import-time snapshot of ``os.environ``.
 
     ``tests/conftest.py`` installs ``GIT_CONFIG_*`` entries at import time; a

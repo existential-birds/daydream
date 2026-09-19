@@ -819,6 +819,18 @@ def _shim_main(state_dir: Path) -> int:
     return rc
 
 
+def block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail instead of executing the real ``gh`` CLI, keeping a suite hermetic."""
+    real_run = subprocess.run
+
+    def guarded_run(args: list[Any], *pargs: Any, **kwargs: Any) -> Any:
+        if args and args[0] == "gh":
+            raise AssertionError("test attempted to execute the real gh CLI")
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
+
+
 def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     """Route sync ``gh`` in process and async ``gh`` through a PATH shim."""
     state_dir.mkdir(parents=True, exist_ok=True)

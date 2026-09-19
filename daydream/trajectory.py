@@ -1838,7 +1838,6 @@ def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
     return extra
 
 
-# --- P18 Task 2: pending-generation lifecycle (binding decisions 1/4/5) ------
 #
 # Provider generation drafts stay UNENDED until billing ownership resolves.
 # Immutable provider choice + timing seal at ``message_end`` before tools;
