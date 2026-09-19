@@ -1,6 +1,5 @@
 import hashlib
 import os
-import subprocess
 import uuid
 from copy import deepcopy
 from pathlib import Path
@@ -10,6 +9,8 @@ import pytest
 import yaml
 
 from daydream.benchmark import migrate, schema, storage
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import git as _git
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
 _HEAD_HEX = "0123456789abcdef0123456789abcdef01234567"
@@ -91,7 +92,7 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     storage.ensure_private_dir(ws)
     repo = tmp_path / "source"
     repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    _git(repo, "init", "-b", "main")
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "Tester",
@@ -100,40 +101,21 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
         "GIT_COMMITTER_EMAIL": "test@example.com",
     }
 
-    def commit(name: str, content: str, message: str) -> str:
+    def seed_file(name: str, content: str, message: str) -> str:
         (repo / name).write_text(content)
-        subprocess.run(["git", "add", name], cwd=repo, env=env, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", message], cwd=repo, env=env, check=True, capture_output=True)
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
-        ).stdout.strip()
+        _git(repo, "add", name, env=env)
+        return _commit(repo, message, env=env)
 
-    merge_base = commit("base.py", "BASE = 1\n", "base")
-    subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True)
-    head_sha = commit("feature.py", "FEATURE = 1\n", "feature")
-    subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
-    requested_tip = commit("upstream.py", "UPSTREAM = 1\n", "advanced base")
+    merge_base = seed_file("base.py", "BASE = 1\n", "base")
+    _git(repo, "checkout", "-b", "feature")
+    head_sha = seed_file("feature.py", "FEATURE = 1\n", "feature")
+    _git(repo, "checkout", "main")
+    requested_tip = seed_file("upstream.py", "UPSTREAM = 1\n", "advanced base")
     cache = ws / "cache"
     storage.ensure_private_dir(cache)
-    subprocess.run(
-        ["git", "clone", "--mirror", str(repo), str(cache / "repository.git")],
-        check=True,
-        capture_output=True,
-    )
-    base_tree = subprocess.run(
-        ["git", "rev-parse", f"{merge_base}^{{tree}}"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    head_tree = subprocess.run(
-        ["git", "rev-parse", f"{head_sha}^{{tree}}"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    _git(repo, "clone", "--mirror", str(repo), str(cache / "repository.git"))
+    base_tree = _git(repo, "rev-parse", f"{merge_base}^{{tree}}")
+    head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
     case_id = f"pr-000101-{head_sha[:12]}"
     manifest = _seed_manifest()
     manifest["cases"] = [
