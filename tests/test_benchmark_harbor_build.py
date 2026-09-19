@@ -13,6 +13,12 @@ from tests.harness.git_helpers import seed_commit, seed_write
 
 REPO = Path(__file__).resolve().parents[1]
 
+_BUNDLE_ENV: dict[str, str] = {
+    **os.environ,
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
+
 
 def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
     """A canned GitHub PR-header response for *number*."""
@@ -244,29 +250,28 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     from daydream.benchmark import snapshot
     src = tmp_path / "src"
     src.mkdir()
-    env = {**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-           "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
 
-    def g(*a: str) -> str:
-        return subprocess.run(["git", "-C", str(src), *a], check=True,
-                              env=env, capture_output=True).stdout.decode().strip()
-
-    g("init", "-q")
-    g("config", "user.email", "t@t")
-    g("config", "user.name", "t")
+    _seed_git(src, "init", "-q", env=_BUNDLE_ENV)
+    _seed_git(src, "config", "user.email", "t@t", env=_BUNDLE_ENV)
+    _seed_git(src, "config", "user.name", "t", env=_BUNDLE_ENV)
     (src / "f.py").write_text("x=1\n")
-    g("add", ".")
-    g("commit", "-qm", "base")
-    base = g("rev-parse", "HEAD")
+    _seed_git(src, "add", ".", env=_BUNDLE_ENV)
+    _seed_git(src, "commit", "-qm", "base", env=_BUNDLE_ENV)
+    base = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
     (src / "f.py").write_text("x=2\n")
-    g("add", ".")
-    g("commit", "-qm", "head")
-    head = g("rev-parse", "HEAD")
+    _seed_git(src, "add", ".", env=_BUNDLE_ENV)
+    _seed_git(src, "commit", "-qm", "head", env=_BUNDLE_ENV)
+    head = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
     m = snapshot.ensure_mirror(tmp_path, "o/r")
     # push the base/head commits (objects + refs) into the mirror so build_bundle can resolve trees
-    subprocess.run(["git", "-C", str(src), "push", str(m),
-                    f"{base}:refs/heads/base", f"{head}:refs/heads/head"],
-                   check=True, env=env, capture_output=True)
+    _seed_git(
+        src,
+        "push",
+        str(m),
+        f"{base}:refs/heads/base",
+        f"{head}:refs/heads/head",
+        env=_BUNDLE_ENV,
+    )
     bundle = tmp_path / "b.bundle"
     snapshot.build_bundle(m, base, head, bundle)
     return m, bundle.read_bytes()
@@ -1141,19 +1146,22 @@ def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path
 
 
 def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
-    import subprocess as _subprocess
-
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     m, _ = _seed_bare_bundle(tmp_path)
     bp = tmp_path / "bad.bundle"
     # add an extra ref to the mirror, then rebuild the bundle including it
-    _subprocess.run(["git", "-C", str(m), "update-ref", "refs/heads/extra", "refs/heads/base"], check=True)
-    env = {**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-           "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
-    _subprocess.run(["git", "-C", str(m), "bundle", "create", str(bp),
-                     "refs/heads/base", "refs/heads/head", "refs/heads/extra"],
-                    check=True, env=env, capture_output=True)
+    _seed_git(m, "update-ref", "refs/heads/extra", "refs/heads/base")
+    _seed_git(
+        m,
+        "bundle",
+        "create",
+        str(bp),
+        "refs/heads/base",
+        "refs/heads/head",
+        "refs/heads/extra",
+        env=_BUNDLE_ENV,
+    )
     try:
         build.validate_bundle_inventory(bp)
         assert False, "expected to fail for an extra ref"
