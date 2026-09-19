@@ -57,7 +57,6 @@ _TESTS_ROOT = _HARNESS_DIR.parent
 _ALLOWED: frozenset[str] = frozenset({
     "deep_orchestrator/support.py::_RejectingArbiterBackend",
     "deep_orchestrator/test_related_regression_commit.py::FootprintBackend",
-    "test_agent_retry.py::_SharedBackend",
     "test_archive_data_capture.py::MalformedToolBackend",
     "test_archive_data_capture.py::_ArchiveCaptureBackend",
     "test_archive_data_capture.py::_CodexEvidenceBackend",
@@ -70,8 +69,6 @@ _ALLOWED: frozenset[str] = frozenset({
     "test_deep_wonder_concurrency.py::_WonderRendezvousStub",
     "test_extension_seam_integration.py::DeferredWriteBackend",
     "test_extension_seam_integration.py::ShallowRecordingBackend",
-    "test_fix_footprint.py::BarrierBackend",
-    "test_fix_footprint.py::CancelBackend",
     "test_improve_flow.py::BlockingAuditBackend",
     "test_improve_flow.py::BlockingBackend",
     "test_improve_flow.py::_AuditCommittingBackend",
