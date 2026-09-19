@@ -36,6 +36,20 @@ def monkeypatch_relative_cwd(cwd: Path) -> Any:
         os.chdir(old)
 
 
+def _fetch_pr_refs(
+    root: Path,
+    repo_slug: str,
+    pr_number: int,
+    base_tip: str,
+    explicit_shas: list[str] | tuple[str, ...] = (),
+    origin_url: str | None = None,
+) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    sn.fetch_base_tip(root, repo_slug, base_tip, origin_url)
+    sn.fetch_head_refs(root, repo_slug, pr_number, explicit_shas, origin_url)
+
+
 def _seed_origin(tmp_path: Path) -> str:
     """Bare origin: main (base1->base2->base3) + "refs/pull/1/head" off base2."""
     repo = tmp_path / "seed_wt"
@@ -287,12 +301,12 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
     mirror = tmp_path / "cache" / "repository.git"
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
     assert mirror.is_dir()
-    sn.fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
                      explicit_shas=[], origin_url=origin)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
     assert sn.rev_parse(mirror, "refs/heads/base_tip") == _SHA_BASE2
     # second call is idempotent
-    sn.fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
                      explicit_shas=[], origin_url=origin)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
 
@@ -305,7 +319,7 @@ def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE3,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE3,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     pr_head = sn.rev_parse(m, "refs/pull/1/head")
@@ -323,7 +337,7 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
@@ -343,11 +357,11 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
-    assert sn.degenerate(m, _SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
-    assert sn.degenerate(m, _SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
+    assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
+    assert sn.degenerate(_SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
     d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     assert re.fullmatch(r"[0-9a-f]{64}", d)
 
@@ -361,7 +375,7 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -385,7 +399,7 @@ def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path) -> None
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -410,7 +424,7 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[], origin_url=origin)
     m = sn.mirror(tmp_path)
     # widen the mirror's effective abbrev past the fresh 2-commit clone's default
@@ -450,7 +464,7 @@ def test_offline_clone_validates(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -474,7 +488,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     base_tree, head_tree = _SHA_BASE2_TREE, _SHA_HEAD_TREE
@@ -630,7 +644,7 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
                            policy="final_pr_head", requested_head="final",
@@ -691,7 +705,7 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     # PR head is forked from base2; main has advanced to base3.
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD,
@@ -822,7 +836,7 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: 
 
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=base, explicit_shas=[head],
+    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=base, explicit_shas=[head],
                      origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"

@@ -1001,9 +1001,9 @@ def test_derived_workspace_state_empty_vs_collecting() -> None:
 
 
 def test_classify_validation_codes() -> None:
-    assert classify_validation(ready=True, incomplete=False, corrupt=False) == 0
-    assert classify_validation(ready=False, incomplete=True, corrupt=False) == 2
-    assert classify_validation(ready=False, incomplete=False, corrupt=True) == 1
+    assert classify_validation(ready=True, corrupt=False) == 0
+    assert classify_validation(ready=False, corrupt=False) == 2
+    assert classify_validation(ready=False, corrupt=True) == 1
 
 
 def test_case_document_accepts_additive_prioritization_key() -> None:

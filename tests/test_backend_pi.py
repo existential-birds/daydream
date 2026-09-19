@@ -43,7 +43,6 @@ from daydream.backends.pi import (
     _PI_STDOUT_LIMIT_BYTES,
     PiBackend,
     PiError,
-    _is_retryable_error_message,
     _is_retryable_exit_code,
     _pi_error_category,
     _pi_retry_attempts,
@@ -1318,7 +1317,7 @@ def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
     ],
 )
 def test_pi_transient_failures_are_retryable(message: str) -> None:
-    assert _is_retryable_error_message(message) is True
+    assert _pi_retryable_for(category=_pi_error_category(message), message=message) is True
 
 
 @pytest.mark.asyncio
@@ -1381,7 +1380,7 @@ async def test_pi_stream_timeout_is_retryable() -> None:
     assert raised.value.retryable is True
 
 
-# _is_retryable_error_message
+# pi retry classification
 
 
 @pytest.mark.parametrize(
@@ -1441,7 +1440,7 @@ async def test_pi_stream_timeout_is_retryable() -> None:
     ],
 )
 def test_is_retryable_error_message(message: Any, expected: Any) -> None:
-    assert _is_retryable_error_message(message) is expected
+    assert _pi_retryable_for(category=_pi_error_category(message), message=message) is expected
 
 
 # _is_retryable_exit_code

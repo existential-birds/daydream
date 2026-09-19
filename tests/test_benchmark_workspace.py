@@ -203,8 +203,8 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     bundle_rel = f"snapshots/{case_id}.bundle"
 
     sn.ensure_mirror(root, repo_slug, origin_url)
-    sn.fetch_pr_refs(root, repo_slug, 101, base_tip=base_sha,
-                     explicit_shas=[head_sha], origin_url=origin_url)
+    sn.fetch_base_tip(root, repo_slug, base_sha, origin_url)
+    sn.fetch_head_refs(root, repo_slug, 101, [head_sha], origin_url)
     m = sn.mirror(root)
     bundle_path = root / bundle_rel
     sn.build_bundle(m, base_sha, head_sha, bundle_path)

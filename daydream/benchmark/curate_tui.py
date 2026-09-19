@@ -526,6 +526,28 @@ def _action_edit(
     )
 
 
+def _select_evidence_indices(
+    read_line: Callable[[str], str], binding: list[str]
+) -> list[int] | None:
+    """Parse one evidence selector into binding indices, or None to continue.
+
+    ``None`` covers cancellation, an invalid fragment, and a selected entry
+    with no source_id; each path has already printed its diagnostic.
+    """
+    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
+    if text == "0":
+        return None
+    try:
+        indices = parse_indices(text, len(binding))
+    except ValueError as exc:
+        print(str(exc))
+        return None
+    if any(not binding[i] for i in indices):
+        print("selected entry has no source_id")
+        return None
+    return indices
+
+
 def _edit_author_evidence(
     root: Path, case_id: str, binding: list[str], read_line: Callable[[str], str]
 ) -> str:
@@ -537,18 +559,10 @@ def _edit_author_evidence(
     :func:`add_edited_findings`. Editor cancellation, an invalid fragment, a
     curation error or a validation error all mutate nothing.
     """
-    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
-    if text == "0":
-        return "continue"
-    try:
-        indices = parse_indices(text, len(binding))
-    except ValueError as exc:
-        print(str(exc))
+    indices = _select_evidence_indices(read_line, binding)
+    if indices is None:
         return "continue"
     source_ids = [binding[i] for i in indices]
-    if any(not sid for sid in source_ids):
-        print("selected entry has no source_id")
-        return "continue"
     return _edit_and_stage_fragment(
         _editor_fragment_authored(source_ids),
         lambda atoms: cu.add_edited_findings(root, case_id, atoms=atoms),
@@ -680,18 +694,10 @@ def _action_exclude(
     """
     if not _check_fresh(root, case_id, binding):
         return "rerender"
-    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
-    if text == "0":
-        return "continue"
-    try:
-        indices = parse_indices(text, len(binding))
-    except ValueError as exc:
-        print(str(exc))
+    indices = _select_evidence_indices(read_line, binding)
+    if indices is None:
         return "continue"
     source_ids = [binding[i] for i in indices]
-    if any(not sid for sid in source_ids):
-        print("selected entry has no source_id")
-        return "continue"
     reason = _prompt(
         read_line, f"reason ({'|'.join(_EVIDENCE_REASONS)}): "
     ).strip()

@@ -267,7 +267,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
             recover_startup(root)
         except Exception:  # recovery diagnostics must not disclose journal contents
             return (
-                classify_validation(corrupt=True, ready=False, incomplete=False),
+                classify_validation(corrupt=True, ready=False),
                 f"corrupt: {root}: workspace recovery failed",
             )
 
@@ -275,7 +275,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
             manifest = load_benchmark_manifest(root).model
         except Exception:  # schema/checksum/unreadable all map to corruption
             return (
-                classify_validation(corrupt=True, ready=False, incomplete=False),
+                classify_validation(corrupt=True, ready=False),
                 f"corrupt: {root}: invalid benchmark.yaml",
             )
 
@@ -288,7 +288,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
                 on_disk=_scan_authoring_files(root),
             )
         except WorkspaceCorrupt as exc:
-            return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
+            return (classify_validation(corrupt=True, ready=False), f"corrupt: {exc}")
 
         # State + identity resolution, shared with status. Loading each case
         # strictly and verifying import checksums (below) surfaces a
@@ -296,7 +296,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         try:
             state, resolved = _derived_state(root, manifest, docs)
         except WorkspaceCorrupt as exc:
-            return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
+            return (classify_validation(corrupt=True, ready=False), f"corrupt: {exc}")
 
     reasons = sorted(
         {
@@ -314,7 +314,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         label = f"incomplete: workspace state {state}"
     if reasons:
         label += f"; unreplayable snapshot reasons: {', '.join(reasons)}"
-    return (classify_validation(ready=ready, incomplete=not ready, corrupt=False), label)
+    return (classify_validation(ready=ready, corrupt=False), label)
 
 
 def _derived_state(

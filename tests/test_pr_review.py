@@ -123,7 +123,7 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_c
 
 
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+    pr: PRInfo
 ) -> None:
     from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
@@ -154,7 +154,7 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
     assert body.rstrip().endswith("</sub>")
 
 
-def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
     from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
 
@@ -175,7 +175,7 @@ def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo, monkeypa
 
 
 def test_summary_renderer_falls_back_and_warns_on_error(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    pr: PRInfo, caplog: pytest.LogCaptureFixture
 ) -> None:
     from daydream.extensions import Registry
     from daydream.extensions.builtins import register_builtins
@@ -459,7 +459,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     assert result.inline[1]["line"] == 106
 
 
-def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> None:
     """M1/M4: the reviewed-commit line is rendered, fully linked (S1),
     and precedes Model/Cost and Severity/Confidence in the review-info block."""
     classified = pr_review._ClassifiedIssues(
@@ -495,7 +495,7 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo, mon
     assert body.index(expected) < body.index("- **Confidence:**")
 
 
-def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) -> None:
     """M2: renderer degradation to 'run details unavailable' must not hide
     the reviewed-commit line (host-injection, Key Decision 2)."""
     payload = build_payload(
@@ -546,7 +546,7 @@ def test_build_payload_blocks_forged_reviewed_commit_line(
     assert "e" * 40 not in body
 
 
-def test_build_payload_shape(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_payload_shape(pr: PRInfo) -> None:
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         body_only=[
@@ -651,7 +651,6 @@ def test_build_payload_keeps_comment_when_blocking_finding(pr: PRInfo, severity:
 
 def test_build_payload_none_severity_does_not_crash_on_approve_check(
     pr: PRInfo,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A None-severity issue must not crash the clean computation."""
     classified = pr_review._ClassifiedIssues(
@@ -666,7 +665,6 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
 @pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
 def test_build_payload_keeps_comment_when_off_vocabulary_severity(
     pr: PRInfo,
-    monkeypatch: pytest.MonkeyPatch,
     off_vocabulary_severity: str,
 ) -> None:
     """F1: approve_on_clean=True but an off-vocabulary severity -> event COMMENT.
@@ -1740,7 +1738,7 @@ def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> N
     assert fields.severity is None  # not the string "none"
 
 
-def test_null_severity_does_not_block_approval(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
     # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
@@ -1908,7 +1906,7 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
     assert calls == [("post", None), ("minimize", "IC_matching")]
 
 
-def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo) -> None:
     """``diagram_blocks`` lands directly under ``**Code Review Summary**``."""
     classified = pr_review._ClassifiedIssues(
         body_only=[
@@ -1939,7 +1937,7 @@ def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo, monkey
     )["body"] == body.replace(f"{header}\n\n{blocks}", header)
 
 
-def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> None:
     """Spec test 16: ``ctx.diagrams`` reaches a fork renderer, which owns it.
 
     The host cannot inject the blocks around a custom renderer's output (they
