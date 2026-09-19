@@ -15,6 +15,7 @@ import os
 import tempfile
 from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +39,9 @@ from daydream.backends._transport import (
     CliTransport,
     StderrPolicy,
     StdinMode,
-    TransportExitError,
+    raise_for_exit,
+    reap,
+    teardown,
 )
 from daydream.trajectory import redact_text
 
@@ -202,6 +205,15 @@ def _bounded_diagnostics(lines: Iterable[str]) -> str:
 
 def _bounded_diagnostic_line(line: str) -> str:
     return redact_text(line)[:_MAX_DIAGNOSTIC_LINE_CHARS]
+
+
+def _osprey_process_exit_message(stderr_lines: list[str], returncode: int) -> str:
+    """Build osprey's structurally distinct PROCESS_EXIT message.
+
+    Osprey inlines the bounded diagnostic list after ``": "`` instead of the
+    shared builder's ``"(last N non-JSON lines)"`` header and count.
+    """
+    return f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(stderr_lines)}"
 
 
 def _stderr_diagnostic_sink(diagnostics: list[str]) -> Callable[[str], None]:
@@ -875,24 +887,23 @@ class OspreyBackend:
                 else:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
-            # Reap the child first; the transport raises TransportExitError on
-            # a non-zero exit, and the check below formats the backend-specific
+            # Reap the child; the shared reap returns the exit code without
+            # raising, and the shared check below formats the backend-specific
             # message from the code and captured stderr lines.
-            try:
-                await transport.wait()
-            except TransportExitError:
-                pass
+            returncode = await reap(transport)
             # A descendant can outlive Osprey while retaining the inherited
             # stderr fd. Reap the process group and close its transports before
-            # awaiting EOF so the diagnostic drain cannot hang indefinitely.
-            await transport.terminate()
-            await transport.drain_finished()
-            returncode = transport.returncode
-            if returncode not in (None, 0):
-                raise OspreyError(
-                    f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(stderr_lines)}",
-                    category="PROCESS_EXIT",
-                )
+            # awaiting EOF so the diagnostic drain cannot hang indefinitely —
+            # the drained stderr is what the message below carries. The
+            # ``finally`` teardown is a no-op second call.
+            await teardown(transport, self._transports)
+            # No retryable= kwarg: osprey's PROCESS_EXIT is not retryable.
+            raise_for_exit(
+                returncode,
+                error_type=OspreyError,
+                category="PROCESS_EXIT",
+                build_message=partial(_osprey_process_exit_message, stderr_lines),
+            )
             if not saw_header:
                 raise OspreyProtocolError("Osprey produced no protocol header")
             if not saw_session_start:
@@ -910,10 +921,7 @@ class OspreyBackend:
                 raise OspreyProtocolError("successful session_end has pending tool calls")
         finally:
             if transport is not None:
-                await transport.terminate()
-                await transport.drain_finished()
-                if transport in self._transports:
-                    self._transports.remove(transport)
+                await teardown(transport, self._transports)
             if schema_path is not None:
                 Path(schema_path).unlink(missing_ok=True)
 

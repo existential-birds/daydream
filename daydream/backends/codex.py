@@ -20,6 +20,7 @@ import threading
 import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,10 @@ from daydream.backends._transport import (
     CliTransport,
     StderrPolicy,
     StdinMode,
-    TransportExitError,
+    process_exit_message,
+    raise_for_exit,
+    reap,
+    teardown,
 )
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 
@@ -55,7 +59,6 @@ _DIAGNOSTIC_LABEL_MAX_CHARS = 64
 _DIAGNOSTIC_LABEL_MAX_DISTINCT = 32
 _NON_JSON_EXCERPT_MAX_LINES = 20
 _NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
-_PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 # Observable boundary: this contract is activated only by a public ``error``
 # item. If Codex omits a tool and emits no public marker, Daydream cannot infer
 # the invisible call and must not fabricate a ToolStart/ToolResult or an
@@ -65,6 +68,11 @@ _PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 _TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
 
 _logger = logging.getLogger(__name__)
+
+
+def _codex_process_exit_message(non_json_lines: list[str], returncode: int) -> str:
+    """Bind codex's captured diagnostics into the shared PROCESS_EXIT message."""
+    return process_exit_message(display="Codex", returncode=returncode, lines=non_json_lines)
 
 
 def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
@@ -1246,13 +1254,10 @@ class CodexBackend:
                 for diagnostic in _take_early_diagnostics():
                     yield diagnostic
 
-            # Reap the child (the transport raises TransportExitError on a
-            # non-zero exit; _check_return_code below formats the backend-
-            # specific message from the code and captured diagnostics).
-            try:
-                await transport.wait()
-            except TransportExitError:
-                pass
+            # Reap the child, then surface its final diagnostics before the
+            # shared exit check formats the backend-specific message from the
+            # code and captured diagnostics.
+            returncode = await reap(transport)
 
             for diagnostic in _take_final_diagnostics():
                 yield diagnostic
@@ -1261,15 +1266,18 @@ class CodexBackend:
             # turn.failed event, surface the failure with diagnostic output
             # instead of reporting a successful completion with empty/partial
             # output.
-            self._check_return_code(transport.returncode, non_json_lines)
+            raise_for_exit(
+                returncode,
+                error_type=CodexError,
+                category="PROCESS_EXIT",
+                build_message=partial(_codex_process_exit_message, non_json_lines),
+            )
             if _pending_result is not None:
                 yield _pending_result
 
         finally:
             if transport is not None:
-                await transport.terminate()
-                if transport in self._transports:
-                    self._transports.remove(transport)
+                await teardown(transport, self._transports)
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
             if shared_checkout is not None:
@@ -1304,29 +1312,6 @@ class CodexBackend:
             if isinstance(block, dict) and block.get("type") in ("text", "output_text"):
                 parts.append(block.get("text", ""))
         return "".join(parts)
-
-    @staticmethod
-    def _check_return_code(
-        returncode: int | None,
-        non_json_lines: list[str],
-    ) -> None:
-        """Raise CodexError(PROCESS_EXIT) if the subprocess exited non-zero."""
-        if returncode is not None and returncode != 0:
-            tail = "\n".join(non_json_lines[-_PROCESS_EXIT_EXCERPT_MAX_LINES:])
-            if non_json_lines:
-                detail = (
-                    f"\nCodex CLI output (last {min(len(non_json_lines), _PROCESS_EXIT_EXCERPT_MAX_LINES)} "
-                    f"non-JSON lines):\n{tail}"
-                )
-            else:
-                detail = (
-                    "\n(no non-JSON output captured — codex may have "
-                    "crashed before writing to stdout)"
-                )
-            raise CodexError(
-                f"Codex CLI exited with return code {returncode}.{detail}",
-                category="PROCESS_EXIT",
-            )
 
     @staticmethod
     def _write_temp_schema(schema: dict[str, Any]) -> str:

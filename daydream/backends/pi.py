@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,8 @@ from daydream.backends import (
     _admit_json_value,
     _admit_native_unix_ms,
     _new_generation_id,
+    _parsed_nonnegative_float,
+    _parsed_nonnegative_int,
     resolve_fanout_concurrency,
     unix_ms_to_ns,
 )
@@ -69,7 +71,10 @@ from daydream.backends._transport import (
     CliTransport,
     StderrPolicy,
     StdinMode,
-    TransportExitError,
+    process_exit_message,
+    raise_for_exit,
+    reap,
+    teardown,
 )
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
@@ -104,6 +109,11 @@ _PI_PROVIDER_API_KEY_ENV = {
     "zai": "ZAI_API_KEY",
     "nous": "NOUS_API_KEY",
 }
+
+
+def _pi_process_exit_message(stderr_lines: list[str], returncode: int) -> str:
+    """Bind pi's captured stderr into the shared PROCESS_EXIT message."""
+    return process_exit_message(display="Pi", returncode=returncode, lines=stderr_lines)
 
 
 def _read_pi_default_model(path: Path) -> str | None:
@@ -220,68 +230,21 @@ def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None
 
 
 def _pi_retry_attempts() -> int:
-    raw = os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS")
-    if raw is None:
-        return _PI_DEFAULT_RETRY_ATTEMPTS
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "DAYDREAM_PI_RETRY_ATTEMPTS=%r is not a valid integer; using default %d",
-            raw,
-            _PI_DEFAULT_RETRY_ATTEMPTS,
-        )
-        return _PI_DEFAULT_RETRY_ATTEMPTS
-    if value < 0:
-        logger.warning(
-            "DAYDREAM_PI_RETRY_ATTEMPTS=%r is negative; using default %d",
-            raw,
-            _PI_DEFAULT_RETRY_ATTEMPTS,
-        )
-        return _PI_DEFAULT_RETRY_ATTEMPTS
-    return value
-
-
-def _pi_retry_delay(env_name: str, default: float) -> float:
-    """Read one finite, non-negative retry delay from the environment."""
-    raw = os.environ.get(env_name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not a valid float; using default %g",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-    if not math.isfinite(value):
-        logger.warning(
-            "%s=%r is not finite; using default %g",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-    if value < 0:
-        logger.warning(
-            "%s=%r is negative; using default %g",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-    return value
+    return _parsed_nonnegative_int(
+        os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS
+    )
 
 
 def _pi_retry_base_delay() -> float:
-    return _pi_retry_delay("DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY)
+    return _parsed_nonnegative_float(
+        os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY
+    )
 
 
 def _pi_retry_max_delay() -> float:
-    return _pi_retry_delay("DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY)
+    return _parsed_nonnegative_float(
+        os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY
+    )
 
 
 # Shared error-taxonomy tokens. The permanent set is deliberately checked
@@ -356,7 +319,7 @@ def _is_retryable_error_message(message: str) -> bool:
     )
 
 
-def _is_retryable_exit_code(code: int) -> bool:
+def _is_retryable_exit_code(code: int | None) -> bool:
     """Return True for exit codes that indicate OOM/SIGKILL rather than a logic error."""
     return code in (-9, 137)
 
@@ -1061,13 +1024,10 @@ class PiBackend:
                 # tool_execution_update are streaming-only; the full content is
                 # already captured at message_end / tool_execution_end.
 
-            # Reap the child (the transport raises TransportExitError on a
-            # non-zero exit; the check below formats the backend-specific
-            # message from the code and captured stderr lines).
-            try:
-                await transport.wait()
-            except TransportExitError:
-                pass
+            # Reap the child, then yield its terminal events before the shared
+            # exit check formats the backend-specific message from the code and
+            # captured stderr lines (the events must stay between the two).
+            returncode = await reap(transport)
 
             if output_schema and last_assistant_text:
                 structured_result = extract_json(last_assistant_text)
@@ -1078,18 +1038,13 @@ class PiBackend:
             # turn_end error event, surface the failure with diagnostic output
             # instead of reporting a successful completion with empty/partial
             # output.
-            returncode = transport.returncode
-            if returncode is not None and returncode != 0:
-                stderr_tail = "\n".join(stderr_lines[-10:])
-                if stderr_lines:
-                    detail = f"\nPi CLI output (last {len(stderr_lines)} non-JSON lines):\n{stderr_tail}"
-                else:
-                    detail = "\n(no non-JSON output captured — pi may have crashed before writing to stdout)"
-                raise PiError(
-                    f"Pi CLI exited with return code {returncode}.{detail}",
-                    retryable=_is_retryable_exit_code(returncode),
-                    category="PROCESS_EXIT",
-                )
+            raise_for_exit(
+                returncode,
+                error_type=PiError,
+                category="PROCESS_EXIT",
+                build_message=partial(_pi_process_exit_message, stderr_lines),
+                retryable=_is_retryable_exit_code(returncode),
+            )
 
             if saw_turn_start and not saw_finish_reason:
                 raise PiError(
@@ -1100,9 +1055,7 @@ class PiBackend:
 
         finally:
             if transport is not None:
-                await transport.terminate()
-                if transport in self._transports:
-                    self._transports.remove(transport)
+                await teardown(transport, self._transports)
 
     async def cancel(self) -> None:
         """Cancel all running Pi processes.
