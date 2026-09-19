@@ -105,6 +105,32 @@ to see exactly what changed. Do NOT dump the full diff — work file-by-file so
 your context stays small."""
 
 
+def _specialist_prompt(
+    strategy: str,
+    files_block: str,
+    cwd: Path,
+    diff_ref: str,
+    schema: dict[str, Any],
+    *,
+    instructions: str = "",
+) -> str:
+    instructions_block = f"{instructions}\n\n" if instructions else ""
+    return f"""{strategy}
+
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
+
+{instructions_block}{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+
+<affected_files>
+{files_block}
+</affected_files>
+
+{_inspect_changes_block(diff_ref)}
+
+{_schema_block(schema)}
+"""
+
+
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
 def build_pattern_scanner_prompt(
     affected_files: list[FileInfo], diff_ref: str, *, cwd: Path, strategy: str
@@ -122,25 +148,17 @@ def build_pattern_scanner_prompt(
         strategy: The profile-owned ``exploration.pattern_scan`` strategy content.
     """
     files_block = _files_block(affected_files)
-    return f"""{strategy}
-
-{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
-
-Instructions:
+    return _specialist_prompt(
+        strategy,
+        files_block,
+        cwd,
+        diff_ref,
+        PATTERN_SCANNER_SCHEMA,
+        instructions="""Instructions:
 - Read CLAUDE.md at the repo root if it exists.
 - Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
-- Infer conventions from the code itself where config files are silent.
-
-{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
-
-<affected_files>
-{files_block}
-</affected_files>
-
-{_inspect_changes_block(diff_ref)}
-
-{_schema_block(PATTERN_SCANNER_SCHEMA)}
-"""
+- Infer conventions from the code itself where config files are silent.""",
+    )
 
 
 def build_repo_survey_prompt(
@@ -204,20 +222,7 @@ def build_dependency_tracer_prompt(
         strategy: The profile-owned ``exploration.dependency_trace`` strategy content.
     """
     files_block = _files_block(affected_files)
-    return f"""{strategy}
-
-{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
-
-{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
-
-<affected_files>
-{files_block}
-</affected_files>
-
-{_inspect_changes_block(diff_ref)}
-
-{_schema_block(DEPENDENCY_TRACER_SCHEMA)}
-"""
+    return _specialist_prompt(strategy, files_block, cwd, diff_ref, DEPENDENCY_TRACER_SCHEMA)
 
 
 def build_test_mapper_prompt(
@@ -236,20 +241,7 @@ def build_test_mapper_prompt(
         strategy: The profile-owned ``exploration.test_mapping`` strategy content.
     """
     files_block = _files_block(affected_files)
-    return f"""{strategy}
-
-{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
-
-{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
-
-<affected_files>
-{files_block}
-</affected_files>
-
-{_inspect_changes_block(diff_ref)}
-
-{_schema_block(TEST_MAPPER_SCHEMA)}
-"""
+    return _specialist_prompt(strategy, files_block, cwd, diff_ref, TEST_MAPPER_SCHEMA)
 
 
 __all__ = [

@@ -24,13 +24,14 @@ import re
 import shutil
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
 from daydream.archive import hydrate_rules, sanitize
+from daydream.archive._console import warn as _warn
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.hydrate_rules import (
     REASON_CODE_BUNDLE_UNREADABLE,
@@ -54,6 +55,16 @@ from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, redact_text
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,39}$")
 ANNOTATION_BRANCH = "main"
+
+_LICENSE_REASON_CODES = frozenset(
+    {
+        REASON_CODE_C5_EXCLUDED_REPO,
+        REASON_CODE_C8_COPYLEFT_UNOPTED,
+        REASON_CODE_LICENSE_EVIDENCE_MISSING,
+        REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    }
+)
 
 
 class HydrationError(Exception):
@@ -90,13 +101,6 @@ class PublicDestinationError(HydrationError):
 
 class VerificationError(HydrationError):
     """The clean-room verification cycle failed — success is never reported (M20)."""
-
-
-def _warn(message: str) -> None:
-    """Print a one-line warning through the daydream console (never raises)."""
-    from daydream.ui import create_console, print_warning  # noqa: PLC0415 - lazy: avoid ui import at module load
-
-    print_warning(create_console(), message)
 
 
 def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bool) -> str:
@@ -748,6 +752,27 @@ def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collis
     return None, None
 
 
+def _iter_enrichment_cache(stage: Path) -> Iterator[dict[str, Any]]:
+    """Yield the dict rows of the enrichment evidence cache, skipping malformed lines."""
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _ENRICH_CACHE_NAME,
+        _ENRICH_DIR,
+    )
+
+    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            yield entry
+
+
 def _repo_commit_unresolved_sessions(stage: Path) -> set[str]:
     """Session ids whose enrichment recorded an unresolvable repo commit.
 
@@ -757,23 +782,9 @@ def _repo_commit_unresolved_sessions(stage: Path) -> set[str]:
     pinned, so the gate records such evidence-missing rejections under the
     specific stable code instead of the generic one.
     """
-    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
-        _ENRICH_CACHE_NAME,
-        _ENRICH_DIR,
-    )
-
-    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
     unresolved: set[str] = set()
-    if not path.is_file():
-        return unresolved
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict) or entry.get("status") != REASON_CODE_REPO_COMMIT_UNRESOLVED:
+    for entry in _iter_enrichment_cache(stage):
+        if entry.get("status") != REASON_CODE_REPO_COMMIT_UNRESOLVED:
             continue
         sid = entry.get("session_id")
         if isinstance(sid, str) and sid:
@@ -1126,13 +1137,6 @@ def _policy_binding(
     recorded_excluded = _DedupeLedger.load(
         _dedupe_dir(stage, _pre_identity_dir(stage, str(source_commit)).name) / "dedupe.jsonl"
     ).latest
-    license_codes = {
-        REASON_CODE_C5_EXCLUDED_REPO,
-        REASON_CODE_C8_COPYLEFT_UNOPTED,
-        REASON_CODE_LICENSE_EVIDENCE_MISSING,
-        REASON_CODE_REPO_IDENTITY_MISSING,
-        REASON_CODE_REPO_COMMIT_UNRESOLVED,
-    }
     excluded_dir = stage / "excluded"
     if excluded_dir.is_dir():
         for derivative in sorted(p for p in excluded_dir.iterdir() if p.is_dir()):
@@ -1146,7 +1150,7 @@ def _policy_binding(
             sid = str(data.get("session_id") or derivative.name)
             entry = recorded_excluded.get(sid) or {}
             code = entry.get("reason_code")
-            if code not in license_codes:
+            if code not in _LICENSE_REASON_CODES:
                 continue  # never a license-gate decision, never in the digest
             decision = resolve_repo_decision(
                 _manifest_repo_slug(data) or "",
@@ -1544,16 +1548,9 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
     entries: list[tuple[str, str | None]] = [
         (str(item["session_id"]), None) for item in ledger.get("imported", [])
     ]
-    license_codes = {
-        REASON_CODE_C5_EXCLUDED_REPO,
-        REASON_CODE_C8_COPYLEFT_UNOPTED,
-        REASON_CODE_LICENSE_EVIDENCE_MISSING,
-        REASON_CODE_REPO_IDENTITY_MISSING,
-        REASON_CODE_REPO_COMMIT_UNRESOLVED,
-    }
     for item in ledger.get("rejections", []):
         code = item.get("reason_code")
-        if code in license_codes:
+        if code in _LICENSE_REASON_CODES:
             entries.append((str(item["session_id"]), str(code)))
     return admission_summary_buckets(entries)
 
@@ -1575,19 +1572,12 @@ def license_admission_by_repo(
     and counts, never URLs or paths.
     """
     revision = str(ledger["pinned_revision"])
-    license_codes = {
-        REASON_CODE_C5_EXCLUDED_REPO,
-        REASON_CODE_C8_COPYLEFT_UNOPTED,
-        REASON_CODE_LICENSE_EVIDENCE_MISSING,
-        REASON_CODE_REPO_IDENTITY_MISSING,
-        REASON_CODE_REPO_COMMIT_UNRESOLVED,
-    }
     entries: list[tuple[str, str | None]] = [
         (str(item["session_id"]), None) for item in ledger.get("imported", [])
     ]
     for item in ledger.get("rejections", []):
         code = item.get("reason_code")
-        if code in license_codes:
+        if code in _LICENSE_REASON_CODES:
             entries.append((str(item["session_id"]), str(code)))
     by_repo: dict[str, dict[str, int]] = {}
     for sid, code in entries:
@@ -1960,23 +1950,9 @@ def _repo_commits_from_enrichment_cache(stage: Path) -> dict[str, str]:
     revision is never consulted and never recorded as a repository commit
     (issue #1094).
     """
-    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
-        _ENRICH_CACHE_NAME,
-        _ENRICH_DIR,
-    )
-
-    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
     commits: dict[str, str] = {}
-    if not path.is_file():
-        return commits
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict) or entry.get("status") != "resolved":
+    for entry in _iter_enrichment_cache(stage):
+        if entry.get("status") != "resolved":
             continue
         slug = entry.get("repo_slug")
         commit = entry.get("repo_commit")

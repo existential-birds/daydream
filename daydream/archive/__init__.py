@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from daydream.archive._console import warn as _warn
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest_from_snapshot
@@ -42,17 +43,6 @@ if TYPE_CHECKING:
 
 class ArchiveFinalizationError(RuntimeError):
     """Strict host archive finalization did not complete successfully."""
-
-
-def _warn(message: str) -> None:
-    """Print a one-line warning through the daydream console (never raises).
-
-    Lazily imported (mirroring ``hub._warn``) so the archive import graph does
-    not pull the UI package in for callers that never warn.
-    """
-    from daydream.ui import create_console, print_warning
-
-    print_warning(create_console(), message)
 
 
 def get_archive_dir() -> Path:

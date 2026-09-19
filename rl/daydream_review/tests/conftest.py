@@ -17,7 +17,6 @@ import pytest
 import verifiers.v1 as vf
 from verifiers.v1.runtimes.subprocess import SubprocessConfig, SubprocessRuntime, SubprocessRuntimeInfo
 
-from daydream_review.fixture import FixtureRepo, build_fixture_repo
 from daydream_review.stub_upstream import serve
 from images import build_images
 
@@ -55,12 +54,6 @@ def base_image() -> str:
             check=True,
         )
     return tag
-
-
-@pytest.fixture
-def fixture_repo(tmp_path: Path) -> FixtureRepo:
-    """A freshly built deterministic fixture repository."""
-    return build_fixture_repo(tmp_path / "daydream-rl-fixture")
 
 
 @pytest.fixture(scope="session")

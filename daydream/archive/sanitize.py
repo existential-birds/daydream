@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive import scan
+from daydream.archive._console import warn as _warn
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
 from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
 
@@ -56,13 +57,6 @@ _DERIVATIVE_MARKER = ".daydream_derivative_marker"
 
 def _now_iso_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _warn(message: str) -> None:
-    """Print a one-line warning through the daydream console (never raises)."""
-    from daydream.ui import create_console, print_warning  # noqa: PLC0415 - lazy: avoid ui import at module load
-
-    print_warning(create_console(), message)
 
 
 @dataclass(frozen=True)

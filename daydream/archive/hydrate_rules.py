@@ -16,9 +16,6 @@ ADMISSION_POLICY_VERSION = "1"
 
 # Stable quarantine/exclusion reason codes (v1 registry; extended for
 # license/repo gates by issue #1080).
-REASON_CODE_FIXTURE_PYTEST_PATH = "fixture_pytest_path"
-REASON_CODE_FIXTURE_TMP_ARTIFACT = "fixture_tmp_artifact"
-REASON_CODE_NON_PRODUCTION_BUNDLE = "non_production_bundle"
 REASON_CODE_PIPELINE_STATUS_EVIDENCE_ABSENT = "pipeline_status_evidence_absent"
 REASON_CODE_SECRETS_SCAN_DIRTY = "secrets_scan_dirty"
 REASON_CODE_BUNDLE_UNREADABLE = "bundle_unreadable"
