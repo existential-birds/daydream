@@ -290,7 +290,6 @@ JsonValue = Union[None, bool, int, float, str, list["JsonValue"], dict[str, "Jso
 
 _MAX_MODEL_NAME_CHARS = 256
 _MAX_PROVIDER_NAME_CHARS = 128
-_MAX_PHASE_NAME_CHARS = 128
 _MAX_TOOL_NAME_CHARS = 128
 _MAX_ORDERED_IDENTITY_ENTRIES = 16
 _INT64_MAX = 2**63 - 1
@@ -421,16 +420,6 @@ def _admit_runtime_tool_name(value: Any) -> tuple[str | None, EvidenceDiagnostic
         return None, diagnostic
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", admitted):
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_UNSAFE_CHARS, "tool_name")
-    return admitted, None
-
-
-def _admit_phase_name(value: Any) -> tuple[str | None, EvidenceDiagnostic | None]:
-    """Admit an extension phase key: ASCII ``[A-Za-z][A-Za-z0-9_.-]{0,127}``."""
-    admitted, diagnostic = _admit_identity_label(value, max_chars=_MAX_PHASE_NAME_CHARS, context="phase_name")
-    if admitted is None:
-        return None, diagnostic
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", admitted):
-        return None, EvidenceDiagnostic(_DIAG_IDENTITY_UNSAFE_CHARS, "phase_name")
     return admitted, None
 
 

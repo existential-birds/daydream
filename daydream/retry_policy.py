@@ -204,12 +204,7 @@ class RetryRecoveryBudget:
         return self._spent_s
 
     def charge(self, seconds: float) -> None:
-        """Charge backoff-sleep seconds to the cumulative allowance."""
-        if seconds > 0:
-            self._spent_s += seconds
-
-    def charge_attempt(self, seconds: float) -> None:
-        """Charge time spent inside a retry attempt to the cumulative allowance."""
+        """Charge time to the cumulative retry allowance."""
         if seconds > 0:
             self._spent_s += seconds
 

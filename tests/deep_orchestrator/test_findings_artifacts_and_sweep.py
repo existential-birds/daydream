@@ -11,7 +11,6 @@ import pytest
 
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
-    _CommittingStubBackend,
     _eroded_main_repo,
     _install_uncovered_sweep_stub,
     _silence_gate_noise,
@@ -27,6 +26,7 @@ from tests.test_deep_orchestrator import (
     _pin_findings_pr,
     _run_deep,
     _silence,
+    _StubBackend,
 )
 
 
@@ -189,7 +189,7 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
 
     monkeypatch.setattr("daydream.run_context._prompt_user", _prompt)
 
-    stub = _CommittingStubBackend(tiny_diff_target)
+    stub = _StubBackend(tiny_diff_target)
     _add_bare_remote(tiny_diff_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)

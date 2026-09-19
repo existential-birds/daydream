@@ -482,14 +482,9 @@ def test_resume_failure_on_last_download_leaves_no_partial_install(tmp_path: Pat
     assert list(tmp_path.glob(".fresh.*")) == []
 
 
-def test_resume_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _fail_parent_fsync_after_rename(
+    monkeypatch: pytest.MonkeyPatch, destination: Path, parent_identity: tuple[int, int]
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    state, manifest = _state_v2(tmp_path)
-    publish_annotation_state(hub, state, manifest=manifest)
-    destination = tmp_path / "fresh"
-    parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     real_fsync = os.fsync
 
     def fail_parent_after_rename(fd: int) -> None:
@@ -499,6 +494,17 @@ def test_resume_parent_fsync_failure_removes_owned_install(
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", fail_parent_after_rename)
+
+
+def test_resume_parent_fsync_failure_removes_owned_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    state, manifest = _state_v2(tmp_path)
+    publish_annotation_state(hub, state, manifest=manifest)
+    destination = tmp_path / "fresh"
+    parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
+    _fail_parent_fsync_after_rename(monkeypatch, destination, parent_identity)
     with pytest.raises(HydrationError, match="parent fsync failed"):
         resume_annotation_state(hub, curation_id=_CID, destination=destination)
 
@@ -1229,15 +1235,7 @@ def test_final_download_parent_fsync_failure_removes_owned_install(
     published = publish_final_annotation_bundle(hub, bundle)
     destination = tmp_path / "download"
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
-    real_fsync = os.fsync
-
-    def fail_parent_after_rename(fd: int) -> None:
-        stat = os.fstat(fd)
-        if destination.exists() and (stat.st_dev, stat.st_ino) == parent_identity:
-            raise OSError("parent fsync failed")
-        real_fsync(fd)
-
-    monkeypatch.setattr(os, "fsync", fail_parent_after_rename)
+    _fail_parent_fsync_after_rename(monkeypatch, destination, parent_identity)
     with pytest.raises(HydrationError, match="parent fsync failed"):
         download_final_annotation_bundle(
             hub,

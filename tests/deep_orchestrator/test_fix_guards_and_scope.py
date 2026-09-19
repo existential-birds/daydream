@@ -10,8 +10,6 @@ import pytest
 
 import daydream
 from tests.deep_orchestrator.support import (
-    _CommittingStubBackend,
-    _PushingCommittingStubBackend,
     _scan_phase_events,
     _scan_trajectory_extra,
 )
@@ -105,7 +103,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     untouched_untracked.write_bytes(b"-- untouched draft\r\n")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
-    stub = _PushingCommittingStubBackend(project)
+    stub = _StubBackend(project)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     stub.merge_items = [
         _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
@@ -172,7 +170,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     head_before = _git(project, "rev-parse", "HEAD")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
-    stub = _PushingCommittingStubBackend(project)
+    stub = _StubBackend(project)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     # A one-file diff collapses to single-stack mode (no cross-stack merge
     # agent), so the finding is driven through the per-stack parse: the go
@@ -268,7 +266,7 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(heal=True, commit=False)
-    stub = _CommittingStubBackend(multi_stack_target)
+    stub = _StubBackend(multi_stack_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]

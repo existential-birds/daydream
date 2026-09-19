@@ -16,6 +16,7 @@ from daydream.improve.partition import (
 )
 from daydream.improve.services import Service
 from daydream.services import enumerate_services
+from tests.test_improve_flow import _nested_service_repo
 
 
 def test_service_files_cover_into_service_partitions() -> None:
@@ -242,15 +243,6 @@ def test_partition_max_files_default_is_the_module_bound() -> None:
     assert all(len(p.files) <= PARTITION_MAX_FILES for p in partitions)
     assert isinstance(partitions[0], Partition)
     assert isinstance(group_partitions(partitions, {})[0][0], PartitionGroup)
-
-
-def _nested_service_repo(tmp_path: Path) -> Path:
-    """A repo whose ``services/api/inner`` nests inside ``services/api``."""
-    repo = tmp_path / "repo"
-    for root in ("services/api", "services/api/inner"):
-        (repo / root).mkdir(parents=True)
-        (repo / root / "pyproject.toml").write_text("[project]\nname = 'x'\n")
-    return repo
 
 
 def test_service_ownership_freezes_nested_and_repo_root_partitioning(tmp_path: Path) -> None:

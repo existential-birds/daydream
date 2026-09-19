@@ -223,60 +223,6 @@ def _count_merge_prompts(calls: list[dict[str, Any]]) -> int:
     return sum(1 for c in calls if "cross-stack merge agent" in c["prompt"].lower())
 
 
-class _CommittingStubBackend(_StubBackend):
-    """Stub backend for real-commit flow tests.
-
-    ``_do_commit`` commits host-side (issue #726) — no agent turn, no commit
-    prompt to answer — so this stub only serves the run's fix/heal turns.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> Any:
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
-class _PushingCommittingStubBackend(_StubBackend):
-    """Run stub for real commit/push flow tests (commit is host-side, issue #726)."""
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> Any:
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
 def _eroded_main_repo(tmp_path: Path) -> Path:
     """Build a repo whose feature branch adds an eroded ``main()``: repeated
     ``--flag value`` / ``--flag=value`` branch pairs with no helper extracted

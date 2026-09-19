@@ -265,86 +265,27 @@ class ReadbackClient:
             }
         )
 
-    async def post_json(
+    async def _request(
         self,
         client: httpx.AsyncClient,
+        method: str,
         *,
         destination: str,
         url: str,
-        payload: Mapping[str, Any],
+        request_kwargs: Mapping[str, Any],
         headers: Mapping[str, str],
         op: str,
         key: str,
-    ) -> tuple[str, int, dict[str, Any], bytes]:
-        """One bounded POST under the shared immutable deadline.
-
-        Returns (disposition, status, parsed_json, raw_body). A timeout returns
-        only the fixed timeout disposition; no URL, body or exception text is
-        ever propagated. Redirects (3xx) fail closed because the client never
-        follows them.
-        """
-        left = self.remaining()
-        if left <= 0:
-            return (DISPOSITION_TIMEOUT, 0, {}, b"")
-        self._record(destination, op, key)
-        try:
-            with anyio.fail_after(left):
-                async with client.stream("POST", url, json=dict(payload), headers=dict(headers)) as response:
-                    status = response.status_code
-                    if status in (301, 302, 303, 307, 308):
-                        return (DISPOSITION_REDIRECT, status, {}, b"")
-                    if status in (401, 403):
-                        return (DISPOSITION_AUTH, status, {}, b"")
-                    if status == 404:
-                        return (DISPOSITION_NOT_FOUND, status, {}, b"")
-                    if status in (429, 502, 503, 504) or status >= 500:
-                        return (DISPOSITION_HTTP_ERROR, status, {}, b"")
-                    raw = bytearray()
-                    oversized = False
-                    async for chunk in response.aiter_bytes():
-                        raw.extend(chunk)
-                        if len(raw) > MAX_BODY_BYTES:
-                            oversized = True
-                            break  # bounded discard; the response context closes it
-                    if oversized:
-                        return (DISPOSITION_OVERSIZED, status, {}, b"")
-        except (TimeoutError, anyio.ClosedResourceError, anyio.BrokenResourceError):
-            return (DISPOSITION_TIMEOUT, 0, {}, b"")
-        except httpx.HTTPError:
-            # Connection refused/reset/DNS: bounded, redacted, no retry.
-            return (DISPOSITION_HTTP_ERROR, 0, {}, b"")
-        try:
-            parsed = json.loads(bytes(raw).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
-        if not isinstance(parsed, dict):
-            return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
-        return (DISPOSITION_PASS, status, parsed, bytes(raw))
-
-    async def get_json(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        destination: str,
-        url: str,
-        params: Mapping[str, Any],
-        headers: Mapping[str, str],
-        op: str,
-        key: str,
+        accept: type[Any] | tuple[type[Any], ...],
     ) -> tuple[str, int, Any, bytes]:
-        """One bounded GET under the shared immutable deadline.
-
-        Same redaction/failure contract as :meth:`post_json`; the parsed body
-        may be a JSON array (e.g. the vendor session list) so ``Any`` is
-        returned. A non-JSON or non-list/object body is MALFORMED.
-        """
+        """One bounded request under the shared immutable deadline."""
         left = self.remaining()
         if left <= 0:
             return (DISPOSITION_TIMEOUT, 0, {}, b"")
         self._record(destination, op, key)
         try:
             with anyio.fail_after(left):
-                async with client.stream("GET", url, params=dict(params), headers=dict(headers)) as response:
+                async with client.stream(method, url, **request_kwargs, headers=dict(headers)) as response:
                     status = response.status_code
                     if status in (301, 302, 303, 307, 308):
                         return (DISPOSITION_REDIRECT, status, {}, b"")
@@ -371,9 +312,57 @@ class ReadbackClient:
             parsed = json.loads(bytes(raw).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
-        if not isinstance(parsed, (dict, list)):
+        if not isinstance(parsed, accept):
             return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
         return (DISPOSITION_PASS, status, parsed, bytes(raw))
+
+    async def post_json(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        destination: str,
+        url: str,
+        payload: Mapping[str, Any],
+        headers: Mapping[str, str],
+        op: str,
+        key: str,
+    ) -> tuple[str, int, dict[str, Any], bytes]:
+        """One bounded POST under the shared immutable deadline."""
+        return await self._request(
+            client,
+            "POST",
+            destination=destination,
+            url=url,
+            request_kwargs={"json": dict(payload)},
+            headers=headers,
+            op=op,
+            key=key,
+            accept=dict,
+        )
+
+    async def get_json(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        destination: str,
+        url: str,
+        params: Mapping[str, Any],
+        headers: Mapping[str, str],
+        op: str,
+        key: str,
+    ) -> tuple[str, int, Any, bytes]:
+        """One bounded GET under the shared immutable deadline."""
+        return await self._request(
+            client,
+            "GET",
+            destination=destination,
+            url=url,
+            request_kwargs={"params": dict(params)},
+            headers=headers,
+            op=op,
+            key=key,
+            accept=(dict, list),
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ from daydream.improve.prompts import (
     build_plan_writer_repair_prompt,
 )
 from daydream.improve.publish import ImprovePublishError, IssuePublisher
-from daydream.improve.render import markdown_cell, plan_slug
+from daydream.improve.render import _redact_model_value, markdown_cell, plan_slug
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
@@ -164,22 +164,6 @@ _PROVENANCE_VALUES = {"introduced", "inherited"}
 _MAINTENANCE_SIGNALS = set(MAINTENANCE_SIGNALS)
 _CHANGE_SHAPES = set(CHANGE_SHAPES)
 _REUSE_TARGET = re.compile(r"^(?:repo:[^#\s]+#[^\s]+|stdlib:[^\s]+|dep:[^:\s]+:[^\s]+)$")
-
-
-def _redact_model_value(value: Any) -> Any:
-    """Redact nested model-authored strings before host use or persistence."""
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, list):
-        return [_redact_model_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_model_value(item) for item in value)
-    if isinstance(value, dict):
-        return {
-            key: _redact_model_value(item)
-            for key, item in value.items()
-        }
-    return value
 
 
 def _artifact_provenance(*, phase: DaydreamPhase) -> dict[str, str]:
