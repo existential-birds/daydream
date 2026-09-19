@@ -32,8 +32,8 @@ from daydream.training.corpus_projection.projector import build_frozen_corpus
 from tests.test_calibration import _build_fixture, _config
 from tests.test_cli_adjudicate import _seed_adjudicated, _write_sessions
 from tests.test_corpus_projection import _cfg, _write_annotations_snapshot, _write_bundle
-from tests.test_training_adjudication_final_bundle import seed_final_bundle_state
 from tests.test_training_adjudication_canonical import _PIN, _index
+from tests.test_training_adjudication_final_bundle import seed_final_bundle_state
 
 
 @contextmanager
