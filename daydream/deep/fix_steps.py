@@ -1077,7 +1077,6 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
     """Run one policy-bound fix round using its own complete rollback point."""
     deep_state = DeepState(ctx.data)
     items = _round_dispatch_items(ctx, deep_state.items)
-    deep_state.fix_round_items = list(items)
     if not items:
         return None
     try:

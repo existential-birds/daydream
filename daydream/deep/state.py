@@ -254,17 +254,6 @@ class DeepState:
         self._data["intent_summary"] = value
 
     @property
-    def per_stack_outputs(self) -> dict[str, Path]:
-        return cast(
-            dict[str, Path],
-            self._required("per_stack_outputs", dict, "dict"),
-        )
-
-    @per_stack_outputs.setter
-    def per_stack_outputs(self, value: dict[str, Path]) -> None:
-        self._data["per_stack_outputs"] = value
-
-    @property
     def records_paths(self) -> list[Path]:
         return cast(list[Path], self._required("records_paths", list, "list"))
 
@@ -413,17 +402,6 @@ class DeepState:
     @fix_outcomes.setter
     def fix_outcomes(self, value: dict[str, dict[str, Any]]) -> None:
         self._data["fix_outcomes"] = value
-
-    @property
-    def fix_round_items(self) -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            self._required("fix_round_items", list, "list"),
-        )
-
-    @fix_round_items.setter
-    def fix_round_items(self, value: list[dict[str, Any]]) -> None:
-        self._data["fix_round_items"] = value
 
     @property
     def fix_round_snapshot(self) -> RetainedTreeSnapshot | None:

@@ -1427,8 +1427,9 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     assert "exploration=None" in prompt  # no dangling host path on a clone run
 
 
+@pytest.mark.parametrize("kind", ["sequence", "flowchart"])
 async def test_disposable_clone_authoring_completes_without_artifact_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     """Issue #1123 acceptance: the full author turn on a disposable-clone backend
     completes with no read of .daydream/exploration or diff.patch — the prompt
@@ -1452,41 +1453,7 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
     result = await deep._run_diagram_kind(
         ctx,
-        kind="sequence",
-        eligibility=_clone_test_eligibility(),
-        hunk_ranges={},
-        symbols=RepoSymbols(tmp_path),
-        recorder=None,
-        backend=_Wall(),
-    )
-    assert result["status"] != "failed"  # authoring completed
-
-
-async def test_disposable_clone_flowchart_authoring_completes_without_artifact_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Same wall for the flowchart branch: no clone-branch special-casing may
-    leak a host-only artifact path into the flowchart author prompt."""
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
-
-    class _Wall:
-        """Fake disposable-clone backend."""
-
-        read_only_disposable_clone = True
-        model = "fake"
-
-    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        for forbidden in (".daydream/", "diff.patch"):
-            if forbidden in prompt:
-                raise AssertionError(f"prompt references {forbidden} — clone cannot read it")
-        return {"participants": []}, None, None
-
-    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
-    ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
-    result = await deep._run_diagram_kind(
-        ctx,
-        kind="flowchart",
+        kind=kind,
         eligibility=_clone_test_eligibility(),
         hunk_ranges={},
         symbols=RepoSymbols(tmp_path),

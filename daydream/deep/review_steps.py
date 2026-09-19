@@ -351,7 +351,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     if config.start_at not in ("merge", "fix"):
         print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
         async with phase_scope(DaydreamPhase.DEEP, stage="review"):
-            per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
+            _, failed_stacks = await phase_per_stack_reviews(
                 ctx.backend_for("per_stack_review"),
                 ctx.work,
                 stacks,
@@ -386,8 +386,6 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     else:
         # Resume: resurrect any prior failure summary before reconstructing
         # outputs, so failed stacks never re-enter the parse pipeline.
-        from daydream.deep.artifacts import per_stack_review_path
-
         failures_p = per_stack_failures_path(dd)
         loaded = _load_failures(failures_p)
         # Surface a prior cross-stack synthesis failure (issue #361): the
@@ -405,12 +403,6 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
         failed_stacks = {
             str(k): str(v) for k, v in loaded.items() if isinstance(v, str)
         }
-        per_stack_outputs = {
-            stack.stack_name: per_stack_review_path(dd, stack.stack_name)
-            for stack in stacks
-            if stack.stack_name not in failed_stacks
-        }
-    deep_state.per_stack_outputs = per_stack_outputs
     deep_state.failed_stacks = failed_stacks
 
 
@@ -562,15 +554,6 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     # record's own uid (issue #1111) and rebuilds ``all_records`` /
     # ``record_sources`` as pairs, so the positional index invariant between
     # those two lists survives the split exactly as before.
-    #
-    # This test used to compare ``src`` against both ``STRUCTURE_STACK_NAME``
-    # and the records filename, on the stated belief that ``source`` is a bare
-    # stack name on a fresh run and a filename on resume. That belief was
-    # wrong: ``source_name`` is ``records_path.name`` above on every path, fresh
-    # run and resume alike, so the bare-stack-name half of the test was dead
-    # code (the only bare-name source in this module is the uncovered sweep's
-    # ``"uncovered"``). A uid's stack half has one spelling and cannot rot that
-    # way.
     #
     # The partition is scoped to the dedup pre-filter and the merge agent's
     # record pool -- the two places that could collapse a structural finding

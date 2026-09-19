@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from daydream import review_profile as rp
 from daydream.deep.coverage import (
     build_uncovered_sweep_prompt,
@@ -684,59 +686,20 @@ def test_omitted_assigned_file_is_still_swept(tmp_path: Path) -> None:
     assert "api.py" not in uncovered   # reviewed inline -> not swept
 
 
-def test_compute_uncovered_files_bash_import_only_grep_does_not_cover(tmp_path: Path) -> None:
-    """An import-only Bash grep shares the Grep-tool carve-out (issue #739)."""
-    daydream_dir = tmp_path / ".daydream"
-    daydream_dir.mkdir()
-    write_hunk_index(daydream_dir, _DIFF)
-    run_dir = daydream_dir / "runs" / "sess-bashgrep"
-    run_dir.mkdir(parents=True)
-    _write_main(run_dir)
-    _write_claude_fork(run_dir, "deep-python.json", [
-        {"function_name": "Bash", "arguments": {
-            "command": "grep -n '^from|^import' /repo/api.py"
-        }},
-    ])
-    _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
-
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-bashgrep")
-
-    assert "api.py" in uncovered  # the import-only Bash grep covers nothing
-    assert stats["files_read_by_reviewers"] == 1  # only notes.txt via Read
-    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
-    assert "api.py" in swept  # the file is swept, never silently skipped
-
-
-def test_compute_uncovered_files_counts_claude_bash_reads(tmp_path: Path) -> None:
-    """A Claude-spelled Bash sed read covers a diff file (AC3)."""
-    daydream_dir = tmp_path / ".daydream"
-    daydream_dir.mkdir()
-    write_hunk_index(daydream_dir, _DIFF)
-    run_dir = daydream_dir / "runs" / "sess-claude"
-    run_dir.mkdir(parents=True)
-    _write_main(run_dir)
-    _write_claude_fork(run_dir, "deep-python.json", [
-        {"function_name": "Bash", "arguments": {"command": "sed -n '1,60p' /repo/api.py"}},
-    ])
-
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-claude")
-
-    assert uncovered == ["notes.txt"]  # api.py read via Bash sed is covered, not swept
-    assert stats["files_read_by_reviewers"] == 1
-    assert stats["coverage_ratio"] == 0.5
-
-
-def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path) -> None:
-    """An import-only Grep does not, on its own, mark a file covered (AC2/AC3)."""
+@pytest.mark.parametrize("tool", [
+    {"function_name": "Bash", "arguments": {
+        "command": "grep -n '^from|^import' /repo/api.py"}},
+    {"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "/repo/api.py"}},
+])
+def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path, tool: Any) -> None:
+    """An import-only grep (Bash or Grep tool) covers nothing (issue #739 / AC2/AC3)."""
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
     write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-grep"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
-    _write_claude_fork(run_dir, "deep-python.json", [
-        {"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "/repo/api.py"}},
-    ])
+    _write_claude_fork(run_dir, "deep-python.json", [tool])
     _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
 
     uncovered, stats = compute_uncovered_files(daydream_dir, "sess-grep")
