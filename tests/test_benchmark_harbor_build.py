@@ -9,20 +9,9 @@ import pytest
 
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git
+from tests.harness.git_helpers import seed_commit, seed_write
 
 REPO = Path(__file__).resolve().parents[1]
-
-# deterministic seed identity + fake_gh fixtures (mirrors
-# tests/test_benchmark_curation.py::_seed_ready_case and tests/conftest.py)
-
-_SEED_ENV = {
-    "GIT_AUTHOR_NAME": "Tester",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_NAME": "Tester",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
-}
 
 
 def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
@@ -40,18 +29,6 @@ def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "
         "updated_at": "2026-01-01T00:00:00Z",
         "user": {"login": "alice", "type": "User"},
     }
-
-
-def _seed_write(repo: Any, name: str, content: str) -> None:
-    path = repo / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    _seed_git(repo, "add", name)
-
-
-def _seed_commit(repo: Any, message: str) -> str:
-    _seed_git(repo, "commit", "-m", message, env=_SEED_ENV)
-    return _seed_git(repo, "rev-parse", "HEAD")
 
 
 def _seed_preflight(fake_gh: FakeGh, *, number: int = 101) -> None:
@@ -81,17 +58,17 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
         _sh.rmtree(repo)
     repo.mkdir()
     _seed_git(repo, "init", "-b", "main")
-    _seed_write(repo, "readme.txt", "base1\n")
-    _seed_commit(repo, "base1")
-    _seed_write(repo, "base.py", "BASE = 2\n")
-    base_sha = _seed_commit(repo, "base2")
-    _seed_write(repo, "beyond.py", "BEYOND = 3\n")
-    _seed_commit(repo, "base3")
+    seed_write(repo, "readme.txt", "base1\n")
+    seed_commit(repo, "base1")
+    seed_write(repo, "base.py", "BASE = 2\n")
+    base_sha = seed_commit(repo, "base2")
+    seed_write(repo, "beyond.py", "BEYOND = 3\n")
+    seed_commit(repo, "base3")
     _seed_git(repo, "checkout", "--detach", base_sha)
     (repo / "base.py").write_text("BASE = 20\n")
     _seed_git(repo, "add", "base.py")
-    _seed_write(repo, "feature.py", "".join(f"LINE {i}\n" for i in range(1, lines + 1)))
-    head_sha = _seed_commit(repo, f"feature{number}")
+    seed_write(repo, "feature.py", "".join(f"LINE {i}\n" for i in range(1, lines + 1)))
+    head_sha = seed_commit(repo, f"feature{number}")
     bare = tmp_path / f"origin_{number}.git"
     if bare.exists():
         _sh.rmtree(bare)
