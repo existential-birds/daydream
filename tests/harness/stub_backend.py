@@ -561,6 +561,7 @@ class StubBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         call = {
             "cwd": cwd,
@@ -571,6 +572,7 @@ class StubBackend:
             "continuation": continuation,
             "max_turns": max_turns,
             "read_only": read_only,
+            "persist_session": persist_session,
         }
         self.calls.append(call)
         if self._shared is not None:
