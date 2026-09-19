@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import re
 import stat
@@ -256,99 +255,30 @@ def test_invalidation_inputs_and_determinism() -> None:
         _invalidation_inputs,
         _load_fixture,
         _load_judge_template,
-        _serialize_inputs,
     )
     sr, pairs = _load_judge_template(), _load_fixture()
-    a = _serialize_inputs(_invalidation_inputs(_env(), pairs, sr))
-    b = _serialize_inputs(_invalidation_inputs(_env(), pairs, sr))
+    a = _invalidation_inputs(_env(), pairs, sr)
+    b = _invalidation_inputs(_env(), pairs, sr)
     assert a == b
 
 
 def test_receipt_written_atomic_0600_and_current(tmp_path: Path) -> None:
     from daydream.benchmark.harbor.calibrate import (
         _build_receipt,
-        _invalidation_inputs,
         _load_fixture,
         _load_judge_template,
         _write_receipt,
-        is_receipt_current,
     )
     sr, pairs = _load_judge_template(), _load_fixture()
     receipt = _build_receipt(sr, pairs, _env(), passed=True,
                              balanced_accuracy=0.9583,
                              confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
                              disagreements=[])
-    p = _write_receipt(tmp_path, receipt)
+    _write_receipt(tmp_path, receipt)
     assert (tmp_path / "runtime" / "calibration-receipt.json").exists()
     assert stat.S_IMODE(
         (tmp_path / "runtime" / "calibration-receipt.json").stat().st_mode
     ) == 0o600
-    assert is_receipt_current(p, _invalidation_inputs(_env(), pairs, sr)) is True
-
-
-def test_receipt_invalidated_on_input_change(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor.calibrate import (
-        _build_receipt,
-        _invalidation_inputs,
-        _load_fixture,
-        _load_judge_template,
-        _write_receipt,
-        is_receipt_current,
-    )
-    sr, pairs = _load_judge_template(), _load_fixture()
-    _write_receipt(
-        tmp_path,
-        _build_receipt(sr, pairs, _env(), passed=True,
-                       balanced_accuracy=0.9583,
-                       confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
-                       disagreements=[]),
-    )
-    changed = dict(_env())
-    changed["DAYDREAM_JUDGE_MODEL"] = "other-model"
-    assert is_receipt_current(
-        tmp_path / "runtime" / "calibration-receipt.json",
-        _invalidation_inputs(changed, pairs, sr),
-    ) is False
-
-
-def test_diagnostic_receipt_invalidates_on_fixture_content_change(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from daydream.benchmark.harbor import calibrate
-
-    sr = calibrate._load_judge_template()
-    pairs = calibrate._load_fixture()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9", "DAYDREAM_JUDGE_API_KEY": "k"}
-    receipt = calibrate._build_receipt(
-        sr, pairs, env, passed=True, balanced_accuracy=1.0,
-        confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0}, disagreements=[])
-    path = calibrate._write_receipt(tmp_path, receipt)
-
-    # Diagnostic receipts carry honest machine-readable provenance matching the fixture.
-    assert receipt["provenance"]["origin"] == "llm_generated"
-    assert receipt["provenance"]["human_reviewed"] is False
-    assert receipt["provenance"]["labels"] == "unverified"
-    # Full fixture content (provenance + all pairs) is part of the invalidation inputs.
-    assert receipt["inputs"]["fixture_sha256"] == calibrate._fixture_sha256(pairs)
-    assert receipt["inputs"]["fixture_provenance"]["origin"] == "llm_generated"
-
-    assert calibrate.is_receipt_current(path, calibrate._invalidation_inputs(env, pairs, sr))
-
-    # A provenance-block change (the fixture now claims human_reviewed=true)
-    # must invalidate an existing diagnostic receipt, even though the ordered
-    # gold/candidate/label triples (label_sha256) are unchanged.
-    modified_provenance = dict(calibrate._load_provenance(pairs))
-    modified_provenance["human_reviewed"] = True
-    monkeypatch.setattr(calibrate, "_load_provenance", lambda pairs: modified_provenance)
-    monkeypatch.setattr(
-        calibrate,
-        "_fixture_sha256",
-        lambda pairs: hashlib.sha256(b"fixture-with-human-revised-provenance").hexdigest(),
-    )
-    assert not calibrate.is_receipt_current(
-        path, calibrate._invalidation_inputs(env, pairs, sr))
 
 
 def test_receipt_has_no_credentials_or_source() -> None:
@@ -521,28 +451,6 @@ class TestCalibrateAcceptance:
         err = capsys.readouterr().err
         assert "instability" in err and "0" in err
         assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
-
-    def test_acceptance_invalidation_through_gate(self, tmp_path: Path, ws_factory: Any) -> None:
-        from daydream.benchmark.harbor.calibrate import (
-            _invalidation_inputs,
-            _load_fixture,
-            _load_judge_template,
-            is_receipt_current,
-            run_calibration,
-        )
-        pairs = _load_fixture()
-        responses = _scripted_responses(pairs)
-        fake, _ = _scripted_http(responses)
-        assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
-        receipt = tmp_path / "ws" / "runtime" / "calibration-receipt.json"
-        assert is_receipt_current(
-            receipt, _invalidation_inputs(_env(), pairs, _load_judge_template())
-        ) is True
-        changed = dict(_env())
-        changed["DAYDREAM_JUDGE_MODEL"] = "other"
-        assert is_receipt_current(
-            receipt, _invalidation_inputs(changed, pairs, _load_judge_template())
-        ) is False
 
     def test_acceptance_zero_source_leakage(self, tmp_path: Path, ws_factory: Any) -> None:
         from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration

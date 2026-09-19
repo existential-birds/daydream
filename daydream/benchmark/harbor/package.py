@@ -699,8 +699,3 @@ def generate_runtime_lock(uv_lock_path: Path, *, daydream_version: str) -> bytes
     """Generate complete packaged lock bytes."""
     header, body = render_runtime_lock(uv_lock_path, daydream_version=daydream_version)
     return (header + body).encode("utf-8")
-
-
-def write_runtime_lock(output: str | Path, uv_lock_path: Path, daydream_version: str) -> None:
-    """Generate and write the packaged runtime lock."""
-    Path(output).write_bytes(generate_runtime_lock(uv_lock_path, daydream_version=daydream_version))

@@ -137,22 +137,6 @@ corpus at rank 64 is expected in the low tens of minutes per epoch on a single
 Stage-3 GRPO run is bounded by prime-rl's own schedule in `rl/train/rl.toml`.
 These numbers are pinned in the run manifest when the GPU run happens.
 
-## Cost accounting
-
-Per-run costs are recorded by `daydream.training.costs.record_stage_costs` and
-aggregated by `summarize_costs` into two metrics:
-
-- **`usd_per_review`** — total recorded USD divided by the number of reviews.
-- **`usd_per_finding_that_mattered`** — total USD divided by findings that
-  survived to an accepted/contested label (the denominator is findings a
-  maintainer actually engaged with, per the module contract).
-
-Measured: the 50-record fixture validation run recorded **$0.00 total LLM
-spend** (dry path, no paid backend calls), so both metrics were reported as
-zero-spend rather than estimated. The real-archive GPU runs will pin these
-numbers in their stage manifests; this section is updated with those measured
-values at launch.
-
 ## Stage-0 gate result (validation run)
 
 From the stage manifest's `stages.stage0.gate`:

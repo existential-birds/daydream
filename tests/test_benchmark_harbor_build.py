@@ -644,11 +644,11 @@ def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp
     assert {str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file()} == expected
     src_core = Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
     assert (dst / "tests" / "verifier_core.py").read_bytes() == src_core.read_bytes()
-    assert not (build._TEMPLATE_DIR / "tests" / "verifier_core.py").exists()
+    assert not (Path(REPO) / "daydream" / "benchmark" / "harbor" / "templates" / "tests" / "verifier_core.py").exists()
     assert (dst / "tests" / "verifier_core.py").read_bytes() == (
         Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_bytes()
     assert (dst / "tests" / "score_review.py").read_bytes() == (
-        build._TEMPLATE_DIR / "tests" / "score_review.py").read_bytes()
+        Path(REPO) / "daydream" / "benchmark" / "harbor" / "templates" / "tests" / "score_review.py").read_bytes()
 
 
 def _load_json(path: Path) -> Any:

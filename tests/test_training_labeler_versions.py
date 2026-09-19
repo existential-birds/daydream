@@ -8,7 +8,6 @@ def test_versions_are_independent() -> None:
     """The four version axes exist and never alias reward.REWARD_VERSION."""
     assert lv.RUBRIC_SCHEMA_VERSION != lv.LABELER_POLICY_VERSION
     assert lv.LABELER_POLICY_VERSION != lv.REPLY_CLASSIFIER_VERSION
-    assert lv.REPLY_EVIDENCE_DIGEST_FORMAT == "sha256/1"
     assert lv.LABELER_POLICY_VERSION != reward.REWARD_VERSION
     assert lv.RUBRIC_SCHEMA_VERSION != reward.REWARD_VERSION
 

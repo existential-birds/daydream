@@ -367,13 +367,6 @@ def _render_judge_prompt_digest(sr: Any) -> str:
     return hashlib.sha256(prompt_path.read_bytes()).hexdigest()
 
 
-def _serialize_inputs(inputs: dict[str, Any]) -> bytes:
-    """Deterministic byte-stable serialization of the invalidation inputs."""
-    return json.dumps(
-        inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-
-
 def _invalidation_inputs(
     env: dict[str, Any], pairs: list[dict[str, Any]], sr: Any
 ) -> dict[str, Any]:
@@ -443,40 +436,6 @@ def _write_receipt(workspace: Path, receipt: dict[str, Any]) -> Path:
     path = runtime / "calibration-receipt.json"
     storage.atomic_write_json(path, receipt, mode=0o600)
     return path
-
-
-def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bool:
-    """Fail-closed invalidation check for diagnostic receipts.
-
-    True only when the stored inputs byte-match the current inputs AND the
-    document satisfies the diagnostic-receipt contract: ``schema_version`` 1,
-    ``type`` ``judge-calibration``, ``result.passed`` True, and a provenance
-    block declaring the fixture ``llm_generated`` and not ``human_reviewed``.
-    Any violation — including a fixture content change, which moves
-    ``fixture_sha256``, or a provenance change, which moves
-    ``fixture_provenance`` — returns False.
-    """
-    try:
-        raw = json.loads(Path(receipt_path).read_bytes())
-    except (ValueError, OSError):
-        return False
-    if not isinstance(raw, dict) or not isinstance(raw.get("inputs"), dict):
-        return False
-    if raw.get("schema_version") != 1:
-        return False
-    if raw.get("type") != "judge-calibration":
-        return False
-    result = raw.get("result")
-    if not isinstance(result, dict) or result.get("passed") is not True:
-        return False
-    provenance = raw.get("provenance")
-    if not isinstance(provenance, dict):
-        return False
-    if provenance.get("origin") != "llm_generated":
-        return False
-    if provenance.get("human_reviewed") is not False:
-        return False
-    return _serialize_inputs(raw["inputs"]) == _serialize_inputs(current_inputs)
 
 
 def _default_confirm(prompt: str) -> bool:
