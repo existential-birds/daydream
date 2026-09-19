@@ -307,6 +307,17 @@ async def test_every_execute_argument_is_recorded() -> None:
     assert backend.calls[0]["persist_session"] is True
 
 
+@pytest.mark.asyncio
+async def test_cancel_calls_counts_every_cancel_invocation() -> None:
+    backend = ScriptedBackend()
+
+    assert backend.cancel_calls == 0
+    await backend.cancel()
+    await backend.cancel()
+
+    assert backend.cancel_calls == 2
+
+
 def test_extra_attrs_are_set_for_the_optional_protocol_extensions() -> None:
     """Backends advertise opt-in hints as plain attributes, read via ``getattr``."""
     backend = ScriptedBackend(model="pi-glm", retry_attempts=1, reasoning_effort="high")

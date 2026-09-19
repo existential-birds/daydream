@@ -56,6 +56,7 @@ class ScriptedBackend:
         max_turns: ``max_turns`` arguments in call order.
         schemas: ``output_schema`` arguments in call order.
         call_count: Total ``execute`` invocations.
+        cancel_calls: Total ``cancel`` invocations.
     """
 
     def __init__(
@@ -114,6 +115,7 @@ class ScriptedBackend:
         for name, value in attrs.items():
             setattr(self, name, value)
         self.calls: list[dict[str, Any]] = []
+        self.cancel_calls = 0
 
     # --- Observables ---------------------------------------------------------
 
@@ -223,4 +225,4 @@ class ScriptedBackend:
         return None
 
     async def cancel(self) -> None:
-        pass
+        self.cancel_calls += 1
