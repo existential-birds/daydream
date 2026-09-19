@@ -557,42 +557,35 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> N
     matcher = matchers[0]
     assert matcher.hooks  # callbacks registered
 
-    async def decide(payload: Any) -> Any:
-        # Mirror the SDK: run every registered hook; first deny wins.
-        for hook in matcher.hooks:
-            out = await hook(payload, None, {})
-            if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
-                return out
-        return {}
-
-    deny_write = await decide(
-        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}
+    deny_write = await _decide(
+        matcher, {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}
     )
     assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    deny_bash = await decide(
+    deny_bash = await _decide(
+        matcher,
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}
     )
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    deny_git_output = await decide(
+    deny_git_output = await _decide(matcher,
         {"tool_name": "Bash", "tool_input": {"command": "git diff --output=diff.patch"}}
     )
     assert deny_git_output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    allow_bash = await decide(
+    allow_bash = await _decide(matcher,
         {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}
     )
     assert "hookSpecificOutput" not in allow_bash
-    allow_read = await decide({"tool_name": "Read", "tool_input": {"file_path": "x"}})
+    allow_read = await _decide(matcher, {"tool_name": "Read", "tool_input": {"file_path": "x"}})
     assert "hookSpecificOutput" not in allow_read
 
     # Fail-closed: a narrow deny-list matcher would never present an unknown tool to the guard.
-    deny_unknown = await decide({"tool_name": "FutureMutator", "tool_input": {}})
+    deny_unknown = await _decide(matcher, {"tool_name": "FutureMutator", "tool_input": {}})
     assert deny_unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     # read_only=True also composes the always-on dangerous-command guard: a root scan denies.
-    deny_find_root = await decide(
+    deny_find_root = await _decide(matcher,
         {"tool_name": "Bash", "tool_input": {"command": "find / -name x"}}
     )
     assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -862,6 +855,29 @@ def _is_denied(decision: Any) -> bool:
     )
 
 
+_GIT_REDIRECT_VARS = (
+    "PWD",
+    "OLDPWD",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_PREFIX",
+)
+
+
+async def _decide(matcher: Any, payload: Any) -> Any:
+    # Mirror the SDK: run every registered hook; first deny wins.
+    for hook in matcher.hooks:
+        out = await hook(payload, None, {})
+        if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+            return out
+    return {}
+
+
 @pytest.mark.asyncio
 async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path) -> None:
     root = tmp_path / "audit root"
@@ -974,18 +990,7 @@ async def test_audit_execute_builds_closed_sdk_options_and_environment(
             captured=captured,
         )
     )
-    for variable in (
-        "PWD",
-        "OLDPWD",
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_PREFIX",
-    ):
+    for variable in _GIT_REDIRECT_VARS:
         monkeypatch.setenv(variable, str(source))
     backend = ClaudeBackend(model="opus", audit_root=root)
 
@@ -1236,18 +1241,7 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
         pass
     options = captured["options"]
 
-    for variable in (
-        "PWD",
-        "OLDPWD",
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_PREFIX",
-    ):
+    for variable in _GIT_REDIRECT_VARS:
         monkeypatch.setenv(variable, str(source))
     monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
     spawned: dict[str, Any] = {}
@@ -1283,21 +1277,7 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
     child_env = spawned["kwargs"]["env"]
     for key, value in options.env.items():
         assert child_env[key] == value
-    assert str(source) not in {
-        child_env[key]
-        for key in (
-            "PWD",
-            "OLDPWD",
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_COMMON_DIR",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_CEILING_DIRECTORIES",
-            "GIT_PREFIX",
-        )
-    }
+    assert str(source) not in {child_env[key] for key in _GIT_REDIRECT_VARS}
 
 
 # fanout_concurrency
@@ -1483,29 +1463,23 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
 
     matcher = captured["options"].hooks["PreToolUse"][0]
 
-    async def decide(payload: Any) -> Any:
-        for hook in matcher.hooks:
-            out = await hook(payload, None, {})
-            if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
-                return out
-        return {}
-
-    deny_bg = await decide(
-        {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}}
+    deny_bg = await _decide(
+        matcher,
+        {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}},
     )
     hook_out = deny_bg["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
     assert "background Bash blocked" in hook_out["permissionDecisionReason"]
     assert "foreground" in hook_out["permissionDecisionReason"]
 
-    allow_fg = await decide(
+    allow_fg = await _decide(matcher,
         {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": False}}
     )
     assert "hookSpecificOutput" not in allow_fg
-    allow_no_key = await decide({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+    allow_no_key = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "git status"}})
     assert "hookSpecificOutput" not in allow_no_key
 
-    other_tool = await decide(
+    other_tool = await _decide(matcher,
         {"tool_name": "Read", "tool_input": {"file_path": "x", "run_in_background": True}}
     )
     assert "background Bash blocked" not in str(other_tool)

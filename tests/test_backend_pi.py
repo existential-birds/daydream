@@ -53,7 +53,7 @@ from daydream.backends.pi import (
     _schema_instruction,
     parse_pi_retry_hint,
 )
-from tests.harness.fake_cli_process import ImmediateStdout, LimitAwareStdout
+from tests.harness.fake_cli_process import BlockingStdout, ImmediateStdout, LimitAwareStdout, blocking_cli_process
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.stub_backend import silence as _silence
@@ -694,33 +694,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend keep reading their own process."""
     backend = PiBackend(model="glm-5.2")
 
-    class _BlockingStdout:
-        def __init__(self) -> None:
-            self.entered = asyncio.Event()
-            self.release = asyncio.Event()
-            self._waiting = False
-
-        async def readline(self) -> bytes:
-            if self._waiting:
-                raise RuntimeError("readuntil() called while another coroutine is already waiting")
-            self._waiting = True
-            self.entered.set()
-            try:
-                await self.release.wait()
-                return b""
-            finally:
-                self._waiting = False
-
-    def _proc(stdout: object) -> MagicMock:
-        process = MagicMock()
-        process.stdout = stdout
-        process.wait = AsyncMock(return_value=0)
-        process.returncode = 0
-        process.terminate = MagicMock()
-        process.kill = MagicMock()
-        return process
-
-    first_proc = _proc(
+    first_proc = blocking_cli_process(
         ImmediateStdout(
             [
                 '{"type":"session","sessionId":"s1"}',
@@ -732,8 +706,8 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
             ]
         )
     )
-    second_stdout = _BlockingStdout()
-    second_proc = _proc(second_stdout)
+    second_stdout = BlockingStdout()
+    second_proc = blocking_cli_process(second_stdout)
     procs = iter([first_proc, second_proc])
 
     async def fake_exec(*args: object, **kwargs: object) -> MagicMock:

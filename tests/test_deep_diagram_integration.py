@@ -1228,6 +1228,18 @@ async def test_diagram_phase_resolves_its_own_configured_model(
 # --- Issue #1123: inline host artifacts for disposable-clone author turns ----
 
 
+async def _empty_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+    return {"participants": []}, None, None
+
+
+def _recording_agent(prompts: list[str]) -> Any:
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        prompts.append(prompt)
+        return {"participants": []}, None, None
+
+    return _fake_run_agent
+
+
 def _clone_test_eligibility() -> Any:
     from daydream.deep.diagram_trigger import Eligibility, KindDecision
     from daydream.deep.diagram_types import DiagramThresholds
@@ -1622,11 +1634,7 @@ async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_over
     ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
 
-    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        prompts.append(prompt)
-        return {"participants": []}, None, None
-
-    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
     result = await deep._run_diagram_kind(
         ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None,
@@ -1649,11 +1657,7 @@ async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
     ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
     prompts: list[str] = []
 
-    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        prompts.append(prompt)
-        return {"participants": []}, None, None
-
-    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
     result = await deep._run_diagram_kind(
         ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None,
@@ -1673,10 +1677,7 @@ async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
 
     ctx = await _session_test_ctx(tmp_path)
 
-    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        return {"participants": []}, None, None
-
-    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(deep, "run_agent", _empty_agent)
     result = await deep._run_diagram_kind(
         ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None,
@@ -1712,11 +1713,7 @@ async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
     backend.audit_root = ctx.work.repo.resolve() if hasattr(backend, "audit_root_isolation") else None
     prompts: list[str] = []
 
-    async def _fake_run_agent(b: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        prompts.append(prompt)
-        return {"participants": []}, None, None
-
-    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
     await deep._run_diagram_kind(
         ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
@@ -1757,11 +1754,7 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
 
-    async def _fake_run_agent(b: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        prompts.append(prompt)
-        return {"participants": []}, None, None
-
-    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
     await deep._run_diagram_kind(
         ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None,

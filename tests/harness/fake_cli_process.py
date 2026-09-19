@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -75,6 +76,44 @@ class ImmediateStdout:
             return (next(self._lines) + "\n").encode()
         except StopIteration:
             return b""
+
+
+class BlockingStdout:
+    """A stdout whose first ``readline`` blocks until the test releases it.
+
+    A second concurrent ``readline`` raises, modeling the asyncio StreamReader
+    guard that a backend sharing one reader across runs would trip.
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self._waiting = False
+
+    async def readline(self) -> bytes:
+        if self._waiting:
+            raise RuntimeError("readuntil() called while another coroutine is already waiting for incoming data")
+        self._waiting = True
+        self.entered.set()
+        try:
+            await self.release.wait()
+            return b""
+        finally:
+            self._waiting = False
+
+
+def blocking_cli_process(stdout: object) -> MagicMock:
+    """A mocked subprocess with the full write/wait/terminate surface."""
+    process = MagicMock()
+    process.stdout = stdout
+    process.stdin = MagicMock()
+    process.stdin.write = MagicMock()
+    process.stdin.close = MagicMock()
+    process.wait = AsyncMock(return_value=0)
+    process.returncode = 0
+    process.terminate = MagicMock()
+    process.kill = MagicMock()
+    return process
 
 
 class _FakePipeTransport:

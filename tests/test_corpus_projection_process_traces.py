@@ -7,22 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from tests.test_corpus_projection import (
-    _policy_file,
+    _cfg,
     _write_annotations_snapshot,
     _write_bundle,
 )
-
-
-def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
-    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
-
-    return BuildFrozenCorpusConfig(
-        out_dir=out_dir,
-        bundle_dir=bundle_dir,
-        annotation_bundle_dir=snapshot.parent,
-        license_policy_path=_policy_file(bundle_dir.parent),
-        **kw,
-    )
 
 
 def _records(out_dir: Path) -> list[dict[str, Any]]:
