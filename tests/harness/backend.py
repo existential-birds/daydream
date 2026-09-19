@@ -23,7 +23,7 @@ Once the script is exhausted the final turn repeats, which is what the
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -191,9 +191,7 @@ class ScriptedBackend:
             turn = self._turn_for_schema(output_schema)
             if turn is None:
                 turn = self._script[index]
-            for item in turn:
-                if isinstance(item, BaseException):
-                    raise item
+            async for item in self._raise_or_yield(turn):
                 yield item
             return
         if isinstance(responded, AsyncIterator):
@@ -205,7 +203,18 @@ class ScriptedBackend:
                 if aclose is not None:
                     await aclose()
             return
-        for item in responded:
+        async for item in self._raise_or_yield(responded):
+            yield item
+
+    @staticmethod
+    async def _raise_or_yield(turn: Iterable[AgentEvent | BaseException]) -> AsyncIterator[AgentEvent]:
+        """Surface a scripted exception item as a raise, every other item as a yield.
+
+        Both the schema/script-selected branch and the responder branch funnel
+        through here, so the two cannot drift in how a mid-stream exception item
+        (the "yield partial output, then fail" shape) reaches the consumer.
+        """
+        for item in turn:
             if isinstance(item, BaseException):
                 raise item
             yield item

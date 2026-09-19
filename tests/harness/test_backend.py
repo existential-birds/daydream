@@ -8,7 +8,10 @@ checks every shared harness fake's ``execute`` against the real
 ``daydream.backends.Backend.execute`` signature via ``inspect.signature``, and
 ``test_no_module_outside_the_harness_declares_the_protocol_execute`` statically
 scans ``tests/**`` (via ``ast``) for a re-typed protocol signature outside
-``tests/harness/`` against the ratchet allowlist.
+``tests/harness/`` against the ratchet allowlist, and
+``test_every_harness_protocol_declaration_is_in_the_parity_list`` mirrors that
+scan inside ``tests/harness/`` -- the directory the scan skips by design -- so
+the parity list cannot drift.
 """
 
 from __future__ import annotations
@@ -90,6 +93,49 @@ def test_no_module_outside_the_harness_declares_the_protocol_execute() -> None:
     )
     assert _ALLOWED - violations == set(), (
         f"stale ratchet allowlist entries (already migrated) — delete them: {sorted(_ALLOWED - violations)}"
+    )
+
+
+def _harness_execute_declarations() -> set[str]:
+    """Harness classes whose own ``execute`` names protocol parameters.
+
+    The mirror of ``_protocol_shaped_declarations`` restricted to
+    ``tests/harness/``, the directory that scan skips by design. A forwarding
+    override that names no protocol parameter (``*args, **kwargs``) delegates
+    the signature to its base and is deliberately exempt, exactly as outside the
+    harness.
+    """
+    found: set[str] = set()
+    for path in sorted(_HARNESS_DIR.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == "execute":
+                    names = {a.arg for a in (*member.args.posonlyargs, *member.args.args, *member.args.kwonlyargs)}
+                    if names & set(_PROTOCOL_PARAMS):
+                        found.add(node.name)
+    return found
+
+
+def test_every_harness_protocol_declaration_is_in_the_parity_list() -> None:
+    """The parity list is the harness's only signature gate, so it must not drift silently.
+
+    ``test_no_module_outside_the_harness_declares_the_protocol_execute`` opts the
+    whole harness out, so an unlisted harness fake that re-types ``execute``
+    would be checked by nothing.
+    """
+    declared = _harness_execute_declarations()
+    listed = {class_name for _, _, class_name in _SHARED_HARNESS_BACKENDS}
+
+    unlisted = declared - listed
+    assert unlisted == set(), (
+        "these tests/harness/ classes declare the protocol execute() but are missing from "
+        f"_SHARED_HARNESS_BACKENDS, so nothing checks their signature: {sorted(unlisted)}"
+    )
+    stale = listed - declared
+    assert stale == set(), (
+        f"stale _SHARED_HARNESS_BACKENDS entries — the class no longer declares execute(): {sorted(stale)}"
     )
 
 
