@@ -13,6 +13,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.agent import run_agent
@@ -244,6 +245,49 @@ async def test_a_none_schema_pair_is_the_fallback_for_an_unmatched_schema() -> N
     assert _texts(await _drain(backend, output_schema={"title": "a"})) == ["A"]
     assert _texts(await _drain(backend, output_schema=None)) == ["fallback"]
     assert _texts(await _drain(backend, output_schema={"title": "z"})) == ["fallback"]
+
+
+@pytest.mark.asyncio
+async def test_a_responder_turn_replaces_the_script_and_raises_mid_stream() -> None:
+    """A prompt-conditional failure keeps its old timing: after earlier events are yielded."""
+    def responder(cwd: Any, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+                  max_turns: Any = None, read_only: Any = False, persist_session: Any = True) -> Any:
+        if "react" in prompt:
+            return [TextEvent(text="partial"), RuntimeError("react failed")]
+        return None
+
+    backend = ScriptedBackend(events=[TextEvent(text="scripted")], responder=responder)
+
+    seen: list[AgentEvent] = []
+    with pytest.raises(RuntimeError, match="react failed"):
+        async for event in backend.execute(Path("/tmp"), "react please"):
+            seen.append(event)
+    assert _texts(seen) == ["partial"]
+    assert _texts(await _drain(backend, "python please")) == ["scripted"]
+
+
+@pytest.mark.asyncio
+async def test_an_async_iterator_responder_streams_between_awaits_and_closes_with_the_consumer() -> None:
+    release = anyio.Event()
+    closed = anyio.Event()
+
+    async def responder(*args: Any, **kwargs: Any) -> Any:
+        async def _gen() -> Any:
+            try:
+                yield TextEvent(text="first")
+                await release.wait()
+                yield TextEvent(text="second")
+            finally:
+                closed.set()
+        return _gen()
+
+    backend = ScriptedBackend(responder=responder)
+    stream = backend.execute(Path("/tmp"), "go")
+    assert isinstance(await stream.__anext__(), TextEvent)
+    await stream.aclose()
+
+    assert closed.is_set(), "the consumer closing the stream must close the responder iterator"
+    assert not release.is_set()
 
 
 @pytest.mark.asyncio

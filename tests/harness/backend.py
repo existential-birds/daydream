@@ -4,10 +4,12 @@
 exercise orchestration through the production seams.
 
 ``ScriptedBackend`` is the *scripted* fake: it yields a pre-built turn script,
-records what it was called with, and can key responses by the call's
+records what it was called with, can key responses by the call's
 ``output_schema`` (a constructor seam) so a parallel fan-out whose completion
-order is not fixed still gets the right turn. Prompt-heuristic routing for the
-shallow review-fix-test loop stays
+order is not fixed still gets the right turn, and can hand a call to a
+per-call ``responder`` that returns a turn, streams its own async iterator, or
+declines (``None``) so the schema/script selection decides. Prompt-heuristic
+routing for the shallow review-fix-test loop stays
 ``tests.harness.phase_backend.PhaseDispatchBackend``'s job, and phase-keyed
 replay of real driver output stays ``tests.harness.phase_replay``'s.
 
@@ -20,13 +22,19 @@ Once the script is exhausted the final turn repeats, which is what the
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+import inspect
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from daydream.backends import AgentEvent, ResultEvent
 
 Turn = Sequence[AgentEvent | BaseException]
+
+# A per-call hook: returns a ``Turn`` to yield, an async iterator to stream,
+# ``None`` to fall through to schema/script selection, or an awaitable of any
+# of those (awaited before the turn — the rendezvous shape).
+Responder = Callable[..., "Turn | AsyncIterator[AgentEvent] | None | Awaitable[Any]"]
 
 # The default turn: a bare terminal ResultEvent. This is what the ~20 fakes that
 # only existed to satisfy the protocol (model-line spies, minimal runner stubs)
@@ -56,6 +64,7 @@ class ScriptedBackend:
         *,
         events: Turn | None = None,
         responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
+        responder: Responder | None = None,
         model: str = "test-model",
         fanout_concurrency: int = 4,
         **attrs: Any,
@@ -74,6 +83,13 @@ class ScriptedBackend:
                 any unmatched call. With no match (and no fallback) the normal
                 per-call script selection applies. Matching never hashes the
                 schema, so the real dict schemas work as keys.
+            responder: Optional per-call hook, called with the same eight
+                ``execute`` arguments. Returns a ``Turn`` (yielded, so an
+                exception inside it raises mid-stream), an async iterator
+                (streamed and closed with the consumer), or ``None`` to fall
+                through to ``responses_by_schema`` and then the script. An
+                awaitable result is awaited first (a rendezvous before the
+                turn).
             model: Value of the ``model`` attribute.
             fanout_concurrency: The optional ``Backend`` scheduling hint.
             **attrs: Extra instance attributes, for the optional protocol
@@ -92,6 +108,7 @@ class ScriptedBackend:
         self._responses_by_schema: list[tuple[dict[str, Any] | None, Turn]] = [
             (schema, list(turn)) for schema, turn in (responses_by_schema or [])
         ]
+        self._responder = responder
         self.model = model
         self.fanout_concurrency = fanout_concurrency
         for name, value in attrs.items():
@@ -161,10 +178,32 @@ class ScriptedBackend:
             }
         )
         index = min(len(self.calls) - 1, len(self._script) - 1)
-        turn = self._turn_for_schema(output_schema)
-        if turn is None:
-            turn = self._script[index]
-        for item in turn:
+        responded: Any = None
+        if self._responder is not None:
+            responded = self._responder(
+                cwd, prompt, output_schema, continuation, agents, max_turns, read_only, persist_session
+            )
+            if inspect.isawaitable(responded):
+                responded = await responded
+        if responded is None:
+            turn = self._turn_for_schema(output_schema)
+            if turn is None:
+                turn = self._script[index]
+            for item in turn:
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+            return
+        if isinstance(responded, AsyncIterator):
+            try:
+                async for event in responded:
+                    yield event
+            finally:
+                aclose = getattr(responded, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            return
+        for item in responded:
             if isinstance(item, BaseException):
                 raise item
             yield item
