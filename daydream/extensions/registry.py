@@ -40,8 +40,6 @@ class Registry:
         self._tool_supervisor: ToolSupervisor | None = None
         self._trace_exporters: dict[str, TraceExporterFactory] = {}
 
-    # -- phases -----------------------------------------------------------
-
     def register_phase(self, step: FlowStep, *, replace: bool = False) -> None:
         """Register a phase by unique name; duplicates require ``replace=True``."""
         if step.name in self._phases and not replace:
@@ -54,8 +52,6 @@ class Registry:
             return self._phases[name]
         except KeyError:
             raise UnresolvedExtensionError(f"phase '{name}' is not registered; {_VALIDATE_HINT}") from None
-
-    # -- flows ------------------------------------------------------------
 
     def set_flow(self, flow_name: str, entries: Sequence[FlowEntry]) -> None:
         """Define a flow as an ordered list of phase names and loop groups.
@@ -119,8 +115,6 @@ class Registry:
                 )
         raise UnresolvedExtensionError(f"flow '{flow_name}' has no step '{name}'; {_VALIDATE_HINT}")
 
-    # -- prompts ----------------------------------------------------------
-
     def override_prompt(self, name: str, builder: Callable[..., str]) -> None:
         """Upsert the prompt builder for a named prompt."""
         self._prompts[name] = builder
@@ -135,8 +129,6 @@ class Registry:
     def prompt_names(self) -> tuple[str, ...]:
         """Return every registered prompt name in registration order."""
         return tuple(self._prompts)
-
-    # -- renderers --------------------------------------------------------
 
     def override_renderer(self, name: str, fn: Callable[..., str]) -> None:
         """Upsert the comment renderer for a named slot."""
@@ -159,8 +151,6 @@ class Registry:
         """Return every registered renderer name in registration order."""
         return tuple(self._renderers)
 
-    # -- tool supervision -------------------------------------------------
-
     def register_tool_supervisor(self, fn: ToolSupervisor) -> None:
         """Register the single per-run tool supervisor."""
         if not callable(fn):
@@ -174,8 +164,6 @@ class Registry:
     def tool_supervisor_if_registered(self) -> ToolSupervisor | None:
         """Return the registered tool supervisor, or None when absent."""
         return self._tool_supervisor
-
-    # -- trace destinations -----------------------------------------------
 
     def register_trace_exporter(self, name: str, factory: TraceExporterFactory, *, replace: bool = False) -> None:
         """Register a destination factory without creating a transport or reading credentials."""
@@ -201,8 +189,6 @@ class Registry:
     def trace_exporter_names(self) -> tuple[str, ...]:
         """Return destination names in deterministic registration order."""
         return tuple(self._trace_exporters)
-
-    # -- stack rules ------------------------------------------------------
 
     def add_stack(self, rule: StackRule) -> None:
         """Upsert a fork stack rule, keyed by ``stack_name``."""

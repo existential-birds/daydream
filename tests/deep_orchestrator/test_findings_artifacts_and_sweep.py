@@ -14,7 +14,6 @@ from tests.deep_orchestrator.support import (
     _eroded_main_repo,
     _install_uncovered_sweep_stub,
     _silence_gate_noise,
-    _StubBackend,
     _uncovered_sweep_target,
 )
 from tests.harness.git_helpers import git as _git
@@ -27,6 +26,7 @@ from tests.test_deep_orchestrator import (
     _pin_findings_pr,
     _run_deep,
     _silence,
+    _StubBackend,
 )
 
 

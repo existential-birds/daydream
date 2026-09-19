@@ -104,15 +104,15 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
 
 
 def test_disposition_sets_are_single_sourced() -> None:
-    from daydream.training.adjudication.dispositions import (
-        NON_DECISIVE_DISPOSITIONS,
-        is_decisive,
-    )
     from daydream.training.adjudication.queue import (
         _NON_DECISIVE_DISPOSITIONS as queue_set,
     )
     from daydream.training.corpus_projection.tiers import (
         _NON_DECISIVE_DISPOSITIONS as tiers_set,
+    )
+    from daydream.training.dispositions import (
+        NON_DECISIVE_DISPOSITIONS,
+        is_decisive,
     )
 
     assert queue_set is NON_DECISIVE_DISPOSITIONS

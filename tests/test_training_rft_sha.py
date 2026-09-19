@@ -9,12 +9,12 @@ and the replay agree on what a valid identity is.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from daydream.training.rft import RftConfig, run_rft
+from tests.test_training_rft import _write_corpus
 
 
 def _record(rid: str = "r1", **overrides: object) -> dict[str, object]:
@@ -32,12 +32,6 @@ def _record(rid: str = "r1", **overrides: object) -> dict[str, object]:
     }
     rec.update(overrides)
     return rec
-
-
-def _write_corpus(tmp_path: Path, records: list[dict[str, object]]) -> Path:
-    path = tmp_path / "rft-inputs.jsonl"
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records), encoding="utf-8")
-    return path
 
 
 def _config(tmp_path: Path, records: list[dict[str, object]]) -> RftConfig:

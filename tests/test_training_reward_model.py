@@ -5,22 +5,11 @@ import pytest
 
 from daydream.training.gate import freeze_split
 from daydream.training.reward_model import score_comment, train_outcome_model
-
-
-def _pairs(tmp_path: Path, n: int = 20) -> Path:
-    rows = []
-    for i in range(n):
-        rows.append({"comment_id": f"a{i}", "text": f"solid grounding {i}", "label": "accepted",
-                     "labeler_policy_version": "980-policy-r1"})
-        rows.append({"comment_id": f"r{i}", "text": f"noise noise {i}", "label": "rejected",
-                     "labeler_policy_version": "980-policy-r1"})
-    p = tmp_path / "labels.jsonl"
-    p.write_text("\n".join(json.dumps(r) for r in rows))
-    return p
+from tests.test_training_gate import _pairs
 
 
 def test_trains_on_both_classes_and_ranks(tmp_path: Path) -> None:
-    p = _pairs(tmp_path)
+    p = _pairs(tmp_path, n=20)
     frozen = freeze_split(p, held_out_fraction=0.2, seed=0)
     model = train_outcome_model(p, split=frozen, seed=0)
     assert model.label_ratio_reported  # S2: actual ratio at training time, not a stale figure
