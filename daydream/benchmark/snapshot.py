@@ -131,27 +131,6 @@ def fetch_head_refs(
     return m
 
 
-def fetch_pr_refs(
-    root: Path,
-    repo_slug: str,
-    pr_number: int,
-    base_tip: str,
-    explicit_shas: list[str] | tuple[str, ...] = (),
-    origin_url: str | None = None,
-) -> Path:
-    """Fetch base tip + ``refs/pull/N/head`` + explicit heads into the mirror.
-
-    Backward-compatible wrapper over :func:`fetch_base_tip` +
-    :func:`fetch_head_refs` for callers that do not need distinct failure
-    reasons; ``freeze_one`` uses the individual fetches so a base-tip failure
-    classifies ``base_unreachable`` and a PR-head failure ``head_unreachable``.
-    Returns the mirror path. Idempotent.
-    """
-    fetch_base_tip(root, repo_slug, base_tip, origin_url)
-    fetch_head_refs(root, repo_slug, pr_number, explicit_shas, origin_url)
-    return mirror(root)
-
-
 def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
     """Classify how an explicit *sha* relates to the PR-head ancestry.
 
@@ -553,7 +532,7 @@ def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str) -> str | tupl
     return (bt, ht)
 
 
-def degenerate(mirror_repo: Path, base_tree: str, head_tree: str) -> str | None:
+def degenerate(base_tree: str, head_tree: str) -> str | None:
     """Classify a degenerate (empty) base/head change, or None when real.
 
     Equal trees return ``"equal_trees"`` -- the only degenerate case, since
@@ -852,7 +831,7 @@ def freeze_one(
     base_tree, head_tree = trees
 
     # 6) a clean review still requires a real code change.
-    degen = degenerate(m, base_tree, head_tree)
+    degen = degenerate(base_tree, head_tree)
     if degen is not None:
         return unreplayable(degen, f"no real code change between base and head ({degen})")
 

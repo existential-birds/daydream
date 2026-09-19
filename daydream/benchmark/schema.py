@@ -22,7 +22,15 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from daydream.pr_review import FINDING_MARKER_RE
 from daydream.severity import SeverityLevel
@@ -75,6 +83,38 @@ def _hex64(value: str) -> str:
     if not _HEX64.fullmatch(value):
         raise ValueError(f"digest must be lowercase 64-hex, got {value!r}")
     return value
+
+
+def _validate_sha40(v: str | None) -> str | None:
+    if v is not None and not _HEX40.fullmatch(v):
+        raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
+    return v
+
+
+def _validate_commit_sha40(v: str | None) -> str | None:
+    if v is not None and not _HEX40.fullmatch(v):
+        raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
+    return v
+
+
+def _validate_positive_line(v: int | None) -> int | None:
+    if v is not None and v < 1:
+        raise ValueError("line anchor must be positive when set")
+    return v
+
+
+def _validate_ts(v: str | datetime | None) -> datetime | None:
+    if v is None:
+        return None
+    return _rfc3339(v)
+
+
+Sha40 = Annotated[str, AfterValidator(_validate_sha40)]
+NullableSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
+CommitSha40 = Annotated[str | None, AfterValidator(_validate_commit_sha40)]
+PositiveLine = Annotated[int | None, AfterValidator(_validate_positive_line)]
+Timestamp = Annotated[datetime, BeforeValidator(_validate_ts)]
+OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_validate_ts)]
 
 
 def normalize_hostname(raw: str) -> str:
@@ -338,28 +378,15 @@ class SnapshotReady(_SnapshotBase):
     # original_base_sha is the true merge base of base-tip and head (the
     # bundle's synthetic base commit); requested_base_sha is the selected
     # base-branch tip the merge base was resolved against.
-    original_base_sha: str
-    requested_base_sha: str
-    original_head_sha: str
-    base_tree_sha: str
-    head_tree_sha: str
+    original_base_sha: Sha40
+    requested_base_sha: Sha40
+    original_head_sha: Sha40
+    base_tree_sha: Sha40
+    head_tree_sha: Sha40
     diff_sha256: str
     bundle_file: str
     bundle_sha256: str
     error: None = None
-
-    @field_validator(
-        "original_base_sha",
-        "requested_base_sha",
-        "original_head_sha",
-        "base_tree_sha",
-        "head_tree_sha",
-    )
-    @classmethod
-    def _sha40(cls, v: str) -> str:
-        if not _HEX40.fullmatch(v):
-            raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
-        return v
 
     @field_validator("diff_sha256", "bundle_sha256")
     @classmethod
@@ -389,22 +416,15 @@ class _SnapshotError(BaseModel):
 
 class SnapshotUnreplayable(_SnapshotBase):
     status: Literal["unreplayable"]
-    original_base_sha: str | None = None
-    requested_base_sha: str | None = None
-    original_head_sha: str | None = None
+    original_base_sha: NullableSha40 = None
+    requested_base_sha: NullableSha40 = None
+    original_head_sha: NullableSha40 = None
     base_tree_sha: None = None
     head_tree_sha: None = None
     diff_sha256: None = None
     bundle_file: None = None
     bundle_sha256: None = None
     error: _SnapshotError
-
-    @field_validator("original_base_sha", "requested_base_sha", "original_head_sha")
-    @classmethod
-    def _sha40_nullable(cls, v: str | None) -> str | None:
-        if v is not None and not _HEX40.fullmatch(v):
-            raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
-        return v
 
 
 class SnapshotImported(_SnapshotBase):
@@ -418,17 +438,10 @@ class SnapshotImported(_SnapshotBase):
     """
 
     status: Literal["imported"]
-    original_base_sha: str
-    requested_base_sha: str
-    original_head_sha: str
+    original_base_sha: Sha40
+    requested_base_sha: Sha40
+    original_head_sha: Sha40
     error: None = None
-
-    @field_validator("original_base_sha", "requested_base_sha", "original_head_sha")
-    @classmethod
-    def _sha40(cls, v: str) -> str:
-        if not _HEX40.fullmatch(v):
-            raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
-        return v
 
 
 Snapshot = Annotated[
@@ -513,17 +526,10 @@ class AuthoringAnchor(BaseModel):
 
     version: Literal[1]
     status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"]
-    commit_id: str | None
+    commit_id: CommitSha40
     path: str | None
-    start_line: int | None
-    end_line: int | None
-
-    @field_validator("commit_id")
-    @classmethod
-    def _sha40_nullable(cls, v: str | None) -> str | None:
-        if v is not None and not _HEX40.fullmatch(v):
-            raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
-        return v
+    start_line: PositiveLine
+    end_line: PositiveLine
 
     @field_validator("path")
     @classmethod
@@ -531,13 +537,6 @@ class AuthoringAnchor(BaseModel):
         if v is None:
             return None
         return _relative_path(v, what="anchor")
-
-    @field_validator("start_line", "end_line")
-    @classmethod
-    def _positive_line(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("line anchor must be positive when set")
-        return v
 
     @model_validator(mode="after")
     def _derived_iff_populated(self) -> "AuthoringAnchor":
@@ -569,17 +568,17 @@ class EvidenceRecord(BaseModel):
     author: _EvidenceAuthor
     body: str
     body_sha256: str
-    created_at: datetime
-    updated_at: datetime
-    submitted_at: datetime | None = None
-    commit_id: str | None = None
-    original_commit_id: str | None = None
+    created_at: Timestamp
+    updated_at: Timestamp
+    submitted_at: OptionalTimestamp = None
+    commit_id: CommitSha40 = None
+    original_commit_id: CommitSha40 = None
     path: str | None = None
     original_path: str | None = None
-    line: int | None = None
-    start_line: int | None = None
-    original_line: int | None = None
-    original_start_line: int | None = None
+    line: PositiveLine = None
+    start_line: PositiveLine = None
+    original_line: PositiveLine = None
+    original_start_line: PositiveLine = None
     authoring_anchor: AuthoringAnchor | None = None
     review_id: str | None = None
     thread_id: str | None = None
@@ -605,27 +604,6 @@ class EvidenceRecord(BaseModel):
     @classmethod
     def _sha64(cls, v: str) -> str:
         return _hex64(v)
-
-    @field_validator("created_at", "updated_at", "submitted_at", mode="before")
-    @classmethod
-    def _ts(cls, v: str | datetime | None) -> datetime | None:
-        if v is None:
-            return None
-        return _rfc3339(v)
-
-    @field_validator("commit_id", "original_commit_id")
-    @classmethod
-    def _sha40_nullable(cls, v: str | None) -> str | None:
-        if v is not None and not _HEX40.fullmatch(v):
-            raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
-        return v
-
-    @field_validator("line", "start_line", "original_line", "original_start_line")
-    @classmethod
-    def _positive_line(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("line anchor must be positive when set")
-        return v
 
     @model_validator(mode="after")
     def _body_hash(self) -> "EvidenceRecord":
@@ -722,23 +700,16 @@ class PullRequestMeta(BaseModel):
     state: str
     base: _PrRef
     head: _PrRef
-    created_at: datetime
-    updated_at: datetime
+    created_at: Timestamp
+    updated_at: Timestamp
     author: _EvidenceAuthor
     html_url: str = ""
     body: str = ""
     title_sha256: str = ""
     body_sha256: str = ""
-    merged_at: datetime | None = None
-    closed_at: datetime | None = None
+    merged_at: OptionalTimestamp = None
+    closed_at: OptionalTimestamp = None
     changed_files: list[str] | None = None
-
-    @field_validator("created_at", "updated_at", "merged_at", "closed_at", mode="before")
-    @classmethod
-    def _ts(cls, v: str | datetime | None) -> datetime | None:
-        if v is None:
-            return None
-        return _rfc3339(v)
 
     @field_validator("title_sha256", "body_sha256")
     @classmethod
@@ -1232,11 +1203,11 @@ def derive_workspace_state(
     return "empty"
 
 
-def classify_validation(*, ready: bool, incomplete: bool, corrupt: bool) -> int:
+def classify_validation(*, ready: bool, corrupt: bool) -> int:
     """Map readiness to a ``0``/``2``/``1`` validation exit code.
 
     ``0`` ready; ``2`` structurally valid but incomplete; ``1`` corrupt.
-    ``corrupt`` always takes precedence over ``incomplete``.
+    ``corrupt`` takes precedence over an incomplete workspace.
     """
     if corrupt:
         return 1

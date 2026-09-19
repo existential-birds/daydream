@@ -14,7 +14,7 @@ from daydream.training.corpus_projection.bundle import (
 )
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
-from daydream.training.corpus_projection.segments import segment, segment_agents
+from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 
 _MANIFEST = {
@@ -485,7 +485,6 @@ def test_spans_compose_v1_build_spans_per_sibling() -> None:
         {"step_id": 1, "kind": "REASON", "content_path": "steps[0].message"},
         {"step_id": 2, "kind": "ACT", "content_path": "steps[1].tool_calls"},
     ]
-    assert segment_agents is segment
 
 
 # Task 6: profile + stack provenance

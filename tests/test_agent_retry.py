@@ -18,7 +18,7 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
-from daydream.backends.pi import PiError, _is_retryable_error_message
+from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
@@ -69,11 +69,16 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
         ),
         # Stream drop. ``retryable`` comes from the PRODUCTION classifier, mirroring how
         # PiBackend constructs PiError, so this param exercises the real classification
-        # path: if ``_is_retryable_error_message("terminated")`` ever returns False,
+        # path: if the shared classifier ever returns False for "terminated",
         # run_agent does NOT retry and this fails.
         pytest.param(
             lambda: _fail_then_succeed(
-                PiError("terminated", retryable=_is_retryable_error_message("terminated")),
+                PiError(
+                    "terminated",
+                    retryable=_pi_retryable_for(
+                        category=_pi_error_category("terminated"), message="terminated"
+                    ),
+                ),
                 text="Review complete after retry",
             ),
             "Review complete after retry",

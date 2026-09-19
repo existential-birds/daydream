@@ -962,7 +962,7 @@ def _append_atoms_to_case(
     _reopen_for_mutation(curation)
     for atom in atoms:
         curation.setdefault("findings", []).append(
-            _build_replacement(root, raw, case_id, atom, authored=authored)
+            _build_replacement(case_id, atom, authored=authored)
         )
     _derive_content(raw)
 
@@ -1035,7 +1035,7 @@ def add_edited_findings(
 
 
 def _build_replacement(
-    root: Path, raw: dict[str, Any], case_id: str, replacement: dict[str, Any],
+    case_id: str, replacement: dict[str, Any],
     *, authored: bool = False,
 ) -> dict[str, Any]:
     """Build one finding from a replacement atom; provenance kind driven by *authored*.
@@ -1081,7 +1081,7 @@ def replace_findings(
             raise CurationError(f"no finding {finding_id}")
         for r in replacements:
             _check_evidence_sources(root, raw, list(r.get("source_ids") or []), case_id)
-        built = [_build_replacement(root, raw, case_id, r) for r in replacements]
+        built = [_build_replacement(case_id, r) for r in replacements]
         new_findings = list(findings[:index]) + built + list(findings[index + 1:])
         curation["findings"] = new_findings
         _derive_content(raw)

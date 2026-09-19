@@ -1901,14 +1901,7 @@ def publish_batches(
     assert all(not p.startswith(("bronze", f"{RUNS_DIRNAME}/", "downloads/")) and ".." not in p
                for p in relpaths), relpaths
 
-    # SHA256SUMS covers every published file except itself (self-inclusion would
-    # make the checksum file unstable across idempotent re-publishes).
-    checksums = "".join(
-        f"{hashlib.sha256((curated / p).read_bytes()).hexdigest()}  {prefix}{p}\n"
-        for p in relpaths if p != "SHA256SUMS"
-    )
-    sums_path = curated / "SHA256SUMS"
-    sums_path.write_text(checksums, encoding="utf-8")
+    _write_sha256sums(curated, prefix, relpaths)
     files = _curated_upload_paths(stage, curation_id)
 
     mapping: dict[str | Path, Path] = {
@@ -1956,6 +1949,18 @@ def _repo_commits_from_enrichment_cache(stage: Path) -> dict[str, str]:
     return commits
 
 
+def _curation_source_commit(curated: Path) -> str | None:
+    """Read ``source_commit`` from the curated import ledger, or ``None``."""
+    ledger_path = curated / "import-ledger.json"
+    if not ledger_path.is_file():
+        return None
+    try:
+        source_commit: str | None = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
+    except (OSError, ValueError):
+        return None
+    return source_commit
+
+
 def _write_resolution_map(stage: Path, curated: Path) -> None:
     """Materialize ``resolution-map.json`` under the curated prefix when absent.
 
@@ -1967,13 +1972,7 @@ def _write_resolution_map(stage: Path, curated: Path) -> None:
     map_path = curated / "resolution-map.json"
     if map_path.exists():
         return
-    source_commit = None
-    ledger_path = curated / "import-ledger.json"
-    if ledger_path.is_file():
-        try:
-            source_commit = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
-        except (OSError, ValueError):
-            source_commit = None
+    source_commit = _curation_source_commit(curated)
     cmap = build_resolution_map(
         stage,
         source_commit=source_commit or "unknown",
@@ -1988,13 +1987,7 @@ def _write_resume_ledger(stage: Path, curated: Path, curation_id: str) -> None:
     Content-addressed: re-publishing identical content produces byte-identical
     records, so the ledger stays deduplicated (latest entry per session wins).
     """
-    source_commit = None
-    ledger_path = curated / "import-ledger.json"
-    if ledger_path.is_file():
-        try:
-            source_commit = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
-        except (OSError, ValueError):
-            source_commit = None
+    source_commit = _curation_source_commit(curated)
     batches_dir = curated / "batches"
     entries: dict[str, dict[str, Any]] = {}
     if batches_dir.is_dir():
@@ -2096,6 +2089,15 @@ def _import_hf_hub() -> Any:
     return huggingface_hub
 
 
+def _write_sha256sums(curated: Path, prefix: str, relpaths: Iterable[str]) -> None:
+    """Write ``SHA256SUMS`` over ``relpaths`` (excluding itself) under ``prefix``."""
+    checksums = "".join(
+        f"{hashlib.sha256((curated / p).read_bytes()).hexdigest()}  {prefix}{p}\n"
+        for p in relpaths if p != "SHA256SUMS"
+    )
+    (curated / "SHA256SUMS").write_text(checksums, encoding="utf-8")
+
+
 def _make_client(repo_id: str, *, token_present: bool | None = None) -> HfHubClient:
     """Build the production :class:`HfHubClient` for ``repo_id``.
 
@@ -2105,23 +2107,17 @@ def _make_client(repo_id: str, *, token_present: bool | None = None) -> HfHubCli
     package or the token is absent. Error messages name prerequisites only;
     token material is never echoed.
     """
-    if token_present is False:
-        raise HubUnavailableError(
-            "HF_TOKEN is not set; hydration requires a read token for the "
-            "private Hub repo. Export HF_TOKEN (or pass --token-source) and retry."
-        )
     if _import_hf_hub() is None:
         raise HubUnavailableError(
             "The 'huggingface-hub' package is required for hydrate but is not "
             "installed. Install the optional extra: `uv sync --extra hub` "
             "(or `pip install 'daydream[hub]'`)."
         )
-    if token_present is None:
-        token_present = bool(os.environ.get("HF_TOKEN"))
+    token_present = token_present if token_present is not None else bool(os.environ.get("HF_TOKEN"))
     if not token_present:
         raise HubUnavailableError(
             "HF_TOKEN is not set; hydration requires a read token for the "
-            "private Hub repo. Export HF_TOKEN and retry."
+            "private Hub repo. Export HF_TOKEN (or pass --token-source) and retry."
         )
     return HfHubClient(repo_id)
 
@@ -2397,22 +2393,13 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     binding_path = curated / "policy-binding.json"
     binding_path.write_text(_policy_binding_record(binding), encoding="utf-8")
     check_prefix_binding(client, curation_id=curation_id, binding=binding, allow_unbound_resume=True)
-    # SHA256SUMS must cover the *final* published file set — including the
-    # curation manifest rendered just above, which can change between runs
-    # (e.g. a newly recorded identity collision). Refresh it here so the
-    # checksums always match the bytes the verify cycle will pin. ``_SUCCESS``
-    # is never covered: the marker does not exist at the verify commit (it is
-    # published only after verification), and a stale local marker must never
-    # leak into the pinned checksums on a re-run.
+    # ``_SUCCESS`` is excluded: it does not exist at the verify commit (it is
+    # published only after verification), so it must not enter the checksums.
     final_relpaths = [
         p.relative_to(curated).as_posix()
         for p in curated.rglob("*") if p.is_file() and p.name != "_SUCCESS"
     ]
-    checksums = "".join(
-        f"{hashlib.sha256((curated / p).read_bytes()).hexdigest()}  {prefix}{p}\n"
-        for p in final_relpaths if p != "SHA256SUMS"
-    )
-    (curated / "SHA256SUMS").write_text(checksums, encoding="utf-8")
+    _write_sha256sums(curated, prefix, final_relpaths)
     _retry_upload(
         client,
         {
@@ -2479,12 +2466,7 @@ def verify_publication(
             raise VerificationError(redact_text(f"verify: published file {relpath!r} missing: {exc}")) from exc
 
     # 1. SHA256SUMS must match every published file byte-for-byte.
-    try:
-        sums_text = _download("SHA256SUMS").decode("utf-8")
-    except VerificationError:
-        raise
-    except HydrationError as exc:
-        raise VerificationError(redact_text(f"verify: SHA256SUMS missing: {exc}")) from exc
+    sums_text = _download("SHA256SUMS").decode("utf-8")
     for line in sums_text.splitlines():
         if not line.strip():
             continue

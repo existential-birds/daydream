@@ -88,8 +88,4 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
     return segments
 
 
-# Plan-facing alias: the segmentation entry point is also exported under the
-# name used in the implementation plan.
-segment_agents = segment
-
-__all__ = ["Segment", "segment", "segment_agents"]
+__all__ = ["Segment", "segment"]

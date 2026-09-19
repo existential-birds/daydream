@@ -304,21 +304,6 @@ def _is_stream_truncation_message(normalized_message: str) -> bool:
     )
 
 
-def _is_retryable_error_message(message: str) -> bool:
-    """Return the shared classifier's verdict for a Pi ``errorMessage``.
-
-    Kept as a thin delegation so the text taxonomy has exactly one
-    implementation: :func:`_pi_error_category` produces the category and
-    :func:`daydream.retry_policy.classify_failure` decides, the same path
-    :class:`PiError` construction and the agent retry branch use. A message
-    heuristic maintained here could otherwise disagree with the production
-    classifier (the pre-#734 drift this module exists to prevent).
-    """
-    return _pi_retryable_for(
-        category=_pi_error_category(message), message=message
-    )
-
-
 def _is_retryable_exit_code(code: int | None) -> bool:
     """Return True for exit codes that indicate OOM/SIGKILL rather than a logic error."""
     return code in (-9, 137)
