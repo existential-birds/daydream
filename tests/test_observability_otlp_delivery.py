@@ -10,9 +10,7 @@ protobuf requests/responses on loopback transports.
 
 from __future__ import annotations
 
-import os
 import time
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from email.utils import formatdate
 from typing import Any, cast
@@ -46,14 +44,6 @@ _CREDENTIAL_PROVIDER_VARS = (
     "_OTEL_PYTHON_EXPORTER_OTLP_HTTP_TRACES_CREDENTIAL_PROVIDER",
     "_OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER",
 )
-
-
-@pytest.fixture(autouse=True)
-def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    for key in os.environ:
-        if key.startswith(("OTEL_", "LANGSMITH_", "HH_", "DAYDREAM_TRACE_", "_OTEL_")):
-            monkeypatch.delenv(key)
-    yield
 
 
 def _spans(count: int = 1) -> list[ReadableSpan]:

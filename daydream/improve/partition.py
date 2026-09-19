@@ -13,8 +13,7 @@ from dataclasses import dataclass
 
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
-from daydream.improve.services import Service
-from daydream.services import RepoRootPolicy, ServiceMatch, owning_services
+from daydream.services import RepoRootPolicy, Service, ServiceMatch, owning_services
 
 PARTITION_MAX_FILES: int = 400
 

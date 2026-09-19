@@ -42,7 +42,13 @@ from daydream.backends.codex import (
     _unwrap_shell_command,
 )
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
-from tests.harness.codex_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.codex_replay import (
+    GapThenBlockingStdout as _GapThenBlockingStdout,
+)
+from tests.harness.codex_replay import (
+    make_mock_process,
+    make_mock_process_from_fixture,
+)
 from tests.harness.fake_cli_process import ImmediateStdout, LimitAwareStdout
 from tests.harness.git_helpers import git as _git
 
@@ -1870,17 +1876,6 @@ async def test_first_parser_gap_is_observable_before_following_stream_stall(
 ) -> None:
     backend = CodexBackend(model="fixture-model")
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
-
-    class _GapThenBlockingStdout:
-        def __init__(self) -> None:
-            self.sent_gap = False
-
-        async def readline(self) -> bytes:
-            if not self.sent_gap:
-                self.sent_gap = True
-                return b'{"type":"future.before.stall"}\n'
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
 
     mock_proc = make_mock_process([])
     mock_proc.stdout = _GapThenBlockingStdout()

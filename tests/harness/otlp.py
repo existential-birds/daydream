@@ -237,6 +237,11 @@ def attributes(span: dict[str, Any]) -> dict[str, Any]:
     return {item["key"]: _value(item["value"]) for item in span.get("attributes", [])}
 
 
+def kind_of(spans: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    """Filter decoded spans by the ``daydream.span.kind`` attribute."""
+    return [span for span in spans if attributes(span).get("daydream.span.kind") == kind]
+
+
 def _value(value: dict[str, Any]) -> Any:
     if "intValue" in value:
         return int(value["intValue"])

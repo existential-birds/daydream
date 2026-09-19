@@ -14,8 +14,7 @@ from daydream.improve.partition import (
     group_partitions,
     stack_by_path,
 )
-from daydream.improve.services import Service
-from daydream.services import enumerate_services
+from daydream.services import Service, enumerate_services
 from tests.test_improve_flow import _nested_service_repo
 
 

@@ -45,9 +45,8 @@ from daydream.improve.prompts import (
     build_audit_prompt,
     build_vet_prompt,
 )
-from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
-from daydream.services import enumerate_services
+from daydream.services import Service, enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_test_command_anchor
 from tests.harness.backend import ScriptedBackend
@@ -73,6 +72,7 @@ from tests.harness.improve_backend import (
     stub_recon_commands,
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.stub_backend import force_interactive as _force_interactive
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -1151,11 +1151,6 @@ def _forbidden_input(*_args: Any, **_kwargs: Any) -> str:
     raise AssertionError(
         "input() was called in non-interactive mode -- stdin must not be touched"
     )
-
-
-def _force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
 
 
 @pytest.mark.anyio

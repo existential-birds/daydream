@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -30,16 +29,6 @@ from daydream.observability.exporters import (
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from tests.harness.otlp import attributes, otlp_collector
-
-
-@pytest.fixture(autouse=True)
-def isolated_trace_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    import os
-
-    for key in os.environ:
-        if key.startswith(("OTEL_", "LANGSMITH_", "HH_", "_OTEL_")):
-            monkeypatch.delenv(key)
-    yield
 
 
 def _emit(exporter: SpanExporter) -> None:

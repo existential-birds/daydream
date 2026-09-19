@@ -1,11 +1,11 @@
 """Tests for the shared service-root discovery module.
 
 ``daydream.services`` is the single service-discovery implementation after the
-move out of ``daydream/improve/services.py`` (issue #1113). This file covers the
+move out of the improve package (issue #1113). This file covers the
 parts that are new at package root: the parameterized ``owning_services``
-containment predicate, the explicit ``service_roots`` override the
-grounded-diagram flow passes, and the shim's re-export identity. The improve
-flow's own behavioral coverage stays in ``tests/test_improve_services.py``.
+containment predicate and the explicit ``service_roots`` override the
+grounded-diagram flow passes. The improve flow's own behavioral coverage stays
+in ``tests/test_improve_services.py``.
 """
 
 from __future__ import annotations
@@ -81,15 +81,6 @@ def test_explicit_roots_short_circuit_layout_inference(monorepo: Path) -> None:
 def test_explicit_roots_with_no_match_yield_no_services(monorepo: Path) -> None:
     services = enumerate_services(monorepo, DaydreamFileConfig(), service_roots=["nope/*"])
     assert services == []
-
-
-def test_improve_shim_re_exports_the_same_objects() -> None:
-    """The historical import path stays valid and identical, not a copy."""
-    from daydream.improve import services as shim
-
-    assert shim.enumerate_services is enumerate_services
-    assert shim.Service is Service
-    assert shim.__all__ == ["Service", "enumerate_services", "filter_scope"]
 
 
 def test_deepest_match_skips_a_repo_root_service_and_accepts_a_path_equal_to_a_root() -> None:

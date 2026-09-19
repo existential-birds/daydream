@@ -13,6 +13,7 @@ import pytest
 from daydream.archive.index import _get_connection, label_observation_history
 from daydream.training.adjudication.canonical import AnnotationDriftError, run_canonical_harvest
 from daydream.training.adjudication.materialize import run_materialize
+from tests.harness.adjudication import make_hydrated_sqlite_index
 
 _PIN = {
     "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
@@ -505,38 +506,16 @@ def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(
 
 
 def _hydrated_sqlite_index_with_conflict(tmp_path: Path) -> Path:
-    """Task 3's ``_hydrated_sqlite_index`` shape, extended with a second,
-    distinct-dedup-key ``label_observations`` row for the same session — two
-    harvester generations disagreeing (labels differ ⇒ dedup keys differ) on
-    one ``s1``. The latest-observed auto row wins; the session is conflicting."""
-    from daydream.archive.index import _get_connection
-
-    root = tmp_path / "hydrated"
-    conn = _get_connection(root)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    """Two distinct-dedup-key ``label_observations`` rows for one ``s1``: two
+    harvester generations disagreeing (labels differ). The latest-observed auto
+    row wins; the session is conflicting."""
+    return make_hydrated_sqlite_index(
+        tmp_path,
+        [
+            ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted"),
+            ("2026-01-03T00:00:00+00:00", '["finding-rejected"]', "f" * 64, "980-rubric-r2", "accepted"),
+        ],
     )
-    rubric = {"posterior_source": "pr_review",
-              "per_finding_resolutions": [{
-                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
-                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-                  "evidence_digest": "d" * 32}]}
-    rubric_json = json.dumps(rubric)
-    for observed_at, labels, evidence_sha in (
-        ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64),
-        ("2026-01-03T00:00:00+00:00", '["finding-rejected"]', "f" * 64),
-    ):
-        conn.execute(
-            "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
-            "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
-            "VALUES ('s1', ?, ?, 'v1', ?, ?, 0, 'auto', '980-rubric-r2')",
-            (observed_at, labels, evidence_sha, rubric_json),
-        )
-    conn.commit()
-    conn.close()
-    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
-    return root
 
 
 def test_conflicted_session_yields_no_decisive_label(tmp_path: Path) -> None:

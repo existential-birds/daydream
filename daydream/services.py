@@ -3,8 +3,7 @@
 The single service-discovery implementation, shared by the improve flow's
 monorepo audits (``--scope``, partition grouping) and grounded-diagram
 eligibility (the cross-service rule, issue #1113). Lives at package root so
-neither flow subpackage depends on the other; ``daydream.improve.services``
-remains as a re-export shim for the historical import path. This module also
+neither flow subpackage depends on the other. This module also
 owns the service-root containment rule (``owning_services``): the question
 "which service, if any, owns this repository-relative path?" is answered here
 and nowhere else.

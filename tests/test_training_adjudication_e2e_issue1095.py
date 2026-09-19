@@ -17,14 +17,9 @@ from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.preview import run_preview
 from tests.harness.trajectory import make_manifest
+from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
-_PIN = {  # same shape as tests/test_training_adjudication_canonical.py
-    "curation_id": "cur-e2e", "sanitized_hub_commit": "a" * 40,
-    "source_hub_commit": "b" * 40, "archive_index_digest": "c" * 64,
-    "evidence_observed_at": "2026-01-01T00:00:00+00:00",
-    "as_of": "2026-02-01T00:00:00+00:00",
-    "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1",
-}
+_PIN = {**_CANONICAL_PIN, "curation_id": "cur-e2e"}
 
 _OBSERVED = "2026-01-02T00:00:00+00:00"
 _EVIDENCE = [{"reply_id": 1, "body_sha256": "abc", "created_at": "2026-01-01T00:00:00+00:00"}]

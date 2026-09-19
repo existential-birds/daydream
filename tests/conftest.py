@@ -627,6 +627,14 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip tracing endpoints and credentials for every test."""
+    for key in os.environ:
+        if key.startswith(("OTEL_", "LANGSMITH_", "HH_", "DAYDREAM_TRACE_", "_OTEL_")):
+            monkeypatch.delenv(key)
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_skill_availability(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:

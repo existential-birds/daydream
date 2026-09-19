@@ -84,14 +84,16 @@ from daydream.improve.prompts import (
 from daydream.improve.publish import ImprovePublishError, IssuePublisher
 from daydream.improve.render import _redact_model_value, markdown_cell, plan_slug
 from daydream.improve.repo_commands import enumerate_repository_commands
-from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.run_context import resolve_run_context
 from daydream.services import (
     RepoRootPolicy,
+    Service,
     ServiceMatch,
+    enumerate_services,
+    filter_scope,
     owning_services,
 )
 from daydream.trajectory import (
