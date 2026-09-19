@@ -94,17 +94,6 @@ from typing import Any
 REWARD_VERSION = "2026.09.04-1"
 """Bump on any change to axis weights, verdict map, gate, or composite shape.
 
-Also bumped when an *upstream label definition* changes while the algebra holds
-still. ``2026.09.04-1`` is exactly that case (issue #1106): the weights, verdict
-map, gate, composite algebra and axis set are all **unchanged** from
-``2026.05.28-2``: the bump records that ``daydream.eval.analyzer`` tightened the
-``grounding_rate`` predicate feeding the ``grounding`` axis. It used to ask only
-whether the finding's cited *file* had been read; it now additionally requires
-the finding's cited *line* to resolve inside (or within tolerance of) a diff
-hunk, so a mis-anchored finding no longer counts as grounded. Records labeled
-under the old predicate are not comparable with records labeled under the new
-one, and without a fresh stamp both would claim the same definition.
-
 Read at call time (not captured in a default argument) so a test can
 monkeypatch ``daydream.training.reward.REWARD_VERSION`` and have
 :func:`score_trajectory` observe the override.

@@ -18,7 +18,6 @@ REPLY_CLASSIFIER_VERSION = "980-classifier-r1"
 ADJUDICATION_LABELER_VERSION = "984-adjudicate-r1"
 HUMAN_LABELER_VERSION = "1055-human-r1"
 ANNOTATION_SNAPSHOT_SCHEMA_VERSION = "1055-snapshot-r1"
-REPLY_EVIDENCE_DIGEST_FORMAT = "sha256/1"
 
 
 def reply_evidence_digest(replies: list[dict[str, Any]]) -> str:

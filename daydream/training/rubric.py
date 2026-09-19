@@ -223,21 +223,10 @@ import hashlib  # noqa: E402  (rubric-scoring section)
 import json  # noqa: E402  (rubric-scoring section)
 import types  # noqa: E402  (rubric-scoring section)
 
-from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, score_trajectory  # noqa: E402
+from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, _clip, score_trajectory  # noqa: E402
 
 REWARD_VERSION_RUBRIC = "2026.09.04-rubric-1"
 """Bump on any change to rubric weights, penalty semantics, or composite shape.
-
-``2026.09.04-rubric-1`` is **not** a weight change: :class:`RubricV2Weights`
-defaults, the penalty semantics and the composite shape are all identical to
-``2026.05.28-rubric-1``. The bump records an upstream *label* redefinition
-(issue #1106): ``daydream.eval.analyzer.analyze_grounding`` tightened its
-grounding predicate from "the finding's cited file was read" to that plus "the
-finding's cited line resolves inside (or within tolerance of) a diff hunk". That
-predicate produces the ``grounded`` count this rubric divides by
-``total_findings`` for the localization term, and the ``grounding_rate`` it hands
-to :func:`~daydream.training.reward.score_trajectory`, so scores stamped before
-and after are not comparable and must not share a stamp.
 
 Read at call time so a test can monkeypatch
 ``daydream.training.rubric.REWARD_VERSION_RUBRIC`` and have
@@ -305,11 +294,6 @@ def _rubric_fingerprint(weights: RubricV2Weights) -> str:
     """
     payload = {name: getattr(weights, name) for name in _WEIGHT_FIELDS}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
-
-
-def _clip(value: float, low: float, high: float) -> float:
-    """Clamp ``value`` to the closed interval ``[low, high]``."""
-    return max(low, min(high, value))
 
 
 def _validate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:

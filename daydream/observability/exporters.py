@@ -99,10 +99,6 @@ class CompatSpanExporter(SpanExporter):
         return self._ledger.snapshot()
 
 
-def _has_snapshot(exporter: Any) -> bool:
-    return hasattr(exporter, "delivery_snapshot")
-
-
 def _snapshot_of(exporter: Any) -> dict[str, Any]:
     """Return the owned transport's delivery snapshot when it exposes one."""
     snapshot = getattr(exporter, "delivery_snapshot", None)
@@ -226,6 +222,14 @@ def _otlp_http_compression() -> Literal["none", "gzip"]:
     return "gzip" if value == "gzip" else "none"
 
 
+def _traces_or_shared_endpoint_setting() -> str:
+    return (
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+        if "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" in os.environ
+        else "OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+
+
 def otlp_exporter(config: ObservabilityConfig) -> SpanExporter:
     """Generic OTLP exporter honoring standard signal-specific and shared OTEL settings."""
     protocol = os.environ.get(
@@ -235,11 +239,7 @@ def otlp_exporter(config: ObservabilityConfig) -> SpanExporter:
         raise ObservabilityError(
             "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL / OTEL_EXPORTER_OTLP_PROTOCOL must be 'http/protobuf' or 'grpc'"
         )
-    endpoint_setting = (
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
-        if "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" in os.environ
-        else "OTEL_EXPORTER_OTLP_ENDPOINT"
-    )
+    endpoint_setting = _traces_or_shared_endpoint_setting()
     endpoint = os.environ.get(endpoint_setting)
     if endpoint is not None:
         _validated_endpoint(endpoint, endpoint_setting, grpc=protocol == "grpc")
@@ -251,11 +251,7 @@ def otlp_exporter(config: ObservabilityConfig) -> SpanExporter:
 
 def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanExporter:
     """Owned HTTP transport via the typed signal-over-shared resolver."""
-    endpoint_setting = (
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
-        if "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" in os.environ
-        else "OTEL_EXPORTER_OTLP_ENDPOINT"
-    )
+    endpoint_setting = _traces_or_shared_endpoint_setting()
     raw_endpoint = os.environ.get(endpoint_setting, "http://localhost:4318")
     # Stock OTel 1.44 semantics (pinned exporter ground truth): the shared
     # endpoint always gets the traces path appended — even when it already
@@ -298,11 +294,7 @@ def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
 
 def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanExporter:
     """Corrected scheme/insecure+compression resolution, then the pinned bridge."""
-    endpoint_setting = (
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
-        if "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" in os.environ
-        else "OTEL_EXPORTER_OTLP_ENDPOINT"
-    )
+    endpoint_setting = _traces_or_shared_endpoint_setting()
     endpoint = os.environ.get(endpoint_setting)
     if endpoint is not None:
         _validated_endpoint(endpoint, endpoint_setting, grpc=True)
@@ -446,21 +438,8 @@ def _preserved_attributes(
     return plain
 
 
-class HoneyHiveExporter(SpanExporter):
-    """Add native event types and billed metadata without changing portable spans."""
-
-    # Native event-type classification: structural aggregates (run/step/logical
-    # agent/attempt) stay chain; only an approved generation is a model event;
-    # opaque backends emit no model event because they create no generation
-    # span. Tool calls are tool events.
-    _EVENT_TYPES = {
-        "run": "chain",
-        "step": "chain",
-        "agent": "chain",
-        "attempt": "chain",
-        "generation": "model",
-        "tool": "tool",
-    }
+class _NativeSpanExporter(SpanExporter):
+    """Shared delegation and billing-owner resolution for native exporters."""
 
     def __init__(self, exporter: SpanExporter) -> None:
         self._exporter = exporter
@@ -470,30 +449,7 @@ class HoneyHiveExporter(SpanExporter):
 
     @staticmethod
     def _adapt(span: ReadableSpan) -> ReadableSpan:
-        attributes = dict(span.attributes or {})
-        kind = attributes.get("daydream.span.kind")
-        attributes["honeyhive_event_type"] = HoneyHiveExporter._EVENT_TYPES.get(str(kind), "chain")
-        session_id = attributes.get("traceloop.association.properties.session_id") or attributes.get("daydream.run.id")
-        if session_id:
-            attributes["honeyhive.session_id"] = session_id
-            attributes["honeyhive.session_auto_create"] = True
-            attributes["honeyhive.session_name"] = f"daydream.{attributes.get('daydream.flow', 'run')}"
-        # HoneyHive's documented canonical mapping recognizes the standard
-        # agent identity: gen_ai.agent.name/description/id normalize into
-        # metadata.agent_name/description/id. No guessed underscore-prefixed
-        # derived fields are written (issue #1156).
-        if HoneyHiveExporter._is_billed_owner(attributes):
-            for portable, native in (
-                ("gen_ai.usage.input_tokens", "prompt_tokens"),
-                ("gen_ai.usage.output_tokens", "completion_tokens"),
-                ("gen_ai.usage.cost", "cost"),
-                ("gen_ai.usage.cache_read.input_tokens", "cache_read_input_tokens"),
-                ("gen_ai.usage.cache_creation.input_tokens", "cache_write_input_tokens"),
-                ("gen_ai.usage.reasoning.output_tokens", "reasoning_tokens"),
-            ):
-                if portable in attributes:
-                    attributes[f"honeyhive_metadata.{native}"] = attributes[portable]
-        return _copy_span(span, _preserved_attributes(span, attributes))
+        raise NotImplementedError
 
     @staticmethod
     def _is_billed_owner(attributes: Mapping[str, AttributeValue]) -> bool:
@@ -522,7 +478,51 @@ class HoneyHiveExporter(SpanExporter):
         return _snapshot_of(self._exporter)
 
 
-class LangSmithExporter(SpanExporter):
+class HoneyHiveExporter(_NativeSpanExporter):
+    """Add native event types and billed metadata without changing portable spans."""
+
+    # Native event-type classification: structural aggregates (run/step/logical
+    # agent/attempt) stay chain; only an approved generation is a model event;
+    # opaque backends emit no model event because they create no generation
+    # span. Tool calls are tool events.
+    _EVENT_TYPES = {
+        "run": "chain",
+        "step": "chain",
+        "agent": "chain",
+        "attempt": "chain",
+        "generation": "model",
+        "tool": "tool",
+    }
+
+    @staticmethod
+    def _adapt(span: ReadableSpan) -> ReadableSpan:
+        attributes = dict(span.attributes or {})
+        kind = attributes.get("daydream.span.kind")
+        attributes["honeyhive_event_type"] = HoneyHiveExporter._EVENT_TYPES.get(str(kind), "chain")
+        session_id = attributes.get("traceloop.association.properties.session_id") or attributes.get("daydream.run.id")
+        if session_id:
+            attributes["honeyhive.session_id"] = session_id
+            attributes["honeyhive.session_auto_create"] = True
+            attributes["honeyhive.session_name"] = f"daydream.{attributes.get('daydream.flow', 'run')}"
+        # HoneyHive's documented canonical mapping recognizes the standard
+        # agent identity: gen_ai.agent.name/description/id normalize into
+        # metadata.agent_name/description/id. No guessed underscore-prefixed
+        # derived fields are written (issue #1156).
+        if HoneyHiveExporter._is_billed_owner(attributes):
+            for portable, native in (
+                ("gen_ai.usage.input_tokens", "prompt_tokens"),
+                ("gen_ai.usage.output_tokens", "completion_tokens"),
+                ("gen_ai.usage.cost", "cost"),
+                ("gen_ai.usage.cache_read.input_tokens", "cache_read_input_tokens"),
+                ("gen_ai.usage.cache_creation.input_tokens", "cache_write_input_tokens"),
+                ("gen_ai.usage.reasoning.output_tokens", "reasoning_tokens"),
+            ):
+                if portable in attributes:
+                    attributes[f"honeyhive_metadata.{native}"] = attributes[portable]
+        return _copy_span(span, _preserved_attributes(span, attributes))
+
+
+class LangSmithExporter(_NativeSpanExporter):
     """Add LangSmith compatibility attributes to copies; keep portable spans untouched."""
 
     # LangSmith native run types: every structural aggregate (run/step/logical
@@ -536,12 +536,6 @@ class LangSmithExporter(SpanExporter):
         "generation": "llm",
         "tool": "tool",
     }
-
-    def __init__(self, exporter: SpanExporter) -> None:
-        self._exporter = exporter
-
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._exporter.export([self._adapt(span) for span in spans])
 
     @staticmethod
     def _adapt(span: ReadableSpan) -> ReadableSpan:
@@ -565,21 +559,3 @@ class LangSmithExporter(SpanExporter):
             if usage:
                 attributes["langsmith.usage_metadata"] = json.dumps(usage, separators=(",", ":"))
         return _copy_span(span, _preserved_attributes(span, attributes))
-
-    @staticmethod
-    def _is_billed_owner(attributes: Mapping[str, AttributeValue]) -> bool:
-        kind = attributes.get("daydream.span.kind")
-        if kind == "generation":
-            return bool(attributes.get("daydream.generation.billed"))
-        if kind == "attempt":
-            return attributes.get("daydream.billing.owner") == "structural_attempt"
-        return False
-
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        return self._exporter.force_flush(timeout_millis)
-
-    def shutdown(self) -> None:
-        self._exporter.shutdown()
-
-    def delivery_snapshot(self) -> dict[str, Any]:
-        return _snapshot_of(self._exporter)

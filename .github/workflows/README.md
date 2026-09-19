@@ -100,10 +100,7 @@ single dependency. Commit messages carry the `chore(deps)` prefix.
 **Action bumps are automated.** Every third-party action stays pinned to a full
 commit SHA — enforced by
 `tests/test_workflow_templates.py::test_bot_workflow_action_references_are_pinned_to_commit_shas`
-— and the `github-actions` ecosystem raises the bumps. It was off for a while
-because a hand-maintained SHA→version map in that same test file could not be
-updated by Dependabot, so every bump PR failed CI; the map is gone, and the
-SHA-pinning invariant it was bolted onto is unaffected.
+— and the `github-actions` ecosystem raises the bumps.
 
 **Validation gate.** Every dependency PR must pass `make check` before merge —
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`

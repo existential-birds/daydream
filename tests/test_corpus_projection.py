@@ -773,19 +773,18 @@ def test_v2_loader_refuses_partial_projection_without_success_marker(tmp_path: P
 
 def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None:
     # The projector copies schema/record-schema.json beside its output, so every emitted
-    # record must validate against that exact artifact (TRAINING_RECORD_SCHEMA_PATH
-    # is the consumed-by-test canonical contract; nothing may ship a schema the
+    # record must validate against that exact artifact (nothing may ship a schema the
     # projector's own output cannot satisfy).
     from jsonschema import Draft202012Validator
 
-    from daydream.training.schema import TRAINING_RECORD_SCHEMA_PATH
+    schema_path = Path(__file__).resolve().parents[1] / "daydream/training/schema/record-schema.json"
 
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "proj"
     summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
     assert summary["emitted"] >= 1
-    validator = Draft202012Validator(json.loads(TRAINING_RECORD_SCHEMA_PATH.read_text()))
+    validator = Draft202012Validator(json.loads(schema_path.read_text()))
     records = [
         json.loads(line)
         for line in (out / "corpus.jsonl").read_text().splitlines()

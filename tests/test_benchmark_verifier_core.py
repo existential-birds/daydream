@@ -17,7 +17,6 @@ from daydream.benchmark.harbor.verifier_core import (
     parse_gold_finding,
     retained_edges,
     reward_details,
-    reward_details_to_json,
     reward_to_json,
     score_review,
     validate_candidate_artifact,
@@ -400,7 +399,7 @@ def test_reward_details_shape_and_no_source_leak() -> None:
         assert key in details
     assert details["unmatched_gold"] == ["b" * 64]
     assert details["unmatched_candidates"] == [cands[1].candidate_id]
-    blob = reward_details_to_json(details)
+    blob = json.dumps(details)
     assert "same bug" in blob  # reasoning is kept
     assert "Cache key not scoped" not in blob  # finding body/title never leaks
     assert "f1" not in blob  # candidate content never leaks

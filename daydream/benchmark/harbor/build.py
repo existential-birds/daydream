@@ -476,8 +476,6 @@ def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> di
 
 
 # Verifier/solution template assets copied byte-for-byte into each compiled case.
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
-
 _COPY_ASSETS = ("tests/score_review.py", "tests/verifier_core.py", "tests/judge_prompt.md",
                 "tests/test.sh", "tests/Dockerfile", "solution/solve.sh")
 

@@ -821,11 +821,6 @@ def reward_details(
     }
 
 
-def reward_details_to_json(details: dict[str, object]) -> str:
-    """Serialize a reward-details dict to JSON."""
-    return json.dumps(details)
-
-
 # ---------------------------------------------------------------------------
 # corpus micro-metric aggregation
 # ---------------------------------------------------------------------------

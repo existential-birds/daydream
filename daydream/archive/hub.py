@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from daydream.archive._console import warn as _warn
+
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
 
@@ -32,13 +34,6 @@ HfApi: type | None = None
 # the base delay via monkeypatch to keep the retry tests fast.
 _UPLOAD_RETRY_BASE_DELAY_S = 2.0
 _UPLOAD_RETRY_MAX_DELAY_S = 120.0
-
-
-def _warn(message: str) -> None:
-    """Print a one-line warning through the daydream console (never raises)."""
-    from daydream.ui import create_console, print_warning
-
-    print_warning(create_console(), message)
 
 
 def resolve_hub_repo(config: RunConfig) -> str | None:
