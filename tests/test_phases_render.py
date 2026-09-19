@@ -16,8 +16,7 @@ phases themselves, not the backend).
 """
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
@@ -25,7 +24,7 @@ from typing import Any, cast
 import pytest
 from rich.console import Console
 
-from daydream.backends import AgentEvent, Backend, ContinuationToken, ResultEvent
+from daydream.backends import Backend, ResultEvent
 from daydream.deep.detection import StackAssignment
 from daydream.phases import (
     phase_arbiter_review,
@@ -34,6 +33,7 @@ from daydream.phases import (
     phase_per_stack_reviews,
 )
 from daydream.workspace import WorkContext
+from tests.harness.backend import ScriptedBackend
 from tests.harness.stub_backend import MockBackend
 
 
@@ -168,44 +168,22 @@ async def test_arbiter_prints_kept_dropped(
     assert "Arbiter: kept 2, dropped 1" in out
 
 
-@dataclass
-class _PerStackBackend:
-    """Backend that raises for stacks whose name appears in ``fail_for``.
+def _per_stack_backend(fail_for: set[str]) -> ScriptedBackend:
+    """Responder-backed fake raising for stacks whose name appears in ``fail_for``.
 
     ``phase_per_stack_reviews`` passes each stack's output path (which embeds the
     stack name, e.g. ``stack-stack-a-review.md``) into the per-stack prompt, so the
-    stub keys its raise/succeed decision off the prompt text. Mirrors the
-    three-method Backend protocol (test_agent_recorder_integration:61-96).
+    fake keys its raise/succeed decision off the prompt text.
     """
 
-    model = "mock-model"
-    fail_for: set[str]
+    def respond(cwd: Any, prompt: str, *args: Any) -> list[Any]:
+        if any(f"stack-{name}-review.md" in prompt for name in fail_for):
+            return [RuntimeError("agent boom")]
+        # Issue #745: per-stack reviewers must emit PER_STACK_RECORD_SCHEMA
+        # structured output (issues + verdicts) to be recorded as a success.
+        return [ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None)]
 
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        should_fail = any(f"stack-{name}-review.md" in prompt for name in self.fail_for)
-
-        async def _gen() -> AsyncIterator[AgentEvent]:
-            if should_fail:
-                raise RuntimeError("agent boom")
-            # Issue #745: per-stack reviewers must emit PER_STACK_RECORD_SCHEMA
-            # structured output (issues + verdicts) to be recorded as a success.
-            yield ResultEvent(
-                structured_output={"issues": [], "verdicts": []}, continuation=None
-            )
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
+    return ScriptedBackend(responder=respond, model="mock-model")
 
 
 async def test_per_stack_failures_summarized_once(
@@ -228,7 +206,7 @@ async def test_per_stack_failures_summarized_once(
         StackAssignment(stack_name="stack-b", files=["b.py"]),
         StackAssignment(stack_name="stack-c", files=["c.py"]),
     ]
-    backend = _PerStackBackend(fail_for={"stack-a", "stack-b"})
+    backend = _per_stack_backend({"stack-a", "stack-b"})
 
     successes, failures = await phase_per_stack_reviews(
         cast(Backend, backend),

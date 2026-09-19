@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
 
-from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
+from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
 from daydream.workspace import WorkContext
@@ -223,27 +223,14 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
 ) -> None:
     """A single stack failure does not abort the whole fan-out, and is reported."""
 
-    # Prompt-conditional, so it stays a dispatch fake: ScriptedBackend scripts by
-    # call index and the fan-out completion order is not fixed.
-    class _FlakyBackend(ScriptedBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            if "react" in prompt.lower():
-                raise RuntimeError("simulated react failure")
-            async for event in super().execute(cwd, prompt, output_schema, continuation,
-                                               agents, max_turns, read_only, persist_session):
-                yield event
+    # Prompt-conditional, so the failure is keyed off the prompt text: the
+    # fan-out completion order is not fixed and a per-call script would misalign.
+    def _flaky_responder(cwd: Any, prompt: str, *args: Any) -> list[Any] | None:
+        if "react" in prompt.lower():
+            return [RuntimeError("simulated react failure")]
+        return None
 
-    backend = _FlakyBackend(events=_REVIEW_TURN)
+    backend = ScriptedBackend(events=_REVIEW_TURN, responder=_flaky_responder)
     diff, intent, alts = _mk_context_files(tmp_path)
     recorder = make_recorder(tmp_path)
 
