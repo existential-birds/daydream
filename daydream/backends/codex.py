@@ -592,7 +592,6 @@ class CodexBackend:
     Translates Codex JSONL events into the unified AgentEvent stream.
     """
 
-    concise_fix_prompts = False
     # Codex operates in a disposable read-only clone of the workspace, so it
     # can safely have over-budget diffs inlined (truncated) and exploration
     # summaries inlined rather than pointed at on-disk artifact files.

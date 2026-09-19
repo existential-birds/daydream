@@ -273,7 +273,6 @@ class OspreyBackend:
     """Translate ``osprey agent --events-jsonl`` into daydream events."""
 
     name = "osprey"
-    concise_fix_prompts = False
 
     def __init__(
         self,

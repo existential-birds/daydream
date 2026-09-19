@@ -65,7 +65,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# --- Data shapes ------------------------------------------------------------
 
 
 class PostStatus(Enum):
@@ -312,7 +311,6 @@ class _ClassifiedIssues:
         return [*self.inline_issues, *self.file_level, *self.body_only]
 
 
-# --- Public entry points ----------------------------------------------------
 
 
 @bind_resolved_run_context
@@ -392,7 +390,6 @@ async def post_review_to_pr_from_report(
     )
 
 
-# --- Parsers ---------------------------------------------------------------
 
 
 DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
@@ -541,7 +538,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     return out
 
 
-# --- Git / gh helpers ------------------------------------------------------
 
 
 def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
@@ -684,7 +680,6 @@ def find_pr_by_number(
     return _pr_info_from_row(target_dir, data, auth=auth)
 
 
-# --- Line resolution + hunk classification --------------------------------
 
 
 _ANCHOR_TOKEN = re.compile(r"`([^`\n]{3,80})`|\b([A-Za-z_][A-Za-z0-9_]{4,})\b")
@@ -975,7 +970,6 @@ def snap_to_hunk(
     return best
 
 
-# --- Classification + payload build ---------------------------------------
 
 
 def classify(
@@ -1814,7 +1808,6 @@ def post_classified_review(
     )
 
 
-# --- Core orchestration ---------------------------------------------------
 
 
 def _resolve_pr(

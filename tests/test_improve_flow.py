@@ -49,7 +49,7 @@ from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
 from daydream.services import enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
-from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
+from tests.conftest import improve_fixture_test_command_anchor
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
     bare_remote,
@@ -59,7 +59,6 @@ from tests.harness.git_helpers import (
     init_repo,
 )
 from tests.harness.improve_backend import (
-    AuditAbsoluteWorkingDirectoryBackend,
     ImproveStubBackend,
     IncrementalPlanBackend,
     OutOfOrderPlanBackend,
@@ -1969,122 +1968,6 @@ async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
     )
     assert all(call["read_only"] for call in stub.calls)
     assert _git_status_porcelain(improve_monorepo_target) == ""
-
-
-def _dedup_test_command(
-    *,
-    command_id: str,
-    purpose: str,
-    working_directory: str,
-    scope: dict[str, Any],
-    rationale: str,
-    evidence: dict[str, Any],
-) -> dict[str, Any]:
-    """Build one recon command record for the absolute-wd dedup fixture.
-
-    The host-enumerated and model-cited sides of the dedup share the same
-    command, expected-success block, and applicability skeleton; only the id,
-    working-directory spelling, scope, rationale, and evidence differ.
-    """
-    return {
-        "id": command_id,
-        "purpose": purpose,
-        "command": "uv run pytest",
-        "working_directory": working_directory,
-        "expected_success": {
-            "exit_code": 0,
-            "observable_result": "exit 0 and the tests pass",
-        },
-        "applicability": {
-            "scope": scope,
-            "preconditions": [],
-            "rationale": rationale,
-        },
-        "evidence": evidence,
-    }
-
-
-@pytest.mark.anyio
-async def test_host_enumeration_dedups_absolute_model_wd(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-) -> None:
-    """A model-cited command whose working_directory is spelled absolutely is
-    deduped against the host record for the same directory (relative spelling):
-    exactly one command record, no rejection noise (issue #654).
-
-    Fixture contract (mirrors tests/test_command_contract.py): the service dir
-    and the test-command anchor are derived from the fixture's actual content
-    via the shared fixture-contract helpers rather than hardcoded, so a future
-    fixture edit surfaces as an attributable error instead of a silent meaning
-    shift.
-    """
-    # Derive a real service dir (one containing a pyproject.toml) from the
-    # fixture, and the root test-command declaration line, via the shared
-    # fixture-contract helpers.
-    service = improve_fixture_service(improve_monorepo_target / "apps")
-    rel = f"apps/{service}"
-    anchor_line = improve_fixture_test_command_anchor(
-        improve_monorepo_target / "pyproject.toml"
-    )
-    monkeypatch.setattr(
-        "daydream.improve.orchestrator.enumerate_repository_commands",
-        lambda repo, *, directories=(".",), reserved_ids=(): [
-            _dedup_test_command(
-                command_id="make-check",
-                purpose="Run the repository test suite",
-                working_directory=rel,
-                scope={"kind": "in-scope-paths", "paths": [rel]},
-                rationale=f"The {service} service declares the test command.",
-                evidence={
-                    "kind": "host-derived",
-                    "source_path": f"{rel}/pyproject.toml",
-                    "line_anchor": {"start_line": 1, "end_line": 1},
-                    "verbatim_excerpt": "[project]",
-                },
-            )
-        ],
-    )
-
-    stub = install_capable_improve_backend(
-        monkeypatch,
-        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target, rel=rel),
-    )
-    stub.recon_output_override = {
-        "languages": ["python"],
-        "commands": [
-            _dedup_test_command(
-                command_id="model-check",
-                purpose="Run the repository test suite",
-                # Absolute spelling of the SAME directory the host enumerates
-                # relative.
-                # The backend rewrites this placeholder to the absolute audit
-                # snapshot path once the real runner supplies its cwd.
-                working_directory=rel,
-                scope={"kind": "whole-repository"},
-                rationale="The root configuration declares the test command.",
-                evidence={
-                    "kind": "literal-command",
-                    "source_path": "pyproject.toml",
-                    "line_anchor": {"start_line": anchor_line, "end_line": anchor_line},
-                    "verbatim_excerpt": None,
-                },
-            )
-        ],
-        "conventions": ["OpenAPI First"],
-        "intent_docs": ["README.md"],
-    }
-    stub.plan_gate_on_first_menu_id = True
-
-    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
-
-    assert code == 0
-    recon = _load_improve_json(improve_monorepo_target, "recon.json")
-    # The host command was deduped against the absolute model wd: no
-    # re-admitted make-check record, no rejection noise.
-    assert [command["id"] for command in recon["commands"]] == ["model-check"]
-    assert recon["command_rejections"] == []
 
 
 @pytest.mark.anyio

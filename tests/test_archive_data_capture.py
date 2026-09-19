@@ -137,7 +137,6 @@ async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
     )
 
 
-# --- AC1 + AC3: default deep run populates eval metrics AND captures recommended.patch ---
 
 
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
@@ -595,7 +594,6 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     assert not dump_dir.exists()
 
 
-# --- #1170: the dump secret-scan gate is tiered (advisory reports, blocking refuses) ---
 
 
 def _commit_scanned_file(target: Path, name: str, body: str) -> None:
@@ -852,7 +850,6 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     assert not (run_dir / "evaluation.json").exists()
 
 
-# --- AC3 (shallow path): recommended.patch captured through the shallow runner ---
 
 
 def _fix_editing_backend(repo: Path) -> ScriptedBackend:
@@ -982,7 +979,6 @@ async def test_shallow_run_captures_recommended_patch(
     assert "+# daydream recommended change" not in diff_text
 
 
-# --- AC4: applied-signal cascades read recommended.patch (fallback to diff.patch) ---
 
 
 def test_fix_applied_signal_prefers_recommended_patch(tmp_path: Path) -> None:
@@ -1102,7 +1098,6 @@ def test_local_commit_applied_signal_uses_recommended_patch(
     assert sig.verdict == expected_verdict
 
 
-# --- location + shipped-duplication axes reach the archive (issue #1106) ---
 
 
 async def test_deep_run_archives_location_and_shipped_duplication_axes(
@@ -1760,7 +1755,6 @@ async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_s
     )
 
 
-# --- retry / circuit manifest summary (issue #734 must-have 15) ---
 
 
 def _retry_stop_event(
