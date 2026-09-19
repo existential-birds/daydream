@@ -505,57 +505,6 @@ async def test_cwd_passed_to_subprocess() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_uses_start_new_session() -> None:
-    """CLI spawns create a new session so the process group is killable."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ) as mock_exec:
-        events = []
-        async for event in backend.execute(Path("/tmp"), "hello"):
-            events.append(event)
-    assert mock_exec.call_args.kwargs["start_new_session"] is True
-
-
-@pytest.mark.asyncio
-async def test_execute_finally_reaps_process_after_exit() -> None:
-    """Even when the CLI already exited, the finally reaps the process group.
-
-    The transport teardown runs unconditionally: its group signal fires
-    regardless of ``returncode``, so a grandchild that outlived the CLI is
-    still signalled and the pipe fds are still released.
-    """
-    from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
-
-    backend = PiBackend(model="glm-5.2")
-    captured = FakeCliSpawner()
-
-    async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
-        proc = FakeCliProcess(
-            [
-                '{"type":"session","sessionId":"pi_ses_bye"}',
-                '{"type":"agent_start"}',
-                '{"type":"agent_end","messages":[]}',
-            ],
-            exit_code=0,
-        )
-        captured.procs.append(proc)
-        return proc
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        events = [event async for event in backend.execute(Path("/tmp"), "hello")]
-
-    assert events  # the turn ran to completion
-    proc = captured.procs[0]
-    assert proc.returncode == 0
-    assert proc.reaped, "the finally must reap the child even after clean exit"
-    assert proc._transport.closed, "the finally must release the pipe fds even after clean exit"
-    assert backend._transports == [], "the finally must drop the transport from the backend list"
-
-
-@pytest.mark.asyncio
 async def test_execute_raises_on_agents() -> None:
     """PiBackend refuses agents= with NotImplementedError (plan §5)."""
     backend = PiBackend(model="glm-5.2")

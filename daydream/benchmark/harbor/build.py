@@ -496,9 +496,7 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # control-plane leakage scan (issue #778)
-# ---------------------------------------------------------------------------
 
 _LEAK_RULES = [
     ("original-git-sha", re.compile(r"\b[0-9a-f]{40}\b")),
@@ -563,9 +561,7 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     return None
 
 
-# ---------------------------------------------------------------------------
 # bundle archive-inventory check
-# ---------------------------------------------------------------------------
 
 
 def validate_bundle_inventory(bundle_path: Path) -> None:
@@ -583,9 +579,7 @@ def validate_bundle_inventory(bundle_path: Path) -> None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # case compilation + lock + atomic swap
-# ---------------------------------------------------------------------------
 
 _CASE_README = (
     "# Daydream Harbor task\n\n"

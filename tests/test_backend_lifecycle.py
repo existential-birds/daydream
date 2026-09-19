@@ -112,10 +112,8 @@ def test_process_exit_message_reports_the_count_it_prints() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Shared parser contracts (the helpers the pi env facades delegate to) plus
 # the delegating facades themselves. The parsers have no other direct test.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -191,10 +189,8 @@ def test_pi_retry_delay_is_gone() -> None:
     assert not hasattr(pi_module, "_pi_retry_delay")
 
 
-# ---------------------------------------------------------------------------
 # Per-adapter lifecycle (requirement 13): drive the real backends through the
 # transport seam (only the OS fork is replaced) and pin the observable outcome.
-# ---------------------------------------------------------------------------
 
 
 async def _drive(
@@ -325,11 +321,9 @@ async def test_osprey_clean_exit_lifecycle() -> None:
     _assert_clean_lifecycle(backend, proc)
 
 
-# ---------------------------------------------------------------------------
 # Structural guard: the reap / raise / teardown sequence lives once, in the
 # owner module. The detectors are liveness-proven (each is asserted to fire on
 # a synthetic offender) so an empty scan can never pass because it is broken.
-# ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _BACKENDS_DIR = _REPO_ROOT / "daydream" / "backends"

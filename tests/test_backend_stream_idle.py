@@ -241,11 +241,9 @@ async def test_pi_active_tool_keeps_long_subprocess_window(
     assert_stalled_and_reaped(spawner)
 
 
-# --------------------------------------------------------------------------
 # A stream with data flowing must NOT trip, however small the window. This is
 # the regression that keeps a genuinely slow-but-alive model from being killed
 # mid-turn: data availability, not elapsed time, is what feeds the window.
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -341,10 +339,8 @@ def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatc
     )
 
 
-# --------------------------------------------------------------------------
 # Retryable — driven through run_agent, the production call site. A stalled
 # stream consumes the backend's bounded retry budget after the full idle window.
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -454,12 +450,10 @@ async def test_cancelled_teardown_still_escalates_to_sigkill(
     assert proc.returncode == SIGKILL_RC
 
 
-# --------------------------------------------------------------------------
 # Real-subprocess wiring. One test per backend proves the production spawn
 # plumbing — PATH resolution, pipe wiring, real byte decode, real wait/reap —
 # against a fake CLI that unconditionally prints its stream and exits. No
 # hang, no cadence, no timer in play: nothing here races anything.
-# --------------------------------------------------------------------------
 
 _WIRING_CLI = textwrap.dedent(
     """\

@@ -88,8 +88,6 @@ def _append_ledger_run_raw(ws: Path, run_id: Any, *, job_dir: Any, state: Any, e
     storage.atomic_write_json(path, doc, mode=0o600)
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_parser_exposes_flags_and_derived_union() -> None:
@@ -120,8 +118,6 @@ def test_handle_clean_routes_to_clean_workspace(tmp_path: Path, monkeypatch: pyt
     assert captured["all_"] is False and captured["yes"] is True
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_report_summary_includes_populated_counters() -> None:
@@ -163,8 +159,6 @@ def test_clean_no_flags_deletes_nothing_and_preserves_gold(tmp_path: Path) -> No
     assert report.trajectory_deleted == 0 and report.images_removed == 0
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_cache_deletes_only_cache_targets(tmp_path: Path) -> None:
@@ -191,8 +185,6 @@ def test_clean_cache_absent_target_is_already_clean(tmp_path: Path) -> None:
     assert report.job_dirs_deleted == 0 and report.trajectory_deleted == 0
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_trajectories_deletes_job_trajectories_only(tmp_path: Path) -> None:
@@ -224,8 +216,6 @@ def test_clean_trajectories_absent_dir_is_already_clean(tmp_path: Path) -> None:
     assert report.job_dirs_deleted == 0
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_jobs_deletes_ledgered_job_dir_and_marks_cleaned(tmp_path: Path) -> None:
@@ -254,8 +244,6 @@ def test_clean_jobs_already_cleaned_run_is_noop(tmp_path: Path) -> None:
     assert report.job_dirs_deleted == 0
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_jobs_removes_recorded_images_and_marks_removed(tmp_path: Path) -> None:
@@ -295,8 +283,6 @@ def test_clean_jobs_removed_true_env_skipped(tmp_path: Path) -> None:
     assert ledger["runs"][0]["state"] == "cleaned"
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_job_dir_kept_when_image_removal_fails(tmp_path: Path) -> None:
@@ -437,8 +423,6 @@ def test_clean_jobs_cleans_run_whose_job_dir_never_materialized(tmp_path: Path) 
     assert not (ws / "harbor" / "jobs" / run_id).exists()
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_symlink_escape_target_rejected(tmp_path: Path) -> None:
@@ -464,8 +448,6 @@ def test_non_contained_ledger_job_dir_rejected(tmp_path: Path) -> None:
     assert evil.exists()
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_clean_all_refuses_without_yes_and_no_tty(tmp_path: Path) -> None:
@@ -530,8 +512,6 @@ def test_clean_all_preserves_curated_when_derived_stage_soft_fails(tmp_path: Pat
         assert (ws / name).exists(), f"curated {name} must survive a soft derived failure"
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_workspace_lock_held_during_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

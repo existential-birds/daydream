@@ -20,9 +20,9 @@ import pytest
 from daydream.training.calibration import (
     CalibrationConfig,
     CalibrationError,
-    assign_split,
     run_calibration,
 )
+from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.reward import REWARD_VERSION as _PRODUCTION_REWARD_VERSION
 
 AS_OF = "2026-01-01T00:00:00+00:00"
@@ -234,7 +234,7 @@ def test_stored_split_mismatch_fails_closed(tmp_path: Path) -> None:
         val_rate=float(lineage["val_rate"]),
         salt=str(lineage["salt"]),
     )
-    records[0]["lineage"]["split"] = "val" if derived != "val" else "holdout"
+    records[0]["lineage"]["split"] = "validation" if derived != "validation" else "holdout"
     payload = "\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n"
     (corpus_dir / "corpus.jsonl").write_text(payload)
     (corpus_dir / "SHA256SUMS").write_text(

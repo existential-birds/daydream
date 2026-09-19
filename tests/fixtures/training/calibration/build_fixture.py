@@ -33,7 +33,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daydream.training.calibration import assign_split
+from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.labeler_versions import (
     LABELER_POLICY_VERSION,
