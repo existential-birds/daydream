@@ -11,19 +11,8 @@ from daydream.benchmark.schema import BenchmarkManifest, CaseDocument, ImportDoc
 from daydream.benchmark.storage import load_json_strict, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import SEED_ENV, commit
 from tests.harness.git_helpers import git as _git
-
-
-def _commit(repo: Any, message: str) -> str:
-    return commit(repo, message, env=SEED_ENV)
-
-
-def _write_seed(repo: Any, name: Any, content: Any) -> None:
-    path = repo / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    _git(repo, "add", name)
+from tests.harness.git_helpers import seeded_commit, write_and_stage
 
 
 def test_init_creates_private_layout_and_modes(tmp_path: Path) -> None:
@@ -145,17 +134,17 @@ def _seed_local_origin(root: Path) -> tuple[Any, ...]:
         _sh.rmtree(repo)
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write_seed(repo, "readme.txt", "base1\n")
-    _commit(repo, "base1")
-    _write_seed(repo, "base.py", "BASE = 2\n")
-    base_sha = _commit(repo, "base2")
-    _write_seed(repo, "beyond.py", "BEYOND = 3\n")
-    _commit(repo, "base3")
+    write_and_stage(repo, "readme.txt", "base1\n")
+    seeded_commit(repo, "base1")
+    write_and_stage(repo, "base.py", "BASE = 2\n")
+    base_sha = seeded_commit(repo, "base2")
+    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
+    seeded_commit(repo, "base3")
     _git(repo, "checkout", "--detach", base_sha)
     (repo / "base.py").write_text("BASE = 20\n")
     _git(repo, "add", "base.py")
-    _write_seed(repo, "feature.py", "LINE 1\n")
-    head_sha = _commit(repo, "feature")
+    write_and_stage(repo, "feature.py", "LINE 1\n")
+    head_sha = seeded_commit(repo, "feature")
     bare = seed / "origin_local.git"
     if bare.exists():
         _sh.rmtree(bare)

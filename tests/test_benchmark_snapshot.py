@@ -20,24 +20,10 @@ import pytest
 
 from daydream import git_ops
 from daydream.git_ops import GitError
-from tests.harness.git_helpers import SEED_ENV, commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import seeded_commit, write_and_stage
 
 # real-git seed helpers (deterministic commit SHAs)
-
-
-def _commit(repo: Path, message: str) -> str:
-    return commit(repo, message, env=SEED_ENV)
-
-
-def _write(repo: Path, name: str, content: str | bytes) -> None:
-    path = repo / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, bytes):
-        path.write_bytes(content)
-    else:
-        path.write_text(content)
-    _git(repo, "add", name)
 
 
 @contextlib.contextmanager
@@ -55,17 +41,17 @@ def _seed_origin(tmp_path: Path) -> str:
     repo = tmp_path / "seed_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "readme.txt", "base1\n")
-    _commit(repo, "base1")
-    _write(repo, "base.py", "BASE = 2\n")
-    base2_sha = _commit(repo, "base2")
-    _write(repo, "beyond.py", "BEYOND = 3\n")
-    _commit(repo, "base3")
+    write_and_stage(repo, "readme.txt", "base1\n")
+    seeded_commit(repo, "base1")
+    write_and_stage(repo, "base.py", "BASE = 2\n")
+    base2_sha = seeded_commit(repo, "base2")
+    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
+    seeded_commit(repo, "base3")
     _git(repo, "checkout", "--detach", base2_sha)
     repo.joinpath("base.py").write_text("BASE = 20\n")
     _git(repo, "add", "base.py")
-    _write(repo, "feature.py", "FEATURE = 1\n")
-    head_sha = _commit(repo, "feature")
+    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
+    head_sha = seeded_commit(repo, "feature")
 
     bare = tmp_path / "origin.git"
     bare.mkdir(parents=True, exist_ok=True)
@@ -84,26 +70,26 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     repo = tmp_path / "seed_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "readme.txt", "base1\n")
-    _commit(repo, "base1")
-    _write(repo, "base.py", "BASE = 2\n")
-    _commit(repo, "base2")
-    _write(repo, "beyond.py", "BEYOND = 3\n")
-    _commit(repo, "base3")
+    write_and_stage(repo, "readme.txt", "base1\n")
+    seeded_commit(repo, "base1")
+    write_and_stage(repo, "base.py", "BASE = 2\n")
+    seeded_commit(repo, "base2")
+    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
+    seeded_commit(repo, "base3")
     # PR 1 head off base2 (identical seed to _seed_origin => same _SHA_HEAD)
     _git(repo, "checkout", "--detach", "HEAD~1")            # base2
     repo.joinpath("base.py").write_text("BASE = 20\n")
     _git(repo, "add", "base.py")
-    _write(repo, "feature.py", "FEATURE = 1\n")
-    _commit(repo, "feature")
+    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
+    seeded_commit(repo, "feature")
     pr1_head = _git(repo, "rev-parse", "HEAD")
     # PR 2: unrelated `dev` branch diverged from base1; base tip = dev1, head = dev2
     _git(repo, "checkout", "-b", "dev", "HEAD~2")           # base1
-    _write(repo, "dev.py", "DEV = 1\n")
-    dev_tip = _commit(repo, "dev1")
+    write_and_stage(repo, "dev.py", "DEV = 1\n")
+    dev_tip = seeded_commit(repo, "dev1")
     repo.joinpath("dev.py").write_text("DEV = 2\n")
     _git(repo, "add", "dev.py")
-    pr2_head = _commit(repo, "dev2")
+    pr2_head = seeded_commit(repo, "dev2")
     bare = tmp_path / "origin.git"
     bare.mkdir(parents=True, exist_ok=True)
     _git(bare, "init", "--bare")
@@ -124,10 +110,10 @@ def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
     repo = tmp_path / "rename_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
-    authoring_sha = _commit(repo, "author old.py")
+    write_and_stage(repo, "old.py", "def old() -> int:\n    return 1\n")
+    authoring_sha = seeded_commit(repo, "author old.py")
     _git(repo, "mv", "old.py", "new.py")
-    head_sha = _commit(repo, "rename old.py to new.py")
+    head_sha = seeded_commit(repo, "rename old.py to new.py")
 
     bare = tmp_path / "origin_rename.git"
     bare.mkdir(parents=True, exist_ok=True)
@@ -195,11 +181,11 @@ def _seed_anchor_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str, str]:
     repo = tmp_path / "anchor_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "a.py", "def a() -> int:\n    return 1\n")
-    authoring_sha = _commit(repo, "author a.py")
+    write_and_stage(repo, "a.py", "def a() -> int:\n    return 1\n")
+    authoring_sha = seeded_commit(repo, "author a.py")
     repo.joinpath("a.py").write_text("def a() -> int:\n    return 2\n")
     _git(repo, "add", "a.py")
-    head_sha = _commit(repo, "edit a.py")
+    head_sha = seeded_commit(repo, "edit a.py")
 
     bare = tmp_path / "anchor_origin.git"
     bare.mkdir(parents=True, exist_ok=True)
@@ -220,12 +206,12 @@ def _seed_double_rename_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str
     repo = tmp_path / "dbl_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "old1.py", "def old1() -> int:\n    return 1\n")
-    _write(repo, "old2.py", "def old2() -> int:\n    return 2\n")
-    authoring_sha = _commit(repo, "author old1 old2")
+    write_and_stage(repo, "old1.py", "def old1() -> int:\n    return 1\n")
+    write_and_stage(repo, "old2.py", "def old2() -> int:\n    return 2\n")
+    authoring_sha = seeded_commit(repo, "author old1 old2")
     _git(repo, "mv", "old1.py", "new1.py")
     _git(repo, "mv", "old2.py", "new2.py")
-    head_sha = _commit(repo, "rename both")
+    head_sha = seeded_commit(repo, "rename both")
 
     bare = tmp_path / "dbl_origin.git"
     bare.mkdir(parents=True, exist_ok=True)
@@ -799,7 +785,7 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
         shutil.rmtree(repo)
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "readme.txt", "hello rich\n")
+    write_and_stage(repo, "readme.txt", "hello rich\n")
     (repo / "run.sh").write_text("#!/bin/sh\necho hi\n")
     (repo / "run.sh").chmod(0o755)
     _git(repo, "add", "run.sh")
@@ -808,7 +794,7 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     if hasattr(os, "symlink"):
         os.symlink("readme.txt", repo / "alias.txt")
         _git(repo, "add", "alias.txt")
-    base_sha = _commit(repo, "rich base")
+    base_sha = seeded_commit(repo, "rich base")
     base_tree = _git(repo, "rev-parse", f"{base_sha}^{{tree}}")
 
     _git(repo, "mv", "readme.txt", "renamed.txt")
@@ -816,7 +802,7 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
         _git(repo, "rm", "alias.txt")
     (repo / "payload.bin").write_bytes(b"\x00\x01\x02\x03\x04\x05")
     _git(repo, "add", "payload.bin")
-    head_sha = _commit(repo, "rich head")
+    head_sha = seeded_commit(repo, "rich head")
     head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
 
     bare = tmp_path / "rich_origin.git"
@@ -893,22 +879,22 @@ def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
     repo = tmp_path / "facts_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "readme.txt", "base1\n")
-    _commit(repo, "base1")
-    _write(repo, "base.py", "BASE = 2\n")
-    base2_sha = _commit(repo, "base2")
-    _write(repo, "beyond.py", "BEYOND = 3\n")
-    base3_sha = _commit(repo, "base3")
+    write_and_stage(repo, "readme.txt", "base1\n")
+    seeded_commit(repo, "base1")
+    write_and_stage(repo, "base.py", "BASE = 2\n")
+    base2_sha = seeded_commit(repo, "base2")
+    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
+    base3_sha = seeded_commit(repo, "base3")
     _git(repo, "checkout", "--detach", base2_sha)
-    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
-    _write(repo, "feature.py", "FEATURE = 1\n")
-    authoring_sha = _commit(repo, "author old.py + feature.py")
+    write_and_stage(repo, "old.py", "def old() -> int:\n    return 1\n")
+    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
+    authoring_sha = seeded_commit(repo, "author old.py + feature.py")
     _git(repo, "mv", "old.py", "new.py")
     repo.joinpath("feature.py").write_text("FEATURE = 2\n")
     _git(repo, "add", "feature.py")
     (repo / "blob.bin").write_bytes(b"\x00\x01\x02\x03binary")
     _git(repo, "add", "blob.bin")
-    head_sha = _commit(repo, "rename + edit + binary")
+    head_sha = seeded_commit(repo, "rename + edit + binary")
 
     bare = tmp_path / "facts_origin.git"
     bare.mkdir(parents=True, exist_ok=True)
@@ -976,37 +962,37 @@ def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:
     repo = tmp_path / "delta_wt"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "readme.txt", "base1\n")
-    _commit(repo, "base1")
-    _write(repo, "base.py", "BASE = 2\n")
-    _write(repo, "wide.py", "".join(f"line{i}\n" for i in range(1, 11)))
-    _write(repo, "renamed.txt", "r\n")
-    _write(repo, "deleted.txt", "d\n")
-    base2_sha = _commit(repo, "base2")
+    write_and_stage(repo, "readme.txt", "base1\n")
+    seeded_commit(repo, "base1")
+    write_and_stage(repo, "base.py", "BASE = 2\n")
+    write_and_stage(repo, "wide.py", "".join(f"line{i}\n" for i in range(1, 11)))
+    write_and_stage(repo, "renamed.txt", "r\n")
+    write_and_stage(repo, "deleted.txt", "d\n")
+    base2_sha = seeded_commit(repo, "base2")
 
     _git(repo, "checkout", "--detach", base2_sha)
     content = (repo / "wide.py").read_text().replace("line10\n", "line10 edited\n")
     repo.joinpath("wide.py").write_text(content)
     _git(repo, "add", "wide.py")
-    edit_head = _commit(repo, "edit wide.py line 10")
+    edit_head = seeded_commit(repo, "edit wide.py line 10")
 
     _git(repo, "checkout", "--detach", base2_sha)
     _git(repo, "mv", "renamed.txt", "renamed2.txt")
-    rename_head = _commit(repo, "rename renamed.txt")
+    rename_head = seeded_commit(repo, "rename renamed.txt")
 
     _git(repo, "checkout", "--detach", base2_sha)
     _git(repo, "rm", "deleted.txt")
-    delete_head = _commit(repo, "delete deleted.txt")
+    delete_head = seeded_commit(repo, "delete deleted.txt")
 
     _git(repo, "checkout", "--detach", base2_sha)
     (repo / "bin.dat").write_bytes(b"\x00\x01\x02binary")
     _git(repo, "add", "bin.dat")
-    binary_head = _commit(repo, "add bin.dat")
+    binary_head = seeded_commit(repo, "add bin.dat")
 
     _git(repo, "checkout", "--detach", base2_sha)
     repo.joinpath("orphan.txt").write_text("o\n")
     _git(repo, "add", "orphan.txt")
-    orphan_sha = _commit(repo, "orphan")
+    orphan_sha = seeded_commit(repo, "orphan")
 
     bare = tmp_path / "delta_origin.git"
     bare.mkdir(parents=True, exist_ok=True)

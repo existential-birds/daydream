@@ -4,6 +4,12 @@ Consolidates the ``_git`` helper (and its repo-building family) that was
 previously duplicated across tests/conftest.py and several test modules.
 tests/test_workspace.py builds on these too, keeping only the extra plumbing
 its bare-origin push semantics genuinely need.
+
+The seed family (``SEED_ENV`` + :func:`write_and_stage` +
+:func:`seeded_commit`) is the single source of truth for deterministic
+test seed repositories. Deliberate exceptions are migrate's dateless
+identity, ``harbor_build``'s bundle identity, and the identities in
+production ``daydream/benchmark/snapshot.py`` and RL ``fixture.py``.
 """
 
 from __future__ import annotations
@@ -13,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-SEED_ENV = {
+SEED_ENV: dict[str, str] = {
     "GIT_AUTHOR_NAME": "Tester",
     "GIT_AUTHOR_EMAIL": "test@example.com",
     "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
@@ -46,11 +52,17 @@ def commit(repo: Path, message: str, *, env: dict[str, str] | None = None) -> st
     return git(repo, "rev-parse", "HEAD")
 
 
-def write_and_stage(repo: Path, name: str, content: str) -> None:
-    """Write *name* under *repo* and stage it."""
+def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:
+    """Write *name* under *repo* and stage it (``str`` or ``bytes``).
+
+    Half of the deterministic seed family — see the module docstring.
+    """
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content)
     git(repo, "add", name)
 
 
