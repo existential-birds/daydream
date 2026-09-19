@@ -55,18 +55,12 @@ _TESTS_ROOT = _HARNESS_DIR.parent
 # migration task deletes its own entries; the guard fails on a stale entry as well as
 # an unmigrated one, so this set must end up exactly empty.
 _ALLOWED: frozenset[str] = frozenset({
-    "deep_orchestrator/support.py::_RejectingArbiterBackend",
-    "deep_orchestrator/test_related_regression_commit.py::FootprintBackend",
     "test_archive_data_capture.py::MalformedToolBackend",
     "test_archive_data_capture.py::_ArchiveCaptureBackend",
     "test_archive_data_capture.py::_CodexEvidenceBackend",
     "test_archive_data_capture.py::_FixEditingBackend",
     "test_archive_data_capture.py::_JoinedArtifactEvidenceBackend",
     "test_archive_integration.py::_SecretFailureBackend",
-    "test_deep_integration.py::_DeepMockBackend",
-    "test_deep_orchestrator.py::_ExtraEditBackend",
-    "test_deep_orchestrator.py::_PromptHookStub",
-    "test_deep_wonder_concurrency.py::_WonderRendezvousStub",
     "test_extension_seam_integration.py::DeferredWriteBackend",
     "test_extension_seam_integration.py::ShallowRecordingBackend",
     "test_improve_flow.py::BlockingAuditBackend",

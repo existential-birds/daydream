@@ -370,11 +370,8 @@ class _RejectingArbiterBackend(_StubBackend):
         self,
         cwd: Path,
         prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> AsyncIterator[AgentEvent]:
         if "you are the arbiter" in prompt.lower():
             self.calls.append({"prompt": prompt, "model": self.model})
@@ -399,7 +396,7 @@ class _RejectingArbiterBackend(_StubBackend):
                 continuation=None,
             )
             return
-        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+        async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
 
