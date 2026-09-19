@@ -485,40 +485,27 @@ async def test_api_v6_stable_keys_share_state_and_reparse_filtered_items(
     assert DROP_ME not in fix_prompts
 
 
-class DeferredWriteBackend:
-    """Yield a write start before performing the write on generator resumption."""
+def _deferred_write_responder(target: Path) -> Callable[..., Any]:
+    """Responder that writes ``target`` only once the consumer resumes the stream.
 
-    model = "mock-model"
-    fanout_concurrency = 4
-    retry_attempts = 1
-    retry_base_delay_s = 0.0
+    The write sits between yields, so a tool supervisor that vetoes the Write
+    closes the stream before the generator resumes and the file never appears.
+    """
 
-    def __init__(self, target: Path) -> None:
-        self.target = target
-        self.execute_calls = 0
+    def _respond(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> Any:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            yield ToolStartEvent(
+                id="write-1",
+                name="Write",
+                input={"path": str(target), "content": "backend resumed"},
+            )
+            target.write_text("backend resumed")
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output=None, continuation=None)
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        self.execute_calls += 1
-        yield ToolStartEvent(
-            id="write-1",
-            name="Write",
-            input={"path": str(self.target), "content": "backend resumed"},
-        )
-        self.target.write_text("backend resumed")
-        yield TextEvent(text="")
-        yield ResultEvent(structured_output=None, continuation=None)
+        return _gen()
 
-    async def cancel(self) -> None:
-        pass
+    return _respond
 
 
 async def test_fork_inserts_custom_phase_into_review_flow(
@@ -553,31 +540,6 @@ async def test_fork_inserts_custom_phase_into_review_flow(
     assert rc == 0
 
 
-class ShallowRecordingBackend(PhaseDispatchBackend):
-    """The shared shallow phase-dispatch fake; prompt recording is inherited.
-
-    ``PhaseDispatchBackend`` drives the shallow review-parse-fix-test flow
-    past every gate; its ``prompts`` property records the exact prompt each
-    ``execute`` call received so the test can assert the fork phase's prompt
-    arrived.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        async for event in super().execute(
-            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
-        ):
-            yield event
-
-
 async def test_fork_inserts_phase_before_summary_in_shallow(
     ext_dir: ExtDir,
     multi_stack_target: Path,
@@ -601,7 +563,7 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
         "    r.register_phase(FlowStep(name='ro_shallow', run=_ro))\n"
         "    r.insert_before('deep', anchor='post-review', step='ro_shallow')\n"
     )
-    backend = ShallowRecordingBackend(
+    backend = PhaseDispatchBackend(
         parse_results=[[{"id": 1, "description": "Align hello() return value", "file": "api.py", "line": 1}]]
     )
     install_backend(backend)
@@ -741,7 +703,7 @@ async def _run_tool_case(
     *,
     register_supervisor: bool,
     supervisor_raises: bool = False,
-    backend_capture: list[DeferredWriteBackend] | None = None,
+    backend_capture: list[ScriptedBackend] | None = None,
 ) -> tuple[Path, Path, int]:
     """Run the extension-defined custom flow against the deferred-write backend."""
     supervisor_registration = ""
@@ -777,7 +739,13 @@ async def _run_tool_case(
 
     written = target / "deferred-write.txt"
     trajectory = target / ".daydream" / "tool-supervisor-trajectory.json"
-    backend = DeferredWriteBackend(written)
+    backend = ScriptedBackend(
+        responder=_deferred_write_responder(written),
+        model="mock-model",
+        fanout_concurrency=4,
+        retry_attempts=1,
+        retry_base_delay_s=0.0,
+    )
     if backend_capture is not None:
         backend_capture.append(backend)
     install_backend(backend)
@@ -860,7 +828,7 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
 ) -> None:
     """A retryable supervisor error propagates without entering backend retry,
     and the displayed failure diagnostic is redacted at the host boundary."""
-    backends: list[DeferredWriteBackend] = []
+    backends: list[ScriptedBackend] = []
 
     with pytest.raises(RuntimeError, match="supervisor failed") as exc_info:
         await _run_tool_case(
@@ -888,7 +856,7 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
 
     assert getattr(exc_info.value, "retryable", False) is True
     assert len(backends) == 1
-    assert backends[0].execute_calls == 1
+    assert backends[0].call_count == 1
 
 
 async def test_custom_flow_dispatches_and_dumps_artifacts(
@@ -1040,7 +1008,7 @@ async def test_flow_shallow_routes_to_shallow_helper(
 ) -> None:
     """--flow shallow runs the real shallow pipeline: the parse phase fires,
     exit 0."""
-    backend = ShallowRecordingBackend(
+    backend = PhaseDispatchBackend(
         parse_results=[[{"id": 1, "description": "Align return", "file": "api.py", "line": 1}]]
     )
     install_backend(backend)

@@ -55,8 +55,6 @@ _TESTS_ROOT = _HARNESS_DIR.parent
 # migration task deletes its own entries; the guard fails on a stale entry as well as
 # an unmigrated one, so this set must end up exactly empty.
 _ALLOWED: frozenset[str] = frozenset({
-    "test_extension_seam_integration.py::DeferredWriteBackend",
-    "test_extension_seam_integration.py::ShallowRecordingBackend",
     "test_improve_flow.py::BlockingAuditBackend",
     "test_improve_flow.py::BlockingBackend",
     "test_improve_flow.py::_AuditCommittingBackend",
@@ -64,10 +62,6 @@ _ALLOWED: frozenset[str] = frozenset({
     "test_improve_flow.py::_DirectoryToFileBackend",
     "test_improve_flow.py::_SymlinkGuardBackend",
     "test_improve_flow.py::_UnbornAuditBackend",
-    "test_integration.py::RelatedOnlyBackend",
-    "test_integration.py::ReviewStagingBackend",
-    "test_integration.py::_WorktreeMutatingBackend",
-    "test_trajectory_phase_events.py::_OverlappingReviewBackend",
 })
 
 
