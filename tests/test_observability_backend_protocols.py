@@ -55,6 +55,7 @@ from tests.harness.claude_sdk import (
 )
 from tests.harness.fake_cli_process import install_fake_cli_process
 from tests.harness.otlp import TraceCollector, attributes, otlp_collector, otlp_grpc_collector
+from tests.harness.otlp import kind_of as _kind
 
 #: Each backend's private sentinel: must appear in exactly that backend's wire
 #: payload and in no sibling's. Distinct canaries make accidental cross-task,
@@ -112,10 +113,6 @@ def _configure_otlp(monkeypatch: pytest.MonkeyPatch, endpoint: str, *, protocol:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", protocol)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "2")
     monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp")
-
-
-def _kind(spans: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
-    return [span for span in spans if attributes(span).get("daydream.span.kind") == kind]
 
 
 def _attempt(spans: list[dict[str, Any]]) -> dict[str, Any]:

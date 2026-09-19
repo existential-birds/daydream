@@ -10,7 +10,6 @@ link trace state) are asserted first, then required to be repaired in transit.
 from __future__ import annotations
 
 import base64
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -37,16 +36,6 @@ _LINK_TRACE_ID = 0x44444444444444444444444444444444
 _LINK_SPAN_ID = 0x5555555555555555
 
 _VENDORS = ("honeyhive", "langsmith", "otlp")
-
-
-@pytest.fixture(autouse=True)
-def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    import os
-
-    for key in os.environ:
-        if key.startswith(("OTEL_", "LANGSMITH_", "HH_", "_OTEL_")):
-            monkeypatch.delenv(key)
-    yield
 
 
 def _ctx(

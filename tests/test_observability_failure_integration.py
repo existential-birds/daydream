@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import textwrap
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -34,6 +33,7 @@ from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import TraceCollector, attributes, otlp_collector
+from tests.harness.otlp import kind_of as _kind
 
 _RESULT_FILE = ".daydream/trace-failure-result.json"
 _FLOW_IMPORTS = """
@@ -57,9 +57,6 @@ return Stop(1) if aborted else None
 
 @pytest.fixture(autouse=True)
 def isolated_operator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in os.environ:
-        if name.startswith(("OTEL_", "DAYDREAM_TRACE_", "_OTEL_")):
-            monkeypatch.delenv(name)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "0.5")
 
 
@@ -79,10 +76,6 @@ def _config(
 ) -> RunConfig:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint + "/v1/traces")
     return make_config(repo, flow_name="trace-failures", observability=ObservabilityConfig(destinations=("otlp",)))
-
-
-def _kind(spans: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
-    return [span for span in spans if attributes(span).get("daydream.span.kind") == kind]
 
 
 class _RetryableFailure(RuntimeError):

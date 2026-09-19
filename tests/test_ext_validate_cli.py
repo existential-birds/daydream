@@ -12,13 +12,7 @@ import pytest
 
 from tests.conftest import ExtDir
 from tests.harness.scripts import cli_main as _run_main
-
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def strip_ansi(text: str) -> str:
-    """Strip ANSI escape codes from text for assertion comparisons."""
-    return _ANSI_ESCAPE.sub("", text)
+from tests.test_integration import strip_ansi
 
 
 def test_ext_validate_ok(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:

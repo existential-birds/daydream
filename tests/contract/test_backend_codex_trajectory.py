@@ -16,7 +16,6 @@ Contract tests over a real-shape multi-turn Codex JSONL fixture:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -30,6 +29,7 @@ from daydream.backends import MetricsEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from tests.harness.codex_replay import GapThenBlockingStdout as _GapThenBlockingStdout
 from tests.harness.codex_replay import make_mock_process_from_fixture
 
 FIXTURE = "multi_turn_with_metrics.jsonl"
@@ -297,17 +297,6 @@ async def test_parser_gap_survives_in_partial_trajectory_before_stream_stall(
 ) -> None:
     """The first gap reaches the recorder before a later blocked read stalls."""
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
-
-    class _GapThenBlockingStdout:
-        def __init__(self) -> None:
-            self.sent_gap = False
-
-        async def readline(self) -> bytes:
-            if not self.sent_gap:
-                self.sent_gap = True
-                return b'{"type":"future.before.stall"}\n'
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
 
     recorder = TrajectoryRecorder(
         path=tmp_path / "trajectory.json",

@@ -23,6 +23,7 @@ from daydream.training.adjudication.final_bundle import (
 )
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
+from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
 _SOURCE = "b" * 40
 _POLICY_BINDING: dict[str, Any] = {
@@ -43,13 +44,7 @@ _CURATION_ID = derive_curation_id(
     _POLICY_BINDING["resolved_decisions_digest"],
     _POLICY_BINDING["distribution_digest"],
 )
-_PIN = {
-    "curation_id": _CURATION_ID, "sanitized_hub_commit": _SOURCE,
-    "source_hub_commit": _SOURCE, "archive_index_digest": "c" * 64,
-    "evidence_observed_at": "2026-01-01T00:00:00+00:00",
-    "as_of": "2026-02-01T00:00:00+00:00",
-    "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1",
-}
+_PIN = {**_CANONICAL_PIN, "curation_id": _CURATION_ID, "sanitized_hub_commit": _SOURCE}
 
 
 def _refresh_curation_envelope(root: Path) -> None:
