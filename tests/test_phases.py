@@ -26,7 +26,6 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
-from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
 
 
@@ -473,29 +472,6 @@ def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(
     assert migration.read_bytes() == original
 
 
-class _HostCommitBackend(StubBackend):
-    """Backend stand-in for host-native commit tests.
-
-    ``_do_commit`` never runs an agent turn (issue #726), so the backend
-    parameter is a structural formality — but the Backend protocol still
-    requires a correctly typed ``execute`` for mypy.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        yield TextEvent(text="unused on the host commit path")
-        yield ResultEvent(structured_output=None, continuation=None)
-
-
 @pytest.mark.asyncio
 async def test_do_commit_excludes_preexisting_untracked_from_tree(
     git_repo: Path,
@@ -513,7 +489,7 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     git_commit(git_repo, "baseline app.py")
     (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked modification)
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
-    backend = _HostCommitBackend(git_repo)
+    backend = ScriptedBackend()
 
     ok = await _do_commit(
         backend, work, push=False, preexisting_untracked={"notes.txt"},
@@ -552,7 +528,7 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
 
     ok = await _do_commit(
-        _HostCommitBackend(git_repo), work, push=False,
+        ScriptedBackend(), work, push=False,
         items=[{"file": "app.py", "description": "fix app"}],
         preexisting_untracked={"notes.txt"},
     )
@@ -592,7 +568,7 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     (dd / "fix-failures.json").write_text("[]\n")
     (dd / "deep").mkdir(parents=True)
     (dd / "deep" / "fix-quality-gate.json").write_text("{}\n")
-    backend = _HostCommitBackend(git_repo)
+    backend = ScriptedBackend()
 
     ok = await _do_commit(
         backend, work, push=False, preexisting_untracked=set(),
@@ -632,7 +608,7 @@ async def test_host_commit_push_verifies_remote_before_success(
 
     work = make_work(work_repo)
     ok = await _do_commit(
-        _HostCommitBackend(work_repo), work, push=True, interactive=False,
+        ScriptedBackend(), work, push=True, interactive=False,
         items=[{"file": "fix.py", "description": "fix bug"}],
         preexisting_untracked=set(),
     )
@@ -675,7 +651,7 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(
     (repo / "app.py").write_text("x = 1\n")
 
     result = await _do_commit(
-        _HostCommitBackend(repo),
+        ScriptedBackend(),
         make_work(repo),
         push=True,
         interactive=False,
@@ -726,7 +702,7 @@ async def test_push_rejects_remote_url_changed_by_real_hook(
 
     with pytest.raises(PushAttemptError) as exc_info:
         await _do_commit(
-            _HostCommitBackend(repo),
+            ScriptedBackend(),
             make_work(repo),
             push=True,
             interactive=False,
@@ -767,7 +743,7 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
     work = make_work(work_repo)
     with pytest.raises(GitError):
         await _do_commit(
-            _HostCommitBackend(work_repo), work, push=True, interactive=False,
+            ScriptedBackend(), work, push=True, interactive=False,
             items=[{"file": "fix.py", "description": "fix bug"}],
             preexisting_untracked=set(),
         )
@@ -804,7 +780,7 @@ async def test_push_attempt_error_carries_exact_attempted_identity(
 
     with pytest.raises(git_ops.GitError) as exc_info:
         await _do_commit(
-            _HostCommitBackend(repo),
+            ScriptedBackend(),
             make_work(repo),
             push=True,
             interactive=False,
@@ -848,7 +824,7 @@ async def test_push_verification_failure_surfaces_even_when_push_succeeds(
     work = make_work(work_repo)
     with pytest.raises(git_ops.GitError):
         await _do_commit(
-            _HostCommitBackend(work_repo), work, push=True, interactive=False,
+            ScriptedBackend(), work, push=True, interactive=False,
             items=[{"file": "fix.py", "description": "fix bug"}],
             preexisting_untracked=set(),
         )
@@ -871,7 +847,7 @@ async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
     (git_repo / "notes.txt").write_text("user scratch\n")  # untracked scratch
 
     ok = await _do_commit(
-        _HostCommitBackend(git_repo), make_work(git_repo), push=False,
+        ScriptedBackend(), make_work(git_repo), push=False,
         interactive=False, items=[{"file": "app.py", "description": "fix app"}],
         preexisting_untracked=None,
     )
@@ -900,7 +876,7 @@ async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
     (git_repo / "generated.py").write_text("created by fix\n")     # fix-created NEW file
 
     ok = await _do_commit(
-        _HostCommitBackend(git_repo), make_work(git_repo), push=False,
+        ScriptedBackend(), make_work(git_repo), push=False,
         interactive=False, items=[{"file": "app.py", "description": "fix app"}],
         preexisting_untracked=None,
     )
@@ -976,7 +952,7 @@ async def test_hook_aware_push_runs_suite_exactly_once(
         monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
 
         ok = await _do_commit(
-            _HostCommitBackend(repo), make_work(repo), push=True, interactive=False,
+            ScriptedBackend(), make_work(repo), push=True, interactive=False,
             items=[{"file": "fix.py", "description": "fix bug"}],
             preexisting_untracked=set(),
             config=_hook_run_config(),
@@ -1021,7 +997,7 @@ async def test_hook_aware_push_red_suite_blocks_push(
 
     with pytest.raises(RuntimeError, match="Pre-push validation"):
         await _do_commit(
-            _HostCommitBackend(repo), make_work(repo), push=True, interactive=False,
+            ScriptedBackend(), make_work(repo), push=True, interactive=False,
             items=[{"file": "fix.py", "description": "fix bug"}],
             preexisting_untracked=set(),
             config=_hook_run_config(),
@@ -1085,7 +1061,7 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
     monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
 
     success, retries, _ = await phase_test_and_heal(
-        _HostCommitBackend(tmp_path), make_work(tmp_path),
+        ScriptedBackend(), make_work(tmp_path),
         config=SimpleNamespace(
             test_command="true",
             file_config=DaydreamFileConfig(test_command="true", test_command_wall_s=1234.0),
@@ -1098,7 +1074,7 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
 
     # Unset: falls through to the orchestrator default.
     await phase_test_and_heal(
-        _HostCommitBackend(tmp_path), make_work(tmp_path),
+        ScriptedBackend(), make_work(tmp_path),
         config=SimpleNamespace(
             test_command="true", file_config=DaydreamFileConfig(test_command="true"),
         ),
@@ -3327,7 +3303,7 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     git(tmp_path, "init", "--bare", "remote")
     git(repo, "remote", "add", "origin", str(bare))
 
-    backend = _HostCommitBackend(repo)
+    backend = ScriptedBackend()
     work = make_work(repo, base_sha="ABC123", head_sha="DEF456")
     await phase_commit_push(backend, work)
 
@@ -3381,7 +3357,7 @@ async def test_declined_commit_still_runs_host_validation_before_success(
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
     config = make_config(tmp_path, test_command="true")
-    await phase_commit_push(_HostCommitBackend(repo), work, config=config)
+    await phase_commit_push(ScriptedBackend(), work, config=config)
 
     assert calls, "validation must re-run the host test runner on decline"
     assert calls[0]["cwd"] == repo
@@ -3414,7 +3390,7 @@ async def test_declined_commit_surfaces_failed_validation(
     work = make_work(repo)
     config = make_config(tmp_path, test_command="false")
     with _pytest.raises(RuntimeError, match="validation"):
-        await phase_commit_push(_HostCommitBackend(repo), work, config=config)
+        await phase_commit_push(ScriptedBackend(), work, config=config)
 
 
 @pytest.mark.asyncio
@@ -3440,7 +3416,7 @@ async def test_declined_commit_without_configured_command_skips_validation(
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
     config = make_config(tmp_path)
-    await phase_commit_push(_HostCommitBackend(repo), work, config=config)
+    await phase_commit_push(ScriptedBackend(), work, config=config)
 
 
 # phase_test_and_heal — option 1 setup-investigator wiring
@@ -6131,7 +6107,7 @@ async def test_phase_test_once_records_host_input_and_output_identity(
 
     monkeypatch.setattr(phases, "run_test_command", _run)
     evidence, continuation, output = await phases.phase_test_once(
-        _HostCommitBackend(tmp_path),
+        ScriptedBackend(),
         make_work(tmp_path),
         config=SimpleNamespace(
             test_command="pytest -q",
@@ -6245,7 +6221,7 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
     )
 
     committed = await phases._do_commit(
-        _HostCommitBackend(repo),
+        ScriptedBackend(),
         make_work(repo),
         retained_paths=frozenset({"app.py"}),
         retained_states=retained_states,
@@ -6283,7 +6259,7 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
     before_states = git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"])
 
     assert (await phases._do_commit(
-        _HostCommitBackend(repo), make_work(repo),
+        ScriptedBackend(), make_work(repo),
         retained_paths=retained,
         retained_states=git_ops.snapshot_worktree_paths(repo, retained),
         initial_index=initial_index,
@@ -6333,7 +6309,7 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
         (repo / native).write_bytes(b"retained after\n")
 
     assert (await phases._do_commit(
-        _HostCommitBackend(repo), make_work(repo),
+        ScriptedBackend(), make_work(repo),
         retained_paths=retained,
         retained_states=git_ops.snapshot_worktree_paths(repo, retained),
         initial_index=initial_index,
@@ -6393,7 +6369,7 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
 
     async def commit_retained() -> phases.CommitPushResult:
         return await phases._do_commit(
-            _HostCommitBackend(repo),
+            ScriptedBackend(),
             make_work(repo),
             retained_paths=frozenset({"app.py"}),
             retained_states=retained_states,
@@ -6446,7 +6422,7 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
         match=r"Local commit [0-9a-f]+ was created.*push blocked",
     ):
         await phases._do_commit(
-            _HostCommitBackend(repo),
+            ScriptedBackend(),
             make_work(repo),
             retained_paths=frozenset({"app.py"}),
             retained_states=retained_states,
@@ -6558,25 +6534,12 @@ async def test_phase_fix_parallel_partial_dispatch_preserves_successful_group(
     """One failed real fix group records partial without losing its sibling ref."""
     from daydream import phases
 
-    class _OneFixFailsBackend(ScriptedBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            if "\nFile: bad.py\n" in prompt:
-                raise RuntimeError("failed fix group")
-            async for event in super().execute(
-                cwd, prompt, output_schema, continuation, agents, max_turns,
-                read_only, persist_session,
-            ):
-                yield event
+    def _one_fix_fails_responder(
+        cwd: Any, prompt: str, *args: Any
+    ) -> list[AgentEvent | BaseException] | None:
+        if "\nFile: bad.py\n" in prompt:
+            return [RuntimeError("failed fix group")]
+        return None
 
     silence_console("daydream.phases")
     items = [
@@ -6586,7 +6549,7 @@ async def test_phase_fix_parallel_partial_dispatch_preserves_successful_group(
     recorder = make_recorder(tmp_path)
     async with recorder:
         failures = await phases.phase_fix_parallel(
-            cast(Backend, _OneFixFailsBackend(events=_FIX_TURN)),
+            cast(Backend, ScriptedBackend(events=_FIX_TURN, responder=_one_fix_fails_responder)),
             make_work(tmp_path),
             items,
         )
@@ -6625,25 +6588,12 @@ async def test_phase_fix_parallel_rolled_back_group_dispatch_is_failed(
     """Progress erased by whole-group rollback is not reported as partial."""
     from daydream import phases
 
-    class _FallbackThenFailureBackend(ScriptedBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            if prompt.startswith("Fix these ") or "\nFile: b.py\n" in prompt:
-                raise RuntimeError("group must roll back")
-            async for event in super().execute(
-                cwd, prompt, output_schema, continuation, agents, max_turns,
-                read_only, persist_session,
-            ):
-                yield event
+    def _fallback_then_failure_responder(
+        cwd: Any, prompt: str, *args: Any
+    ) -> list[AgentEvent | BaseException] | None:
+        if prompt.startswith("Fix these ") or "\nFile: b.py\n" in prompt:
+            return [RuntimeError("group must roll back")]
+        return None
 
     silence_console("daydream.phases")
     items = [
@@ -6663,7 +6613,7 @@ async def test_phase_fix_parallel_rolled_back_group_dispatch_is_failed(
     recorder = make_recorder(tmp_path)
     async with recorder:
         failures = await phases.phase_fix_parallel(
-            cast(Backend, _FallbackThenFailureBackend(events=_FIX_TURN)),
+            cast(Backend, ScriptedBackend(events=_FIX_TURN, responder=_fallback_then_failure_responder)),
             make_work(tmp_path),
             items,
         )
