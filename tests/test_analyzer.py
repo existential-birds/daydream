@@ -472,7 +472,6 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(
     assert sum(agent["steps"] for agent in result["by_agent"]) == 3
 
 
-# --- analyze_grounding ---
 
 
 def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict[str, Any]:
@@ -954,7 +953,6 @@ def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
     assert result["grounding_rate"] is None
 
 
-# --- cross-backend read extraction (issue #307) ---
 
 
 CODEX_READ_COMMAND = (
@@ -1140,7 +1138,6 @@ def test_files_read_grep_context_options_do_not_eat_operand() -> None:
     assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
 
 
-# --- unbalanced-quote tokenization (issue #327) ---
 
 
 # Only a quote opened and never closed makes shlex raise; the two other
@@ -1259,7 +1256,6 @@ def test_analyze_grounding_counts_codex_and_pi_reads(tmp_path: Path) -> None:
     assert result["grounding_rate"] == 1.0
 
 
-# --- quality metrics (issue #316) ---
 
 
 def _quality_workspace(tmp_path: Path, files: dict[str, str], name: str = "workspace") -> Path:
@@ -1510,7 +1506,6 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(
     assert result["daydream_dir"] == str(public_source / ".daydream")
 
 
-# --- review round 1 fix regressions (#316) ---
 
 
 def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
@@ -1657,7 +1652,6 @@ def test_quality_verbosity_wrapper_cases(tmp_path: Path, source: str, verbosity:
     assert result["per_file"]["app.py"]["verbosity"] == verbosity
 
 
-# --- review round 2 fix regressions (#316) ---
 
 
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
@@ -1895,7 +1889,6 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> N
     assert result["verbosity"] == 0.0
 
 
-# --- review round 3 fix regressions (#316) ---
 
 
 def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(
@@ -2100,11 +2093,9 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
     assert result["erosion"] == 0.0
 
 
-# ----------------------------------------------------------------------------
 # Shipped-set findings metrics (issue #741): analyze_findings counts the
 # authoritative merged-items.json set, falling back to the merged review
 # regex count, then the pre-merge per-stack total.
-# ----------------------------------------------------------------------------
 
 def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
     """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
@@ -2325,7 +2316,6 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
 
 
-# --- tree-sitter version guard (#1087) ---
 
 
 def test_analyze_quality_refuses_known_bad_tree_sitter(
@@ -2403,7 +2393,6 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     assert result["trajectory_count"] == 1
 
 
-# --- analyze_location + analyze_shipped_duplication (issue #1106) ---
 
 # Pattern B: real temp artifact dirs. These seed helpers write the REAL
 # production artifacts (`.daydream/diff.patch`, `.daydream/hunk-index.json`,
@@ -3107,7 +3096,6 @@ def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(
     assert dedup["avg_overlap_similarity"] == 0.65
 
 
-# --- analyze_grounding: the line-tightened predicate (issue #1106) ---
 
 
 def _grounding_finding(**extra: Any) -> dict[str, Any]:
@@ -3314,7 +3302,6 @@ def test_analyze_session_reports_location_and_shipped_duplication(
     assert result["grounding"]["hunk_source"] == "hunk-index.json"
 
 
-# --- _agent_label (retained legacy tolerance) ---
 
 
 @pytest.mark.parametrize(

@@ -16,13 +16,13 @@ def test_every_registered_model_bearing_stage_has_strategy_and_classification() 
     default = rp.build_default_profile()
     for stage in rp.STAGE_KEYS:
         assert stage in default.strategies, f"model-bearing stage {stage} has no profile strategy"
-        assert stage in rp.ENVELOPE_CLASSIFICATION, f"stage {stage} has no host-envelope classification"
+        assert stage in rp._ENVELOPE_BY_STAGE, f"stage {stage} has no host-envelope classification"
 
 
 def test_classification_is_strategy_plus_host_envelope() -> None:
+    default = rp.build_default_profile()
     for key in rp.STAGE_KEYS:
-        cls = rp.ENVELOPE_CLASSIFICATION[key]
-        assert cls["strategy"] and cls["envelope"]  # both nonempty, one per stage
+        assert default.strategies[key].source and rp._ENVELOPE_BY_STAGE[key]
 
 
 def test_audit_stages_track_production_playbook() -> None:
@@ -42,6 +42,6 @@ def test_audit_stages_track_production_playbook() -> None:
         assert stage in default.strategies, (
             f"model-bearing audit stage {stage} has no profile strategy"
         )
-        assert stage in rp.ENVELOPE_CLASSIFICATION, (
+        assert stage in rp._ENVELOPE_BY_STAGE, (
             f"stage {stage} has no host-envelope classification"
         )

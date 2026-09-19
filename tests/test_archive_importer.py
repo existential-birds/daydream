@@ -356,7 +356,6 @@ def test_empty_inventories(tmp_path: Path) -> None:
     assert merged == {"rows": [], "deduped_count": 0, "content_conflict": []}
 
 
-# --- Task 4: version-gated gold eligibility (M6, KD3) -----------------------
 
 
 def make_observation(ver: str) -> dict[str, Any]:
@@ -379,7 +378,6 @@ def test_gold_eligibility_three_fixtures() -> None:
     assert [obs for obs in (valid, stale, unknown) if gold_eligible(obs)] == [valid]
 
 
-# --- Task 5: run-level labels stay run-level (M5, AC2) ----------------------
 
 
 def make_session_row(

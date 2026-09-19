@@ -37,8 +37,6 @@ from daydream._tree_sitter_safety import assert_tree_sitter_safe
 from daydream.exploration import FileInfo
 from daydream.git_ops import GitError
 
-# --- Lazy language factories -------------------------------------------------
-
 
 def _python_lang() -> Language:
     import tree_sitter_python
@@ -70,7 +68,6 @@ def _rust_lang() -> Language:
     return Language(tree_sitter_rust.language())
 
 
-# --- Registry ----------------------------------------------------------------
 
 LANGUAGES: dict[str, tuple[str, Callable[[], Language]]] = {
     ".py": ("python", _python_lang),
@@ -109,7 +106,6 @@ def get_parser(language_id: str) -> Parser | None:
     return parser
 
 
-# --- Query strings -----------------------------------------------------------
 
 PYTHON_IMPORT_QUERY = """
 (import_statement name: (dotted_name) @import)
@@ -152,7 +148,6 @@ RUST_DEF_QUERY = """
 # ``name`` field, so ``extract_definitions`` drops it. Left as-is deliberately:
 # changing the shared query would change reverse-import-edge policy (issue #1113).
 
-# --- Diagram definition queries (issue #1113) --------------------------------
 #
 # A SEPARATE query family from ``_def_query_for_language`` above. The shared
 # query feeds ``detect_affected_files``' ``defining_paths`` gate, which decides
@@ -375,7 +370,6 @@ def extract_imports(parser: Parser, source: bytes, query_string: str) -> list[st
         return []
 
 
-# --- Diff parsing ------------------------------------------------------------
 
 
 @dataclass
@@ -417,7 +411,6 @@ def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
     return entries
 
 
-# --- Import resolution -------------------------------------------------------
 
 
 def _module_candidates(base: Path, dotted: str) -> list[Path]:
@@ -549,7 +542,6 @@ def _resolve_import(
     return []
 
 
-# --- Reverse edges (importers) ----------------------------------------------
 
 
 # Stems whose bare name is too common for a reverse-import grep to be
@@ -650,10 +642,8 @@ def _build_importer_lookup(
     return lookup
 
 
-# --- Public API --------------------------------------------------------------
 
 
-# --- Control-flow tables (issue #1113) ---------------------------------------
 #
 # Every node type below was confirmed by parsing purpose-built snippets with the
 # installed grammars and by compiling ``(<type>) @x`` as a real ``Query`` against

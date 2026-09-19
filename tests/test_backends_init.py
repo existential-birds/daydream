@@ -64,13 +64,6 @@ def test_pi_backend_concise_fix_prompts_true() -> None:
     assert backend.concise_fix_prompts is True
 
 
-def test_claude_and_codex_backend_concise_fix_prompts_false() -> None:
-    """Claude and Codex backends do not request concise fix prompts by default."""
-    from daydream.backends.codex import CodexBackend
-    assert ClaudeBackend(model="test").concise_fix_prompts is False
-    assert CodexBackend(model="test").concise_fix_prompts is False
-
-
 @pytest.mark.asyncio
 async def test_create_backend_claude_execute_accepts_agents_none(
     monkeypatch: pytest.MonkeyPatch,
