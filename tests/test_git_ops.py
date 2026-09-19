@@ -1408,44 +1408,6 @@ def test_show_raises_a_plain_error_when_the_object_store_is_damaged(tmp_path: Pa
     assert not isinstance(excinfo.value, git_ops.PathAbsentError)
 
 
-def test_grep_returns_matching_paths(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "needle.txt").write_text("findme\n")
-    (repo / "miss.txt").write_text("nope\n")
-    _git(repo, "add", "needle.txt", "miss.txt")
-    _commit(repo, "add files")
-    matches = git_ops.grep(repo, "findme")
-    assert "needle.txt" in matches
-    assert "miss.txt" not in matches
-
-
-def test_grep_returns_empty_when_no_matches(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    assert git_ops.grep(repo, "doesnotexistanywhere") == []
-
-
-def test_grep_word_matches_whole_words_only(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "whole.txt").write_text("the app runs\n")
-    (repo / "part.txt").write_text("the application runs\n")
-    _git(repo, "add", "whole.txt", "part.txt")
-    _commit(repo, "add files")
-    matches = git_ops.grep(repo, "app", word=True)
-    assert "whole.txt" in matches
-    assert "part.txt" not in matches
-
-
-def test_grep_pathspecs_restrict_search(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "code.py").write_text("widget = 1\n")
-    (repo / "notes.md").write_text("widget docs\n")
-    _git(repo, "add", "code.py", "notes.md")
-    _commit(repo, "add files")
-    matches = git_ops.grep(repo, "widget", pathspecs=("*.py",))
-    assert "code.py" in matches
-    assert "notes.md" not in matches
-
-
 def test_grep_fixed_matches_returns_path_pattern_pairs(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     (repo / "widget_user.py").write_text("import widget\n")
@@ -2704,37 +2666,6 @@ def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
     assert git_ops.head_sha(clone) == before
 
 
-def test_update_ref_sets_explicit_oid(tmp_path: Path) -> None:
-    """update_ref repoints an existing ref to a *different* OID: the ref is
-    seeded to HEAD and repointed at a newer commit, so a no-op write path
-    cannot satisfy the assertion."""
-    repo = _make_repo_with_main(tmp_path, name="update_ref")
-    start = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "update-ref", "refs/heads/scratch", start)  # seed a ref to repoint
-    (repo / "second.txt").write_text("second\n")
-    _git(repo, "add", "second.txt")
-    _commit(repo, "second")  # HEAD moves, so update_ref must write a new OID
-    target = _git(repo, "rev-parse", "HEAD")
-    assert target != start
-
-    git_ops.update_ref(repo, "refs/heads/scratch", target)
-
-    assert _git(repo, "rev-parse", "refs/heads/scratch") == target
-
-
-def test_update_ref_accepts_names_merely_ending_in_lock(tmp_path: Path) -> None:
-    """git forbids only the literal lowercase ``.lock`` component suffix, so
-    branches like unlock/block/deadlock/xLock as well as case-variants git
-    accepts (topic.LOCK, release.LOCK, x.lOck) are valid refs and snapshot
-    cleanly."""
-    repo = _make_repo_with_main(tmp_path, name="update_ref_lockish")
-    oid = _git(repo, "rev-parse", "HEAD")
-    for name in ("unlock", "block", "deadlock", "xLock", "topic.LOCK", "release.LOCK", "x.lOck"):
-        ref = f"refs/heads/{name}"
-        git_ops.update_ref(repo, ref, oid)
-        assert _git(repo, "rev-parse", ref) == oid
-
-
 def test_update_refs_snapshots_a_batch_and_aborts_atomically(tmp_path: Path) -> None:
     """update_refs writes many refs in one transactional git call, and a bad
     ref aborts the whole batch: nothing is written."""
@@ -2750,26 +2681,6 @@ def test_update_refs_snapshots_a_batch_and_aborts_atomically(tmp_path: Path) -> 
         # batch still aborts atomically on git's side: nothing is written.
         git_ops.update_refs(repo, {"refs/heads/ok": oid, "refs/heads/foo..bar": oid})
     assert "ok" not in git_ops.list_local_branches(repo)  # whole batch rolled back
-
-
-def test_update_ref_rejects_invalid_ref_name(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path, name="update_ref_bad")
-    oid = git_ops.head_sha(repo)
-    for bad in (
-        "refs/heads/..",
-        "refs/heads/foo bar",
-        "refs/heads/bad\nname",
-        "-dash-start",
-        "refs/heads/topic.lock",
-    ):
-        with pytest.raises(git_ops.GitError, match="invalid ref name"):
-            git_ops.update_ref(repo, bad, oid)
-
-
-def test_update_ref_rejects_malformed_oid(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path, name="update_ref_badoid")
-    with pytest.raises(git_ops.GitError, match="invalid OID"):
-        git_ops.update_ref(repo, "refs/heads/newbranch", "not-a-sha")
 
 
 def test_update_refs_rejects_injectable_ref_names_before_shell_out(tmp_path: Path) -> None:

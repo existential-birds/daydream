@@ -587,7 +587,7 @@ async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
         ).stdout
         # Source-immutability sentinel: mutate a ref inside the clone, then
         # verify the source's refs and HEAD are untouched.
-        git_ops.update_ref(isolated, "refs/heads/main", git_ops.head_sha(isolated))
+        git_ops.update_refs(isolated, {"refs/heads/main": git_ops.head_sha(isolated)})
         return mock_proc
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):

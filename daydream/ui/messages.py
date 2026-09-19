@@ -117,25 +117,6 @@ def print_info(console: Console, message: str) -> None:
     console.print(f"[neon.cyan]ℹ[/] [neon.fg]{message}[/]")
 
 
-def print_skipped_phases(console: Console, start_at: str) -> None:
-    """Print message about skipped phases when starting at a non-default phase.
-
-    Args:
-        start_at: The phase to start at ("parse", "fix", or "test").
-
-    """
-    phase_order = ["review", "parse", "fix", "test"]
-    skipped = []
-    for phase in phase_order:
-        if phase == start_at:
-            break
-        skipped.append(phase)
-
-    if skipped:
-        skipped_str = ", ".join(skipped)
-        console.print(f"[neon.yellow]⏭[/] [neon.fg]Starting at phase: {start_at} (skipping {skipped_str})[/]")
-
-
 def print_dim(console: Console, message: str) -> None:
     """Print a dimmed message for secondary information."""
     console.print(f"[neon.dim]{message}[/]")

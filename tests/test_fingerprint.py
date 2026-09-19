@@ -2,7 +2,6 @@ from typing import Any
 
 from daydream.pr_review import (
     ParsedIssue,
-    alt_issues_to_parsed,
     compute_fingerprint,
     extract_anchors,
     parsed_issues_from_items,
@@ -99,16 +98,3 @@ def test_parsed_issues_carry_fingerprint() -> None:
 def test_parsed_issue_fingerprint_defaults_none() -> None:
     """Other construction sites (parse_report etc.) are unaffected."""
     assert ParsedIssue(path="a.py", line=1, title="t", body="b").fingerprint is None
-
-
-def test_alt_issues_get_stable_per_file_fingerprints() -> None:
-    raw = {"id": 1, "title": "Race in cache", "description": "TOCTOU in `load_cache`",
-           "recommendation": "Hold the lock", "severity": "high",
-           "confidence": "HIGH", "files": ["a.py", "b.py"], "rationale": ""}
-    first = alt_issues_to_parsed([raw])
-    second = alt_issues_to_parsed([raw])
-    assert [i.fingerprint for i in first] == [i.fingerprint for i in second]
-    assert first[0].fingerprint == compute_fingerprint(
-        "a.py", "Race in cache", "TOCTOU in `load_cache`"
-    )
-    assert first[0].fingerprint != first[1].fingerprint  # per-file identity

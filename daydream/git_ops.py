@@ -1130,48 +1130,6 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
     return proc.stdout
 
 
-def capture_recommended_patch(
-    repo: Path, base_ref: str | None, out_path: Path, *, preexisting_untracked: set[str] | None = None
-) -> bool:
-    """Write the pre-fix-base to working-tree patch, including newly untracked files.
-
-    The caller captures *base_ref* before fixes and excludes paths in
-    *preexisting_untracked*. A missing base or git failure returns ``False``
-    without writing. An empty diff writes an empty marker to distinguish no
-    recommendation from an old archive without ``recommended.patch``. This
-    best-effort function never raises and returns ``True`` only for a nonempty patch.
-    """
-    if not base_ref:
-        return False
-    try:
-        recommended = diff_worktree_against(repo, base_ref, ["."])
-    except GitError:
-        return False
-    # `git diff <base_ref>` only reports tracked-file changes, so new files the
-    # fix phase created are absent. Append a creation hunk for each via
-    # `git diff --no-index /dev/null <file>` (exit 1 = "files differ", expected).
-    # Pre-fix untracked files (preexisting_untracked) are filtered out first so
-    # files that were already untracked before the run never enter the patch.
-    try:
-        untracked = _filter_preexisting_untracked(list_untracked(repo), preexisting_untracked)
-        for rel in untracked:
-            proc = _run_git(repo, ["diff", "--no-index", "/dev/null", rel], timeout=30, retries=0)
-            if proc.returncode in (0, 1):
-                recommended += proc.stdout
-    except GitError:
-        return False
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if not recommended.strip():
-        # Empty marker: a present-but-empty recommended.patch distinguishes a
-        # no-fix run from a legacy archive (no file at all), preventing the
-        # diff.patch fallback in _read_recommended_patch. Returns False since
-        # no non-empty patch was written.
-        out_path.write_text("")
-        return False
-    out_path.write_text(recommended)
-    return True
-
-
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
     """Return the one-line commit log for ``base..head``.
 
@@ -1334,44 +1292,6 @@ def show(repo: Path, ref: str, path: str) -> bytes:
             raise PathAbsentError(message)
         raise GitError(message)
     return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
-
-
-def grep(
-    repo: Path,
-    pattern: str,
-    *,
-    word: bool = False,
-    pathspecs: Sequence[str] | None = None,
-) -> list[str]:
-    """Return file paths matching *pattern* via ``git grep -l``.
-
-    Only tracked, non-ignored files are searched (``git grep`` semantics).
-
-    Args:
-        repo: Repository root to search.
-        pattern: Basic-regex pattern passed to ``git grep``.
-        word: When true, match only at word boundaries (``-w``) so ``app``
-            does not also match ``application`` or ``mapping``.
-        pathspecs: Optional ``git`` pathspecs limiting the search to matching
-            files (e.g. ``("*.py", "*.ts")``). When omitted, every tracked
-            file is searched.
-
-    Raises:
-        GitError: If ``git grep`` exits with an unexpected status.  Exit code
-            ``1`` is "no matches" and is treated as success (empty list).
-    """
-    args = ["grep", "-l"]
-    if word:
-        args.append("-w")
-    args.extend(["-e", pattern])
-    if pathspecs:
-        args.append("--")
-        args.extend(pathspecs)
-    proc = _run_git(repo, args, timeout=30)
-    # git grep returns 1 when there are simply no matches.
-    if proc.returncode not in (0, 1):
-        raise GitError(f"git grep {pattern!r} failed: {proc.stderr.strip()}")
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def grep_fixed_matches(
@@ -2659,51 +2579,13 @@ def _validate_ref_oid_pair(ref: str, oid: str) -> None:
         raise GitError(f"invalid ref name: {ref}")
 
 
-def update_ref(repo: Path, ref: str, oid: str) -> None:
-    """Point *ref* at the explicit *oid* in *repo* (``git update-ref <ref> <oid>``).
-
-    Fail-closed mutating wrapper — ``retries=0`` so a timed-out ref mutation is
-    never re-run. Both arguments are validated **before** any shell-out:
-
-    * *ref* is checked with ``git check-ref-format`` (git's own ref-format
-      authority), plus the shared Python-side guards of
-      :func:`_validate_ref_oid_pair` (also used by :func:`update_refs`):
-      names beginning with ``-`` (git would parse them as options, never as a
-      ref), names whose final component ends in the literal lowercase
-      ``.lock`` suffix — git forbids exactly that, so ``unlock``, ``block``,
-      ``deadlock`` and ``xLock`` are valid names and snapshot cleanly, while
-      ``topic.lock`` stays rejected and case-variants git accepts
-      (``topic.LOCK``, ``x.lOck``, ``release.LOCK``) stay valid — and names
-      containing whitespace or control characters. Anything invalid raises
-      ``GitError`` without invoking ``update-ref``.
-
-    * *oid* must be a full 40-character hex object ID (upper- or lowercase);
-      anything else raises ``GitError`` and is never passed through to git.
-
-    The ``update-ref`` subprocess never substitutes a fallback value: a
-    non-zero exit raises ``GitError`` with git's stderr.
-
-    Raises:
-        GitError: If *ref* or *oid* is invalid or ``git update-ref`` fails.
-    """
-    _validate_ref_oid_pair(ref, oid)
-    # check-ref-format is a read-only query, so it inherits the retrying
-    # default; only the update-ref mutation below passes retries=0.
-    proc = _run_git(repo, ["check-ref-format", ref], timeout=10)
-    if proc.returncode != 0:
-        raise GitError(f"invalid ref name: {ref}")
-    proc = _run_git(repo, ["update-ref", ref, oid], timeout=10, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git update-ref {ref} failed in {repo}: {proc.stderr.strip()}")
-
-
 def update_refs(repo: Path, ref_oids: dict[str, str]) -> None:
     """Point many *ref* -> *oid* pairs at once (``git update-ref --stdin``).
 
     Fail-closed mutating wrapper for the branch-snapshot loop — ``retries=0``
     so a timed-out ref mutation is never re-run. Every pair is validated
     **before** any shell-out with the same shared guards as
-    :func:`update_ref` via :func:`_validate_ref_oid_pair` (full 40-hex OID;
+    :func:`_validate_ref_oid_pair` (full 40-hex OID;
     ref must not start with ``-``; final component must not end in the literal
     ``.lock`` suffix — git's own rule, which accepts case-variants like
     ``topic.LOCK``/``x.lOck`` so those stay valid; no whitespace or control

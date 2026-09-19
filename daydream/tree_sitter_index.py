@@ -653,46 +653,6 @@ def _build_importer_lookup(
 # --- Public API --------------------------------------------------------------
 
 
-def build_symbol_index(repo_root: Path, paths: list[str]) -> dict[str, list[dict[str, object]]]:
-    """Build a symbol index of function/class definitions for ``paths``.
-
-    Only Python and Rust sources are indexed (the issue's symbol scope). Each
-    path is resolved relative to ``repo_root``; a file that parses or queries
-    with no definitions simply contributes nothing (graceful degradation per
-    D-06).
-
-    Returns ``{name: [{"path", "line", "end_line", "kind"}]}`` keyed by
-    definition name (a name can be defined in multiple files).
-    """
-    index: dict[str, list[dict[str, object]]] = {}
-    for path in paths:
-        lang_entry = LANGUAGES.get(Path(path).suffix)
-        if lang_entry is None:
-            continue
-        language_id, _factory = lang_entry
-        query_string = _def_query_for_language(language_id)
-        if query_string is None:
-            continue
-        abs_path = repo_root / path
-        try:
-            source = abs_path.read_bytes()
-        except (FileNotFoundError, OSError):
-            continue
-        parser = get_parser(language_id)
-        if parser is None:
-            continue
-        for definition in extract_definitions(parser, source, query_string):
-            index.setdefault(str(definition["name"]), []).append(
-                {
-                    "path": path,
-                    "line": definition["line"],
-                    "end_line": definition["end_line"],
-                    "kind": definition["kind"],
-                }
-            )
-    return index
-
-
 # --- Control-flow tables (issue #1113) ---------------------------------------
 #
 # Every node type below was confirmed by parsing purpose-built snippets with the
