@@ -4,7 +4,7 @@ Stage 4.2: every test below stands up a real git repository (often with a
 real bare-origin remote) and exercises ``daydream.runner.run`` end-to-end.
 The Backend is the ONLY thing mocked — git
 operations all run for real so the tests reflect actual user-facing
-behavior. The ``MockBackend`` mirrors the canned-event pattern used in
+behavior. The scripted backend mirrors the canned-event pattern used in
 ``tests/test_runner.py`` and ``tests/test_integration.py``.
 
 Test inventory (keyed to the Stage 4.2 spec):
@@ -19,23 +19,18 @@ Test inventory (keyed to the Stage 4.2 spec):
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream import git_ops, runner
-from daydream.backends import (
-    AgentEvent,
-    ContinuationToken,
-    ResultEvent,
-    TextEvent,
-)
+from daydream.backends import ResultEvent, TextEvent
 from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import current_run_context
 from daydream.runner import RunConfig
+from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
 
 # --- Helpers ---------------------------------------------------------------
@@ -63,43 +58,6 @@ def _make_feature_branch_on_origin(
     return sha
 
 
-class MockBackend:
-    """Minimal Backend that yields canned events and records every call.
-
-    No phase-specific routing — every ``execute`` returns the same generic
-    pair of events. Tests assert on observable side effects (workspace
-    cleanup, exit codes, captured errors) rather than on what the backend
-    happened to be asked to do.
-    """
-
-    model = "mock-model"
-
-    def __init__(self, events: list[AgentEvent] | None = None) -> None:
-        default: list[AgentEvent] = [
-            TextEvent(text="ok"),
-            ResultEvent(structured_output={"issues": []}, continuation=None),
-        ]
-        self._events = events if events is not None else default
-        self.calls: list[dict[str, Any]] = []
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        self.calls.append({"cwd": cwd, "prompt": prompt})
-        for event in self._events:
-            yield event
-
-    async def cancel(self) -> None:
-        return None
-
-
 @pytest.fixture
 def silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence Rich panels emitted from the runner so test output stays clean."""
@@ -113,9 +71,15 @@ def silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> MockBackend:
+def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> ScriptedBackend:
     """Patch ``create_backend`` so every backend instantiation returns the same mock."""
-    backend = MockBackend()
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text="ok"),
+            ResultEvent(structured_output={"issues": []}, continuation=None),
+        ],
+        model="mock-model",
+    )
     monkeypatch.setattr(
         "daydream.runner.create_backend", lambda name, model=None, **kwargs: backend
     )
@@ -128,7 +92,7 @@ def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> MockBackend:
 @pytest.mark.asyncio
 async def test_default_loop_on_base_branch_raises_wrong_branch_error(
     repo_with_origin: Path,
-    install_mock_backend: MockBackend,
+    install_mock_backend: ScriptedBackend,
     silence_ui: None,  # noqa
 ) -> None:
     """Default loop (no --branch, no --worktree) on the base branch errors loudly.
@@ -432,7 +396,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
 @pytest.mark.asyncio
 async def test_review_mode_on_base_branch_does_not_error(
     repo_with_origin: Path,
-    install_mock_backend: MockBackend,
+    install_mock_backend: ScriptedBackend,
     silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

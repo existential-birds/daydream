@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import signal
 import subprocess
 import threading
@@ -749,16 +748,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
             self.entered_count = 0
             self.active_count = 0
 
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-        ) -> AsyncIterator[AgentEvent]:
+        async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
             is_initial_specialist = "specialist" in prompt.lower() and self.entered_count < 2
             if is_initial_specialist:
                 self.entered_count += 1
@@ -769,15 +759,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
                     await self.release.wait()
                 finally:
                     self.active_count -= 1
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-            ):
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
     # Four changed files select pre_scan's parallel tier; the backend's real
@@ -1902,56 +1884,6 @@ async def test_run_threads_non_interactive_into_runtime(
 # --- Deep fix-cycle commit gate semantics ----------------------------------
 
 
-class _CommitWritingBackend:
-    """Scripted fake whose test-suite and commit turns really touch the worktree.
-
-    The test-suite turn reports a green run; the commit turn runs a REAL ``git
-    commit`` carrying the Daydream trailers, so ``_do_commit``'s post-commit
-    trailer verification sees a new HEAD. The backend is the only mocked seam —
-    exactly the shape an agent with tools would take.
-    """
-
-    model = "mock-model"
-
-    def __init__(self, repo: Path) -> None:
-        self.repo = repo
-        self.commit_prompts: list[str] = []
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        pl = prompt.lower()
-        if "run the project's test suite" in pl:
-            yield TextEvent(text="All 1 tests passed. 0 failed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-        if "the daydream changes are already staged" in pl:
-            self.commit_prompts.append(prompt)
-            run_id = re.search(r"Daydream-Run: (\S+)", prompt)
-            version = re.search(r"Daydream-Version: (\S+)", prompt)
-            message = (
-                "fix: apply daydream fix\n\n"
-                f"Daydream-Run: {run_id.group(1) if run_id else 'unknown'}\n"
-                f"Daydream-Version: {version.group(1) if version else 'unknown'}\n"
-            )
-            _git(cwd, "commit", "-m", message)
-            yield TextEvent(text="Committed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-        yield TextEvent(text="ok")
-        yield ResultEvent(structured_output=None, continuation=None)
-
-    async def cancel(self) -> None:
-        pass
-
-
 @pytest.mark.asyncio
 async def test_fix_cycle_yes_commits_fixes(
     monkeypatch: pytest.MonkeyPatch,
@@ -1975,7 +1907,13 @@ async def test_fix_cycle_yes_commits_fixes(
     # the repo a bare remote so the push + ls-remote verification succeeds.
     no_ci_remote.connect(feature_branch_repo, bare_remote(tmp_path / "origin.git"))
 
-    commit_backend = _CommitWritingBackend(feature_branch_repo)
+    commit_backend = ScriptedBackend(
+        events=[
+            TextEvent(text="All 1 tests passed. 0 failed."),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
         lambda _config, _phase, cache=None, **_kwargs: commit_backend,
@@ -2009,7 +1947,7 @@ async def test_fix_cycle_yes_commits_fixes(
     head_after = _git(feature_branch_repo, "rev-parse", "HEAD")
     assert head_after != head_before, "the --yes run never committed"
     # Issue #726: the commit is host-native — no agent commit turn runs.
-    assert commit_backend.commit_prompts == []
+    assert not any("daydream changes are already staged" in prompt for prompt in commit_backend.prompts)
     assert "Daydream-Run:" in _git(feature_branch_repo, "log", "-1", "--format=%B")
     assert "# daydream fix" in _git(feature_branch_repo, "show", "HEAD:main.py")
 

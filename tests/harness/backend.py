@@ -66,7 +66,7 @@ class ScriptedBackend:
         events: Turn | None = None,
         responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
         responder: Responder | None = None,
-        model: str = "test-model",
+        model: str | None = "test-model",
         fanout_concurrency: int = 4,
         **attrs: Any,
     ) -> None:
@@ -110,7 +110,7 @@ class ScriptedBackend:
             (schema, list(turn)) for schema, turn in (responses_by_schema or [])
         ]
         self._responder = responder
-        self.model = model
+        self.model: Any = model
         self.fanout_concurrency = fanout_concurrency
         for name, value in attrs.items():
             setattr(self, name, value)
