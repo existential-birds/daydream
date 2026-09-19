@@ -324,36 +324,15 @@ def _pass_gate(
     return (len(failures) == 0, failures, matrix, bacc)
 
 
-def _label_sha256(pairs: list[dict[str, Any]]) -> str:
-    """Canonical sha256 over the ordered gold/candidate/label triples.
-
-    Retained as a compatibility field; the full-content ``fixture_sha256`` is
-    the authoritative invalidation digest.
-    """
-    triples = [
-        {
-            "gold": p["gold"]["finding_id"],
-            "candidate": p["candidate"]["candidate_id"],
-            "label": p["label"],
-        }
-        for p in pairs
-    ]
-    canonical = json.dumps(
-        triples, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
-
-
 def _fixture_sha256(pairs: list[dict[str, Any]]) -> str:
     """Canonical sha256 over the full passed fixture pairs.
 
     Digests the ``pairs`` argument — every pair field (gold/candidate content,
-    category, label), not just the ordered triples covered by ``label_sha256`` —
-    so the authoritative invalidation digest is bound to exactly what was
-    judged. A caller passing synthetic or subset pairs binds the digest to
-    those pairs rather than to a fixed on-disk file; any fixture content change
-    moves the digest even without a triple reorder and invalidates existing
-    receipts.
+    category, label) — so the authoritative invalidation digest is bound to
+    exactly what was judged. A caller passing synthetic or subset pairs binds
+    the digest to those pairs rather than to a fixed on-disk file; any fixture
+    content change moves the digest even without a triple reorder and
+    invalidates existing receipts.
     """
     canonical = json.dumps(
         pairs, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -372,11 +351,10 @@ def _invalidation_inputs(
 ) -> dict[str, Any]:
     """The receipt's invalidation contract: a deterministic byte-stable dict.
 
-    ``fixture_sha256`` digests the passed ``pairs`` (all content, not just the
-    ordered triples covered by ``label_sha256``), and ``fixture_provenance``
-    mirrors the provenance declaration bound to those pairs, so a fixture
-    content or provenance change invalidates existing receipts — not just a
-    reorder of the ordered triples.
+    ``fixture_sha256`` digests the passed ``pairs`` (all content), and
+    ``fixture_provenance`` mirrors the provenance declaration bound to those
+    pairs, so a fixture content or provenance change invalidates existing
+    receipts — not just a reorder of the ordered triples.
     """
     inputs = {
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "",
@@ -384,7 +362,6 @@ def _invalidation_inputs(
         "host": _judge_host_from_env(env),
         "judge_prompt_sha256": _render_judge_prompt_digest(sr),
         "threshold": sr.verifier_core.CONFIDENCE_THRESHOLD,
-        "label_sha256": _label_sha256(pairs),
         "fixture_sha256": _fixture_sha256(pairs),
         "fixture_provenance": _load_provenance(pairs),
         "attempts": 3,

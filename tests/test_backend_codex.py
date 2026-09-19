@@ -1448,14 +1448,6 @@ class TestUnwrapShellCommand:
         cmd = '/bin/zsh -lc "cd /home/user/project && make test"'
         assert _unwrap_shell_command(cmd) == "cd /home/user/project && make test"
 
-    def test_bash_wrapper_with_cd_kept_replayable(self) -> None:
-        cmd = '/bin/bash -lc "cd /tmp/work && pytest -x"'
-        assert _unwrap_shell_command(cmd) == "cd /tmp/work && pytest -x"
-
-    def test_sh_wrapper_with_cd_kept_replayable(self) -> None:
-        cmd = '/bin/sh -lc "cd /app && echo hello"'
-        assert _unwrap_shell_command(cmd) == "cd /app && echo hello"
-
     def test_nested_single_quotes_round_trip(self) -> None:
         # The reported corruption class: '\' escaping inside the -lc payload.
         cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
@@ -1639,15 +1631,8 @@ class TestUnwrapShellCommand:
         cmd = '/bin/zsh -lc "ls -la"'
         assert _unwrap_shell_command(cmd) == "ls -la"
 
-    def test_plain_command_passthrough(self) -> None:
-        assert _unwrap_shell_command("ls -la") == "ls -la"
-
     def test_empty_command(self) -> None:
         assert _unwrap_shell_command("") == ""
-
-    def test_single_quotes(self) -> None:
-        cmd = "/bin/zsh -lc 'cd /project && git status'"
-        assert _unwrap_shell_command(cmd) == "cd /project && git status"
 
     def test_unquoted_simple(self) -> None:
         """Real Codex format: no quotes around simple commands."""

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import git as _seed_git
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -41,16 +42,6 @@ def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "
     }
 
 
-def _seed_git(repo: Any, *args: str, check: bool = True) -> str:
-    proc = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True,
-        env={**os.environ, **_SEED_ENV}, check=check,
-    )
-    if check and proc.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
-
-
 def _seed_write(repo: Any, name: str, content: str) -> None:
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +50,7 @@ def _seed_write(repo: Any, name: str, content: str) -> None:
 
 
 def _seed_commit(repo: Any, message: str) -> str:
-    _seed_git(repo, "commit", "-m", message)
+    _seed_git(repo, "commit", "-m", message, env=_SEED_ENV)
     return _seed_git(repo, "rev-parse", "HEAD")
 
 
@@ -341,7 +332,7 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     # stored normalized body (never the escaped title: prefix).
     # fixed 15-byte prefix ("title: T\nbody: ") puts the first emoji at bytes
     # 1015..1018; max_bytes=1021 slices 2 bytes into the second emoji, so
-    # _truncate_utf8 must back off byte-by-byte to 1018 (the whole first
+    # the truncator must back off byte-by-byte to 1018 (the whole first
     # emoji), exercising the UnicodeDecodeError path -- max_bytes=200 would
     # cut inside the ASCII a*1000 run and never reach the multibyte block.
     ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)

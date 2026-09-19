@@ -47,6 +47,7 @@ from daydream.backends.codex import CodexError
 from daydream.phases import UnconfinedFindingError
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, commit, git
+from tests.harness.git_helpers import tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 
 # Reuse the deep-pipeline stub from the exemplar instead of duplicating it.
@@ -620,18 +621,6 @@ def _assert_frozen_outputs(
     assert len(agent_steps) == 2
     assert {step["model_name"] for step in agent_steps} == {model}
     return session_id
-
-
-def _tracked_source_state(repo: Path) -> dict[str, Any]:
-    """Everything a review run must never mutate in the source checkout."""
-    tracked = git(repo, "ls-files").splitlines()
-    return {
-        "head": git(repo, "rev-parse", "HEAD"),
-        "refs": git(repo, "show-ref"),
-        "index": git(repo, "ls-files", "--stage"),
-        "diff": git(repo, "diff", "--binary", "HEAD"),
-        "bytes": {name: (repo / name).read_bytes() for name in tracked},
-    }
 
 
 def _replace_destination_after_entered(

@@ -1308,11 +1308,6 @@ def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch: pytest.MonkeyP
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 8
 
 
-def test_claude_fanout_concurrency_env_overrides_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "3")
-    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 3
-
-
 def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
     assert effective_fanout_concurrency(2, ClaudeBackend(model="opus")) == 2

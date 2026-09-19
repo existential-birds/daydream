@@ -11,7 +11,7 @@ import json
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator
+from typing import Any, AsyncIterator, Iterator
 
 import pytest
 import verifiers.v1 as vf
@@ -207,21 +207,3 @@ def stub_upstream() -> Iterator[str]:
         server.server_close()
         thread.join(timeout=5)
 
-
-def assert_docstring_guards(
-    func: Callable[..., object], *, gone: tuple[str, ...] = (), present: tuple[str, ...] = ()
-) -> None:
-    """Assert a docstring no longer claims the stale ``gone`` phrases and still
-    describes the accurate ``present`` phrases. Keeps the docker docstring-guard
-    tests (test_harness.py / test_images.py) DRY and the phrase lists the only
-    difference between them."""
-    doc = getattr(func, "__doc__", None)
-    assert doc is not None, f"{func.__qualname__} has no docstring to guard"
-    for phrase in gone:
-        assert phrase not in doc, (
-            f"{func.__qualname__} docstring still contains stale phrase {phrase!r}"
-        )
-    for phrase in present:
-        assert phrase in doc, (
-            f"{func.__qualname__} docstring missing accurate phrase {phrase!r}"
-        )

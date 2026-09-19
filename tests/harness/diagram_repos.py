@@ -13,10 +13,21 @@ pass reads the head tree, so a spec that drifts from the fixture stops being a
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from tests.harness.git_helpers import commit, git, init_repo
+
+
+def load_diagram_artifact(target: Path) -> dict[str, Any]:
+    """Load ``.daydream/deep/diagram.json`` from a finished run."""
+    path = target / ".daydream" / "deep" / "diagram.json"
+    assert path.is_file(), f"diagram artifact missing at {path}"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    return data
+
 
 # Repository builders
 

@@ -25,6 +25,7 @@ from typing import Any, cast
 import pytest
 
 from tests.harness import diagram_repos as dr
+from tests.harness.diagram_repos import load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
@@ -153,15 +154,6 @@ async def _dispatch_run(config: Any) -> int:
     from daydream.runner import run
 
     return await run(config)
-
-
-def _artifact(target: Path) -> dict[str, Any]:
-    """Load ``.daydream/deep/diagram.json``."""
-    path = target / ".daydream" / "deep" / "diagram.json"
-    assert path.is_file(), f"diagram artifact missing at {path}"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-    return data
 
 
 def _root_trajectory(target: Path) -> dict[str, Any]:

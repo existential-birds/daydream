@@ -630,23 +630,6 @@ storage_mb = 4096
 '''.encode("utf-8")
 
 
-def render_lock_header(
-    daydream_version: str,
-    source_sha256: str,
-    gen_command: str,
-    template_version: str,
-) -> str:
-    """Render deterministic provenance for the packaged runtime lock."""
-    return (
-        "# Daydream Harbor runtime requirements (generated; do not edit)\n"
-        f"# daydream_version: {daydream_version}\n"
-        f"# source_uv_lock_sha256: {source_sha256}\n"
-        f"# generation_command: {gen_command}\n"
-        f"# template_version: {template_version}\n"
-        "\n"
-    )
-
-
 def _strip_uv_header(text: str) -> str:
     """Strip uv's leading generated-comment block while preserving requirement comments."""
     lines = text.splitlines(keepends=True)
@@ -691,7 +674,14 @@ def render_runtime_lock(uv_lock_path: Path, *, daydream_version: str) -> tuple[s
     body = _uv_export_body(uv_lock_path)
     if f"daydream=={daydream_version}" in body:
         raise PackageError("runtime lock unexpectedly includes the Daydream project")
-    header = render_lock_header(daydream_version, source_sha256, GENERATION_COMMAND, TEMPLATE_VERSION)
+    header = (
+        "# Daydream Harbor runtime requirements (generated; do not edit)\n"
+        f"# daydream_version: {daydream_version}\n"
+        f"# source_uv_lock_sha256: {source_sha256}\n"
+        f"# generation_command: {GENERATION_COMMAND}\n"
+        f"# template_version: {TEMPLATE_VERSION}\n"
+        "\n"
+    )
     return header, body
 
 
