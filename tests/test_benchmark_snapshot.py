@@ -20,32 +20,14 @@ import pytest
 
 from daydream import git_ops
 from daydream.git_ops import GitError
+from tests.harness.git_helpers import SEED_ENV, commit
+from tests.harness.git_helpers import git as _git
 
 # real-git seed helpers (deterministic commit SHAs)
 
-_SEED_ENV = {
-    "GIT_AUTHOR_NAME": "Tester",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_NAME": "Tester",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
-}
-
-
-def _git(repo: Path, *args: str, env: dict[str, str] | None = None, check: bool = True) -> str:
-    proc_env = {**os.environ, **env} if env is not None else os.environ.copy()
-    proc = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, env=proc_env, check=check
-    )
-    if check and proc.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
-
 
 def _commit(repo: Path, message: str) -> str:
-    _git(repo, "commit", "-m", message, env=_SEED_ENV)
-    return _git(repo, "rev-parse", "HEAD")
+    return commit(repo, message, env=SEED_ENV)
 
 
 def _write(repo: Path, name: str, content: str | bytes) -> None:

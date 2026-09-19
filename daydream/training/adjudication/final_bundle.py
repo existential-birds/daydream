@@ -31,14 +31,14 @@ from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.training.adjudication.canonical import _evidence_after_as_of
+from daydream.json_utils import canonical_json as _canonical
+from daydream.training.adjudication.canonical import _evidence_after_as_of, read_jsonl
 from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
-    _sessions_from_hydrated_stage,
+    index_sessions,
 )
 from daydream.training.adjudication.observations import load_observations
 from daydream.training.adjudication.precedence import effective_adjudication
-from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
 from daydream.training.corpus_projection.bundle import load_curated_bundle
@@ -84,10 +84,6 @@ _LINEAGE_PIN_FIELDS = (
     "rubric_version",
     "classifier_version",
 )
-
-
-def _canonical(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _bundle_input_names(root: Path) -> set[str]:
@@ -139,36 +135,26 @@ def _require_regular_input(root: Path, name: str) -> Path:
 
 def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
     annotations_path = materialize_dir / _ANNOTATIONS_FILENAME
-    if not annotations_path.is_file():
-        raise FileNotFoundError(
+    return read_jsonl(
+        annotations_path,
+        missing=(
             f"materialized annotations not found (run `corpus adjudicate materialize` and "
             f"`corpus adjudicate harvest-snapshot` first): {annotations_path}"
-        )
-    try:
-        return [
-            json.loads(line)
-            for line in annotations_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"unreadable materialized annotations at {annotations_path}: {exc}") from exc
+        ),
+        invalid="unreadable materialized annotations",
+    )
 
 
 def _load_sessions_output(materialize_dir: Path) -> list[dict[str, Any]]:
     sessions_path = materialize_dir / _SESSIONS_OUT_FILENAME
-    if not sessions_path.is_file():
-        raise FileNotFoundError(
+    return read_jsonl(
+        sessions_path,
+        missing=(
             f"materialized preview snapshot not found (run `corpus adjudicate materialize` "
             f"first): {sessions_path}"
-        )
-    try:
-        return [
-            json.loads(line)
-            for line in sessions_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"unreadable materialized snapshot at {sessions_path}: {exc}") from exc
+        ),
+        invalid="unreadable materialized snapshot",
+    )
 
 
 def _load_manifest(materialize_dir: Path) -> dict[str, Any]:
@@ -185,16 +171,6 @@ def _load_manifest(materialize_dir: Path) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise ValueError(f"preview manifest at {manifest_path} is not a JSON object")
     return manifest
-
-
-def _index_sessions(index_root: Path) -> list[dict[str, Any]]:
-    """Load the segmented sessions the fresh queue is built over, mirroring
-    ``canonical.run_canonical_harvest``'s source selection."""
-    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
-        sessions, _index_revision = _load_sessions(index_root)
-    else:
-        sessions, _index_revision = _sessions_from_hydrated_stage(index_root)
-    return sessions
 
 
 def _lineage_field(manifest: Mapping[str, Any], field: str, manifest_path: Path) -> str:
@@ -506,7 +482,7 @@ def build_final_bundle(
     #    manifest (empty when unpinned).
     observations = load_observations(observations_path) if observations_path is not None else []
     report_items = _enrich_report_items(
-        build_queue(_index_sessions(index_root), include_decisive=True),
+        build_queue(index_sessions(index_root)[0], include_decisive=True),
         observations,
         as_of=manifest.get("as_of"),
     )

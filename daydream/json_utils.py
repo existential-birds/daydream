@@ -196,6 +196,10 @@ def atomic_write_json(
     atomic_write_bytes(path, text.encode("utf-8"), fsync=fsync, dir_fsync=dir_fsync, mode=mode)
 
 
+def canonical_json(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def extract_json(text: str) -> Any:
     """Extract a JSON object or array from possibly prose-wrapped model text.
 

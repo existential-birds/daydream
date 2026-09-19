@@ -8,13 +8,8 @@ from typing import Any
 
 import pytest
 
+from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
-
-
-def _default_strategy(stage: str) -> str:
-    from daydream import review_profile as _rp
-
-    return _rp.build_default_profile().strategies[stage].content
 
 
 def _merge_call(stub: StubBackend) -> dict[str, Any]:

@@ -73,7 +73,7 @@ from daydream.archive.importer import (
 from daydream.archive.index import _get_connection
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.json_utils import atomic_write_bytes
-from daydream.training.adjudication.canonical import run_canonical_harvest
+from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.materialize import run_materialize
@@ -528,14 +528,7 @@ def _load_sessions_for_index(index_root: Path) -> list[dict[str, Any]]:
     sessions_path = index_root / _SESSIONS_FILENAME
     if not sessions_path.is_file():
         raise ValueError(f"hydrated index sessions file not found: {sessions_path}")
-    try:
-        return [
-            json.loads(line)
-            for line in sessions_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"unreadable hydrated index at {sessions_path}: {exc}") from exc
+    return read_jsonl(sessions_path, missing="", invalid="unreadable hydrated index")
 
 
 def handle_export(argv: list[str]) -> int:
@@ -1168,17 +1161,14 @@ def _load_import_index_sessions(index_root: Path) -> list[dict[str, Any]]:
     fail-closed materialize adapter. Anything else is a derive failure —
     no empty-literal fallback.
     """
-    if (index_root / _SESSIONS_FILENAME).is_file():
-        return _load_sessions_for_index(index_root)
-    if (index_root / "index.db").is_file():
-        from daydream.training.adjudication.materialize import _sessions_from_hydrated_stage
+    if not (index_root / _SESSIONS_FILENAME).is_file() and not (index_root / "index.db").is_file():
+        raise ValueError(
+            f"import index root {index_root} has neither sessions.jsonl nor index.db; "
+            "not a hydrated index or materialized snapshot"
+        )
+    from daydream.training.adjudication.materialize import index_sessions
 
-        sessions, _ = _sessions_from_hydrated_stage(index_root)
-        return sessions
-    raise ValueError(
-        f"import index root {index_root} has neither sessions.jsonl nor index.db; "
-        "not a hydrated index or materialized snapshot"
-    )
+    return index_sessions(index_root)[0]
 
 
 def _load_import_index_runs(

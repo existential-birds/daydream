@@ -32,17 +32,17 @@ from typing import Any
 
 from daydream.archive.index import append_label_observation
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
+from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.materialize import (
     _CONFLICTED_DISPOSITION,
     _SESSIONS_OUT_FILENAME,
-    _sessions_from_hydrated_stage,
+    index_sessions,
 )
 from daydream.training.adjudication.observations import load_observations
 from daydream.training.adjudication.precedence import (
     DECISIVE_DISPOSITIONS,
     effective_adjudication,
 )
-from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.labeler_versions import REPLY_CLASSIFIER_VERSION
@@ -53,10 +53,6 @@ _ANNOTATIONS_FILENAME = "annotations.jsonl"
 _MANIFEST_FILENAME = "preview-manifest.json"
 
 _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
-
-
-def _canonical(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:
@@ -90,21 +86,29 @@ class AnnotationDriftError(ValueError):
         self.requeued_record_ids = requeued_record_ids
 
 
-def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
-    records_path = materialize_dir / _SESSIONS_OUT_FILENAME
-    if not records_path.is_file():
-        raise FileNotFoundError(
-            f"materialized preview snapshot not found (run `corpus adjudicate materialize` "
-            f"first): {records_path}"
-        )
+def read_jsonl(path: Path, *, missing: str, invalid: str) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise FileNotFoundError(missing)
     try:
         return [
             json.loads(line)
-            for line in records_path.read_text(encoding="utf-8").splitlines()
+            for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"unreadable materialized snapshot at {records_path}: {exc}") from exc
+        raise ValueError(f"{invalid} at {path}: {exc}") from exc
+
+
+def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
+    records_path = materialize_dir / _SESSIONS_OUT_FILENAME
+    return read_jsonl(
+        records_path,
+        missing=(
+            f"materialized preview snapshot not found (run `corpus adjudicate materialize` "
+            f"first): {records_path}"
+        ),
+        invalid="unreadable materialized snapshot",
+    )
 
 
 def _load_pin(materialize_dir: Path) -> dict[str, Any]:
@@ -168,16 +172,7 @@ def run_canonical_harvest(
     """
     pin = _load_pin(materialize_dir)
     materialized = _load_materialized_records(materialize_dir)
-    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
-        sessions, _index_revision = _load_sessions(index_root)
-    else:
-        # Hydrated staging archive (materialize's primary flow): no
-        # sessions.jsonl — derive the sessions from the SQLite index plus the
-        # sanitized per-run trajectories, so the drift gate re-derives the
-        # fresh queue over the same hydrated index the materialized preview
-        # was built from instead of feeding the materialize dir back and
-        # comparing each digest against itself (tautological).
-        sessions, _index_revision = _sessions_from_hydrated_stage(index_root)
+    sessions, _index_revision = index_sessions(index_root)
     # The complete set is the drift authority: widened materialization emits a
     # record for every disposition, so the fresh queue must include the
     # automatic decisive records too — an unresolved-only queue would

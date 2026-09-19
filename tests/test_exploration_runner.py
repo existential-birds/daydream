@@ -33,6 +33,7 @@ from daydream.prompts.grounding import (
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
 from tests.harness.backend import Responder, ScriptedBackend
+from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
 )
@@ -45,10 +46,6 @@ from tests.harness.trajectory import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
-
-
-def _default_strategy(stage: str) -> str:
-    return rp.build_default_profile().strategies[stage].content
 
 
 def _dispatch_steps(trajectory: dict[str, Any], *, phase: str) -> list[dict[str, Any]]:
@@ -595,7 +592,6 @@ def test_pre_scan_threads_profile_strategy(tmp_path: Path) -> None:
     import inspect
 
     import daydream.exploration_runner as er
-    from daydream import review_profile as rp
 
     p = rp.build_default_profile()
     strategies = {

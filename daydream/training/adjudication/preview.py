@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError, RepoInfo, resolve_source_revision
+from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.queue import build_queue
 
 __all__ = ["preview_ledger_digest", "run_preview"]
@@ -57,10 +58,6 @@ class _LocalIndexClient:
 
     def list_revisions(self) -> list[str]:
         return []
-
-
-def _canonical(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def preview_ledger_digest(ledger: dict[str, Any]) -> str:
@@ -116,18 +113,9 @@ def run_preview(index_root: Path, ledger_path: Path) -> dict[str, Any]:
     ``resolve_source_revision``; malformed evidence raises ``ValueError``
     from the queue builder naming the offending fingerprint.
     """
-    if (index_root / _SESSIONS_FILENAME).is_file():
-        sessions, index_revision = _load_sessions(index_root)
-    else:
-        # Hydrated staging archive: derive the sessions from the SQLite
-        # index's label_observations via the shared materialize adapter
-        # (read-only; lazy import — materialize imports this module's
-        # ``_load_sessions``).
-        from daydream.training.adjudication.materialize import (
-            _sessions_from_hydrated_stage,
-        )
+    from daydream.training.adjudication.materialize import index_sessions
 
-        sessions, index_revision = _sessions_from_hydrated_stage(index_root)
+    sessions, index_revision = index_sessions(index_root)
     items = [
         {k: item[k] for k in _ITEM_KEYS} for item in build_queue(sessions)
     ]

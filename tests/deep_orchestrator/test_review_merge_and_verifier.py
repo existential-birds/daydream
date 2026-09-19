@@ -13,10 +13,10 @@ import pytest
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
 )
+from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
-    _default_strategy,
     _force_interactive,
     _install_model_capturing_stubs,
     _install_stub_backend,

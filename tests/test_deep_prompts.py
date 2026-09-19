@@ -29,6 +29,7 @@ from daydream.deep.prompts import (
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 class _PromptPaths(TypedDict):
@@ -54,13 +55,6 @@ def _paths(tmp_path: Path) -> _PromptPaths:
         "output_path": tmp_path / ".daydream" / "deep" / "stack-python-review.md",
         "cwd": tmp_path,
     }
-
-
-def _default_strategy(stage: str) -> str:
-    """Return the packaged default profile strategy content for a stage."""
-    from daydream import review_profile as _rp
-
-    return _rp.build_default_profile().strategies[stage].content
 
 
 _REVIEW_BUILDERS: dict[str, Callable[..., str]] = {

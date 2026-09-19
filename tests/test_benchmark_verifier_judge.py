@@ -28,7 +28,7 @@ def test_spike_template_loads_with_bare_import(sr_module: Any) -> None:
     assert sr_module.verifier_core.CONFIDENCE_THRESHOLD == 0.7
 
 
-def test_render_pair_prompt_is_bounded_and_fences_untrusted_text(sr_module: Any, tmp_path: Path) -> None:
+def test_render_pair_prompt_is_bounded_and_fences_untrusted_text(sr_module: Any) -> None:
     sr = sr_module
     prompt = sr.render_pair_prompt(
         gold={
@@ -450,7 +450,6 @@ def _candidate_artifact(
 def test_run_verifier_writes_reward_and_details_atomically(
     sr_module: Any,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"
@@ -516,7 +515,7 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_pa
     assert len(details["errors"]) >= 1                            # bounded diagnostic written
 
 
-def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any) -> None:
     sr = sr_module
     base = {"DAYDREAM_JUDGE_PROVIDER": "claude-cli", "DAYDREAM_JUDGE_MODEL": "m"}
 
@@ -550,7 +549,7 @@ def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any, monk
         )
 
 
-def test_provider_selection_builds_expected_client(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provider_selection_builds_expected_client(sr_module: Any) -> None:
     sr = sr_module
 
     def make(provider: Any, base_url: Any, model: Any="m", api_key: Any="k") -> Any:
@@ -573,7 +572,6 @@ def test_provider_selection_builds_expected_client(sr_module: Any, monkeypatch: 
 
 def test_main_reads_only_tests_and_logs_artifact_paths(
     sr_module: Any,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sr = sr_module

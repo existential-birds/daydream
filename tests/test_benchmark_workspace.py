@@ -1,7 +1,6 @@
 import json
 import os
 import stat
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,30 +11,12 @@ from daydream.benchmark.schema import BenchmarkManifest, CaseDocument, ImportDoc
 from daydream.benchmark.storage import load_json_strict, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace
 from tests.harness.fake_gh import FakeGh
-
-_SEED_ENV = {
-    "GIT_AUTHOR_NAME": "Tester",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_NAME": "Tester",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
-}
+from tests.harness.git_helpers import SEED_ENV, commit
+from tests.harness.git_helpers import git as _git
 
 
-def _git(repo: Any, *args: Any, env: Any=None, check: Any=True) -> Any:
-    proc_env = {**os.environ, **env} if env is not None else os.environ.copy()
-    proc = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, env=proc_env, check=check
-    )
-    if check and proc.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
-
-
-def _commit(repo: Any, message: Any) -> Any:
-    _git(repo, "commit", "-m", message, env=_SEED_ENV)
-    return _git(repo, "rev-parse", "HEAD")
+def _commit(repo: Any, message: str) -> str:
+    return commit(repo, message, env=SEED_ENV)
 
 
 def _write_seed(repo: Any, name: Any, content: Any) -> None:
@@ -933,7 +914,6 @@ def test_referenced_bundle_missing_is_corruption(tmp_path: Path) -> None:
 
 def test_duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
     import hashlib
-    import os
 
     import yaml
 

@@ -140,7 +140,7 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
         assert p.read_bytes() == digest             # host files untouched (no writes outside out_dir)
 
 
-def test_verifier_asset_set_never_includes_task_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_verifier_asset_set_never_includes_task_md() -> None:
     """The verifier image/asset set is fixed and must not read Task.md (R12/R13 constraint)."""
     # The fixed verifier asset set is exactly what templates/tests/Dockerfile COPYs:
     # score_review.py verifier_core.py judge_prompt.md golden-review.json test.sh

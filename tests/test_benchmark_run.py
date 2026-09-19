@@ -108,8 +108,6 @@ def _seed_compiled_task(ws: Path, *, reviewer: Any, judge: Any) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_benchmark_parser_has_run_subcommand() -> None:
@@ -142,8 +140,6 @@ def test_handle_benchmark_run_routes_to_supervisor(tmp_path: Path, monkeypatch: 
     assert "DAYDREAM_REVIEW_MODEL" in captured["env"]  # env threaded through
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_preflight_ok_when_all_checks_pass(tmp_path: Path) -> None:
@@ -264,8 +260,6 @@ def test_preflight_uses_live_docker_capability_by_default(tmp_path: Path, monkey
     assert any("rejected nftables fib rules" in e for e in errs)
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_pre_run_summary_lists_all_required_fields(tmp_path: Path) -> None:
@@ -283,8 +277,6 @@ def test_pre_run_summary_lists_all_required_fields(tmp_path: Path) -> None:
     assert "127.0.0.1" in text # judge host threaded from env
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_ledger_append_running_and_mark_complete(tmp_path: Path) -> None:
@@ -323,8 +315,6 @@ def test_ledger_rejects_non_contained_job_dir(tmp_path: Path) -> None:
                                       job_dir=str(tmp_path / "outside"))
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def _score(reward: Any) -> dict[str, Any]:
@@ -385,8 +375,6 @@ def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
     assert ok is False
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
@@ -440,8 +428,6 @@ def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:
     assert reason is None
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path: Path) -> None:
@@ -520,8 +506,6 @@ def test_run_refuses_without_yes_and_no_confirm(tmp_path: Path) -> None:
     assert not (ws / "runtime" / "harbor.json").exists()  # no running entry on block
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Path) -> None:
@@ -590,8 +574,6 @@ def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
     assert called == []         # Harbor never spawned, no reviewer call
     assert not (ws / "runtime" / "harbor.json").exists()  # blocked run leaves no running entry
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_run_persists_trial_environments_to_ledger(tmp_path: Path) -> None:
@@ -658,8 +640,6 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
     assert envs[0]["backend"] == "docker"
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 
 def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) -> None:

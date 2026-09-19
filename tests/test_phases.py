@@ -26,12 +26,8 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
+from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.trajectory import make_recorder, read_trajectory
-
-
-def _default_strategy(stage: str) -> str:
-    return _rp.build_default_profile().strategies[stage].content
-
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 _FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)

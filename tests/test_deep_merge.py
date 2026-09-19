@@ -9,12 +9,7 @@ from daydream.deep.prompts import build_merge_prompt
 from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
-
-
-def _default_strategy(stage: str) -> str:
-    from daydream import review_profile as _rp
-
-    return _rp.build_default_profile().strategies[stage].content
+from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
