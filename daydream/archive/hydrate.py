@@ -552,11 +552,6 @@ class IngestResult:
     reason_code: str | None = None
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write ``payload`` to ``path`` atomically (temp file + rename); fatal on failure."""
-    atomic_write_json(path, payload)
-
-
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -689,7 +684,7 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(derivative), str(target))  # staging layout only, not the gate
         results.append(IngestResult(session_id, "admitted"))
-    _atomic_write_json(
+    atomic_write_json(
         bundles_root.parent / "_ingest_results.json",
         {
             "revision": str(revision),
@@ -1723,7 +1718,7 @@ def build_import_ledger(
             "accounted": accounted,
         },
     }
-    _atomic_write_json(curated / "import-ledger.json", ledger)
+    atomic_write_json(curated / "import-ledger.json", ledger)
     return ledger
 
 
@@ -1984,7 +1979,7 @@ def _write_resolution_map(stage: Path, curated: Path) -> None:
         source_commit=source_commit or "unknown",
         repo_commits=_repo_commits_from_enrichment_cache(stage),
     )
-    _atomic_write_json(map_path, cmap)
+    atomic_write_json(map_path, cmap)
 
 
 def _write_resume_ledger(stage: Path, curated: Path, curation_id: str) -> None:
@@ -2395,7 +2390,7 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     doc = _curation_manifest_doc(stage, curation_id=curation_id, source_commit=source_commit, ledger=ledger)
     manifest_path = curated / "curation-manifest.json"
-    _atomic_write_json(manifest_path, doc)
+    atomic_write_json(manifest_path, doc)
     prefix = f"curated/{curation_id}/"
     # Issue #1094: pin the policy binding into the published prefix and fail
     # closed on any conflicting remote record before the manifest commit.

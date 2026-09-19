@@ -1139,21 +1139,12 @@ class CodexBackend:
                         model_name = native_model
                     if isinstance(native_provider, str) and native_provider:
                         provider_name = native_provider
-                    # EVNT-07: MetricsEvent per turn (empty message_id — Codex has no
-                    # per-message id). #194 reverses D-16: the CLI emits no cost field,
-                    # so we now synthesize from tokens via the #61 user-overridable price
-                    # table (Claude/Pi parity). None when the model is unknown to the
-                    # table (preserves the #156 observable-marker). cached_input_tokens
-                    # IS surfaced (#65, K4). Rename input/output_tokens → prompt/completion;
-                    # skip if either missing (EVNT-02 requires both). CostEvent below
-                    # carries partials.
-                    #
-                    # #192: reasoning_output_tokens is the reasoning portion of
-                    # output_tokens — a SUBSET, NOT additive (codex's own
-                    # accounting.rs already counts these inside output_tokens, so
-                    # cost synthesis is unchanged). Surfaced for cost attribution
-                    # and perf observability (#171/#172/#186). OpenAI emits the
-                    # COUNT only — no reasoning content (openai/codex#26428).
+                    # MetricsEvent per turn (empty message_id — Codex has no
+                    # per-message id). No cost field is emitted, so synthesize via
+                    # the user-overridable price table; None when the model is
+                    # unknown. Rename input/output_tokens → prompt/completion;
+                    # skip if either is missing. reasoning_output_tokens is the
+                    # reasoning portion of output_tokens — a SUBSET, not additive.
                     cached_tokens = usage.get("cached_input_tokens")
                     reasoning_tokens = usage.get("reasoning_output_tokens")
                     in_tok = usage.get("input_tokens")

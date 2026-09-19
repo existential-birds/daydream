@@ -432,26 +432,11 @@ def parse_diagram_markers(text: str) -> list[tuple[str, str]]:
     return [(kind, sha) for kind, sha in DIAGRAM_MARKER_RE.findall(text)]
 
 
-def _normalize_severity(raw: dict[str, Any]) -> str | None:
-    """Normalize a raw item's severity against the canonical vocabulary.
-
-    Total: never raises. Present-but-null severities (the wire schema emits
-    ``severity: null``) and omitted keys both map to ``None``, as do unknown
-    or non-string values — never the string ``"none"``. Unknown string
-    severities (e.g. ``"critical"``) also map to ``None`` here so the
-    canonical render path stays clean; callers must pair this with
-    :func:`_severity_off_vocabulary` so a present-but-off-vocabulary label
-    still fails closed at the approval gate instead of looking like a model
-    that omitted severity.
-    """
-    return normalize_severity(raw.get("severity"))
-
-
 def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
     """True when ``raw`` carries a present, non-empty severity string outside
     the canonical vocabulary (e.g. ``"critical"``).
 
-    ``_normalize_severity`` folds such labels into ``None``, but a raw
+    :func:`normalize_severity` folds such labels into ``None``, but a raw
     off-vocabulary label is a severity the model asserted — it must not be
     indistinguishable from an omitted severity at the approval gate. The gate
     blocks on this flag, restoring the documented fail-closed invariant for
@@ -480,7 +465,7 @@ def extract_item_fields(
     line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
     description = str(raw.get("description", "")).strip()
     rationale = str(raw.get("rationale", "")).strip()
-    severity = _normalize_severity(raw)
+    severity = normalize_severity(raw.get("severity"))
     confidence = str(raw.get("confidence", "")).strip().upper() or None
     is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
     location_distrust = bool(raw.get("location_distrust"))

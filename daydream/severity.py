@@ -1,26 +1,15 @@
 """Single source of truth for finding severity vocabulary and policy.
 
-This module is the one place to look for the canonical severity levels, the
-sort-rank mapping, and the missing-severity fallback policy. It is a leaf
-module: it must not import from any other daydream module, so it stays
-importable everywhere in the pipeline.
+Leaf module: it must not import from any other daydream module, so it stays
+importable everywhere in the pipeline. ``CANONICAL_LEVELS`` is the only
+declaration of the levels.
 
-``CANONICAL_LEVELS`` is the only declaration of the levels. The model-facing
-order is its derived descending form, and the static typing form mirrors the
-same vocabulary.
-
-P6 rule: off-vocabulary severity values are never silently passed through.
-A boundary site that encounters an unknown or absent value must map it
-explicitly (via :func:`normalize_severity`, which returns ``None`` for
-unknown/absent) and decide what that means in its own context.
-
-Default severity policy (R3.1, documented once):
-
-- A missing severity stays ``None`` on report and approval paths; ``None``
-  deliberately does not block approval.
-- The only ``"high"`` default permitted anywhere is the structural-lens
-  ``setdefault("severity", "high")`` (structural high-conviction invariant).
-- No other fallback severity value is permitted.
+P6 rule: off-vocabulary severity values are never silently passed through. A
+boundary site that encounters an unknown or absent value must map it explicitly
+(via :func:`normalize_severity`, which returns ``None`` for unknown/absent) and
+decide what that means in its own context. A missing severity stays ``None`` on
+report and approval paths (``None`` deliberately does not block approval); the
+only ``"high"`` default permitted is the structural-lens ``setdefault``.
 """
 
 from typing import Literal, TypeAlias
