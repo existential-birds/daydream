@@ -15,7 +15,7 @@ structured, salvageable failure instead of a fatal run abort:
   R6  -- a ``--start-at fix`` relaunch picks up the salvaged partial items
          without re-reviewing completed stacks or re-running the merge agent.
   R7  -- a ``str``-shaped merge response (mirroring the arbiter
-         ``_SplitTextBackend`` "got str" pattern) triggers the salvage path,
+         ``_split_text_backend`` "got str" pattern) triggers the salvage path,
          while a bare-``list`` response containing a parseable item list is
          merged normally.
 
@@ -221,7 +221,7 @@ def _merge_args(tmp_path: Path) -> dict[str, Any]:
 def _merge_text_backend(text: str, structured: Any) -> ScriptedBackend:
     """Responder-backed fake emitting the real pi contract (prose + merge result).
 
-    Mirrors the arbiter ``_SplitTextBackend`` in
+    Mirrors the arbiter ``_split_text_backend`` in
     ``tests/test_arbiter_prose_extraction.py``: when a structured output schema
     is requested the ResultEvent carries the structured answer, otherwise the
     caller drives the unparseable-text path by passing ``structured=None``.

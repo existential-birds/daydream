@@ -87,14 +87,18 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _pi_like_backend(message: str) -> ScriptedBackend:
-    """Mirrors the pi backend: structured_output = extract_json(final text)."""
-    return ScriptedBackend(
-        events=[
+    """Mirrors the pi backend: structured_output = extract_json(final text), gated on the schema."""
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        return [
             TextEvent(text=message),
-            ResultEvent(structured_output=extract_json(message), continuation=None),
-        ],
-        model="glm-5.2",
-    )
+            ResultEvent(
+                structured_output=extract_json(message) if output_schema else None,
+                continuation=None,
+            ),
+        ]
+
+    return ScriptedBackend(responder=respond, model="glm-5.2")
 
 
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(
@@ -181,18 +185,22 @@ STRUCTURED_OUTPUT: dict[str, Any] = {
 
 
 def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
-    """Emits prose text and structured output separately (the real pi contract).
+    """Emits prose text and structured output separately (the real pi contract), gated on the schema.
 
-    The final ``TextEvent`` and the ResultEvent's ``structured_output`` diverge:
-    the text is prose the extractor cannot parse into a findings object, while
-    ``structured_output`` is the complete answer. This is what exposes the
-    log_mode result-capture bug -- a backend whose text happens to also contain a
-    parseable object would mask it via the fallback.
+    Unlike ``_pi_like_backend``, the final ``TextEvent`` and the ResultEvent's
+    ``structured_output`` diverge: the text is prose the extractor cannot parse
+    into a findings object, while ``structured_output`` is the complete answer.
+    This is what exposes the log_mode result-capture bug -- a backend whose text
+    happens to also contain a parseable object would mask it via the fallback.
     """
-    return ScriptedBackend(
-        events=[TextEvent(text=text), ResultEvent(structured_output=structured, continuation=None)],
-        model="glm-5.2",
-    )
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        return [
+            TextEvent(text=text),
+            ResultEvent(structured_output=structured if output_schema else None, continuation=None),
+        ]
+
+    return ScriptedBackend(responder=respond, model="glm-5.2")
 
 
 async def test_arbiter_captures_structured_output_in_log_mode(
@@ -220,3 +228,24 @@ async def test_arbiter_captures_structured_output_in_log_mode(
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
     assert verdicts[2]["keep"] is False
+
+
+async def test_pi_contract_fakes_gate_structured_output_on_the_requested_schema() -> None:
+    """Both arbiter fakes mirror the real pi contract: no schema requested ⇒ no structured output.
+
+    ``daydream/backends/pi.py`` computes ``structured_output`` only when the call
+    passed an ``output_schema``, so an ungated fake would let a test observe a
+    structured payload production can never produce (and vice versa).
+    """
+    schema: dict[str, Any] = {"type": "object"}
+    fakes = (
+        _pi_like_backend(ARBITER_MESSAGE),
+        _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),
+    )
+    for fake in fakes:
+        with_schema = [event async for event in fake.execute(Path("."), "prompt", schema)]
+        without_schema = [event async for event in fake.execute(Path("."), "prompt")]
+        assert isinstance(with_schema[-1], ResultEvent)
+        assert with_schema[-1].structured_output is not None
+        assert isinstance(without_schema[-1], ResultEvent)
+        assert without_schema[-1].structured_output is None
