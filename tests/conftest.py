@@ -160,18 +160,24 @@ def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
     return repo
 
 
-@pytest.fixture
-def improve_monorepo_target(tmp_path: Path) -> Path:
-    """Committed multi-service repository for improve-flow real-path tests."""
-    project = tmp_path / "improve_monorepo"
+def _improve_monorepo(
+    tmp_path: Path,
+    name: str,
+    *,
+    with_web: bool = True,
+    branch_changes: tuple[str, ...] = (),
+) -> Path:
+    """Build the shared committed apps/{billing,catalog} monorepo scaffold."""
+    project = tmp_path / name
     for service in ("billing", "catalog"):
         root = project / "apps" / service
         root.mkdir(parents=True)
         (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
         (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
-    web = project / "web"
-    web.mkdir()
-    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+    if with_web:
+        web = project / "web"
+        web.mkdir()
+        (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
     (project / "README.md").write_text("# Improve monorepo\n")
     (project / "pyproject.toml").write_text(
         "[project]\n"
@@ -184,7 +190,21 @@ def improve_monorepo_target(tmp_path: Path) -> Path:
     _init_repo(project)
     _git(project, "add", ".")
     _commit(project, "initial")
+    if branch_changes:
+        _git(project, "checkout", "-b", "feature")
+        for service in branch_changes:
+            (project / "apps" / service / "api.py").write_text(
+                f'def service_name():\n    return "{service}-v2"\n'
+            )
+        _git(project, "add", *(f"apps/{service}/api.py" for service in branch_changes))
+        _commit(project, "change " + " and ".join(branch_changes) + " api")
     return project
+
+
+@pytest.fixture
+def improve_monorepo_target(tmp_path: Path) -> Path:
+    """Committed multi-service repository for improve-flow real-path tests."""
+    return _improve_monorepo(tmp_path, "improve_monorepo")
 
 
 @pytest.fixture
@@ -214,65 +234,15 @@ def improve_scaled_monorepo_target(tmp_path: Path) -> Path:
 @pytest.fixture
 def improve_branch_target(tmp_path: Path) -> Path:
     """Improve monorepo with one billing change committed on a feature branch."""
-    project = tmp_path / "improve_branch"
-    for service in ("billing", "catalog"):
-        root = project / "apps" / service
-        root.mkdir(parents=True)
-        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
-        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
-    web = project / "web"
-    web.mkdir()
-    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
-    (project / "README.md").write_text("# Improve monorepo\n")
-    (project / "pyproject.toml").write_text(
-        "[project]\n"
-        'name = "improve-monorepo"\n'
-        "\n"
-        "[tool.daydream]\n"
-        'test-command = "uv run pytest"\n'
-        'scope-command = "git diff --exit-code"\n'
-    )
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "initial")
-    _git(project, "checkout", "-b", "feature")
-    (project / "apps" / "billing" / "api.py").write_text(
-        'def service_name():\n    return "billing-v2"\n'
-    )
-    _git(project, "add", "apps/billing/api.py")
-    _commit(project, "change billing api")
-    return project
+    return _improve_monorepo(tmp_path, "improve_branch", branch_changes=("billing",))
 
 
 @pytest.fixture
 def improve_branch_two_services_target(tmp_path: Path) -> Path:
     """Improve monorepo whose feature branch changes billing AND catalog."""
-    project = tmp_path / "improve_branch_two"
-    for service in ("billing", "catalog"):
-        root = project / "apps" / service
-        root.mkdir(parents=True)
-        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
-        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
-    (project / "README.md").write_text("# Improve monorepo\n")
-    (project / "pyproject.toml").write_text(
-        "[project]\n"
-        'name = "improve-monorepo"\n'
-        "\n"
-        "[tool.daydream]\n"
-        'test-command = "uv run pytest"\n'
-        'scope-command = "git diff --exit-code"\n'
+    return _improve_monorepo(
+        tmp_path, "improve_branch_two", with_web=False, branch_changes=("billing", "catalog")
     )
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "initial")
-    _git(project, "checkout", "-b", "feature")
-    for service in ("billing", "catalog"):
-        (project / "apps" / service / "api.py").write_text(
-            f'def service_name():\n    return "{service}-v2"\n'
-        )
-    _git(project, "add", "apps/billing/api.py", "apps/catalog/api.py")
-    _commit(project, "change billing and catalog api")
-    return project
 
 
 @pytest.fixture

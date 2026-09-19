@@ -143,10 +143,6 @@ class Registry:
         except KeyError:
             raise UnresolvedExtensionError(f"renderer '{name}' is not registered; {_VALIDATE_HINT}") from None
 
-    def renderer_if_registered(self, name: str) -> Callable[..., str] | None:
-        """Return the named renderer, or None; never raises."""
-        return self._renderers.get(name)
-
     def renderer_names(self) -> tuple[str, ...]:
         """Return every registered renderer name in registration order."""
         return tuple(self._renderers)

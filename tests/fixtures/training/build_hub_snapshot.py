@@ -23,7 +23,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from daydream.archive.hydrate import RepoInfo
 from daydream.archive.hydrate_client import FakeHub
@@ -131,18 +131,24 @@ def _snapshot_manifest(session_id: str, repo_slug: str, skill: str, outcome_labe
     )
 
 
-def build_snapshot(*, hostile: bool = False) -> FakeHub:
-    """Materialize the pinned three-session snapshot as an in-memory FakeHub."""
+def _snapshot_files(
+    *,
+    trajectory_fn: Callable[[str], dict[str, object]] = _snapshot_trajectory,
+    manifest_hook: Callable[[dict[str, object]], None] | None = None,
+    hostile: bool = False,
+) -> dict[str, bytes]:
+    """Materialize the snapshot's file tree for :func:`build_snapshot` variants."""
     files: dict[str, bytes] = {}
     for session_id, session in zip(_SNAPSHOT_SESSION_IDS, FIXTURE_SESSIONS, strict=False):
         manifest = _snapshot_manifest(
             session_id, session.repo_slug, session.skill, session.outcome_labels
         )
-        files[f"{session_id}/manifest.json"] = json.dumps(
-            manifest.to_dict(), indent=2
-        ).encode()
+        data = manifest.to_dict()
+        if manifest_hook is not None:
+            manifest_hook(data)
+        files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
         files[f"{session_id}/trajectory.json"] = json.dumps(
-            _snapshot_trajectory(session_id), indent=2
+            trajectory_fn(session_id), indent=2
         ).encode()
     # Non-run metadata and derived outputs: hydration must ignore them.
     files["README.md"] = b"production trajectory archive\n"
@@ -163,8 +169,12 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
     if hostile:
         files["../../escape.txt"] = b"pwned"
         files["/etc/daydream-escape"] = b"pwned"
+    return files
 
-    hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
+
+def build_snapshot(*, hostile: bool = False) -> FakeHub:
+    """Materialize the pinned three-session snapshot as an in-memory FakeHub."""
+    hub = FakeHub(repo_id=REPO_ID, private=True, files=_snapshot_files(hostile=hostile))
     hub.commit_revision(SNAPSHOT_REVISION)
     return hub
 

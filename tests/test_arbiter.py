@@ -17,6 +17,8 @@ tagged two ways cannot masquerade as a contest.
 
 from __future__ import annotations
 
+import pytest
+
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 
 
@@ -115,7 +117,6 @@ def test_missing_severity_only_selectable_via_contested() -> None:
 
 
 def test_length_mismatch_raises() -> None:
-    import pytest
 
     with pytest.raises(ValueError):
         select_arbiter_targets([_rec("a.py", 1, "high")], ["python", "react"])
@@ -184,7 +185,6 @@ def test_suppression_default_exclude_is_empty() -> None:
 
 
 def test_suppression_length_mismatch_raises() -> None:
-    import pytest
 
     with pytest.raises(ValueError):
         select_suppression_targets([_rec("a.py", 1, "low")], ["python", "react"])
@@ -226,7 +226,6 @@ def test_select_suppression_targets_honors_confidence_classes_knob() -> None:
 
 
 def test_suppression_rejects_unknown_confidence_class() -> None:
-    import pytest
 
     records = [_rec_conf("a.py", 1, "low", "LOW")]
     with pytest.raises(ValueError):

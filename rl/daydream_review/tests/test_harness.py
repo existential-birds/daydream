@@ -9,12 +9,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
 import verifiers.v1 as vf
-from conftest import PROJECT_ROOT, FakeRuntime
+from conftest import PROJECT_ROOT, FakeRuntime, passed_gate_report
 from verifiers.v1.graph import MessageNode
 
 from daydream_review.backends import STRATEGIES
@@ -33,20 +32,15 @@ MODEL = "some-org/some-policy-model"
 def _task(fixture_manifest_path: Path) -> DaydreamReviewTask:
     # The load path refuses without a passed Stage-0 gate report (M4); tests
     # here exercise launch/sealing, not the gate, so hand them a passed one.
-    fd, gate_name = tempfile.mkstemp(suffix="-stage0-gate.json")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({"passed": True, "separation": 0.2, "evidence_digest": "test"}, fh)
-    try:
+    with passed_gate_report() as gate_path:
         taskset = DaydreamReviewTaskset(
             DaydreamReviewConfig(
                 id="daydream-review",
                 manifest_path=fixture_manifest_path,
-                gate_report_path=Path(gate_name),
+                gate_report_path=gate_path,
             )
         )
         return list(taskset.load())[0]
-    finally:
-        os.unlink(gate_name)
 
 
 def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:

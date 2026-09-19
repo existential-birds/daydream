@@ -7,8 +7,11 @@ The fixture repository itself lives in the package
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
@@ -82,6 +85,18 @@ _GATE_EVIDENCE: dict[str, Any] = {
     "calibration": 0.75,
     "accepted_ratio": 0.5,
 }
+
+
+@contextmanager
+def passed_gate_report() -> Iterator[Path]:
+    """Yield a minimal PASSED Stage-0 gate report path, removed on exit."""
+    fd, gate_name = tempfile.mkstemp(suffix="-stage0-gate.json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"passed": True, "separation": 0.2, "evidence_digest": "test"}, fh)
+    try:
+        yield Path(gate_name)
+    finally:
+        os.unlink(gate_name)
 
 
 @pytest.fixture
@@ -181,9 +196,6 @@ class FakeRuntime(vf.Runtime):
 
     async def read(self, path: str) -> bytes:
         return self.files[path]
-
-    async def _read(self, path: str) -> bytes:
-        return await self.read(path)
 
     async def write(self, path: str, data: bytes) -> None:
         self.writes[path] = data

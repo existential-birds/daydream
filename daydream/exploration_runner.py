@@ -241,7 +241,6 @@ async def pre_scan(
     except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
         pass
 
-    rel_paths = {m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)}
     if not static_files:
         # Static resolution failed outright; still seed specialists with the
         # changed files so they have a starting point. Reuse the rename-aware
@@ -251,7 +250,7 @@ async def pre_scan(
 
     static_context = ExplorationContext(affected_files=static_files)
 
-    tier = select_tier(len(rel_paths))
+    tier = select_tier(count_changed_files(diff_text))
 
     if tier == "skip":
         return static_context

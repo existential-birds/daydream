@@ -87,15 +87,7 @@ _RECORDS_FILENAME_SUFFIX = "-records.json"
 
 
 def mint_record_uid(stack_name: str, ordinal: int) -> str:
-    """Return the ``uid`` for the *ordinal*-th record of *stack_name*.
-
-    Args:
-        stack_name: Owning stack, e.g. ``python`` or ``structure``.
-        ordinal: 1-based position within that stack's record list.
-
-    Returns:
-        The ``uid`` string, e.g. ``python:1``.
-    """
+    """Return the ``uid`` for the *ordinal*-th record of *stack_name*, e.g. ``python:1``."""
     return f"{stack_name}{_UID_SEPARATOR}{ordinal}"
 
 
@@ -228,14 +220,7 @@ def stamp_item_uids(items: list[dict[str, Any]]) -> None:
 
 
 def mint_item_uid(ordinal: int) -> str:
-    """Return the durable identity for the *ordinal*-th merged item.
-
-    Args:
-        ordinal: 1-based position in the merged item list at mint time.
-
-    Returns:
-        The item uid, e.g. ``item:3``.
-    """
+    """Return the durable identity for the *ordinal*-th merged item, e.g. ``item:3``."""
     return f"item{_UID_SEPARATOR}{ordinal}"
 
 

@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -66,18 +65,18 @@ def _task(
 ) -> DaydreamReviewTask:
     # The load path refuses without a passed Stage-0 gate report (M4); tests
     # here exercise scoring, not the gate, so hand them a minimal passed one.
-    fd, gate_name = tempfile.mkstemp(suffix="-stage0-gate.json")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({"passed": True, "separation": 0.2, "evidence_digest": "test"}, fh)
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-                        manifest_path=fixture_manifest_path,
-            gate_report_path=Path(gate_name),
-            use_images=False,
+    from conftest import passed_gate_report
+
+    with passed_gate_report() as gate_path:
+        taskset = DaydreamReviewTaskset(
+            DaydreamReviewConfig(
+                id="daydream-review",
+                manifest_path=fixture_manifest_path,
+                gate_report_path=gate_path,
+                use_images=False,
+            )
         )
-    )
-    return next(task for task in taskset.load() if task.data.pr_number == pr_number)
+        return next(task for task in taskset.load() if task.data.pr_number == pr_number)
 
 
 def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> vf.Trace:
@@ -1664,51 +1663,36 @@ def test_candidate_diff_cmd_carries_hardening_flags() -> None:
     ]
 
 
-async def test_verify_checkout_external_diff_ignored(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
+@pytest.mark.parametrize("attack", ["external-diff", "textconv"])
+async def test_verify_checkout_repo_helper_ignored(
+    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path, attack: str,
 ) -> None:
-    """A repo-local diff.external that cannot run must not abort verifier-checkout."""
+    """A repo-local helper that cannot run must not abort verifier-checkout."""
     from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
-        check=True,
-    )
+    if attack == "external-diff":
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
+            check=True,
+        )
+    else:
+        # Repository-controlled attribute selecting a driver whose textconv cannot run.
+        (repo / ".gitattributes").write_text("*.py diff=evil\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", ".gitattributes"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "attr"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "diff.evil.textconv", "/nonexistent-textconv-tool"],
+            check=True,
+        )
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     verify_dir = tmp_path / "repo-verify"
     assert verify_dir.is_dir(), "the verify checkout must still be constructed"
     if os.geteuid() == 0:
         assert result == str(verify_dir), "construction must succeed on a root host"
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
-        "the candidate patch must reach repo-verify despite the repo diff.external"
-    )
-
-
-async def test_verify_checkout_textconv_ignored(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
-) -> None:
-    """An attribute-selected textconv that cannot run must not abort verifier-checkout."""
-    from daydream_review import taskset
-
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    # Repository-controlled attribute selecting a driver whose textconv cannot run.
-    (repo / ".gitattributes").write_text("*.py diff=evil\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", ".gitattributes"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "attr"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "diff.evil.textconv", "/nonexistent-textconv-tool"],
-        check=True,
-    )
-    result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
-    verify_dir = tmp_path / "repo-verify"
-    assert verify_dir.is_dir(), "the verify checkout must still be constructed"
-    if os.geteuid() == 0:
-        assert result == str(verify_dir), "construction must succeed on a root host"
-    assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
-        "the repo patch must still be applied despite the attribute-selected diff.evil"
+        "the candidate patch must reach repo-verify despite the repo helper"
     )
 
 
@@ -1744,15 +1728,11 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
 
 # There is deliberately no real-path "trusted diff.external" attack test for
 # the --quiet oracle probes: on the pinned git (2.43.0) ``git diff --quiet``
-# never invokes diff.external or textconv, so the exit-code forgery such a
-# test would stage cannot fire and the test would pass identically with or
-# without the hardening flags -- vacuous either way. The flags' presence on
-# both probes is pinned by the argv-contract tests above
-# (test_fixes_applied_quiet_probe_carries_hardening_flags and
-# test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags);
-# the genuine repo-configurable-helper surface is the non-quiet candidate-diff
-# path, covered by test_verify_checkout_external_diff_ignored and
-# test_verify_checkout_textconv_ignored.
+# never invokes diff.external or textconv, so the forgery it would stage cannot
+# fire and the test would be vacuous. The flags' presence on both probes is
+# pinned by the argv-contract tests below; the genuine repo-configurable-helper
+# surface is the non-quiet candidate path, covered by
+# test_verify_checkout_repo_helper_ignored.
 
 
 # --- oracle / candidate-diff working-tree equivalence (issue #725 pin) ---
