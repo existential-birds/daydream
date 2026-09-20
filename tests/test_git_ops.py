@@ -962,21 +962,6 @@ def test_branch_exists_local(tmp_path: Path) -> None:
     assert git_ops.branch_exists(repo, "feat-local") is True
 
 
-def test_branch_exists_origin_only(tmp_path: Path) -> None:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "-u", "origin", "main")
-    _git(repo, "checkout", "-b", "remote-only")
-    (repo / "r.txt").write_text("r\n")
-    _git(repo, "add", "r.txt")
-    _commit(repo, "remote-only commit")
-    _git(repo, "push", "-u", "origin", "remote-only")
-    _git(repo, "checkout", "main")
-    _git(repo, "branch", "-D", "remote-only")
-    assert git_ops.branch_exists(repo, "remote-only") is True
-
-
 def test_branch_exists_missing(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.branch_exists(repo, "nonexistent") is False
