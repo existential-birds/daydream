@@ -19,12 +19,6 @@ def test_every_registered_model_bearing_stage_has_strategy_and_classification() 
         assert stage in rp._ENVELOPE_BY_STAGE, f"stage {stage} has no host-envelope classification"
 
 
-def test_classification_is_strategy_plus_host_envelope() -> None:
-    default = rp.build_default_profile()
-    for key in rp.STAGE_KEYS:
-        assert default.strategies[key].source and rp._ENVELOPE_BY_STAGE[key]
-
-
 def test_audit_stages_track_production_playbook() -> None:
     # The guard must not be purely self-referential: every audit category in the
     # production playbook (daydream.improve.prompts) is itself a model-bearing

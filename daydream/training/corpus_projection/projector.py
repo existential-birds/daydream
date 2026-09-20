@@ -145,20 +145,12 @@ class BuildFrozenCorpusConfig:
     val_rate: float = 0.1
     salt: str = "daydream-projection-salt"
     caps: dict[str, int] = field(default_factory=dict)
-    # Output-share caps (issue #1079): true share of the final emitted
-    # population, enforced per dimension over the post-tier-cap population.
     max_stack_share: float | None = None
     max_repo_share: float | None = None
     max_profile_share: float | None = None
     labeler_policy_version: str = "1"
     reply_classifier_version: str = "1"
     rubric_schema_version: str = "per-finding-resolutions-v1"
-    # Required: a build without a pinned license policy is a config error
-    # (raised as ValueError naming the field, mirroring annotation_bundle_dir)
-    # — declared optional so that misconfiguration, not a missing kwarg, is
-    # what callers see. The per-repo license decision is resolved from this
-    # policy against each batch's recorded identity + evidence; there is no
-    # global license string to stamp (C5/C8, issue #1080).
     license_policy_path: Path | None = None
     allow_copyleft: frozenset[str] = frozenset()
     # D8 opt-in (issue #1081): when False (default), non-decisive findings
@@ -691,13 +683,6 @@ def _apply_share_caps(
                         population=entry_total,
                         value=value,
                     )
-    # Fixed-point loop (issue #1079, F1): a later dimension's trimming can
-    # remove records of one value and push an earlier dimension's value back
-    # over its limit, so a single sequential pass does not guarantee the M4
-    # contract. Re-run the full dimension sequence until a complete pass
-    # excludes nothing — each pass that excludes reduces the population, so
-    # the loop provably terminates, and every configured dimension is then
-    # within its limit of the final emitted population.
     while True:
         pass_exclusions = 0
         for dimension, flag, getter, limit in dimensions:
@@ -1121,14 +1106,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             kept.append(rec)
         records = kept
 
-    # Output-share caps (issue #1079): true share of the final emitted
-    # population, enforced per dimension (stack → repo → profile) over
-    # the post-tier-cap population. The dimension sequence is re-run to a
-    # fixed point so a later pass can never leave an earlier dimension back
-    # over its cap (F1: a single sequential pass drifts on correlated
-    # dimensions). Only runs when at least one share is configured, so
-    # tier-cap-only builds stay byte-identical and neither the summary nor
-    # lineage gains a ``share_caps`` block.
     share_caps_report: dict[str, Any] | None = None
     if (
         config.max_stack_share is not None

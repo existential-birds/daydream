@@ -340,15 +340,6 @@ def _pi_error_category(message: str) -> str:
 
 
 def parse_pi_retry_hint(message: str) -> float | None:
-    """Extract a numeric-seconds ``retry-after`` hint from *message*.
-
-    Thin alias for :func:`daydream.retry_policy.parse_message_retry_hint`, the
-    single implementation shared by the agent retry branch and every backend: a
-    second copy of the pattern would have to be kept in sync or the two views of
-    the hint would drift. Returns ``None`` for an absent, non-numeric, negative,
-    or non-finite hint; an unparseable hint degrades to jitter rather than to a
-    fabricated delay.
-    """
     return parse_message_retry_hint(message)
 
 

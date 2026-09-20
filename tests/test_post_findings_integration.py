@@ -181,20 +181,21 @@ def _write_artifact(
     return path
 
 
-def _flowchart_payload() -> dict[str, Any]:
-    def grounded(element: str, ref: str, final_index: int) -> dict[str, Any]:
-        return {
-            "element": element,
-            "ref": ref,
-            "grounded": True,
-            "reason": None,
-            "strength": "definition",
-            "snapped_line": None,
-            "in_changed_hunk": True,
-            "defined_at": "a.py:1",
-            "final_index": final_index,
-        }
+def _grounded_element(element: str, ref: str, final_index: int) -> dict[str, Any]:
+    return {
+        "element": element,
+        "ref": ref,
+        "grounded": True,
+        "reason": None,
+        "strength": "definition",
+        "snapped_line": None,
+        "in_changed_hunk": True,
+        "defined_at": "a.py:1",
+        "final_index": final_index,
+    }
 
+
+def _flowchart_payload() -> dict[str, Any]:
     return {
         "results": {
             "flowchart": {
@@ -229,10 +230,10 @@ def _flowchart_payload() -> dict[str, Any]:
                 },
                 "grounding": {
                     "elements": [
-                        grounded("root", "run", 0),
-                        grounded("node", "start", 0),
-                        grounded("node", "end", 1),
-                        grounded("edge", "start->end", 0),
+                        _grounded_element("root", "run", 0),
+                        _grounded_element("node", "start", 0),
+                        _grounded_element("node", "end", 1),
+                        _grounded_element("edge", "start->end", 0),
                     ],
                     "summary": {
                         "proposed": 4,
@@ -249,19 +250,6 @@ def _flowchart_payload() -> dict[str, Any]:
 
 
 def _sequence_payload() -> dict[str, Any]:
-    def grounded(element: str, ref: str, final_index: int) -> dict[str, Any]:
-        return {
-            "element": element,
-            "ref": ref,
-            "grounded": True,
-            "reason": None,
-            "strength": "definition",
-            "snapped_line": None,
-            "in_changed_hunk": True,
-            "defined_at": "a.py:1",
-            "final_index": final_index,
-        }
-
     return {
         "results": {
             "sequence": {
@@ -336,13 +324,13 @@ def _sequence_payload() -> dict[str, Any]:
                 },
                 "grounding": {
                     "elements": [
-                        grounded("participant", "api", 0),
-                        grounded("participant", "worker", 1),
-                        grounded("message", "0", 0),
-                        grounded("message", "1", 1),
-                        grounded("message", "2", 2),
-                        grounded("block", "b0", 0),
-                        grounded("branch", "b0.0", 0),
+                        _grounded_element("participant", "api", 0),
+                        _grounded_element("participant", "worker", 1),
+                        _grounded_element("message", "0", 0),
+                        _grounded_element("message", "1", 1),
+                        _grounded_element("message", "2", 2),
+                        _grounded_element("block", "b0", 0),
+                        _grounded_element("branch", "b0.0", 0),
                     ],
                     "summary": {
                         "proposed": 7,

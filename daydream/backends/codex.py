@@ -102,11 +102,7 @@ _GIT_REDIRECT_STRIP_VARS = (
     "GIT_PREFIX",
 )
 
-# Darwin real-git resolution (issue #1122): the sandboxed read-only child that
-# runs inside the macOS Seatbelt sandbox cannot shell out to ``xcrun`` itself,
-# so the parent resolves the real git binary's directory once per process and
-# prepends it to the child PATH (see ``_isolated_child_env``). Cached
-# at-most-once per process, including negative resolution results.
+# Cached at-most-once per process, including negative resolution results.
 _REAL_GIT_DIR: str | None = None
 _REAL_GIT_RESOLVED = False
 # ``execute()`` builds the child env through ``asyncio.to_thread``, so a fan-out
@@ -227,11 +223,7 @@ def _isolated_child_env(
     )
     for var in _GIT_REDIRECT_STRIP_VARS:
         child_env.pop(var, None)
-    # Issue #1122: on macOS the default ``git`` on PATH is an xcrun shim that
-    # sprays diagnostic noise when invoked inside the Seatbelt sandbox. An
-    # explicit execution environment gets an uncached probe with that exact
-    # mapping; ordinary callers retain the ambient process cache. Fail-open:
-    # when resolution fails, PATH is unchanged.
+    # Explicit environments probe uncached; ordinary callers use the cache.
     if sys.platform == "darwin":
         real_git_dir = (
             _probe_real_git_dir(child_env)
@@ -844,16 +836,9 @@ class CodexBackend:
             if continuation is not None and continuation.backend == "codex":
                 args.extend(["resume", continuation.data["thread_id"]])
 
-            # When running in the disposable clone, the child must not inherit a
-            # path to the caller's repo: _isolated_child_env strips $PWD/$OLDPWD
-            # and the GIT_* overrides that could redirect the clone's git ops back
-            # at the source, and the child is started in the clone (below) so its
-            # own cwd is never the source path. Path-hiding, not physical. On
-            # macOS, the same isolated env also prepends the real git dir to the
-            # child PATH so sandboxed git calls bypass the xcrun shim (#1122).
             # Built off the event loop (asyncio.to_thread, like the sibling git
-            # calls above): the env copy and the bounded xcrun resolution must
-            # never stall concurrent fan-out execute() calls.
+            # calls above), so the env copy and bounded xcrun probe never stall
+            # concurrent fan-out execute() calls.
             base_environment = (
                 self._execution_input.child_environment()
                 if self._execution_input is not None
