@@ -33,6 +33,23 @@ def _budget(
     )
 
 
+def _blocking_auth(
+    loop: asyncio.AbstractEventLoop,
+    started: asyncio.Event,
+    release: threading.Event,
+    finished: threading.Event,
+) -> Any:
+    class BlockingAuth:
+        def environment_for_request(self) -> None:
+            loop.call_soon_threadsafe(started.set)
+            try:
+                release.wait(timeout=2)
+            finally:
+                finished.set()
+
+    return BlockingAuth
+
+
 def _page_endpoint(endpoint: str, page: int, *, per_page: int = 100) -> str:
     separator = "&" if "?" in endpoint else "?"
     return f"{endpoint}{separator}per_page={per_page}&page={page}"
@@ -234,14 +251,7 @@ async def test_blocked_auth_resolution_keeps_loop_responsive_and_is_cancellable(
     finished = threading.Event()
     spawn_calls = 0
 
-    class BlockingAuth:
-        def environment_for_request(self) -> None:
-            loop.call_soon_threadsafe(started.set)
-            try:
-                release.wait(timeout=2)
-            finally:
-                finished.set()
-
+    BlockingAuth = _blocking_auth(loop, started, release, finished)
     async def create_process(*_args: Any, **_kwargs: Any) -> Any:
         nonlocal spawn_calls
         spawn_calls += 1
@@ -285,14 +295,7 @@ async def test_auth_resolution_timeout_never_spawns_and_redacts_details(
     finished = threading.Event()
     spawn_calls = 0
 
-    class BlockingAuth:
-        def environment_for_request(self) -> None:
-            loop.call_soon_threadsafe(started.set)
-            try:
-                release.wait(timeout=2)
-            finally:
-                finished.set()
-
+    BlockingAuth = _blocking_auth(loop, started, release, finished)
     async def create_process(*_args: Any, **_kwargs: Any) -> Any:
         nonlocal spawn_calls
         spawn_calls += 1

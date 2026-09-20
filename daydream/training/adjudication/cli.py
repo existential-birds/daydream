@@ -300,7 +300,6 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                            help="Preview manifest pinning the snapshot")
     p_publish.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
                            help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
-    p_publish.add_argument("--batch-complete", action="store_true", help=argparse.SUPPRESS)
 
     p_resume = sub.add_parser(
         "resume-state",

@@ -33,6 +33,14 @@ def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     block_real_gh(monkeypatch)
 
 
+def _spy_run(captured: Any, stdout: str = "") -> Any:
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
+
+    return spy_run
+
+
 def test_static_auth_copies_environment_and_returns_fresh_mappings() -> None:
     source = {"PATH": "/tools", "GH_TOKEN": "ghs_static_token_1234567890"}
 
@@ -52,12 +60,9 @@ def test_static_auth_copies_environment_and_returns_fresh_mappings() -> None:
 def test_run_gh_passes_exact_static_environment_without_ambient_merge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = {}
+    captured: dict[str, Any] = {}
 
-    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
-
+    spy_run = _spy_run(captured)
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_ambient_secret_1234567890")
     auth = git_ops.StaticGitHubAuth(
         {"GH_TOKEN": "ghs_explicit_token_1234567890", "PATH": "/usr/bin"}
@@ -100,12 +105,9 @@ def test_refreshing_auth_serializes_refresh_across_callers() -> None:
 
 
 def test_run_gh_passes_none_for_inherited_auth() -> None:
-    captured = {}
+    captured: dict[str, Any] = {}
 
-    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
-
+    spy_run = _spy_run(captured)
     with patch("subprocess.run", side_effect=spy_run):
         git_ops._run_gh(
             Path("/tmp"), ["version"], auth=git_ops.INHERIT_GITHUB_AUTH
@@ -470,7 +472,7 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
     minted = 0
-    captured = {}
+    captured: dict[str, Any] = {}
 
     def fake_gh_api(repo: Any, endpoint: str, **kwargs: Any) -> Any:
         nonlocal minted
@@ -482,10 +484,7 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(
             return {"token": "ghs_expired", "expires_at": "1970-01-01T00:00:00Z"}
         return {"token": "ghs_fresh", "expires_at": "9999-01-01T00:00:00Z"}
 
-    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout="{}", stderr="")
-
+    spy_run = _spy_run(captured, "{}")
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
         session = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=True)
 
@@ -658,7 +657,7 @@ def test_get_app_metadata_uses_bearer_jwt_and_explicit_auth() -> None:
 
 def test_get_app_metadata_does_not_mutate_refreshing_installation_auth() -> None:
     """A separate App JWT call leaves the installation session refreshable."""
-    captured = {}
+    captured: dict[str, Any] = {}
     refresh_calls = 0
 
     def refresh() -> tuple[Any, float]:
@@ -671,10 +670,7 @@ def test_get_app_metadata_does_not_mutate_refreshing_installation_auth() -> None
             float("inf"),
         )
 
-    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
-
+    spy_run = _spy_run(captured)
     installation_auth = git_ops.RefreshingGitHubAuth(
         git_ops.StaticGitHubAuth(
             {"PATH": "/tools", "GH_TOKEN": "ghs_expired_token_1234567890"}

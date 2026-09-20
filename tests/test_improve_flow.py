@@ -49,6 +49,7 @@ from daydream.runner import RunConfig, run
 from daydream.services import Service, enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_test_command_anchor
+from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
     bare_remote,
@@ -1018,24 +1019,6 @@ def _untracked(repo: Path) -> list[str]:
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-
-
-def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
-    values: list[str] = []
-    for trajectory_file in list(run_root.rglob("*.json")) + (
-        [traj] if traj.exists() else []
-    ):
-        try:
-            payload = json.loads(trajectory_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for step in payload.get("steps", []):
-            value = (step.get("extra") or {}).get(key)
-            if value:
-                values.append(value)
-    return values
 
 
 def _root_run_trajectory(repo: Path) -> dict[str, Any]:

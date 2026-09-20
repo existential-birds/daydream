@@ -111,8 +111,7 @@ def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
     )
 
 
-def _load_pin(materialize_dir: Path) -> dict[str, Any]:
-    manifest_path = materialize_dir / _MANIFEST_FILENAME
+def _read_manifest(manifest_path: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise FileNotFoundError(
             f"preview manifest not found (run `corpus adjudicate materialize` first): "
@@ -122,6 +121,12 @@ def _load_pin(materialize_dir: Path) -> dict[str, Any]:
         pin: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"unreadable preview manifest at {manifest_path}: {exc}") from exc
+    return pin
+
+
+def _load_pin(materialize_dir: Path) -> dict[str, Any]:
+    manifest_path = materialize_dir / _MANIFEST_FILENAME
+    pin = _read_manifest(manifest_path)
     labeler_version = pin.get("labeler_version")
     if not isinstance(labeler_version, str) or not labeler_version:
         raise ValueError(f"preview manifest at {manifest_path} is missing 'labeler_version'")

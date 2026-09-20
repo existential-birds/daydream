@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import socket
 import threading
 import time
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
@@ -809,9 +811,6 @@ def test_replay_gate_fixture_hash_mismatch_fails_before_send(
     bad_fixture.write_bytes(REPLAY_FIXTURE.read_bytes() + b'{"type":"extra"}\n')
     fk = _fake_pi_script(tmp_path)
     repo = _public_fixture_repo(tmp_path)
-    import io
-    from contextlib import redirect_stdout
-
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         exit_code = _replay.run_replay(
@@ -834,9 +833,6 @@ def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
     receipt_path = tmp_path / "receipt.json"
     fk = _fake_pi_script(tmp_path)
     repo = _public_fixture_repo(tmp_path, origin="https://github.com/private-org/private-repo.git")
-    import io
-    from contextlib import redirect_stdout
-
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         exit_code = _replay.run_replay(
@@ -877,9 +873,6 @@ def test_replay_gate_real_pi_or_wrong_output_fails(
     real_like = tmp_path / "real-pi"
     real_like.write_text("#!/bin/sh\necho 'pi: this is real output'\n", encoding="utf-8")
     real_like.chmod(0o755)
-    import io
-    from contextlib import redirect_stdout
-
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         exit_code = _replay.run_replay(
@@ -903,9 +896,6 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, mo
     receipt_path = tmp_path / "receipt.json"
     fk = _fake_pi_script(tmp_path)
     repo = _public_fixture_repo(tmp_path)
-    import io
-    from contextlib import redirect_stdout
-
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         exit_code = _replay.run_replay(
@@ -943,9 +933,6 @@ def test_replay_fake_pi_marker_requirement(
     receipt_path = tmp_path / "receipt.json"
     repo = _public_fixture_repo(tmp_path)
     fk = _fake_pi_script(tmp_path, marker=marker)
-    import io
-    from contextlib import redirect_stdout
-
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         exit_code = _replay.run_replay(

@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
@@ -24,11 +24,7 @@ from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
-from daydream.training.labeler_signals import (
-    PerFindingDisposition,
-    PerFindingResolution,
-    resolution_from_dict,
-)
+from daydream.training.labeler_signals import resolution_from_dict
 
 __all__ = ["run_materialize"]
 
@@ -354,43 +350,6 @@ def _labels_claim_decisive(labels: Any) -> bool:
     return False
 
 
-def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:
-    """Rebuild the #980 semantic-resolution object from a stored resolution entry.
-
-    Delegates to the canonical ``labeler_signals.resolution_from_dict``;
-    fail-closed: a stored entry missing a required field raises ``ValueError``
-    naming the field and fingerprint — never ``None``-coerced into a record.
-    """
-    fingerprint = row.get("fingerprint")
-    disposition = row.get("disposition")
-    evidence_digest = row.get("evidence_digest")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise ValueError(f"materialize: stored resolution is missing 'fingerprint': {row!r}")
-    if not isinstance(disposition, str) or not disposition:
-        raise ValueError(
-            f"materialize: resolution for fingerprint {fingerprint!r} is missing 'disposition'"
-        )
-    if not isinstance(evidence_digest, str) or not evidence_digest:
-        raise ValueError(
-            f"materialize: resolution for fingerprint {fingerprint!r} is missing 'evidence_digest'"
-        )
-    if disposition not in get_args(PerFindingDisposition):
-        raise ValueError(
-            f"materialize: resolution for fingerprint {fingerprint!r} has unknown "
-            f"disposition {disposition!r}"
-        )
-    typed_disposition = cast(PerFindingDisposition, disposition)
-    return resolution_from_dict(
-        {
-            "fingerprint": fingerprint,
-            "comment_id": row.get("comment_id"),
-            "disposition": typed_disposition,
-            "evidence": list(row.get("evidence") or []),
-            "evidence_digest": evidence_digest,
-        }
-    )
-
-
 def run_materialize(
     index_root: Path,
     out_dir: Path,
@@ -435,7 +394,7 @@ def run_materialize(
         for row in resolutions:
             if not isinstance(row, dict):
                 raise ValueError(f"materialize: non-object resolution row in session data: {row!r}")
-            resolution = _resolution_from_row(row)
+            resolution = resolution_from_dict(row)
             record = build_canonical_record(
                 session,
                 resolution,
