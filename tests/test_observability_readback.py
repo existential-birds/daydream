@@ -361,72 +361,50 @@ def test_honeyhive_paginates_until_count_satisfied(
     assert len([r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]) == 6
 
 
-def test_honeyhive_rejects_duplicate_event_ids(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("body_builder", "disposition"),
+    [
+        (
+            lambda sid: json.dumps(
+                {"events": [_hh_event("dup", sid), _hh_event("dup", sid)], "count": 2}
+            ).encode(),
+            _verifier.DISPOSITION_DUPLICATE,
+        ),
+        (
+            lambda sid: json.dumps({"events": [_hh_event("e1", "not-the-session")], "count": 1}).encode(),
+            _verifier.DISPOSITION_WRONG_SESSION,
+        ),
+        (lambda sid: b'{"events": [', _verifier.DISPOSITION_MALFORMED),
+        (
+            lambda sid: json.dumps(
+                {
+                    "events": [{"id": "e1", "session_id": "x", "blob": "z" * (5 * 1024 * 1024)}],
+                    "count": 1,
+                }
+            ).encode(),
+            _verifier.DISPOSITION_OVERSIZED,
+        ),
+    ],
+)
+def test_honeyhive_rejects_invalid_readbacks(
+    tmp_path: Path,
+    fake_vendor: FakeVendorServer,
+    monkeypatch: pytest.MonkeyPatch,
+    body_builder: Callable[[str], bytes],
+    disposition: str,
 ) -> None:
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
     session_id = json.loads(receipt.read_text())["session_id"]
 
     def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        events = [_hh_event("dup", session_id), _hh_event("dup", session_id)]
-        return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 2}).encode()
+        return 200, {"Content-Type": "application/json"}, body_builder(session_id)
 
     fake_vendor.respond("POST", "/v1/events/search", search)
     _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
     result_path = tmp_path / "result.json"
     assert _run_verify(receipt, result_path) != 0
     result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_DUPLICATE
-
-
-def test_honeyhive_rejects_wrong_session_rows(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        events = [_hh_event("e1", "not-the-session")]
-        return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 1}).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_WRONG_SESSION
-
-
-def test_honeyhive_rejects_malformed_json(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, b'{"events": ['
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_MALFORMED
-
-
-def test_honeyhive_rejects_oversized_response(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        big = {"events": [{"id": "e1", "session_id": "x", "blob": "z" * (5 * 1024 * 1024)}], "count": 1}
-        return 200, {"Content-Type": "application/json"}, json.dumps(big).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_OVERSIZED
+    assert result["terminal"] == disposition
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])

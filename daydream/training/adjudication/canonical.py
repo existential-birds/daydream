@@ -41,6 +41,7 @@ from daydream.training.adjudication.materialize import (
 from daydream.training.adjudication.observations import load_observations
 from daydream.training.adjudication.precedence import (
     DECISIVE_DISPOSITIONS,
+    HUMAN_ROLES,
     effective_adjudication,
 )
 from daydream.training.adjudication.queue import build_queue
@@ -51,8 +52,6 @@ __all__ = ["AnnotationDriftError", "run_canonical_harvest"]
 
 _ANNOTATIONS_FILENAME = "annotations.jsonl"
 _MANIFEST_FILENAME = "preview-manifest.json"
-
-_HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
 
 def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:
@@ -249,7 +248,7 @@ def run_canonical_harvest(
         if record_id in grouped:
             resolved = effective_adjudication(grouped[record_id])
             if (
-                resolved["role"] in _HUMAN_ROLES
+                resolved["role"] in HUMAN_ROLES
                 and resolved["evidence_digest"] == str(record["evidence_digest"])
                 and resolved["disposition"] in DECISIVE_DISPOSITIONS
             ):

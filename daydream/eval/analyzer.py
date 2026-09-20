@@ -318,21 +318,6 @@ def _option_info(
     return 1, False
 
 
-def _rg_option_info(tok: str) -> tuple[int, bool]:
-    """How many tokens an ``rg`` option occupies, and whether it supplies the pattern."""
-    return _option_info(tok, _RG_LONG_VALUE_OPTS, _RG_SHORT_VALUE_OPTS)
-
-
-def _grep_option_info(tok: str) -> tuple[int, bool]:
-    """How many tokens a ``grep`` option occupies, and whether it supplies the pattern.
-
-    Uses grep's own value sets (``--context``/``--before-context``/``--max-count``/…
-    long; ``-e``/``-f``/``-A``/``-B``/``-C`` short) so only grep's value-taking
-    options consume a following token.
-    """
-    return _option_info(tok, _GREP_LONG_VALUE_OPTS, _GREP_SHORT_VALUE_OPTS)
-
-
 def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
     """File-path operands of one command segment for a given read verb.
 
@@ -363,13 +348,17 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
         # whose consumed tokens + pattern-supplying status come from the verb's
         # own option table, and the first remaining positional is the pattern.
         if verb in ("rg", "grep"):
-            option_info = _rg_option_info if verb == "rg" else _grep_option_info
+            long_opts, short_opts = (
+                (_RG_LONG_VALUE_OPTS, _RG_SHORT_VALUE_OPTS)
+                if verb == "rg"
+                else (_GREP_LONG_VALUE_OPTS, _GREP_SHORT_VALUE_OPTS)
+            )
             if tok == "--":
                 after_ddash = True
                 i += 1
                 continue
             if not after_ddash and tok.startswith("-") and tok != "-":
-                skip, supplies_pattern = option_info(tok)
+                skip, supplies_pattern = _option_info(tok, long_opts, short_opts)
                 i += skip
                 if supplies_pattern:
                     seen_pattern = True
@@ -768,6 +757,11 @@ def _records_issues(records: Any) -> list[Any] | None:
     return records if isinstance(records, list) else None
 
 
+def _iter_stack_records(deep_dir: Path) -> Iterator[tuple[str, list[Any]]]:
+    for f in sorted(deep_dir.glob("stack-*-records.json")):
+        yield f.stem.replace("stack-", "").replace("-records", ""), _records_issues_or_empty(json.loads(f.read_text()))
+
+
 def _records_issues_or_empty(records: Any) -> list[Any]:
     """Normalize a loaded per-stack records file to a bare issues list.
 
@@ -806,9 +800,7 @@ def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
             alternatives = None
         if isinstance(alternatives, list):
             per_lens["wonder"] = len(alternatives)
-    for f in sorted(deep_dir.glob("stack-*-records.json")):
-        stack_name = f.stem.replace("stack-", "").replace("-records", "")
-        records = _records_issues_or_empty(json.loads(f.read_text()))
+    for stack_name, records in _iter_stack_records(deep_dir):
         if stack_name == "uncovered":
             per_lens["uncovered"] += len(records)
         elif stack_name == "structure":
@@ -923,9 +915,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
     per_lens = _bucketed_lens_counts(deep_dir)
 
-    for f in sorted(deep_dir.glob("stack-*-records.json")):
-        stack_name = f.stem.replace("stack-", "").replace("-records", "")
-        records = _records_issues_or_empty(json.loads(f.read_text()))
+    for stack_name, records in _iter_stack_records(deep_dir):
         stacks.append({"name": stack_name, "finding_count": len(records)})
         for r in records:
             r["_stack"] = stack_name
@@ -2118,14 +2108,7 @@ def _empty_guard_variable(if_node: Any) -> str | None:
                 zero = child
         if call is None or zero is None or zero.text.decode().strip() != "0":
             return None
-        fn = call.child_by_field_name("function")
-        args = call.child_by_field_name("arguments")
-        if fn is None or fn.type != "identifier" or fn.text.decode() != "len" or args is None:
-            return None
-        arg_ids = [child for child in args.children if child.type == "identifier"]
-        if len(arg_ids) != 1:
-            return None
-        return str(arg_ids[0].text.decode())
+        return _len_call_argument(call)
     return None
 
 
@@ -2408,35 +2391,47 @@ def _nested_ladder_lines(root: Any) -> set[int]:
     return flagged
 
 
-def _clone_flagged_lines(lines: list[str]) -> set[int]:
+def _repeated_block_rows(
+    stripped: dict[Path, list[str]],
+    *,
+    require_distinct_sources: bool,
+) -> dict[Path, set[int]]:
     """Line rows in ≥2 occurrences of an identical contiguous block (3..20 lines).
 
     Lines are normalized by stripping; blocks containing blank lines are
-    skipped so whitespace runs are never counted as clones.
+    skipped so whitespace runs are never counted as clones. When
+    *require_distinct_sources* is set, a block counts only if it appears in
+    ≥2 distinct paths; otherwise any ≥2 occurrences qualify.
     """
-    stripped = [line.strip() for line in lines]
-    n = len(stripped)
-    flagged: set[int] = set()
+    flagged: dict[Path, set[int]] = {path: set() for path in stripped}
     for length in range(_MIN_CLONE_BLOCK, _MAX_CLONE_BLOCK + 1):
-        if length > n:
-            break
-        by_first: dict[str, list[int]] = {}
-        for i in range(n - length + 1):
-            if any(not stripped[j] for j in range(i, i + length)):
+        by_first: dict[str, list[tuple[Path, int]]] = {}
+        for path, lines in stripped.items():
+            n = len(lines)
+            if length > n:
                 continue
-            by_first.setdefault(stripped[i], []).append(i)
-        for starts in by_first.values():
-            if len(starts) < 2:
-                continue
-            by_block: dict[tuple[str, ...], list[int]] = {}
-            for i in starts:
-                by_block.setdefault(tuple(stripped[i : i + length]), []).append(i)
-            for occurrences in by_block.values():
-                if len(occurrences) < 2:
+            for i in range(n - length + 1):
+                if any(not lines[j] for j in range(i, i + length)):
                     continue
-                for i in occurrences:
-                    flagged.update(range(i, i + length))
+                by_first.setdefault(lines[i], []).append((path, i))
+        for starts in by_first.values():
+            by_block: dict[tuple[str, ...], list[tuple[Path, int]]] = {}
+            for path, i in starts:
+                by_block.setdefault(tuple(stripped[path][i : i + length]), []).append((path, i))
+            for occurrences in by_block.values():
+                if require_distinct_sources:
+                    if len({path for path, _ in occurrences}) < 2:
+                        continue
+                elif len(occurrences) < 2:
+                    continue
+                for path, i in occurrences:
+                    flagged[path].update(range(i, i + length))
     return flagged
+
+
+def _clone_flagged_lines(lines: list[str]) -> set[int]:
+    """Line rows in ≥2 occurrences of an identical contiguous block (3..20 lines)."""
+    return _repeated_block_rows({Path(): [line.strip() for line in lines]}, require_distinct_sources=False)[Path()]
 
 
 def _cross_file_clone_flagged_lines(
@@ -2460,33 +2455,14 @@ def _cross_file_clone_flagged_lines(
     returned dict still keys every indexed path (empty sets for non-flagged).
     ``None`` keeps the flag-every-file behavior.
     """
-    stripped_lines = {path: [line.strip() for line in lines] for path, lines in file_lines}
-    flagged: dict[Path, set[int]] = {path: set() for path in stripped_lines}
-    target_set = target_paths if target_paths is not None else set(stripped_lines)
-
-    for length in range(_MIN_CLONE_BLOCK, _MAX_CLONE_BLOCK + 1):
-        by_first: dict[str, list[tuple[Path, int]]] = {}
-        for path, stripped in stripped_lines.items():
-            n = len(stripped)
-            if length > n:
-                continue
-            for i in range(n - length + 1):
-                if any(not stripped[j] for j in range(i, i + length)):
-                    continue
-                by_first.setdefault(stripped[i], []).append((path, i))
-        for starts in by_first.values():
-            if len({path for path, _ in starts}) < 2:
-                continue
-            by_block: dict[tuple[str, ...], list[tuple[Path, int]]] = {}
-            for path, i in starts:
-                by_block.setdefault(tuple(stripped_lines[path][i : i + length]), []).append((path, i))
-            for occurrences in by_block.values():
-                if len({path for path, _ in occurrences}) < 2:
-                    continue
-                for path, i in occurrences:
-                    if path not in target_set:
-                        continue
-                    flagged[path].update(range(i, i + length))
+    flagged = _repeated_block_rows(
+        {path: [line.strip() for line in lines] for path, lines in file_lines},
+        require_distinct_sources=True,
+    )
+    target_set = target_paths if target_paths is not None else set(flagged)
+    for path in flagged:
+        if path not in target_set:
+            flagged[path].clear()
     return flagged
 
 

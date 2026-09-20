@@ -37,6 +37,16 @@ class TestApplyShareCaps:
         assert [r["record_id"] for r in kept if r["stack"] == "rust"] == ["r900"]
         assert exclusions == {"stack:python": 9}
 
+    def test_uniform_corpus_at_cap_keeps_everything(self) -> None:
+        from daydream.training.corpus_projection.projector import _apply_share_caps
+
+        records = [_mk_record(f"r{i:03d}", "python" if i < 4 else "rust", "owner/repo", "deep") for i in range(10)]
+        kept, exclusions = _apply_share_caps(
+            records, max_stack_share=0.6, max_repo_share=None, max_profile_share=None
+        )
+        assert len(kept) == 10
+        assert exclusions == {}
+
     def test_final_shares_respect_limits_after_sequential_passes(self) -> None:
         from daydream.training.corpus_projection.projector import _apply_share_caps
 

@@ -84,11 +84,6 @@ _VERDICT_DIAGNOSTIC = {
 _logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------
-# Delivery outcome ledger
-# --------------------------------------------------------------------------
-
-
 @dataclass
 class DeliverySnapshot:
     """Per-destination observable delivery outcomes."""
@@ -137,11 +132,6 @@ class DeliveryLedger:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return self._snapshot.as_dict()
-
-
-# --------------------------------------------------------------------------
-# Wire codec: pinned encoder + bounded fidelity repair
-# --------------------------------------------------------------------------
 
 
 def encode_batch(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
@@ -194,11 +184,6 @@ def _repair_link(wire_link: Any, source_link: Any) -> None:
     state = source_link.context.trace_state
     if state is not None:
         wire_link.trace_state = ",".join(f"{key}={value}" for key, value in state.items())
-
-
-# --------------------------------------------------------------------------
-# Acknowledgment decision contract (pure, shared by HTTP and gRPC)
-# --------------------------------------------------------------------------
 
 
 def classify_http_ack(
@@ -283,6 +268,15 @@ _VERDICT_RESULT = {
 }
 
 
+def _partial_ack_result(ledger: DeliveryLedger, accepted: int, rejected: int) -> SpanExportResult:
+    """_ACK_PARTIAL policy: terminal FAILURE when spans were rejected, else warning."""
+    if rejected > 0:
+        ledger.record_rejected(rejected, accepted)
+        return SpanExportResult.FAILURE
+    ledger.record_delivered(accepted=accepted, warning=True)
+    return SpanExportResult.SUCCESS
+
+
 def verdict_result(verdict: str) -> SpanExportResult:
     """Map an acknowledgment verdict to its non-retry SpanExportResult."""
     return _VERDICT_RESULT[verdict]
@@ -306,11 +300,6 @@ def parse_retry_after(value: str | None, *, now: float | None = None) -> float |
     if seconds < 0:
         return None
     return seconds
-
-
-# --------------------------------------------------------------------------
-# HTTP transport: HTTPX/AnyIO whole-operation deadline composition
-# --------------------------------------------------------------------------
 
 
 def reject_credential_provider_settings(environ: Any) -> None:
@@ -458,11 +447,7 @@ class HttpxOtlpTransport:
                 return SpanExportResult.FAILURE
             if verdict in (_ACK_OK, _ACK_EMPTY_OK, _ACK_PARTIAL):
                 if verdict == _ACK_PARTIAL:
-                    if rejected > 0:
-                        self._ledger.record_rejected(rejected, accepted)
-                        return SpanExportResult.FAILURE  # terminal partial result
-                    self._ledger.record_delivered(accepted=accepted, warning=True)
-                    return SpanExportResult.SUCCESS  # accepted with warning, no retry
+                    return _partial_ack_result(self._ledger, accepted, rejected)
                 self._ledger.record_delivered(accepted=accepted)
                 return verdict_result(verdict)
             if verdict != _ACK_RETRYABLE:
@@ -582,11 +567,6 @@ def _default_environ() -> Any:
     return os.environ
 
 
-# --------------------------------------------------------------------------
-# gRPC bridge over the pinned 1.44.0 delegate
-# --------------------------------------------------------------------------
-
-
 def _grpc_retry_delay(exc: Any) -> float | None:
     """Extract a valid RetryInfo retry_delay from a gRPC RpcError, if present."""
     try:
@@ -690,11 +670,7 @@ class GrpcBridge:
                 self._ledger.record_delivered(accepted=accepted)
                 return SpanExportResult.SUCCESS
             if verdict == _ACK_PARTIAL:
-                if rejected > 0:
-                    self._ledger.record_rejected(rejected, accepted)
-                    return SpanExportResult.FAILURE
-                self._ledger.record_delivered(accepted=accepted, warning=True)
-                return SpanExportResult.SUCCESS  # accepted with warning
+                return _partial_ack_result(self._ledger, accepted, rejected)
             self._ledger.record_unverified("OTLP_GRPC_MALFORMED_ACK")
             return SpanExportResult.FAILURE
 
