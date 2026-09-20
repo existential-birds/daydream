@@ -102,7 +102,7 @@ _INHERITED_ATTRIBUTES = frozenset(
 )
 
 
-def associate_trajectory_identity(session_id: str, *, trajectory_id: str | None = None) -> None:
+def associate_trajectory_identity(session_id: str) -> None:
     """Propagate a late-bound trajectory identity to scopes opened afterwards.
 
     ``associate_run_trajectory`` patches the root span, but scopes opened
@@ -111,10 +111,9 @@ def associate_trajectory_identity(session_id: str, *, trajectory_id: str | None 
     an active recorder to supply it). The replay tool has no recorder, so the
     seed is what keeps every descendant span in the same vendor session/tree.
     """
-    trajectory = trajectory_id or session_id
     inherited = dict(_scope_attributes.get())
     inherited["daydream.session.id"] = session_id
-    inherited["daydream.trajectory.id"] = trajectory
+    inherited["daydream.trajectory.id"] = session_id
     inherited["traceloop.association.properties.session_id"] = session_id
     _scope_attributes.set({key: value for key, value in inherited.items() if key in _INHERITED_ATTRIBUTES})
 

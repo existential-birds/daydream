@@ -512,31 +512,21 @@ def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(
         _stop_grpc()
 
 
-def test_grpc_resource_exhausted_without_retry_info_is_terminal(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted"),
+        (grpc.StatusCode.UNAVAILABLE, "down"),
+    ],
+)
+def test_grpc_terminal_status_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch, status: grpc.StatusCode, message: str
 ) -> None:
     attempts = {"n": 0}
 
     def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         attempts["n"] += 1
-        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted")
-        return ExportTraceServiceResponse()  # pragma: no cover
-
-    exporter = _generic_grpc(monkeypatch, receive)
-    try:
-        assert exporter.export(_spans()) != SpanExportResult.SUCCESS
-        exporter.shutdown()
-        assert attempts["n"] == 1  # no unconditional exhaustion retry
-    finally:
-        _stop_grpc()
-
-
-def test_grpc_unavailable_is_terminal_under_owned_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    attempts = {"n": 0}
-
-    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
-        attempts["n"] += 1
-        context.abort(grpc.StatusCode.UNAVAILABLE, "down")
+        context.abort(status, message)
         return ExportTraceServiceResponse()  # pragma: no cover
 
     exporter = _generic_grpc(monkeypatch, receive)

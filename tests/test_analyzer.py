@@ -259,7 +259,6 @@ def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
             "main": None,
             "forked": [{"_source_file": "deep-python.json", "steps": steps}],
         },
-        [],
         {"ungrounded": []},
     )
     return cast(list[str], result["trajectories"][0]["noise_flags"])

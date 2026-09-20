@@ -149,19 +149,7 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(phases, "phase_test_and_heal", _with_contract)
 
-    async def _fix_with_contract(*args: Any, **kwargs: Any) -> Any:
-        item = args[2]
-        changed = kwargs.pop("changed_files", None)
-        default_scope = frozenset(
-            {item.get("file")} if isinstance(item.get("file"), str) else set()
-        )
-        edit_scope = frozenset(changed) if changed is not None else default_scope
-        kwargs.setdefault("edit_scope", edit_scope)
-        kwargs.setdefault("read_scope", edit_scope)
-        return await fix_implementation(*args, **kwargs)
-
-    async def _batched_with_contract(*args: Any, **kwargs: Any) -> Any:
-        items = args[2]
+    def _contract_scope_kwargs(items: list[Any], kwargs: dict[str, Any]) -> None:
         changed = kwargs.pop("changed_files", None)
         default_scope = frozenset(
             item["file"] for item in items if isinstance(item.get("file"), str)
@@ -169,6 +157,13 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         edit_scope = frozenset(changed) if changed is not None else default_scope
         kwargs.setdefault("edit_scope", edit_scope)
         kwargs.setdefault("read_scope", edit_scope)
+
+    async def _fix_with_contract(*args: Any, **kwargs: Any) -> Any:
+        _contract_scope_kwargs([args[2]], kwargs)
+        return await fix_implementation(*args, **kwargs)
+
+    async def _batched_with_contract(*args: Any, **kwargs: Any) -> Any:
+        _contract_scope_kwargs(args[2], kwargs)
         return await batched_implementation(*args, **kwargs)
 
     async def _parallel_with_contract(*args: Any, **kwargs: Any) -> Any:
@@ -2947,14 +2942,16 @@ async def test_phase_alternative_review_no_issues(
     assert issues == []
 
 
-def test_feedback_schema_requires_confidence_and_rationale() -> None:
-    from daydream.phases import FEEDBACK_SCHEMA
+@pytest.mark.parametrize("schema_name", ["FEEDBACK_SCHEMA", "ALTERNATIVE_REVIEW_SCHEMA"])
+def test_schema_requires_confidence_and_rationale(schema_name: str) -> None:
+    from daydream import phases
 
-    required = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["required"]
+    schema = getattr(phases, schema_name)
+    required = schema["properties"]["issues"]["items"]["required"]
     assert "confidence" in required
     assert "rationale" in required
     assert "evidence" in required
-    confidence = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
+    confidence = schema["properties"]["issues"]["items"]["properties"]["confidence"]
     assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
@@ -2976,17 +2973,6 @@ def test_finding_file_schema_slots_use_repository_file_path_schema() -> None:
     per_stack_file = phases.PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]
     assert per_stack_file == REPOSITORY_FILE_PATH_SCHEMA
     assert per_stack_file["pattern"]
-
-
-def test_alternative_review_schema_requires_confidence_and_rationale() -> None:
-    from daydream.phases import ALTERNATIVE_REVIEW_SCHEMA
-
-    required = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["required"]
-    assert "confidence" in required
-    assert "rationale" in required
-    assert "evidence" in required
-    confidence = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
-    assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
 def test_is_evidenced_gate_branches() -> None:

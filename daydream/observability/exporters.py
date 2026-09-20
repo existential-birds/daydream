@@ -108,12 +108,7 @@ def _snapshot_of(exporter: Any) -> dict[str, Any]:
 
 
 class _PresetPolicy:
-    """The preset transport policy translated to explicit transport settings.
-
-    Semantic preservation of the former ``_PresetSession``: no netrc/proxy
-    auth, no client certificates, no redirects, verified TLS, literal headers.
-    Tests assert observable requests, not the old class.
-    """
+    """Preset transport policy settings: no auth, redirects, or compression."""
 
     trust_env = False
     follow_redirects = False
@@ -125,8 +120,6 @@ class _PresetPolicy:
 def _preset_transport(
     endpoint: str,
     headers: dict[str, str],
-    config: ObservabilityConfig,
-    environ: Mapping[str, str] | None = None,
 ) -> SpanExporter:
     """Build the owned preset HTTP transport under the diagnostic boundary.
 
@@ -166,7 +159,7 @@ def langsmith_exporter(config: ObservabilityConfig) -> SpanExporter:
     headers = {"x-api-key": key, "Langsmith-Project": project}
     if workspace is not None:
         headers["x-tenant-id"] = workspace
-    return LangSmithExporter(_preset_transport(endpoint + "/otel/v1/traces", headers, config))
+    return LangSmithExporter(_preset_transport(endpoint + "/otel/v1/traces", headers))
 
 
 def honeyhive_exporter(config: ObservabilityConfig) -> SpanExporter:
@@ -177,7 +170,7 @@ def honeyhive_exporter(config: ObservabilityConfig) -> SpanExporter:
         raise ObservabilityError("HH_API_URL is required; use your HoneyHive deployment's API base URL")
     endpoint = _validated_endpoint(base, "HH_API_URL")
     return HoneyHiveExporter(
-        _preset_transport(endpoint + "/opentelemetry/v1/traces", {"Authorization": f"Bearer {key}"}, config)
+        _preset_transport(endpoint + "/opentelemetry/v1/traces", {"Authorization": f"Bearer {key}"})
     )
 
 
