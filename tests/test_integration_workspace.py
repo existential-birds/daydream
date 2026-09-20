@@ -37,7 +37,7 @@ from tests.harness.git_helpers import git as _git
 
 
 def _make_feature_branch_on_origin(
-    tmp_path: Path, repo: Path, bare_origin: Path, branch: str = "feat/X"
+    tmp_path: Path, bare_origin: Path, branch: str = "feat/X"
 ) -> str:
     """Push a new commit on *branch* to *bare_origin* via a sidecar clone.
 
@@ -128,7 +128,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
 ) -> None:
     """``daydream --branch feat/X`` (X only on origin) fetches, runs, cleans up."""
     feat_sha = _make_feature_branch_on_origin(
-        tmp_path, repo_with_origin, bare_origin, branch="feat/X"
+        tmp_path, bare_origin, branch="feat/X"
     )
 
     # Confirm precondition: feat/X is NOT a local branch in repo_with_origin yet.
@@ -204,7 +204,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     """When --branch X is also checked out locally and stale, warn + use origin/X."""
     # Push feat/Y to origin first (canonical commit on origin).
     origin_sha = _make_feature_branch_on_origin(
-        tmp_path, repo_with_origin, bare_origin, branch="feat/Y"
+        tmp_path, bare_origin, branch="feat/Y"
     )
     # Check out feat/Y locally from main, BEFORE fetching, so the local
     # branch is stale relative to origin/feat/Y.
@@ -280,7 +280,7 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     warns-and-skips when no PR is resolvable. The workspace layer still resolves
     the origin-only branch into an ephemeral worktree before dispatch.
     """
-    _make_feature_branch_on_origin(tmp_path, repo_with_origin, bare_origin, branch="feat/Z")
+    _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/Z")
     monkeypatch.setattr(
         "daydream.workspace.git_ops.gh_pr_list_for_branch",
         lambda _repo, _branch, **_kwargs: [],
@@ -337,10 +337,10 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     # tracking branch so ``git merge-base develop HEAD`` (run from inside the
     # ephemeral worktree) can resolve the ref symbolically.
     _make_feature_branch_on_origin(
-        tmp_path, repo_with_origin, bare_origin, branch="develop"
+        tmp_path, bare_origin, branch="develop"
     )
     _make_feature_branch_on_origin(
-        tmp_path, repo_with_origin, bare_origin, branch="feat/W"
+        tmp_path, bare_origin, branch="feat/W"
     )
     _git(repo_with_origin, "fetch", "origin")
     _git(repo_with_origin, "branch", "develop", "origin/develop")

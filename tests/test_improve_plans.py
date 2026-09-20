@@ -942,7 +942,7 @@ def test_first_run_prose_and_annotation_commands_are_blocked(repo: Path, literal
     assert errors == ["RECON_MALFORMED_COMMAND@/commands/0/command"]
 
 
-def test_null_args_ref_expands_to_recon_record_byte_for_byte(repo: Path, head_sha: str) -> None:
+def test_null_args_ref_expands_to_recon_record_byte_for_byte(repo: Path) -> None:
     plan = _authored_plan()
     plan["steps"][0]["verification"] = _ref(
         note="The repository suite proves the catalog behavior end to end."
@@ -956,7 +956,7 @@ def test_null_args_ref_expands_to_recon_record_byte_for_byte(repo: Path, head_sh
         assert gate[key] == base[key]
 
 
-def test_appended_args_expand_to_recon_prefix_plus_suffix(repo: Path, head_sha: str) -> None:
+def test_appended_args_expand_to_recon_prefix_plus_suffix(repo: Path) -> None:
 
     assembled = _assembled(repo)
 
@@ -1936,7 +1936,6 @@ def test_reanchored_finding_is_not_replanned_on_a_later_run(
 
 def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     repo: Path,
-    head_sha: str,
 ) -> None:
     """The start of a plan run prunes stale *-reanchor worktrees from prior runs."""
     stale_dir = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
@@ -1997,7 +1996,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
 
 
 def test_prune_named_reanchor_worktree_removes_valid_worktree(
-    repo: Path, head_sha: str
+    repo: Path
 ) -> None:
     from daydream.improve.plans import prune_named_reanchor_worktree
 
@@ -2012,7 +2011,7 @@ def test_prune_named_reanchor_worktree_removes_valid_worktree(
 
 
 def test_prune_named_reanchor_worktree_reports_plan_count(
-    repo: Path, head_sha: str
+    repo: Path
 ) -> None:
     from daydream.improve.plans import prune_named_reanchor_worktree
 
@@ -2106,7 +2105,7 @@ def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
 
 
 def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(
-    repo: Path, head_sha: str
+    repo: Path
 ) -> None:
     from daydream.improve.plans import list_reanchor_worktrees
 
@@ -2757,7 +2756,7 @@ def test_record_rejections_appends_and_loads_by_fingerprint(
     }
 
 
-def test_overlong_authored_prose_is_clamped_during_normalization(repo: Path, head_sha: str) -> None:
+def test_overlong_authored_prose_is_clamped_during_normalization(repo: Path) -> None:
     plan = _authored_plan()
     plan["scope"]["existing_paths"][0]["role"] = "S" * 306
     plan["why_this_matters"]["problem"] = "P" * 810
@@ -3856,7 +3855,7 @@ def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(repo: Pat
     ]
 
 
-def test_repository_secrets_are_redacted_not_blocked_in_excerpts(repo: Path, head_sha: str) -> None:
+def test_repository_secrets_are_redacted_not_blocked_in_excerpts(repo: Path) -> None:
     """Repository bytes are spliced into excerpts after authored-string
     redaction has already run, so both splice points must redact them.
 
@@ -4653,7 +4652,7 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
 
 
 def test_stale_locked_reanchor_worktree_is_reclaimed(
-    repo: Path, head_sha: str
+    repo: Path
 ) -> None:
     """Acceptance #3: a crashed session's still-locked worktree is eventually
     reclaimed (lock backdated past the staleness window), not wedged forever."""

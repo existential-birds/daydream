@@ -99,10 +99,10 @@ async def test_anthropic_client_posts_messages_and_returns_verdict(sr_module: An
 async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_module: Any) -> None:
     sr = sr_module
     with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_BASE_URL"):
-        sr.resolve_base_url("sk-or-abc", None)
+        sr.resolve_base_url(None)
     with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_BASE_URL"):
-        sr.resolve_base_url("sk-xyz", None)
-    assert sr.resolve_base_url("sk-xyz", "https://custom.example/v1") == "https://custom.example/v1"
+        sr.resolve_base_url(None)
+    assert sr.resolve_base_url("https://custom.example/v1") == "https://custom.example/v1"
 
     calls = []
 
