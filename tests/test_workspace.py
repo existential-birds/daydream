@@ -37,8 +37,6 @@ from tests.harness.git_helpers import configure_identity as _configure_identity
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
-# --- Helpers (workspace-specific: bare-origin push plumbing) ----------------
-
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -109,8 +107,6 @@ def _secrets_token() -> str:
     return secrets.token_hex(3)
 
 
-# --- 1. In-place mode -------------------------------------------------------
-
 
 async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
@@ -137,8 +133,6 @@ async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
     # Source remains untouched after exit (no cleanup paths to assert).
     assert repo.exists()
 
-
-# --- 2. Ephemeral with no branch --------------------------------------------
 
 
 async def test_ephemeral_with_no_branch_uses_head(tmp_path: Path) -> None:
@@ -805,8 +799,6 @@ async def test_legacy_preflight_retires_unknown_after_moving_registered_entry(
     assert ".daydream/worktrees" not in after
 
 
-# --- 3. Ephemeral with branch (local + origin) ------------------------------
-
 
 async def test_ephemeral_uses_origin_branch_tip(tmp_path: Path) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
@@ -833,8 +825,6 @@ async def test_ephemeral_uses_origin_branch_tip(tmp_path: Path) -> None:
         assert ctx.base_branch == "main"
 
 
-# --- 4. Ephemeral with branch (only origin) ---------------------------------
-
 
 async def test_ephemeral_branch_only_on_origin(tmp_path: Path) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
@@ -852,8 +842,6 @@ async def test_ephemeral_branch_only_on_origin(tmp_path: Path) -> None:
         assert ctx.head_sha == new_sha
 
 
-# --- 5. Branch not found anywhere -------------------------------------------
-
 
 async def test_unknown_branch_raises(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -867,8 +855,6 @@ async def test_unknown_branch_raises(tmp_path: Path) -> None:
         ):
             pass  # pragma: no cover
 
-
-# --- 5b. --base accepts any commit-ish --------------------------------------
 
 
 async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
@@ -891,8 +877,6 @@ async def test_base_unknown_ref_raises_reworded(tmp_path: Path) -> None:
         async with open_workspace(repo, branch=None, base="deadbeef", force_ephemeral=False, skip_tests=False):
             pass
 
-
-# --- 6. copy_files_into_ephemeral default list (gitignored only) ------------
 
 
 def test_copy_default_only_copies_gitignored(tmp_path: Path) -> None:
@@ -932,8 +916,6 @@ def test_copy_default_skips_tracked_env(tmp_path: Path) -> None:
     assert copied == []
     assert not (dest / ".env").exists()
 
-
-# --- 7. pyproject override --------------------------------------------------
 
 
 def test_copy_pyproject_override(tmp_path: Path) -> None:
@@ -981,8 +963,6 @@ def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) ->
     assert ".env" in rel
     assert (dest / ".env").read_text() == "SECRET=1\n"
 
-
-# --- 7b. fail-closed copy entry validation --------------------------------
 
 
 @pytest.mark.parametrize("source_kind", ["config", "extra"])
@@ -1078,8 +1058,6 @@ def test_copy_allows_source_symlink_resolving_inside_source(
     assert not (dest / "inside-link.cfg").is_symlink()
 
 
-# --- 8. extra paths combine -------------------------------------------------
-
 
 def test_copy_extra_paths_additive(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -1104,8 +1082,6 @@ def test_copy_extra_paths_additive(tmp_path: Path) -> None:
     assert "workspace.json" in rel
 
 
-# --- 9. skip flag -----------------------------------------------------------
-
 
 def test_copy_skip_returns_empty(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -1121,8 +1097,6 @@ def test_copy_skip_returns_empty(tmp_path: Path) -> None:
     assert copied == []
     assert not (dest / ".env").exists()
 
-
-# --- 10. Cleanup runs even on exception -------------------------------------
 
 
 async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
@@ -1169,8 +1143,6 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(
     assert not any(operational_dirs[0].iterdir())
 
 
-# --- 13. Stale-local warning fires ------------------------------------------
-
 
 async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Warn on a stale local branch and review the fresher remote snapshot."""
@@ -1201,8 +1173,6 @@ async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.Mon
     assert "2 commits behind origin/topic" in out
     assert "reviewing origin/topic" in out
 
-
-# --- 14. independent audit snapshots ---------------------------------------
 
 
 def _audit_source_signature(repo: Path) -> tuple[object, ...]:

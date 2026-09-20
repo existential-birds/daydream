@@ -58,26 +58,22 @@ def _write_checkpoint(tmp_path: Path, *, split_digest: str = "split-digest") -> 
     return p
 
 
-def test_start_refused_without_gate_evidence(tmp_path: Path) -> None:
-    gate_report_path = tmp_path / "missing.json"
-    with pytest.raises(Stage0GateRefused, match="missing") as exc_info:
-        require_stage0_gate(gate_report_path=gate_report_path)  # M4: refuse when evidence missing
-    assert str(gate_report_path) in str(exc_info.value)  # contract: the message names the reason and the path
-
-
-def test_start_refused_on_unparseable_gate_report(tmp_path: Path) -> None:
-    """A corrupt gate report raises, never defaults to allowed."""
+@pytest.mark.parametrize(
+    "content, match",
+    [
+        (None, "missing"),
+        ("{not json", "unreadable"),
+        ('{"passed": false, "separation": 0.01}', "failed"),
+    ],
+    ids=["missing", "unparseable", "failed"],
+)
+def test_start_refused(tmp_path: Path, content: str | None, match: str) -> None:
     gate_report_path = tmp_path / "gate.json"
-    gate_report_path.write_text("{not json")
-    with pytest.raises(Stage0GateRefused, match="unreadable") as exc_info:
+    if content is not None:
+        gate_report_path.write_text(content)
+    with pytest.raises(Stage0GateRefused, match=match) as exc_info:
         require_stage0_gate(gate_report_path=gate_report_path)
-    assert str(gate_report_path) in str(exc_info.value)  # contract: the message names the reason and the path
-
-
-def test_start_refused_on_failed_gate(tmp_path: Path) -> None:
-    (tmp_path / "gate.json").write_text('{"passed": false, "separation": 0.01}')
-    with pytest.raises(Stage0GateRefused, match="failed"):
-        require_stage0_gate(gate_report_path=tmp_path / "gate.json")
+    assert str(gate_report_path) in str(exc_info.value)
 
 
 def test_start_allowed_on_passed_gate(tmp_path: Path) -> None:
@@ -92,34 +88,28 @@ def test_checkpoint_bound_to_passed_report(tmp_path: Path) -> None:
     require_outcome_model_bound(report, _write_checkpoint(tmp_path))  # no raise
 
 
-def test_checkpoint_refused_when_missing(tmp_path: Path) -> None:
-    """A configured but absent checkpoint refuses: nothing to bind the digest to."""
-    with pytest.raises(Stage0GateRefused, match="missing") as exc_info:
-        require_outcome_model_bound(_bound_gate_report(), tmp_path / "no-model.json")
-    assert str(tmp_path / "no-model.json") in str(exc_info.value)
-
-
-def test_checkpoint_refused_on_unparseable_state(tmp_path: Path) -> None:
-    """A corrupt checkpoint refuses, never defaults to intrinsic-only."""
-    p = tmp_path / "outcome-model.json"
-    p.write_text("{not json")
-    with pytest.raises(Stage0GateRefused, match="unreadable"):
-        require_outcome_model_bound(_bound_gate_report(), p)
-
-
-def test_checkpoint_refused_on_digest_mismatch(tmp_path: Path) -> None:
-    """M4 binding: a passed report plus an unrelated checkpoint is a refusal."""
-    p = _write_checkpoint(tmp_path, split_digest="some-other-split")
-    with pytest.raises(Stage0GateRefused, match="does not bind") as exc_info:
-        require_outcome_model_bound(_bound_gate_report(), p)
-    assert str(p) in str(exc_info.value)
-
-
-def test_checkpoint_refused_on_report_without_measurements(tmp_path: Path) -> None:
-    """A hand-rolled report lacking the recomputable fields cannot bind."""
-    report = {"passed": True, "evidence_digest": "fixture-digest"}
-    with pytest.raises(Stage0GateRefused, match="lacks the recomputable evidence"):
-        require_outcome_model_bound(report, _write_checkpoint(tmp_path))
+@pytest.mark.parametrize(
+    "state, report, match",
+    [
+        (None, _bound_gate_report(), "missing"),
+        ("{not json", _bound_gate_report(), "unreadable"),
+        (json.dumps({**MODEL_STATE, "split_digest": "some-other-split"}), _bound_gate_report(), "does not bind"),
+        (
+            json.dumps(MODEL_STATE),
+            {"passed": True, "evidence_digest": "fixture-digest"},
+            "lacks the recomputable evidence",
+        ),
+    ],
+    ids=["missing", "unreadable", "digest-mismatch", "no-measurements"],
+)
+def test_checkpoint_refused(
+    tmp_path: Path, state: str | None, report: dict[str, object], match: str
+) -> None:
+    checkpoint = tmp_path / "outcome-model.json"
+    if state is not None:
+        checkpoint.write_text(state)
+    with pytest.raises(Stage0GateRefused, match=match):
+        require_outcome_model_bound(report, checkpoint)
 
 
 def _projection_record(

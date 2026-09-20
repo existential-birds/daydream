@@ -1,42 +1,8 @@
 """Invariant tests for the shipped GitHub Actions workflow templates.
 
 A workflow's behavior can only be validated by running it in CI, so these tests
-deliberately do NOT restate the YAML (trigger lists, exact ``if:`` strings,
-permission dicts). They guard only the handful of properties a single file-read
-cannot verify and that a careless edit could silently break:
-
-- No untrusted event data is interpolated into a ``run:`` body (injection).
-- The bot-command match step, executed under GitHub's real ``run:`` shell,
-  recognizes exactly ``review`` / ``add sequence diagram`` (alias ``add
-  sequence``) / ``add flowchart`` and nothing adjacent, in every copy; the
-  matched command reaches the review workflow as a bounded three-option
-  ``choice`` dispatch input, and the live and packaged command workflows stay
-  byte-identical.
-- Every non-local action ``uses:`` in the live and shipped bot workflows
-  resolves to a full commit SHA (never a mutable tag/branch/expression).
-- The daydream install stays pinned to an immutable compatible commit: review
-  workflows exposing diagram commands use the approved diagram-capable
-  revision, while posting-only workflows track the packaged release.
-- Every App-token action in the live and packaged posting workflows stays pinned to the approved v3.2.0 commit.
-- The privilege split holds: the job that checks out untrusted PR code never
-  holds the App key, and the privileged jobs never check out PR code.
-- The ``daydream-findings`` upload stays ``if: always()`` and stays after the
-  step that writes ``findings.json``, so a late-stage failure (a refused egress
-  scan, say) cannot discard findings the run already produced.
-- The repo's own Codex dogfood workflow persists ``codex login`` before the
-  review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth), and
-  the repository workflow README names ``OPENAI_API_KEY`` as the credential the
-  live Codex workflow consumes.
-- The repository workflow README declares these files as repository-only Codex
-  dogfood configuration and points to the packaged install guide (never copies
-  ``ANTHROPIC_API_KEY``).
-- The CI actionlint step and the Makefile actionlint target both reference the
-  actionlint image by immutable OCI digest (``rhysd/actionlint:1.7.7@sha256:…``),
-  so a revert to a mutable tag, or drift between the two, fails the suite.
-- The CI actionlint step covers every workflow the project ships — the repo's
-  own top-level workflows plus all recursively discovered template workflows
-  (the nested ``single/daydream.yml`` included) — and each selector still has
-  to match at least one real workflow file (no stale selectors).
+deliberately do NOT restate the YAML. They guard only the handful of properties
+a single file-read cannot verify and that a careless edit could silently break.
 
 PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes it.
 """

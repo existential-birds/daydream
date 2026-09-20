@@ -515,23 +515,6 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         all_records.extend(records)
         record_sources.extend(source_name for _ in records)
 
-    # Issue #1111: every uid-keyed stage downstream of here -- the dedup
-    # pre-filter's b-side drop, adjudication's drop set, the structural
-    # partition/rejoin, and ``_rewrite_stack_records``' file routing -- resolves
-    # a record by its uid. Two records sharing one uid make each of those act on
-    # the wrong record, which is exactly the over-delete this field exists to
-    # prevent (see ``_drop_cross_stack_duplicates``). Checked here, over the
-    # whole loaded pool, BEFORE the structural partition below splits it: one
-    # check then covers both sides and also catches a collision that spans them.
-    #
-    # FATAL rather than a warning. A uid is host-minted and deterministic with
-    # no content-derived input, so a collision is never the near-miss judgement
-    # call a fingerprint match is -- it means two records files claim the same
-    # stack name, or an artifact was written with a partially stamped list.
-    # Continuing would emit a report quietly missing findings, and CLAUDE.md's
-    # rule is that loss is never silently absorbed. A false positive costs a
-    # bounded, visible, actionable stop (the message names the colliding uids
-    # and the remedy); a false negative costs an invisible wrong answer.
     duplicate_uids = duplicate_record_uids(all_records)
     if duplicate_uids:
         loaded_names = ", ".join(sorted(path.name for path in per_stack_records_paths))
@@ -547,20 +530,6 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         )
         return Stop(1)
 
-    # Partition structural meta-stack records out before dedup: its lens
-    # (file-size budgets, layering, canonical-helper gaps) differs from the
-    # language stacks and collapsing it into their dedup pool would demote
-    # those findings. The partition keys on the stack name encoded in each
-    # record's own uid (issue #1111) and rebuilds ``all_records`` /
-    # ``record_sources`` as pairs, so the positional index invariant between
-    # those two lists survives the split exactly as before.
-    #
-    # The partition is scoped to the dedup pre-filter and the merge agent's
-    # record pool -- the two places that could collapse a structural finding
-    # into a language bucket. It is NOT a partition out of adjudication: the
-    # records are kept here under their own keys so ``_step_arbiter`` can put
-    # them back in front of the contested-location branch, which is the one
-    # mechanism designed to catch a structural/language twin (issue #1103).
     structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
     structural_records: list[dict[str, Any]] = []
     structural_record_sources: list[str] = []
@@ -917,24 +886,6 @@ async def _run_uncovered_sweep(
     }
     if completed_reviews:
         records_path = per_stack_records_path(dd, "uncovered")
-        # Issue #1111: the sweep is the pipeline's SECOND record-birth site, and
-        # the load-time backfill in ``_step_per_stack_parse`` cannot reach it --
-        # ``STEPS`` orders ``per-stack-parse`` BEFORE ``uncovered-sweep``, and on
-        # a fresh run ``stack-uncovered-records.json`` does not exist yet when
-        # that loop runs. So stamp here, BEFORE the write, and both the on-disk
-        # artifact and the in-memory pool extended below carry uids. A
-        # ``--start-at merge`` resume reloads this same file through that loop,
-        # where ``stamp_record_uids``' preserve-if-present behaviour keeps these
-        # exact uids instead of re-minting them.
-        #
-        # These uids need no duplicate check of their own: they are freshly
-        # minted over an unstamped list under a stack name no other producer
-        # uses, and the pool they join cannot already hold an ``uncovered:N``.
-        # The sweep is disabled outright on a merge/fix resume
-        # (``_uncovered_sweep_enabled``), a per-stack resume deletes this file
-        # before any new per-stack work (``_clear_sweep_artifacts``), and a fresh
-        # run wipes the whole deep dir -- so on every path that reaches this
-        # line, the parse loop found no uncovered records file to load.
         stamp_record_uids(sweep_records, "uncovered")
         records_path.write_text(json.dumps(sweep_records, indent=2))
         deep_state.records_paths.append(records_path)

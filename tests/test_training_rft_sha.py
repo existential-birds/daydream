@@ -34,27 +34,20 @@ def test_valid_full_shas_build_the_task(tmp_path: Path) -> None:
     assert result.inputs_sha256
 
 
-def test_short_base_sha_fails_closed(tmp_path: Path) -> None:
-    """A 6-char short sha is refused with ValueError before any rebuild."""
-    cfg = _config(tmp_path, [_record("r1", base_sha="abc123")])
-    with pytest.raises(ValueError, match=r"full sha|40"):
-        run_rft(cfg)
-
-
-def test_missing_head_sha_fails_before_task_work(tmp_path: Path) -> None:
-    """A malformed identity (missing head_sha) raises before task/image work."""
-    cfg = _config(tmp_path, [{"id": "r1", "base_sha": "a" * 40, "diff": "diff"}])
-    with pytest.raises(ValueError, match="head_sha"):
-        run_rft(cfg)
-
-
-def test_non_hex_sha_fails_closed(tmp_path: Path) -> None:
-    cfg = _config(tmp_path, [_record("r1", head_sha="z" * 40)])
-    with pytest.raises(ValueError, match="full sha|40"):
-        run_rft(cfg)
-
-
-def test_missing_repo_slug_fails_closed(tmp_path: Path) -> None:
-    cfg = _config(tmp_path, [_record("r1", repo_slug="")])
-    with pytest.raises(ValueError, match="repo_slug"):
+@pytest.mark.parametrize(
+    "record, match",
+    [
+        (_record("r1", base_sha="abc123"), r"full sha|40"),
+        ({"id": "r1", "base_sha": "a" * 40, "diff": "diff"}, "head_sha"),
+        (_record("r1", head_sha="z" * 40), r"full sha|40"),
+        (_record("r1", repo_slug=""), "repo_slug"),
+    ],
+    ids=["short-base-sha", "missing-head-sha", "non-hex-sha", "missing-repo-slug"],
+)
+def test_malformed_identity_fails_closed(
+    record: dict[str, object], match: str, tmp_path: Path
+) -> None:
+    """A malformed identity is refused with ValueError before any rebuild."""
+    cfg = _config(tmp_path, [record])
+    with pytest.raises(ValueError, match=match):
         run_rft(cfg)
