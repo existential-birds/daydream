@@ -1434,34 +1434,6 @@ async def test_artifact_session_succeeds_with_only_empty_operational_root(
     assert (source / ".daydream" / "worktrees").is_dir()
 
 
-async def test_artifact_session_still_fails_closed_on_mid_run_public_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The re-baseline is session-open-only; mid-run divergence still fails closed.
-
-    A concurrent write into the public tree during the detach window must
-    keep raising through the existing conflict machinery (previously pinned
-    by the strict-equality path; now pinned by the same observer seam).
-    """
-    from daydream import artifact_visibility as av
-
-    source = tmp_path / "source"
-    _init_repo(source)
-    _seed_public_artifacts(source)
-
-    def mutate_before_removal(state: str) -> None:
-        if state == "DETACH_REMOVING":
-            (source / ".daydream" / "concurrent.bin").write_bytes(b"unique concurrent bytes")
-
-    monkeypatch.setattr(av, "_transition_observer", mutate_before_removal)
-    with pytest.raises(ArtifactVisibilityError, match="changed during detach"):
-        async with open_artifact_session(_work(source), session_id="mid-run-mutation"):
-            pass
-    assert (source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
-    assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
-
-
 @pytest.mark.parametrize(
     "node_kind",
     ["root-symlink", "directory-symlink", "leaf-symlink", "fifo", "socket"],

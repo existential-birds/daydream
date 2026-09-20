@@ -12,7 +12,7 @@ import httpx
 import pytest
 from huggingface_hub.errors import HfHubHTTPError
 
-from daydream.archive import hydrate, hydrate_rules
+from daydream.archive import hydrate, hydrate_rules, license_enrich
 from daydream.archive.hydrate_client import FakeHub
 
 
@@ -24,22 +24,16 @@ def _write_policy(tmp_path: Path) -> str:
     return str(policy)
 
 
-def _fake_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the enrichment stage offline: resolve every repo to MIT."""
-    from daydream.archive import license_enrich
-
-    def resolve(repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+class _FakeLicenseResolver:
+    def resolve(self, repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence | None:
         return license_enrich.EnrichedEvidence(
             spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
         )
 
-    class FakeResolver:
-        def resolve(
-            self, repo_slug: str, repo_commit: str | None
-        ) -> license_enrich.EnrichedEvidence | None:
-            return resolve(repo_slug, repo_commit)
 
-    monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: FakeResolver())
+def _fake_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the enrichment stage offline: resolve every repo to MIT."""
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", _FakeLicenseResolver)
 
 SNAPSHOT = {
     "bundles/sess-a/manifest.json": b'{"session_id": "sess-a"}',

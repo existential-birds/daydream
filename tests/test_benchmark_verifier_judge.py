@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+from tests.harness.benchmark_judge import MatchClient, judge_env
+
 
 def _http_response(status: int, body: Any = None, *, text: str = "ok", **attrs: Any) -> Any:
     """An httpx-like response for the injected judge transport."""
@@ -502,12 +504,7 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_pa
         artifact_path,
         out_dir,
         client=BrokenClient(),
-        env={
-            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": "k",
-            "DAYDREAM_JUDGE_BASE_URL": None,
-        },
+        env=judge_env(),
     )
     assert reward.verifier_error == 1 and reward.reward == 0.0
     assert not (out_dir / "reward.json").exists()                 # NO numeric reward on any infra path
@@ -605,22 +602,13 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module: Any, 
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(oracle))
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     out = tmp_path / "out"
     reward = sr.run_verifier(
         gold_path,
         artifact_path,
         out,
         client=MatchClient(),
-        env={
-            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": "k",
-            "DAYDREAM_JUDGE_BASE_URL": None,
-        },
+        env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.tp == 2 and reward.clean_pass == 0
 
@@ -638,12 +626,7 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module: Any, 
         clean_art,
         clean_out,
         client=MatchClient(),
-        env={
-            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": "k",
-            "DAYDREAM_JUDGE_BASE_URL": None,
-        },
+        env=judge_env(),
     )
     assert clean.reward == 1.0 and clean.clean_pass == 1 and clean.clean_task == 1
 
@@ -684,22 +667,13 @@ def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="legacy")))
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     out = tmp_path / "out"
     reward = sr.run_verifier(
         gold_path,
         artifact_path,
         out,
         client=MatchClient(),
-        env={
-            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": "k",
-            "DAYDREAM_JUDGE_BASE_URL": None,
-        },
+        env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.verifier_error == 0 and reward.tp == 2
 
@@ -767,22 +741,13 @@ def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(
     run_solution.write_bytes(solution_path.read_bytes())
     _write_metadata(run_gold, case_id="case-x")
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     out = tmp_path / "oracle-out"
     reward = sr.run_verifier(
         run_gold,
         run_solution,
         out,
         client=MatchClient(),
-        env={
-            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": "k",
-            "DAYDREAM_JUDGE_BASE_URL": None,
-        },
+        env=judge_env(),
     )
     assert reward.reward == 1.0
     assert reward.verifier_error == 0
@@ -944,8 +909,7 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module: Any, tmp_
     }))
 
     client = _CountingClient()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
     assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
     rj = json.loads((out / "reward.json").read_text())
@@ -983,8 +947,7 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module: Any
     }))
 
     client = _CountingClient()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
     assert reward.verifier_error == 0  # verifier-legal dense pair is judged
     assert client.requests == 1         # not failed whole
@@ -1003,8 +966,7 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module: Any, tmp
     artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
     out = tmp_path / "out"
     client = _CountingClient()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
     rj = json.loads((out / "reward.json").read_text())
@@ -1023,15 +985,10 @@ def test_oracle_artifact_locationless_scores_reward_1(sr_module: Any, tmp_path: 
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(oracle))
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     out = tmp_path / "out"
     reward = sr.run_verifier(
         gold_path, artifact_path, out, client=MatchClient(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+        env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.tp == 2 and reward.verifier_error == 0
 
@@ -1045,8 +1002,7 @@ def test_run_verifier_rejects_cross_case_replay(sr_module: Any, tmp_path: Path) 
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="task-B", n=1)))
     out = tmp_path / "out"
     client = _CountingClient()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
     rj = json.loads((out / "reward.json").read_text())
@@ -1066,8 +1022,7 @@ def test_run_verifier_rejects_ref_mismatch(sr_module: Any, tmp_path: Path) -> No
     artifact_path.write_text(json.dumps(art))
     out = tmp_path / "out"
     client = _CountingClient()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
     rj = json.loads((out / "reward.json").read_text())
@@ -1090,8 +1045,7 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module: Any, tmp_pa
     gold_path.write_bytes(bytes(corrupted))
     out = tmp_path / "out"
     client = _CountingClient()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
     assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
@@ -1304,8 +1258,7 @@ def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module: Any, tm
     class Exploding:
         async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> None:
             raise RuntimeError("sk-ant-leakme123 boom %s" % ("y" * 1000))
-    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    env = judge_env()
     reward = sr.run_verifier(gold_path, art_path, out, client=Exploding(), env=env)
     # unexpected runtime exception no longer escapes to a bare exit
     assert reward.verifier_error == 1 and reward.reward == 0.0
@@ -1421,8 +1374,7 @@ def test_run_verifier_without_client_is_unscored(sr_module: Any, tmp_path: Path)
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
     out = tmp_path / "out"
     reward = sr.run_verifier(gold_path, artifact_path, out, client=None,
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+        env=judge_env())
     assert reward.verifier_error == 1
     assert not (out / "reward.json").exists()
     details = json.loads((out / "reward-details.json").read_text())
@@ -1439,8 +1391,7 @@ def test_run_verifier_missing_gold_file_is_unscored(sr_module: Any, tmp_path: Pa
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
     out = tmp_path / "out"
     reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+        env=judge_env())
     assert reward.verifier_error == 1
     assert not (out / "reward.json").exists()
     details = json.loads((out / "reward-details.json").read_text())
@@ -1465,8 +1416,7 @@ def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tm
     artifact_path.unlink()                                 # artifact missing
     out = tmp_path / "out"
     reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+        env=judge_env())
     assert reward.verifier_error == 1
     assert reward.reward == 0.0
     assert not (out / "reward.json").exists()              # unscored: no numeric reward
@@ -1486,8 +1436,7 @@ def test_run_verifier_malformed_judge_output_is_unscored(sr_module: Any, tmp_pat
         async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
             return {"match": True, "confidence": 0.0}    # missing reasoning -> parse VerifierError
     reward = sr.run_verifier(gold_path, artifact_path, out, client=BadJudge(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+        env=judge_env())
     assert reward.verifier_error == 1
     assert not (out / "reward.json").exists()
     details = json.loads((out / "reward-details.json").read_text())

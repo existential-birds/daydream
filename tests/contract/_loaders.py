@@ -13,15 +13,28 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from daydream.backends import AgentEvent
 from daydream.backends.claude import ClaudeBackend
 from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
+from tests.harness.claude_sdk import (
+    MockAssistantMessage,
+    MockResultMessage,
+    MockTextBlock,
+    MockThinkingBlock,
+    MockToolResultBlock,
+    MockToolUseBlock,
+    MockUserMessage,
+    patch_claude_sdk,
+    scripted_client,
+)
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.pi_replay import make_mock_process as make_mock_process_pi
 
@@ -29,50 +42,15 @@ from tests.harness.pi_replay import make_mock_process as make_mock_process_pi
 
 
 @dataclass
-class _MockTextBlock:
-    text: str
-
-
-@dataclass
-class _MockThinkingBlock:
-    thinking: str
-
-
-@dataclass
-class _MockToolUseBlock:
-    id: str
-    name: str
-    input: dict[str, Any] | None = None
-
-
-@dataclass
-class _MockToolResultBlock:
-    tool_use_id: str
-    content: str | None = None
-    is_error: bool = False
-
-
-@dataclass
-class _MockAssistantMessage:
-    content: list[Any] = field(default_factory=list)
+class _MockAssistantMessage(MockAssistantMessage):
     message_id: str = ""
     model: str = "claude-test-model"
     usage: dict[str, Any] | None = None
 
 
 @dataclass
-class _MockUserMessage:
-    content: list[Any] = field(default_factory=list)
-
-
-@dataclass
-class _MockResultMessage:
-    total_cost_usd: float | None = None
-    structured_output: Any = None
+class _MockResultMessage(MockResultMessage):
     usage: dict[str, Any] | None = None
-    is_error: bool = False
-    result: str | None = None
-    subtype: str = "success"
 
 
 def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
@@ -97,12 +75,12 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
     for idx, turn in enumerate(turns):
         blocks: list[Any] = []
         if turn.get("text"):
-            blocks.append(_MockTextBlock(text=turn["text"]))
+            blocks.append(MockTextBlock(text=turn["text"]))
         if turn.get("thinking"):
-            blocks.append(_MockThinkingBlock(thinking=turn["thinking"]))
+            blocks.append(MockThinkingBlock(thinking=turn["thinking"]))
         for tc in turn.get("tool_calls", []):
             blocks.append(
-                _MockToolUseBlock(id=tc["id"], name=tc["name"], input=tc.get("input") or {})
+                MockToolUseBlock(id=tc["id"], name=tc["name"], input=tc.get("input") or {})
             )
         # Per-turn usage only on the final turn so MetricsEvent is emitted
         # exactly once (same cardinality as Codex's single turn.completed).
@@ -123,14 +101,14 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
             if tr is None:
                 continue
             result_blocks.append(
-                _MockToolResultBlock(
+                MockToolResultBlock(
                     tool_use_id=tr["id"],
                     content=tr.get("output", ""),
                     is_error=bool(tr.get("is_error", False)),
                 )
             )
         if result_blocks:
-            messages.append(_MockUserMessage(content=result_blocks))
+            messages.append(MockUserMessage(content=result_blocks))
 
     messages.append(
         _MockResultMessage(
@@ -147,34 +125,14 @@ async def claude_loader(
 ) -> AsyncIterator[AgentEvent]:
     """Drive ``ClaudeBackend.execute`` against the canonical script."""
     messages = _build_claude_messages(script)
-
-    class _ScriptedClient:
-        def __init__(self, options: Any = None) -> None:
-            self.options = options
-
-        async def __aenter__(self) -> "_ScriptedClient":
-            return self
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-        async def query(self, prompt: str) -> None:
-            return None
-
-        async def receive_response(self) -> AsyncIterator[Any]:
-            for m in messages:
-                yield m
-
-    with (
-        patch("daydream.backends.claude.ClaudeSDKClient", _ScriptedClient),
-        patch("daydream.backends.claude.AssistantMessage", _MockAssistantMessage),
-        patch("daydream.backends.claude.UserMessage", _MockUserMessage),
-        patch("daydream.backends.claude.ResultMessage", _MockResultMessage),
-        patch("daydream.backends.claude.TextBlock", _MockTextBlock),
-        patch("daydream.backends.claude.ThinkingBlock", _MockThinkingBlock),
-        patch("daydream.backends.claude.ToolUseBlock", _MockToolUseBlock),
-        patch("daydream.backends.claude.ToolResultBlock", _MockToolResultBlock),
-    ):
+    client = scripted_client(messages)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        patch_claude_sdk(
+            monkeypatch,
+            client,
+            assistant_message=_MockAssistantMessage,
+            result_message=_MockResultMessage,
+        )
         backend = ClaudeBackend(model="claude-test-model")
         async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):
             yield event

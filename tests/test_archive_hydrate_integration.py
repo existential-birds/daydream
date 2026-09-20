@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.archive import hydrate, hydrate_rules
+from daydream.archive import hydrate, hydrate_rules, license_enrich
 from daydream.archive.hydrate_client import FakeHub
 from tests.fixtures.training.build_hub_snapshot import (
     PINNED_POLICY_FIXTURE,
@@ -22,38 +22,14 @@ from tests.fixtures.training.build_hub_snapshot import (
     build_pinned_snapshot,
     build_snapshot,
 )
+from tests.test_archive_hydrate import _fake_resolver, _FakeLicenseResolver, _write_policy
 
 REVISION = SNAPSHOT_REVISION  # 40-hex pinned by the fixture builder
 
 
-def _write_policy(tmp_path: Path) -> str:
-    """Minimal permissive policy: the non-dry pipeline fail-closes without one
-    (issue #1094), and the snapshot's declared MIT evidence admits."""
-    policy = tmp_path / "license-policy.json"
-    policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
-    return str(policy)
-
-
 @pytest.fixture(autouse=True)
 def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the enrichment stage offline: resolve every repo to MIT."""
-    from daydream.archive import license_enrich
-
-    def resolve(repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence | None:
-        return resolve_evidence(repo_slug)
-
-    def resolve_evidence(repo_slug: str) -> license_enrich.EnrichedEvidence:
-        return license_enrich.EnrichedEvidence(
-            spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
-        )
-
-    class FakeResolver:
-        def resolve(
-            self, repo_slug: str, repo_commit: str | None
-        ) -> license_enrich.EnrichedEvidence | None:
-            return resolve(repo_slug, repo_commit)
-
-    monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: FakeResolver())
+    _fake_resolver(monkeypatch)
 
 
 def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
@@ -64,17 +40,7 @@ def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
     hydrate.download_snapshot(hub, revision=REVISION, stage_dir=stage / "downloads")
     hydrate.ingest_bundles(stage, revision=REVISION)
     hydrate.dedupe_admitted(stage, revision=REVISION)
-    from daydream.archive import license_enrich
-
-    class FakeResolver:
-        def resolve(
-            self, repo_slug: str, repo_commit: str | None
-        ) -> license_enrich.EnrichedEvidence | None:
-            return license_enrich.EnrichedEvidence(
-                spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
-            )
-
-    license_enrich.enrich_license_evidence(stage, resolver=FakeResolver())
+    license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=REVISION)
     hydrate.apply_license_gate(
         stage, revision=REVISION, license_policy_path=_write_policy(tmp_path),
