@@ -11,6 +11,7 @@ import pytest
 
 from daydream.backends import AgentEvent
 from daydream.runner import RunConfig
+from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
@@ -23,22 +24,6 @@ async def _run_deep(target: Path) -> int:
 def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-
-
-def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
-    values: list[str] = []
-    for path in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
-        try:
-            payload = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for step in payload.get("steps", []):
-            value = (step.get("extra") or {}).get(key)
-            if value:
-                values.append(value)
-    return values
 
 
 async def test_tool_heavy_wonder_completes_under_default_budget(

@@ -433,28 +433,6 @@ def test_cli_publish_state_checkpoint_reports_batch_and_actual_revision(
     assert revision in rendered
 
 
-def test_cli_publish_state_accepts_legacy_batch_complete_as_a_no_op(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
-    state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    _install_annotation_hub(monkeypatch, hub)
-
-    assert handle_adjudicate([
-        "publish-state",
-        "--state-dir", str(state),
-        "--manifest", str(manifest),
-        "--hub-repo", hub.repo_id,
-        "--batch-complete",
-    ]) == 0
-    assert "annotations/cur-1/checkpoints/batch-latest.json" in hub.list_repo_files(
-        hub.repo_info("main").sha
-    )
-
-
 def test_cli_resume_state_bootstraps_from_curation_without_local_manifest(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -38,7 +38,6 @@ from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSIO
 from daydream.trajectory import redact_text
 
 __all__ = [
-    "annotation_prefix",
     "download_final_annotation_bundle",
     "publish_annotation_state",
     "publish_final_annotation_bundle",
@@ -67,32 +66,6 @@ _SUCCESS_SCHEMA = "annotation-success/v1"
 # The threshold is deliberately low ({8,}) — a false positive merely blocks
 # publication, while a miss would leak a live token to a remote dataset repo.
 _SECRET_SHAPES = re.compile(r"(?:hf_[0-9A-Za-z]{8,}|github_pat_[0-9A-Za-z_]{8,}|ghp_[0-9A-Za-z]{8,})")
-
-
-def _read_manifest_data(manifest: Path | Mapping[str, Any]) -> dict[str, Any]:
-    if isinstance(manifest, Mapping):
-        return dict(manifest)
-    try:
-        data: dict[str, Any] = json.loads(Path(manifest).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"publish: unreadable preview manifest {manifest}: {exc}") from exc
-    return data
-
-
-def annotation_prefix(manifest: Path | Mapping[str, Any]) -> str:
-    """Content-addressed remote prefix ``annotations/<curation-id>/<snapshot-id>/``.
-
-    Both pin components must be present and non-empty, else ``ValueError``
-    naming the offending field (M3).
-    """
-    data = _read_manifest_data(manifest)
-    curation_id = data.get("curation_id")
-    snapshot_id = data.get("snapshot_id")
-    if not isinstance(curation_id, str) or not curation_id:
-        raise ValueError("annotation_prefix: manifest is missing required field 'curation_id'")
-    if not isinstance(snapshot_id, str) or not snapshot_id:
-        raise ValueError("annotation_prefix: manifest is missing required field 'snapshot_id'")
-    return f"annotations/{curation_id}/{snapshot_id}/"
 
 
 # SQLite archives (index.db) are binary, not UTF-8; scan them as latin-1

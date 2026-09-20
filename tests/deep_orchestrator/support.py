@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -39,6 +39,18 @@ def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
     production code path under test.
     """
     _silence(monkeypatch, prompts=False)
+
+
+def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+    raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
+
+
+def _make_record_issue(issues: list[tuple[Any, ...]]) -> Callable[..., str]:
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/1"
+
+    return _record_issue
 
 
 def _merged_item_files(target: Path) -> list[str]:

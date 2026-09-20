@@ -32,7 +32,14 @@ from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.json_utils import canonical_json as _canonical
-from daydream.training.adjudication.canonical import _evidence_after_as_of, read_jsonl
+from daydream.training.adjudication.canonical import (
+    _evidence_after_as_of,
+    _read_manifest,
+    read_jsonl,
+)
+from daydream.training.adjudication.canonical import (
+    _load_materialized_records as _load_sessions_records,
+)
 from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
     index_sessions,
@@ -145,29 +152,9 @@ def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
     )
 
 
-def _load_sessions_output(materialize_dir: Path) -> list[dict[str, Any]]:
-    sessions_path = materialize_dir / _SESSIONS_OUT_FILENAME
-    return read_jsonl(
-        sessions_path,
-        missing=(
-            f"materialized preview snapshot not found (run `corpus adjudicate materialize` "
-            f"first): {sessions_path}"
-        ),
-        invalid="unreadable materialized snapshot",
-    )
-
-
 def _load_manifest(materialize_dir: Path) -> dict[str, Any]:
     manifest_path = materialize_dir / _MANIFEST_FILENAME
-    if not manifest_path.is_file():
-        raise FileNotFoundError(
-            f"preview manifest not found (run `corpus adjudicate materialize` first): "
-            f"{manifest_path}"
-        )
-    try:
-        manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"unreadable preview manifest at {manifest_path}: {exc}") from exc
+    manifest = _read_manifest(manifest_path)
     if not isinstance(manifest, dict):
         raise ValueError(f"preview manifest at {manifest_path} is not a JSON object")
     return manifest
@@ -403,7 +390,7 @@ def build_final_bundle(
     _require_regular_input(materialize_dir, _SESSIONS_OUT_FILENAME)
     _require_regular_input(materialize_dir, _MANIFEST_FILENAME)
     records = _load_materialized_records(materialize_dir)
-    _load_sessions_output(materialize_dir)
+    _load_sessions_records(materialize_dir)
     manifest_path = materialize_dir / _MANIFEST_FILENAME
     manifest = _load_manifest(materialize_dir)
     preview_curation = _lineage_field(manifest, "curation_id", manifest_path)

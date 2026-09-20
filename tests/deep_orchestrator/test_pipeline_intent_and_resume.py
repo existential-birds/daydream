@@ -9,6 +9,8 @@ import pytest
 
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.deep_orchestrator.support import (
+    _forbidden_input,
+    _make_record_issue,
     _silence_gate_noise,
 )
 from tests.test_deep_orchestrator import (
@@ -274,9 +276,6 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
-
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
     assert current_run_context() is None
@@ -308,9 +307,6 @@ async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_on
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.parse_severity = "high"
-
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
 
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
@@ -440,11 +436,7 @@ async def test_fix_gate_authorizes_canonical_finding_outside_reviewed_diff(
 
     issues: list[tuple[Any, ...]] = []
 
-    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
-        issues.append((repo, title, body))
-        return "https://github.com/owner/repo/issues/1"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _make_record_issue(issues))
 
     exit_code = await run(
         make_config(
@@ -483,16 +475,12 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
 
     issues: list[tuple[Any, ...]] = []
 
-    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
-        issues.append((repo, title, body))
-        return "https://github.com/owner/repo/issues/1"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _make_record_issue(issues))
 
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True))
     assert exit_code == 0
 
-    fix_prompts = [c["prompt"] for c in stub.calls if c["prompt"].lower().startswith(("fix this issue", "fix these"))]
+    fix_prompts = _fix_prompts(stub)
     assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
     # The ./api.py finding was normalized and stays in scope: it is fixed.
     assert any("api.py" in p for p in fix_prompts), "dot-slash in-scope finding was misfiled out-of-scope and not fixed"
@@ -527,18 +515,14 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
 
     issues: list[tuple[Any, ...]] = []
 
-    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
-        issues.append((repo, title, body))
-        return "https://github.com/owner/repo/issues/1"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _make_record_issue(issues))
 
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True))
     assert exit_code == 0
 
     assert issues == []
 
-    fix_prompts = [c["prompt"] for c in stub.calls if c["prompt"].lower().startswith(("fix this issue", "fix these"))]
+    fix_prompts = _fix_prompts(stub)
     assert any("notes.txt" in prompt for prompt in fix_prompts)
     assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
 

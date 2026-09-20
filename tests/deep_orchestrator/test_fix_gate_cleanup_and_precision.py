@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.deep_orchestrator.support import (
+    _forbidden_input,
     _install_accept_gate_pipeline,
     _merged_item_descriptions,
     _scan_trajectory_extra,
@@ -267,9 +268,6 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
 
     # Any stdin read in non-interactive mode is a bug -- fail loudly.
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
-
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
     traj = tmp_path / "trajectory.json"
