@@ -3,8 +3,7 @@
 Pinned rule (spike 0B): sibling registration order in
 ``TrajectoryRecorder.fork()`` is append-ordered, so enumeration of the
 trajectory's ``subagent_trajectory_ref`` list is the fork registration
-order; ``(order_index, descriptor)`` is a total order across concurrent
-forks. Segmentation must never be a coin-flip, so duplicate sibling keys
+order. Segmentation must never be a coin-flip, so duplicate sibling keys
 raise.
 """
 
@@ -21,8 +20,6 @@ class Segment:
     segment_id: str
     trajectory_id: str
     session_id: str
-    order_index: int
-    descriptor: str
     spans: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -36,9 +33,8 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
     """Segment a trajectory dict into per-agent ``Segment`` records.
 
     Ordering follows the trajectory's ``subagent_trajectory_ref`` list order
-    (fork registration order, per the Task 0B pinned rule) with a stable
-    ``(order_index, descriptor)`` tie-break. The root trajectory is ``seg-0``
-    only when no siblings exist; otherwise siblings are ``seg-0..n-1``.
+    (fork registration order, per the Task 0B pinned rule). The root trajectory
+    is ``seg-0`` only when no siblings exist; otherwise siblings are ``seg-0..n-1``.
 
     Spans are computed per sibling document with the v1 ``_build_spans``
     helper (Pattern Q) when the ref inlines a document (``steps`` key);
@@ -46,7 +42,7 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
 
     Raises:
         ValueError: when two sibling refs share the same
-            ``(order_index, descriptor)`` key — the message names both.
+            ``(descriptor, trajectory_id)`` key — the message names both.
     """
     refs = trajectory.get("subagent_trajectory_ref") or []
     if not refs:
@@ -56,8 +52,6 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
                 segment_id="seg-0",
                 trajectory_id=root_id,
                 session_id=str(trajectory.get("session_id", "")),
-                order_index=0,
-                descriptor=_descriptor(root_id),
                 spans=_build_spans(trajectory),
             )
         ]
@@ -80,8 +74,6 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
                 segment_id=f"seg-{order_index}",
                 trajectory_id=trajectory_id,
                 session_id=str(ref.get("session_id", trajectory.get("session_id", ""))),
-                order_index=order_index,
-                descriptor=descriptor,
                 spans=spans if "steps" in ref else [],
             )
         )
