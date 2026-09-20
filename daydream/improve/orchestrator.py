@@ -82,7 +82,8 @@ from daydream.improve.prompts import (
     build_plan_writer_repair_prompt,
 )
 from daydream.improve.publish import ImprovePublishError, IssuePublisher
-from daydream.improve.render import _redact_model_value, markdown_cell, plan_slug
+from daydream.improve.redaction import redact_model_value
+from daydream.improve.render import markdown_cell, plan_slug
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
@@ -465,7 +466,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     valid_commands: list[dict[str, Any]] = []
     command_errors: list[str] = []
     model_fields: dict[str, Any] = {}
-    safe_recon = _redact_model_value(recon)
+    safe_recon = redact_model_value(recon)
     if isinstance(safe_recon, dict):
         raw_commands = safe_recon.get("commands")
         total_candidates = len(raw_commands) if isinstance(raw_commands, list) else 0
@@ -1030,7 +1031,7 @@ async def _run_audit_assignments(
                                 else []
                             )
                             findings = [
-                                _redact_model_value(finding)
+                                redact_model_value(finding)
                                 for finding in raw_findings
                                 if isinstance(finding, dict)
                             ]
@@ -1412,7 +1413,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                                 except Exception:  # noqa: BLE001 - no verdict fails closed
                                     output = {}
                                     failed_slots.add(slot)
-                                safe_output = _redact_model_value(output)
+                                safe_output = redact_model_value(output)
                                 verdicts = (
                                     safe_output.get("verdicts", [])
                                     if isinstance(safe_output, dict)
@@ -1913,7 +1914,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                         output, aborted_reason = await _call_once_retried(
                             current_prompt
                         )
-                        output = _redact_model_value(output)
+                        output = redact_model_value(output)
                         if aborted_reason is not None:
                             abort_code = {
                                 "tool_call_budget_exceeded": (

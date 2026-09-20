@@ -13,9 +13,6 @@ from daydream.trajectory import redact_text
 
 _SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
 
-# Keep imports working until the remaining consumers migrate to the public owner.
-_redact_model_value = redact_model_value
-
 
 def plan_slug(title: Any) -> str:
     """Derive a plan's filename and branch slug from its title."""
