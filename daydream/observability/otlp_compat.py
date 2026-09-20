@@ -16,6 +16,7 @@ import calendar
 import gzip
 import json
 import logging
+import os
 import ssl
 import threading
 import time
@@ -545,7 +546,7 @@ def build_http_transport(
     ledger: DeliveryLedger | None = None,
 ) -> HttpxOtlpTransport:
     """Resolve the typed HTTP config and construct the owned transport."""
-    reject_credential_provider_settings(environ if environ is not None else _default_environ())
+    reject_credential_provider_settings(environ if environ is not None else os.environ)
     verify = resolve_ssl_context(certificate_file=certificate_file, client_cert=client_cert, client_key=client_key)
     cert = (client_cert, client_key) if client_cert and client_key else client_cert
     config = HttpTransportConfig(
@@ -559,12 +560,6 @@ def build_http_transport(
         follow_redirects=follow_redirects,
     )
     return HttpxOtlpTransport(config, ledger or DeliveryLedger())
-
-
-def _default_environ() -> Any:
-    import os
-
-    return os.environ
 
 
 def _grpc_retry_delay(exc: Any) -> float | None:

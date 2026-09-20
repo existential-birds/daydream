@@ -1,54 +1,21 @@
 """Referential identity for per-stack review records (issue #1111).
 
-Per-stack records answer two different questions, and before this module the
-pipeline used one kind of answer for both:
+Per-stack records answer two different questions: "do these describe the same
+defect?" — legitimately content-derived, answered by
+``pr_review.compute_fingerprint`` and ``deep.dedup.descriptions_match`` — and
+"which record object is this?" — host-assigned, answered by the ``uid`` minted
+at record birth. The reviewer LLM's ``id`` cannot answer the second: the
+numbering restarts at 1 for every stack.
 
-1. **"Do these describe the same defect?"** — legitimately content-derived.
-   ``pr_review.compute_fingerprint`` and ``deep.dedup.descriptions_match`` both
-   answer it, and both stay content-derived. This module does not touch them.
-2. **"Which record object is this?"** — must *not* be content-derived, and had
-   no representation at all.
+``uid`` has the deterministic format ``f"{stack_name}:{ordinal}"`` so it can be
+re-derived from position when backfilling records written before the field
+existed. Stamping is always host-side and post-validation, under the same
+pattern ``normalize_items`` uses for ``id``; no strict schema gains a ``uid``
+property.
 
-The reviewer LLM's ``id`` cannot answer question 2: ``PER_STACK_RECORD_SCHEMA``
-carries no ``uniqueItems`` constraint and the numbering restarts at 1 for every
-stack, so ``id: 1`` is the norm rather than the exception. The first globally
-unique handle a finding used to receive was minted by
-``phases.normalize_items`` at the *final merge write* — after dedup,
-arbitration, suppression and the structural fold had all already needed one. So
-each of those stages invented its own surrogate: a positional list index, an
-``id(record)`` object identity, a ``(file, line)`` tuple, an ``(id, file)``
-tuple, or the ``source`` string. Every one of them gets *less* discriminating as
-two records get more similar — and those sites only ever run on records selected
-for being similar, so the key was weakest exactly where it was used.
-
-``uid`` is the host-assigned answer to question 2, minted at record birth.
-
-Format is ``f"{stack_name}:{ordinal}"`` (``python:1``, ``structure:3``), which
-is deliberately readable in artifacts when debugging and deterministically
-reproducible from ``(stack_name, position)``. That reproducibility is what makes
-:func:`stamp_record_uids` safe to run against records written by an older run:
-they simply lack the field, and re-deriving it from position restores the same
-value the producing run would have minted. A uuid4 would be opaque and could not
-be regenerated for pre-existing artifacts.
-
-**Stamping is always host-side and post-validation.** ``run_agent`` validates
-structured output against the strict schema *before returning it*, and nothing
-re-validates a record dict afterwards, so a host-added key can never be
-schema-rejected. This is the same pattern ``normalize_items`` already uses to
-overwrite ``id``. None of the strict ``*_SCHEMA`` constants in ``phases.py``
-gain a ``uid`` property — ``tests/test_output_schema_strict.py`` requires every
-declared property to sit in ``required``, so declaring ``uid`` would force the
-*model* to emit a field the host owns.
-
-Scope note: ``uid`` is a **pre-merge** identity. The cross-stack merge agent
-re-emits items from scratch under ``MERGED_ITEMS_SCHEMA``, so multi-stack
-merged items carry no ``uid`` and do not need one — ``normalize_items`` already
-gives every merged item a globally unique ``id``. Records that reach
-``merged-items.json`` without passing through the merge agent (the single-stack
-bypass, and the host-appended structural items) keep whichever ``uid`` they were
-born with, so a ``uid`` on a merged item is a valid handle when present but is
-never guaranteed to be there. Read it with :func:`record_uid` and treat the
-empty string as "no pre-merge identity".
+Scope note: ``uid`` is a **pre-merge** identity — the merge agent re-emits items
+from scratch, so merged items carry no ``uid``. Read it with :func:`record_uid`
+and treat the empty string as "no pre-merge identity".
 """
 
 from __future__ import annotations
@@ -151,30 +118,9 @@ def record_uid(record: dict[str, Any]) -> str:
 def stamp_record_uids(records: list[dict[str, Any]], stack_name: str) -> None:
     """Stamp a ``uid`` onto every record in *records* that lacks one, in place.
 
-    Records are mutated in place rather than rebuilt, because the surrogate this
-    field replaces was ``id(record)`` object identity: a stage that rebuilt a
-    record as a fresh dict silently escaped those sets. Mutating in place means
-    a caller holding the same list sees the stamp without having to re-bind
-    anything, and no such escape is possible.
-
-    An existing ``uid`` is **preserved**, never overwritten. Two reasons:
-
-    - Records reloaded on a ``--start-at merge`` resume may have been written
-      back by ``_rewrite_stack_records`` *after* adjudication dropped some of
-      them, so the on-disk list is shorter than the list that produced those
-      uids. Re-minting by position would hand out different uids than the run
-      that created the artifacts.
-    - Idempotence lets this be called at both record birth and record load
-      without the second call fighting the first.
-
-    A minted ordinal SKIPS any value an already-stamped record in the list
-    holds. Counting positions alone is not sufficient and was a real defect
-    here: a list like ``[{uid: python:2}, {}]`` -- a preserved record sitting
-    anywhere other than its original position -- would hand the unstamped
-    record ``python:2`` as well, emitting the duplicate this field exists to
-    make impossible. On a fully unstamped list (the backfill case) skipping
-    changes nothing, so ordinals still equal positions and the value stays
-    re-derivable from ``(stack_name, position)``.
+    An existing ``uid`` is preserved, never overwritten, so this is idempotent
+    and safe to run at both record birth and record load; a minted ordinal skips
+    any value an already-stamped record holds.
 
     Args:
         records: Record dicts to stamp, mutated in place.
@@ -246,23 +192,10 @@ def item_uid(item: dict[str, Any]) -> str:
 def item_source_uids(item: dict[str, Any]) -> list[str]:
     """Return the pre-merge record uids *item* derives from, in order.
 
-    This is the post-merge counterpart to :func:`record_uid`. A merged item is
-    not a record: the cross-stack merge agent synthesizes items, and one item
-    may consolidate several records, so its provenance is a *list* rather than a
-    single handle. ``source_uids`` carries that list.
-
-    Resolution order, so every path a merged item can arrive by reports the same
-    way:
-
-    1. An explicit ``source_uids`` list (the merge agent's attribution, already
-       validated host-side against the run's record pool).
-    2. Failing that, the item's own ``uid`` — the case for items that never went
-       through the merge agent and therefore kept their birth identity: the
-       host-appended structural items, the single-stack bypass, and the salvage
-       path.
-    3. Failing both, empty — the item has no pre-merge provenance. That is a
-       real answer, not an error: an item the merge agent declined to attribute
-       reports nothing rather than a fabricated link.
+    Resolution order: an explicit ``source_uids`` list (the merge agent's
+    attribution, validated host-side against the run's record pool); failing
+    that, the item's own ``uid`` (items that never went through the merge
+    agent); failing both, empty.
 
     Args:
         item: A merged finding item.
