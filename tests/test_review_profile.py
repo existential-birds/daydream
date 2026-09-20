@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from daydream import review_profile as rp
+from tests.test_review_profile_completeness import STAGE_KEYS
 
 
 def test_stage_keys_cover_every_model_bearing_stage() -> None:
@@ -24,7 +25,7 @@ def test_stage_keys_cover_every_model_bearing_stage() -> None:
         "merge",
         "supervision",
         "verification",
-    } <= set(rp.STAGE_KEYS)
+    } <= set(STAGE_KEYS)
 
 
 def test_improve_audits_and_vetting_are_stages() -> None:
@@ -38,14 +39,14 @@ def test_improve_audits_and_vetting_are_stages() -> None:
         "improve.audit.dx",
         "improve.audit.docs",
         "improve.vetting",
-    } <= set(rp.STAGE_KEYS)
+    } <= set(STAGE_KEYS)
 
 
 def test_default_profile_carries_schema_version_name_and_every_stage() -> None:
     p = rp.build_default_profile()
     assert p.schema_version == 1
     assert p.name  # human-readable, nonempty
-    assert set(p.strategies) == set(rp.STAGE_KEYS)  # every stage present
+    assert set(p.strategies) == set(STAGE_KEYS)  # every stage present
 
     for _key, strategy in p.strategies.items():
         assert strategy.content  # nonempty, real content (copied, not invented)

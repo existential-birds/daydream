@@ -135,7 +135,7 @@ def _total(recorder: Any, inv: Invocation, *, input_tokens: int = 10, output_tok
 
 
 def _summary(inv: Invocation) -> dict[str, Any]:
-    return inv.generation_lifecycle()
+    return inv._generation_ledger.to_dict()
 
 
 class TestPendingDraftLifecycle:

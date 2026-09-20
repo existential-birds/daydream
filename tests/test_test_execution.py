@@ -149,7 +149,7 @@ async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
 
     events = [
         e
-        for e in rec.phase_event_dicts()
+        for e in [x.to_dict() for x in rec._phase_events]
         if e["phase"] == DaydreamPhase.TEST_EXECUTION.value and e["event"] == "phase_end"
     ]
     assert len(events) == 1
@@ -170,7 +170,7 @@ async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
 
     events = [
         e
-        for e in rec.phase_event_dicts()
+        for e in [x.to_dict() for x in rec._phase_events]
         if e["phase"] == DaydreamPhase.TEST_EXECUTION.value and e["event"] == "phase_end"
     ]
     assert len(events) == 1

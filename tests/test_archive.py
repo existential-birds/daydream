@@ -3390,7 +3390,7 @@ def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifac
         }
         for phase in (DaydreamPhase.PUSH, DaydreamPhase.REMOTE_CI)
     ]
-    assert recorder.phase_event_dicts() == []
+    assert recorder._phase_events == []
 
     _strict_archive(
         target=target,

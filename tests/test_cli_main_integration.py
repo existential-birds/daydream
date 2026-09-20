@@ -46,9 +46,15 @@ from daydream import cli, git_ops
 from daydream.backends.codex import CodexError
 from daydream.phases import UnconfinedFindingError
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import bare_remote, commit, git
+from tests.harness.git_helpers import bare_remote, git
 from tests.harness.git_helpers import tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
+
+# Reuse the artifact-visibility seeding/assertion helpers instead of duplicating them.
+from tests.test_artifact_visibility_integration import (
+    _assert_frozen_outputs,
+    _seed_visibility_canaries,
+)
 
 # Reuse the deep-pipeline stub from the exemplar instead of duplicating it.
 from tests.test_deep_orchestrator import (
@@ -471,35 +477,6 @@ def _write_visibility_probe_extension(
     )
 
 
-def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
-    """Commit the authorized source canary; seed everything that must stay dark."""
-    source = repo / "visibility_source.py"
-    source.write_text(f"VALUE = {SOURCE_CANARY!r}\n", encoding="utf-8")
-    git(repo, "add", source.name)
-    commit(repo, "seed artifact visibility source canary")
-
-    prior = repo / ".daydream" / "runs" / "prior-public-run"
-    prior.mkdir(parents=True)
-    (prior / "trajectory.json").write_text(json.dumps({"reasoning": PRIOR_REASONING_CANARY}))
-    legacy = repo / ".daydream" / "exploration" / "legacy cache.json"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text(RESUME_CACHE_CANARY, encoding="utf-8")
-
-    # Private-root canaries under the redirected default private base: never
-    # part of any model cwd, and never visible to the external executable.
-    private_base.mkdir(mode=0o700, exist_ok=True)
-    runtime_root = private_base / "runtime"
-    runtime_root.mkdir(mode=0o700, exist_ok=True)
-    sibling = runtime_root / "sibling-owner" / "runs" / "sibling-run"
-    sibling.mkdir(parents=True, exist_ok=True)
-    for path, canary in (
-        (private_base / "private sentinel.txt", PRIVATE_ROOT_CANARY),
-        (runtime_root / "runtime state.txt", RUNTIME_STATE_CANARY),
-        (sibling / "reasoning.txt", SIBLING_REASONING_CANARY),
-    ):
-        path.write_text(canary, encoding="utf-8")
-
-
 @dataclass(frozen=True)
 class _VisibilityCase:
     """One seeded repo + probe extension + real Codex executable on ``PATH``."""
@@ -588,41 +565,6 @@ def _assert_codex_observations(
     return model_cwds
 
 
-def _assert_frozen_outputs(
-    repo: Path, archive_dir: Path, explicit_trajectory: Path, dump_dir: Path, *, model: str
-) -> str:
-    """Explicit, public-run, archive, eval, and dump share one frozen identity."""
-    explicit_bytes = explicit_trajectory.read_bytes()
-    explicit = json.loads(explicit_bytes)
-    session_id: str = explicit["session_id"]
-    assert explicit["trajectory_id"] == session_id
-    assert CURRENT_REASONING_CANARY in explicit_bytes.decode("utf-8")
-
-    public_run = repo / ".daydream" / "runs" / session_id
-    archived_run = archive_dir / "runs" / session_id
-    assert (public_run / "trajectory.json").read_bytes() == explicit_bytes
-    assert (archived_run / "trajectory.json").read_bytes() == explicit_bytes
-    assert (dump_dir / "trajectory.json").read_bytes() == explicit_bytes
-
-    archive_manifest = json.loads((archived_run / "manifest.json").read_bytes())
-    dump_manifest = json.loads((dump_dir / "manifest.json").read_bytes())
-    archive_evaluation = json.loads((archived_run / "evaluation.json").read_bytes())
-    dump_evaluation = json.loads((dump_dir / "evaluation.json").read_bytes())
-    assert archive_manifest == dump_manifest
-    assert archive_evaluation == dump_evaluation
-    assert archive_manifest["session_id"] == session_id
-    assert archive_manifest["archive_status"] == "complete"
-    assert archive_manifest["run"]["backend"] == "codex"
-    assert archive_evaluation["session_id"] == session_id
-    assert archive_manifest["git"]["source_path"] == str(repo.resolve())
-    assert explicit["extra"]["backend"] == "codex"
-    assert explicit["agent"]["model_name"] == model
-    agent_steps = [step for step in explicit["steps"] if step["source"] == "agent"]
-    assert len(agent_steps) == 2
-    assert {step["model_name"] for step in agent_steps} == {model}
-    return session_id
-
-
 def _replace_destination_after_entered(
     fixture: ProtocolCli, destination: Path, replacement: bytes, *,
     expected_pids: int, stop: threading.Event, failures: list[BaseException],
@@ -687,7 +629,8 @@ def test_artifact_visibility_cli_codex_in_place_publishes_after_model(
 
     _assert_codex_observations(case, expected_cwd=case.repo)
     _assert_frozen_outputs(
-        case.repo, archive_dir, explicit_trajectory, dump_dir, model="fixture-model"
+        case.repo, archive_dir, explicit_trajectory, dump_dir,
+        backend="codex", model="fixture-model",
     )
 
 
@@ -728,7 +671,8 @@ def test_artifact_visibility_cli_codex_worktree_branch_and_paths_with_spaces(
     assert not model_cwd.exists(), "ephemeral worktree must be gone after the run"
 
     session_id = _assert_frozen_outputs(
-        repo, archive_dir, explicit_trajectory, dump_dir, model="fixture-model"
+        repo, archive_dir, explicit_trajectory, dump_dir,
+        backend="codex", model="fixture-model",
     )
     # The public run is published to the SOURCE checkout, not the worktree.
     assert (repo / ".daydream" / "runs" / session_id / "trajectory.json").exists()
