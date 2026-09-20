@@ -1818,7 +1818,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
             )
 
             enrich_license_evidence(
-                config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+                config.stage_dir, resolver=_make_license_resolver(),
             )
             _hydrate.restamp_admitted_digests(config.stage_dir, revision=source_commit)
             _hydrate.apply_license_gate(

@@ -932,7 +932,7 @@ def rebuild_index(stage: Path) -> None:
 
 
 def build_resolution_map(
-    stage: Path, *, source_commit: str, repo_commits: Mapping[str, str],
+    stage: Path, *, repo_commits: Mapping[str, str],
 ) -> dict[str, Any]:
     """Build the deferred-clone repository resolution map (issue #982 M5).
 
@@ -946,10 +946,6 @@ def build_resolution_map(
     session ids, as do rows whose slug carries no full 40-hex resolved commit —
     a reported outcome, never a raw-URL fallback, never a fabricated revision,
     and never a clone.
-
-    ``source_commit`` (the Hub dataset revision the snapshot was hydrated
-    from) is accepted for ledger bookkeeping at the call site but is
-    deliberately never recorded in any map entry.
 
     No I/O beyond reading the staging index: this never shells out to git, so
     hydration never clones or fetches (M5). Raw URLs are consumed as data only
@@ -1890,7 +1886,7 @@ def publish_batches(
     curated = stage / "curated" / curation_id
     _stage_batches(stage, curated)
     _write_resolution_map(stage, curated)
-    _write_resume_ledger(stage, curated, curation_id)
+    _write_resume_ledger(curated, curation_id)
     files = _curated_upload_paths(stage, curation_id)
     if not files:
         raise HydrationError(redact_text(f"nothing to publish under curated/{curation_id}"))
@@ -1972,16 +1968,14 @@ def _write_resolution_map(stage: Path, curated: Path) -> None:
     map_path = curated / "resolution-map.json"
     if map_path.exists():
         return
-    source_commit = _curation_source_commit(curated)
     cmap = build_resolution_map(
         stage,
-        source_commit=source_commit or "unknown",
         repo_commits=_repo_commits_from_enrichment_cache(stage),
     )
     atomic_write_json(map_path, cmap)
 
 
-def _write_resume_ledger(stage: Path, curated: Path, curation_id: str) -> None:
+def _write_resume_ledger(curated: Path, curation_id: str) -> None:
     """Write (append) one resume record per admitted batch under ``resume/ledger.jsonl``.
 
     Content-addressed: re-publishing identical content produces byte-identical
@@ -2607,7 +2601,7 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     )
 
     enrich_license_evidence(
-        config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+        config.stage_dir, resolver=_make_license_resolver(),
     )
     # Enrichment may have rewritten admitted manifests; refresh the dedupe
     # baselines/ledger digests so the published content identity matches the

@@ -74,7 +74,7 @@ def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
                 spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
             )
 
-    license_enrich.enrich_license_evidence(stage, revision=REVISION, resolver=FakeResolver())
+    license_enrich.enrich_license_evidence(stage, resolver=FakeResolver())
     hydrate.restamp_admitted_digests(stage, revision=REVISION)
     hydrate.apply_license_gate(
         stage, revision=REVISION, license_policy_path=_write_policy(tmp_path),

@@ -54,7 +54,6 @@ def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(
 # artifact on failure.
 def test_entrypoint_parses_and_validates_candidate_before_runconfig(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daydream.benchmark.harbor import entrypoint
 
@@ -71,7 +70,6 @@ def test_entrypoint_parses_and_validates_candidate_before_runconfig(
 
 def test_entrypoint_invalid_candidate_fails_and_writes_no_review(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daydream.benchmark.harbor import entrypoint
 
@@ -94,7 +92,6 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(
 
 def test_malicious_target_config_cannot_change_harbor_candidate(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daydream.benchmark.harbor import entrypoint
 

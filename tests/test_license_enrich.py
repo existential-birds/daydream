@@ -66,7 +66,7 @@ def test_enrich_fills_missing_evidence_and_skips_declared(tmp_path: Path) -> Non
         ("sess-declared", "acme/widget", {"spdx_id": "Apache-2.0", "source": "producer"}),
     ])
     resolver = _make_resolver()
-    evidence = enrich_license_evidence(stage, revision="a" * 40, resolver=resolver)
+    evidence = enrich_license_evidence(stage, resolver=resolver)
     # The legacy record gains declared evidence identical in shape to producer evidence.
     assert evidence["sess-legacy"]["spdx_id"] == "MIT"
     assert evidence["sess-legacy"]["source"] == f"github:acme/widget@{'b' * 40}"
@@ -85,7 +85,7 @@ def test_enrich_fills_missing_evidence_and_skips_declared(tmp_path: Path) -> Non
 def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-legacy", "acme/widget", None)])
-    enrich_license_evidence(stage, revision="a" * 40, resolver=_make_resolver())
+    enrich_license_evidence(stage, resolver=_make_resolver())
     cache_path = stage / "_enrich" / "evidence.jsonl"
     assert cache_path.is_file()
     import json
@@ -104,7 +104,7 @@ def test_enrich_records_stable_failure_codes_for_unresolvable(tmp_path: Path) ->
         ("sess-noslug", None, None),               # no repo identity
         ("sess-unknown", "ghost/nope", None),      # resolver cannot resolve
     ])
-    enrich_license_evidence(stage, revision="a" * 40, resolver=FakeResolver({}))
+    enrich_license_evidence(stage, resolver=FakeResolver({}))
     codes = {sid: v["status"] for sid, v in _as_entries(stage).items()}
     # No-slug session: repo_identity_missing; unresolvable repo: the specific
     # repo_commit_unresolved code (the evidence-missing bucket folds it in).
@@ -119,11 +119,11 @@ def test_enrich_records_stable_failure_codes_for_unresolvable(tmp_path: Path) ->
 def test_enrich_reuses_cached_resolution_across_runs(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-1", "acme/widget", None)])
-    enrich_license_evidence(stage, revision="a" * 40, resolver=_make_resolver())
+    enrich_license_evidence(stage, resolver=_make_resolver())
     # A second run (fresh resolver instance) must hit the cache, not the resolver.
     second = _make_resolver()
     seed_admitted_runs(stage, [("sess-2", "acme/widget", None)])
-    evidence = enrich_license_evidence(stage, revision="a" * 40, resolver=second)
+    evidence = enrich_license_evidence(stage, resolver=second)
     assert second.queried == []
     assert evidence["sess-2"]["spdx_id"] == "MIT"
 
@@ -132,7 +132,7 @@ def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
     from daydream.archive.hydrate import _curated_dir
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-legacy", "acme/widget", None)])
-    enrich_license_evidence(stage, revision="a" * 40, resolver=_make_resolver())
+    enrich_license_evidence(stage, resolver=_make_resolver())
     from daydream.archive.license_enrich import publish_enrichment_cache
     publish_enrichment_cache(stage, revision="a" * 40)
     published = _curated_dir(stage, "a" * 40) / "license-evidence.jsonl"

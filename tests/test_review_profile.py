@@ -39,9 +39,6 @@ def test_improve_audits_and_vetting_are_stages() -> None:
         "improve.audit.docs",
         "improve.vetting",
     } <= set(rp.STAGE_KEYS)
-    for cat in ("correctness", "security", "performance", "tests",
-                 "tech-debt", "dependencies", "dx", "docs"):
-        assert f"improve.audit.{cat}" in rp.STAGE_KEYS
 
 
 def test_default_profile_carries_schema_version_name_and_every_stage() -> None:

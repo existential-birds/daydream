@@ -370,6 +370,17 @@ def pr() -> PRInfo:
     )
 
 
+def _assert_hunks_resolve(
+    _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
+) -> int | None:
+    assert hunks is not None, "classify called resolve_line without the file's hunks"
+    return issue.line
+
+
+def _raise_on_gh_fallback(*_a: Any, **_k: Any) -> str:
+    raise AssertionError("gh fallback invoked")
+
+
 def test_agent_prompt_has_no_skill_advertising(pr: PRInfo) -> None:
     """M5: the consolidated AI-agent prompt carries no /beagle-core skill reference."""
     body = pr_review._build_consolidated_prompt(pr_review._ClassifiedIssues(), pr)
@@ -383,13 +394,6 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
         ParsedIssue(path="b.py", line=99, title="t2", body="anchor_two"),
         ParsedIssue(path="c.py", line=None, title="t3", body="xstack", is_cross_stack=True),
     ]
-
-    def fake_resolve(
-        _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
-    ) -> int | None:
-        # classify must resolve the hunks first and hand them down (issue #1102).
-        assert hunks is not None, "classify called resolve_line without the file's hunks"
-        return issue.line
 
     def fake_hunks(
         _td: Path,
@@ -407,7 +411,7 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
         return []
 
     monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
-    monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
+    monkeypatch.setattr(pr_review, "resolve_line", _assert_hunks_resolve)
     monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
 
     result = classify(Path("."), pr, issues)
@@ -430,12 +434,6 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
         ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
     ]
 
-    def fake_resolve(
-        _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
-    ) -> int | None:
-        assert hunks is not None, "classify called resolve_line without the file's hunks"
-        return issue.line
-
     def fake_hunks(
         _td: Path,
         _base: str,
@@ -452,7 +450,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
         return []
 
     monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
-    monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
+    monkeypatch.setattr(pr_review, "resolve_line", _assert_hunks_resolve)
     monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
 
     result = classify(Path("."), pr, issues)
@@ -1571,20 +1569,10 @@ def test_file_hunks_uses_git_diff_when_it_succeeds(
     _git(git_repo, "commit", "-m", "add 2 lines")
     head = _git(git_repo, "rev-parse", "HEAD")
 
-    # If the gh fallback fires we want to know about it.
-    gh_called = False
-
-    def boom(*_a: Any, **_k: Any) -> str:
-        nonlocal gh_called
-        gh_called = True
-        return ""
-
-    monkeypatch.setattr(git_ops, "gh_pr_diff", boom)
+    monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
 
     hunks = pr_review.file_hunks(git_repo, base, head, "x.py", pr_number=42)
     assert hunks  # at least one hunk
-    # The fallback was not needed because real git diff succeeded.
-    assert gh_called is False
 
 
 def test_file_hunks_falls_back_to_gh_when_base_unreachable(
@@ -1614,19 +1602,11 @@ def test_file_hunks_no_fallback_without_pr_number(
     Uses real git (which fails on the bogus base) plus a guard on the gh
     wrapper to confirm no fallback is invoked.
     """
-    gh_called = False
-
-    def boom(*_a: Any, **_k: Any) -> str:
-        nonlocal gh_called
-        gh_called = True
-        return ""
-
-    monkeypatch.setattr(git_ops, "gh_pr_diff", boom)
+    monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
     hunks = pr_review.file_hunks(
         git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py"
     )
     assert hunks == []
-    assert gh_called is False
 
 
 def test_file_hunks_gh_fallback_handles_subprocess_error(
