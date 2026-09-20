@@ -376,10 +376,10 @@ def _assert_frozen_outputs(
     *,
     backend: str,
     model: str,
-) -> None:
+) -> str:
     explicit_bytes = explicit_trajectory.read_bytes()
     explicit = json.loads(explicit_bytes)
-    session_id = explicit["session_id"]
+    session_id: str = explicit["session_id"]
     assert explicit["trajectory_id"] == session_id
     assert CURRENT_REASONING_CANARY in explicit_trajectory.read_text(encoding="utf-8")
 
@@ -406,6 +406,7 @@ def _assert_frozen_outputs(
     agent_steps = [step for step in explicit["steps"] if step["source"] == "agent"]
     assert len(agent_steps) == 2
     assert {step["model_name"] for step in agent_steps} == {model}
+    return session_id
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "pi", "osprey"])

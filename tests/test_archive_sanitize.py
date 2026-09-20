@@ -207,25 +207,6 @@ def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path)
     assert "x-access-token" in (run_dir / "trajectory.json").read_text()
 
 
-def _quarantined_bundle_fixture(tmp_path: Path) -> tuple[Path, Path]:
-    """A bronze bundle with a blocking secret URL is quarantined (never
-    imported raw) by ``sanitize.import_bundle``; only the sanitized
-    derivative is releasable. Returns (archive_dir, run_dir)."""
-    from daydream.archive import sanitize
-
-    archive_dir = tmp_path / "archive"
-    run_dir = _seed_bronze_bundle(
-        archive_dir, "s1", "https://user:***@github.com/o/r"
-    )
-    result = sanitize.import_bundle(run_dir, archive_dir)
-    assert result.quarantined is True
-    assert result.imported is False
-    # The bundle was moved to quarantine/<name> — never read raw.
-    assert not run_dir.exists()
-    assert (archive_dir / "quarantine" / "s1" / "manifest.json").exists()
-    return archive_dir, run_dir
-
-
 def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
     """M17 successor: the projection layer's admission boundary refuses a
     bundle whose batch rows are not all ``admitted`` — a quarantined
@@ -267,7 +248,18 @@ def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
 def test_import_bundle_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
     """M17 successor (fail-closed): an affected bronze bundle with no
     released derivative is quarantined at ingest — never imported raw."""
-    _quarantined_bundle_fixture(tmp_path)
+    from daydream.archive import sanitize
+
+    archive_dir = tmp_path / "archive"
+    run_dir = _seed_bronze_bundle(
+        archive_dir, "s1", "https://user:***@github.com/o/r"
+    )
+    result = sanitize.import_bundle(run_dir, archive_dir)
+    assert result.quarantined is True
+    assert result.imported is False
+    # The bundle was moved to quarantine/<name> — never read raw.
+    assert not run_dir.exists()
+    assert (archive_dir / "quarantine" / "s1" / "manifest.json").exists()
 
 
 def test_inventory_counts_by_category_without_values(

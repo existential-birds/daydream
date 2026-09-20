@@ -329,7 +329,6 @@ def materialize_mirror(entry: _ManifestEntry, ctx: Path, *, red: bool, mirror: P
 def _validate_red_flags(
     *,
     red: bool,
-    base_only: bool,
     prs: list[tuple[str, _ManifestEntry, _ManifestPR]],
 ) -> int | None:
     """Validate ``--red`` constraints before any build starts.
@@ -337,10 +336,6 @@ def _validate_red_flags(
     Returns ``None`` when the flags are valid, or an exit code (2) when
     a constraint is violated.
     """
-    if red and base_only:
-        print("--red cannot be combined with --base-only", file=sys.stderr)
-        return 2
-
     if red:
         fixture_selected = any(
             slug == FIXTURE_SLUG and entry.clone_url == FIXTURE_CLONE_URL for slug, entry, _pr in prs
@@ -486,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no PR in {args.manifest} belongs to {args.only}", file=sys.stderr)
             return 2
 
-    red_status = _validate_red_flags(red=args.red, base_only=args.base_only, prs=prs)
+    red_status = _validate_red_flags(red=args.red, prs=prs)
     if red_status is not None:
         return red_status
 

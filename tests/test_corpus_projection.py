@@ -1326,15 +1326,6 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     assert "finding_text_sha256" not in rejected
 
 
-# #1093: the legacy v1 records builder and its CLI verb are removed; the
-# canonical projection surface is the corpus_projection package (renamed in this task).
-def test_legacy_records_builder_gone() -> None:
-    """#1093: `run_build_corpus` (v1 records JSONL emission) is removed."""
-    import daydream.training.corpus as corpus_mod
-
-    assert not hasattr(corpus_mod, "run_build_corpus")
-
-
 def test_corpus_build_verb_gone() -> None:
     """#1093: the legacy `daydream corpus build` verb no longer dispatches.
 

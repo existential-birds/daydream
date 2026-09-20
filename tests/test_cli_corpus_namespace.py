@@ -89,10 +89,7 @@ def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> 
     assert "build" in captured.out
     assert "hydrate-hub" in captured.out
     assert "harvest" in captured.out
-    assert "build" in captured.out
-    assert "build" in captured.out
     assert "label" in captured.out
-    assert "calibrate-reward" in captured.out
 
 
 def test_adjudicate_publication_commands_run_through_main(

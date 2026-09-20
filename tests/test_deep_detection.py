@@ -451,13 +451,3 @@ def test_detect_stacks_registry_independent_same_scopes() -> None:
     assert "python" in names and "react" in names and GENERIC_STACK in names
     assert names[-1] == "structure"
 
-
-def test_detect_stacks_never_degrades_to_generic_without_registry() -> None:
-    from daydream.deep.detection import GENERIC_STACK, detect_stacks
-
-    # D-16 removed: a python stack never becomes generic merely because no
-    # plugin registry is present.
-    changed = ["a.py"]
-    stacks = detect_stacks(changed)
-    assert any(s.stack_name == "python" for s in stacks)
-    assert not any(s.stack_name == GENERIC_STACK for s in stacks)

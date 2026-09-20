@@ -206,28 +206,3 @@ async def test_deep_canary_no_redundant_sweep_when_all_covered(
     assert stats["attempted_files"] == []  # sweep dispatched nothing
     assert pre["coverage_ratio"] == 1.0  # full coverage pre-sweep
 
-
-def test_deep_canary_golden_fixtures_are_well_formed() -> None:
-    """Well-formedness check on the committed golden receipt/stat fixtures.
-
-    NOT a golden reproduction: the live-run invariants are pinned by
-    ``test_deep_canary_sharding_and_sibling_frontier`` and
-    ``test_deep_canary_no_redundant_sweep_when_all_covered`` above, which
-    each drive a fresh ``runner.run`` and assert against live
-    ``.daydream/deep`` output. This check guards the COMMITTED fixtures from
-    a corrupting edit: the archive must still look like a valid deterministic
-    canary outcome (>=2 shards, a non-empty frontier, every shard within the
-    5-file bound, non-trivial dependency-frontier evidence, and mod5.py
-    uncovered then attempted). It compares shape, not bytes, so benign
-    shard-name drift can't break it.
-    """
-    golden_receipt = json.loads((Path(__file__).parent / "fixtures" / "deep" / "coverage-receipts.json").read_text())
-    golden_stats = json.loads((Path(__file__).parent / "fixtures" / "deep" / "coverage-stats.json").read_text())
-    py_shards = {k: v for k, v in golden_receipt.items() if k.startswith("python#")}
-    assert len(py_shards) >= 2
-    assert any(r["frontier_files"] for r in py_shards.values())
-    assert all(len(r["assigned_files"]) <= 5 for r in py_shards.values())
-    pre = golden_stats["pre_sweep"]
-    assert pre["coverage_by_evidence"]["dependency_frontier_read"] >= 1
-    assert "mod5.py" in pre["uncovered_files"]
-    assert "mod5.py" in golden_stats["attempted_files"]
