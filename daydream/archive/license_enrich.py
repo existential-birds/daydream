@@ -242,7 +242,7 @@ def _append_cache(path: Path, entries: list[dict[str, Any]]) -> None:
 
 
 def enrich_license_evidence(
-    stage: Path, *, revision: str, resolver: RepoLicenseResolver
+    stage: Path, *, resolver: RepoLicenseResolver
 ) -> dict[str, dict[str, str]]:
     """Fill missing ``license_evidence`` on admitted derivatives under ``stage/runs/``.
 
@@ -259,10 +259,7 @@ def enrich_license_evidence(
     Resolver network failures propagate as redacted :class:`HydrationError`s
     (fatal); a resolver returning ``None`` is a recorded miss, never an
     exception — the gate rejects it. Returns resolved evidence per session id
-    (``spdx_id``/``source``/``repo_commit``/``origin: enriched``); ``revision``
-    is accepted to mirror the other staging-stage signatures (dedup is per
-    resolved repo commit, not the Hub dataset revision — repository commits in
-    the resolution map come from the resolver, never the Hub revision).
+    (``spdx_id``/``source``/``repo_commit``/``origin: enriched``).
     """
     runs_dir = stage / RUNS_DIRNAME
     by_session, by_repo = _load_cache(stage)

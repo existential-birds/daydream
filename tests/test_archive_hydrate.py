@@ -771,7 +771,7 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
         ("sess-enriched", "acme/widget", None),
     ])
     evidence = license_enrich.enrich_license_evidence(
-        stage, revision="a" * 40, resolver=_StaticResolver())
+        stage, resolver=_StaticResolver())
     policy, _digest = load_license_policy(
         "daydream/training/schema/license-policy-production.json")
     declared = resolve_repo_decision(
@@ -831,7 +831,7 @@ class TestResolutionMap:
             "sess-b": None,
         })
         cmap = hydrate.build_resolution_map(
-            stage, source_commit="a" * 40, repo_commits={"octo/repo": "b" * 40})
+            stage, repo_commits={"octo/repo": "b" * 40})
         entry = cmap["octo/repo"]
         assert entry["pinned_sha"] == "b" * 40  # the resolved Git repo commit
         assert entry["pinned_sha"] != "a" * 40  # never the Hub dataset revision
@@ -841,7 +841,7 @@ class TestResolutionMap:
     def test_non_allowlisted_host_reported_not_cloned(self, tmp_path: Path) -> None:
         stage = _staged_with(tmp_path, remote_urls={"sess-c": "https://gitlab.com/x/y"})
         cmap = hydrate.build_resolution_map(
-            stage, source_commit="a" * 40, repo_commits={})  # no resolved commit for gitlab slugs
+            stage, repo_commits={})  # no resolved commit for gitlab slugs
         assert cmap["unavailable"] == ["sess-c"]     # reported, no fallback, no clone attempted
         assert "gitlab.com" not in json.dumps(cmap)  # redacted from published metadata
 
@@ -854,7 +854,7 @@ class TestResolutionMap:
         monkeypatch.setattr(git_ops, "clone_with_token", boom)
         monkeypatch.setattr(git_ops, "fetch", boom)
         stage = _staged_with(tmp_path, remote_urls={"sess-a": "https://github.com/octo/repo"})
-        hydrate.build_resolution_map(stage, source_commit="a" * 40, repo_commits={})  # must not raise
+        hydrate.build_resolution_map(stage, repo_commits={})  # must not raise
 
 
 def test_resolution_map_records_resolved_repo_commits_not_hub_revision(tmp_path: Path) -> None:
@@ -870,7 +870,7 @@ def test_resolution_map_records_resolved_repo_commits_not_hub_revision(tmp_path:
     # repo_commits mirrors what the enrichment cache provides (Task 3 seam:
     # only acme/widget resolved, to its full Git repository commit).
     cmap = hydrate.build_resolution_map(
-        stage, source_commit="a" * 40, repo_commits={"acme/widget": "b" * 40},
+        stage, repo_commits={"acme/widget": "b" * 40},
     )
     entry = cmap["acme/widget"]
     assert entry["pinned_sha"] == "b" * 40          # the GIT repo commit
@@ -1615,7 +1615,7 @@ def _identity_for(
                 spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
             )
 
-    license_enrich.enrich_license_evidence(stage, revision=revision, resolver=FakeResolver())
+    license_enrich.enrich_license_evidence(stage, resolver=FakeResolver())
     hydrate.restamp_admitted_digests(stage, revision=revision)
     hydrate.apply_license_gate(
         stage, revision=revision, license_policy_path=policy_path,

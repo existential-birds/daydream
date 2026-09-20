@@ -13,17 +13,11 @@ import pytest
 
 from daydream.benchmark.harbor import objective
 from daydream.benchmark.harbor import run as run_mod
+from tests.test_benchmark_run import _seed_compiled_lock
 
 harbor = pytest.importorskip("harbor", reason="harbor is an optional benchmark extra")
 
 _WHEEL = {"distribution": "daydream", "version": "0.1.0", "sha256": "c" * 64}
-
-
-def _seed_compiled_lock(ws: Path, wheel: Any=_WHEEL) -> None:
-    """Write a compiled lock with the ``daydream`` wheel block + a case entry."""
-    lock = {"schema_version": 1, "cases": {"case-a": {"key": "case-a"}}, "files": {},
-            "daydream": wheel}
-    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
 
 
 def _ws(tmp_path: Path) -> Any:

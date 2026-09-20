@@ -1062,7 +1062,7 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path,
     assert list(lock_a["cases"].keys()) == sorted(lock_a["cases"].keys())
 
 
-def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage  # noqa: F401
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError

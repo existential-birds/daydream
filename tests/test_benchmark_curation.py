@@ -25,6 +25,7 @@ from daydream.benchmark.storage import (
 )
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
+from tests.test_benchmark_import_prs import _seed_manifest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,15 +42,6 @@ _PR_HEADER = {
     "updated_at": "2026-01-01T00:00:00Z",
     "user": {"login": "alice", "type": "User"},
 }
-
-
-def _seed_manifest(ws: Path) -> None:
-    """Build an initialized private workspace with an unresolved Source (o/r)."""
-    from daydream.benchmark.workspace import init_workspace
-
-    if (ws / "benchmark.yaml").exists():
-        return
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
 
 
 def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) -> None:

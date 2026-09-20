@@ -627,7 +627,7 @@ def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
     assert rec.model_dump() == before
 
 
-def test_exact_acceptance_from_authoring_anchor_matches_head(fake_gh: FakeGh) -> None:
+def test_exact_acceptance_from_authoring_anchor_matches_head() -> None:
     """A comment GitHub re-anchored onto the head (``commit_id == head`` but
     originally authored elsewhere) is denied exact acceptance: the anchor's
     commit — not the re-anchored ``commit_id`` — gates the judgment.
@@ -639,7 +639,7 @@ def test_exact_acceptance_from_authoring_anchor_matches_head(fake_gh: FakeGh) ->
     assert cand.not_exact_reason == "re-anchored"
 
 
-def test_exact_acceptance_under_explicit_historical_snapshot(fake_gh: FakeGh) -> None:
+def test_exact_acceptance_under_explicit_historical_snapshot() -> None:
     """A comment written against an explicitly selected historical head is exactly
     acceptable even though GitHub's ``commit_id`` has since moved on: the anchor
     matches the head, and the location comes from the authoring path/range.
@@ -654,7 +654,7 @@ def test_exact_acceptance_under_explicit_historical_snapshot(fake_gh: FakeGh) ->
     assert cand.location == Location(path="old.py", start_line=4, end_line=5)
 
 
-def test_range_and_missing_anchor_fail_closed(fake_gh: FakeGh) -> None:
+def test_range_and_missing_anchor_fail_closed() -> None:
     """A fail-closed anchor reason maps 1:1 to its fixed reason; a missing anchor
     (import-only snapshot / pre-anchor import) fails closed to history-unavailable
     and is never granted exact acceptance.
@@ -873,7 +873,7 @@ def test_parse_targets_dedupes_and_orders(tmp_path: Path) -> None:
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
 
 
-def test_parse_head_pr_sha_grammar_and_binding(tmp_path: Path) -> None:
+def test_parse_head_pr_sha_grammar_and_binding() -> None:
     """``--head PR=<40-hex>`` binds the explicit head to that PR only.
 
     A bare 40-hex stays a back-compat superset; an unparseable RHS raises
@@ -897,7 +897,7 @@ def test_parse_head_pr_sha_grammar_and_binding(tmp_path: Path) -> None:
         gi.parse_import_targets(["100"], [], [f"101={sha}"])
 
 
-def test_parse_heads_bound_per_pr_in_multi_import(tmp_path: Path) -> None:
+def test_parse_heads_bound_per_pr_in_multi_import() -> None:
     """A ``PR=<sha>`` head is honored for that PR only, never spread to others.
 
     Regression guard for the bug where ``--pr 100 --pr 101 --head 101=<sha>``

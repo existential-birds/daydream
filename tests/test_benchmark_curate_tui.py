@@ -614,7 +614,6 @@ def test_bare_evidence_number_opens_pager(
     tmp_path: Path,
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
@@ -662,7 +661,6 @@ def test_ready_pages_spec_and_approval_sets_digest(
 def test_ready_declined_leaves_draft_and_no_digest(
     tmp_path: Path,
     fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict

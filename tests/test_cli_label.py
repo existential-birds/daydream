@@ -5,7 +5,6 @@ thin one-liner). Assertions pin observable state — the denormalized ``runs``
 cache value, the human-sourced observation in history, and the prior label
 echoed to stdout — not mere dispatch.
 """
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -53,5 +52,5 @@ def test_label_command_accepts_unknown(archive_dir: Any) -> None:
     assert history[-1]["source"] == "human"
 
 
-def test_label_command_unknown_session_returns_1(tmp_path: Path, archive_dir: Any) -> None:
+def test_label_command_unknown_session_returns_1() -> None:
     assert cli._handle_label_command(["no-such", "--outcome", "accepted"]) == 1

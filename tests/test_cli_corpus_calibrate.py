@@ -23,6 +23,33 @@ def fixture_corpus() -> Path:
     return FIXTURE_DIR
 
 
+def _base_argv(
+    fixture_corpus: Path,
+    tmp_path: Path,
+    *,
+    corpus_dir: str = "corpus",
+    candidate: str = "w_fp=0.1,0.2,0.3",
+) -> list[str]:
+    return [
+        "corpus",
+        "calibrate-reward",
+        "--corpus-dir",
+        str(fixture_corpus / corpus_dir),
+        "--gold-labels",
+        str(fixture_corpus / "gold.json"),
+        "--breakdowns",
+        str(fixture_corpus / "breakdowns.json"),
+        "--run-id",
+        "cal-1",
+        "--seed",
+        "7",
+        "--candidate",
+        candidate,
+        "--out",
+        str(tmp_path / "out"),
+    ]
+
+
 def test_corpus_calibrate_routes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixture_corpus: Path) -> None:
     called: dict[str, Any] = {}
 
@@ -31,26 +58,7 @@ def test_corpus_calibrate_routes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
         return {"total_records": 2, "out": str(tmp_path)}
 
     monkeypatch.setattr("daydream.training.calibration.run_calibration", _fake_run)
-    rc = _run_main(
-        [
-            "corpus",
-            "calibrate-reward",
-            "--corpus-dir",
-            str(fixture_corpus / "corpus"),
-            "--gold-labels",
-            str(fixture_corpus / "gold.json"),
-            "--breakdowns",
-            str(fixture_corpus / "breakdowns.json"),
-            "--run-id",
-            "cal-1",
-            "--seed",
-            "7",
-            "--candidate",
-            "w_fp=0.1,0.2,0.3",
-            "--out",
-            str(tmp_path / "out"),
-        ]
-    )
+    rc = _run_main(_base_argv(fixture_corpus, tmp_path))
     assert rc == 0
     cfg = called["cfg"]
     assert cfg.candidates["w_fp"] == [0.1, 0.2, 0.3]
@@ -66,24 +74,7 @@ def test_calibrate_validation_failure_exits_nonzero(
     # variants/digest holds a tampered corpus.jsonl against a pristine
     # SHA256SUMS manifest: the real digest gate must fire before anything else.
     rc = _run_main(
-        [
-            "corpus",
-            "calibrate-reward",
-            "--corpus-dir",
-            str(fixture_corpus / "variants" / "digest"),
-            "--gold-labels",
-            str(fixture_corpus / "gold.json"),
-            "--breakdowns",
-            str(fixture_corpus / "breakdowns.json"),
-            "--run-id",
-            "cal-1",
-            "--seed",
-            "7",
-            "--candidate",
-            "w_fp=0.1,0.2,0.3",
-            "--out",
-            str(tmp_path / "out"),
-        ]
+        _base_argv(fixture_corpus, tmp_path, corpus_dir="variants/digest")
     )
     assert rc == 1
     # print_error renders a rich panel on the shared console (stdout);
@@ -97,23 +88,6 @@ def test_calibrate_unknown_candidate_flag_exits_nonzero(
     tmp_path: Path, fixture_corpus: Path
 ) -> None:
     rc = _run_main(
-        [
-            "corpus",
-            "calibrate-reward",
-            "--corpus-dir",
-            str(fixture_corpus / "corpus"),
-            "--gold-labels",
-            str(fixture_corpus / "gold.json"),
-            "--breakdowns",
-            str(fixture_corpus / "breakdowns.json"),
-            "--run-id",
-            "cal-1",
-            "--seed",
-            "7",
-            "--candidate",
-            "no_equals_sign",
-            "--out",
-            str(tmp_path / "out"),
-        ]
+        _base_argv(fixture_corpus, tmp_path, candidate="no_equals_sign")
     )
     assert rc == 1
