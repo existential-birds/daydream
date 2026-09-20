@@ -1182,46 +1182,14 @@ class CrossStackMergeError(ValueError):
 def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp every merged item with its display ordinal and its durable identity.
 
-    The two fields written here have deliberately contradictory stability
-    requirements, which is why one field cannot serve both roles (issue #1111):
-
-    - ``id`` is the **human-facing, dense, 1..N ordinal**. It is reassigned on
-      every call by design, whatever the incoming numbering, so the report reads
-      ``1, 2, 3`` and so per-stack, cross-stack, and structural items that
-      collide on their original ids end up uniquely keyed.
-    - ``item_uid`` is the **durable handle**. It is minted once and never
-      reassigned: an item that already carries one keeps it even while its ``id``
-      is being renumbered underneath it. A dense display ordinal *must* shift
-      when the set changes; a durable handle *must not*. That divergence is the
-      whole reason both fields exist.
-
-    Scope, stated plainly: the concrete case this protects is the extension seam.
-    ``docs/extensions.md`` documents that a fork may read ``items_file`` and
-    rewrite its ``items``; a fork that renumbers, reorders, or inserts would
-    shift every ``id`` under anything holding one, and ``item_uid`` is what such
-    a holder can key on instead. No first-party consumer reads ``item_uid``
-    today — this gives the identity somewhere to live before one needs it, not a
-    fix for a break already happening.
-
-    ``item_uid`` is host-minted *after* schema validation and is deliberately
-    absent from ``MERGED_ITEMS_SCHEMA``, exactly as ``uid`` is absent from
-    ``PER_STACK_RECORD_SCHEMA``: every declared property must sit in
-    ``required``, so declaring it would force the *model* to emit a field the
-    host owns. It is also distinct from ``uid`` / ``source_uids`` — identity of
-    the shipped item, never provenance of the records it was synthesized from.
-
-    Order and every other field are preserved by the spread, including the
-    demotion annotations from location validation and the ``uid`` /
-    ``source_uids`` carried by items that bypassed the merge agent.
-
-    Args:
-        raw: Merged finding items, already in final report order.
-
-    Returns:
-        Fresh item dicts; the inputs are never mutated.
-
-    Raises:
-        ValueError: If ``raw`` is not a list.
+    ``id`` is the human-facing, dense 1..N ordinal, reassigned on every call by
+    design so the report reads ``1, 2, 3``. ``item_uid`` is the durable,
+    host-minted handle, never reassigned, so an extension holding one survives
+    renumbering/reordering. The two stability requirements contradict by
+    design. ``item_uid`` is absent from ``MERGED_ITEMS_SCHEMA`` (the host owns
+    it), and is distinct from ``uid``/``source_uids``. Order and all other
+    fields, including demotion annotations, are preserved; inputs are never
+    mutated. Raises ``ValueError`` if ``raw`` is not a list.
     """
     # Function-local import: ``daydream.deep.records`` sits under the
     # ``daydream.deep`` package, whose ``__init__`` imports the orchestrator,
@@ -1297,26 +1265,15 @@ def _evidence_gate_then_validate(
 ) -> list[dict[str, Any]]:
     """Evidence-gate ``raw_items``, then location-validate the survivors, in order.
 
-    The two steps are fused into one call because they encode OPPOSITE meanings
-    for the same confidence token: ``_is_evidenced`` reads ``confidence="LOW"``
-    as "speculative, drop" (legacy LOW-confidence prompt tolerance, issue #227),
-    while ``validate_records`` (``daydream.deep.location_validator``) WRITES
-    ``confidence="LOW"`` to demote-with-annotation a beyond-tolerance citation
-    that must still reach ``merged-items.json`` (issue #745). The two only
-    agree because the gate runs FIRST, on the raw reviewer records (where a LOW
-    confidence is genuinely speculative), and the validator runs only on the
-    already-evidenced survivors. Fusing both in one call makes that order
-    structurally unreachable -- a future refactor cannot hoist the validator
-    above the gate without editing this single function, surfacing the conflict
-    here instead of silently dropping every beyond-tolerance finding.
-
-    Writes the ``dropped-speculative.json`` audit sidecar beside ``items_path``
-    when any item is dropped, then returns the survivors after snap/demote
-    location validation. The sidecar reports both ``dropped_ids`` (the
-    reviewer's own pre-``normalize_items`` numbering) and ``dropped_uids`` (the
-    referential identities, ``""`` for items that never passed through the
-    merge agent), positionally aligned one entry per dropped item with
-    ``dropped_source_uids`` -- see the inline notes at the write site.
+    The two steps are fused because they encode OPPOSITE meanings for the same
+    ``confidence="LOW"`` token: ``_is_evidenced`` reads it as "speculative,
+    drop" (issue #227), while ``validate_records`` writes it to
+    demote-with-annotation a beyond-tolerance citation that must still reach
+    ``merged-items.json`` (issue #745). Fusing them makes the gate-first order
+    structurally unreachable. Writes the ``dropped-speculative.json`` audit
+    sidecar (positionally aligned ``dropped_ids``/``dropped_uids`` /
+    ``dropped_source_uids``) when any item is dropped, then returns the
+    survivors after snap/demote location validation.
     """
     from daydream.deep.location_validator import validate_records
     from daydream.deep.records import item_source_uids, record_uid
@@ -2579,29 +2536,15 @@ async def phase_fix_parallel(
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
-    Items are grouped by their normalized per-item footprint, preserving the
-    caller's severity order.
-    Each footprint-group becomes one task whose findings are fixed together in a
-    single ``phase_fix_batched`` call (one ``run_agent`` turn per group), while
-    distinct files run concurrently under an ``anyio.CapacityLimiter``. If the
-    batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
-    Every prompt receives the exact group's edit scope and the wider run scope
-    only as readable context. Failed batch or group execution restores every
-    group worktree path before fallback/return. The supplied complete index is
-    restored once, only after every concurrent fixer has joined or cancelled.
-
-    Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
-    is consulted before every fix call (including the batched call), and if a
-    group's cumulative wall-clock or serial-item count is reached, the remaining
-    findings in that group are skipped while already-applied fixes in that group
-    are preserved.  The skipped group is recorded in ``failures`` with a
-    ``"file_group_budget_exceeded:"`` reason prefix (distinguishable from
-    exception-based entries) and a ``file_group_budget_exceeded`` trajectory
-    event is emitted.  Callers MUST NOT revert budget-exceeded entries; only
-    remaining findings are unprocessed, not the ones already applied. Each
-    individual fix call is also bounded mid-call by that same group deadline,
-    and a fix turn that times out is reported back as a group stop rather than
-    counted as progress.
+    Items are grouped by normalized per-item footprint, preserving caller
+    severity order; each footprint-group becomes one ``phase_fix_batched`` turn
+    whose failure falls back to per-finding ``phase_fix`` calls, and distinct
+    files run concurrently under an ``anyio.CapacityLimiter``. Every prompt
+    receives the group's edit scope and the wider run scope as readable
+    context, and each group is bounded by a :class:`FileGroupBudget` whose
+    exceeded entries are recorded in ``failures`` with a
+    ``"file_group_budget_exceeded:"`` prefix that callers MUST NOT revert.
+    Failed groups are restored from ``round_snapshot`` before return.
 
     Args:
         backend: The Backend to execute against (shared across tasks).
@@ -2610,30 +2553,20 @@ async def phase_fix_parallel(
         footprint: Normalized run/item authorization policy.
         round_snapshot: Round rollback point used for whole-group recovery.
         limiter_size: Max number of file-groups to fix concurrently.
-        intent_path: Optional confirmed-intent file forwarded unchanged to each
-            fix call so every fix carries the deliberate-intent guard.
+        intent_path: Optional confirmed-intent file forwarded to each fix call.
         group_max_wall_s: Per-file-group wall-clock ceiling (#201).
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
         retry_recovery_allowance_s: Cumulative retry-overhead allowance for
-            every fix call in every group. Resolved once by the caller and
-            forwarded unchanged to each ``phase_fix``/``phase_fix_batched``
-            call; children never re-resolve it. ``None`` leaves the value
-            undeclared so ``run_agent`` applies the module default.
+            every fix call; ``None`` leaves ``run_agent``'s module default.
         exploration_dir: Optional pre-scan directory forwarded to every fix
             call so prompts point at its deterministic ``affected_files.md``.
         test_map_path: Optional ``test-map.json`` forwarded to every fix call
             for source-file context hints. Invalid maps are ignored.
 
     Returns:
-        ``failures``: file -> reason string.  Exception-failed groups carry
-        ``"<ExceptionType>: <message>"`` and have already been restored from the
-        supplied round snapshot; callers must treat them as terminal without
-        reverting successful sibling groups.  Budget-exceeded groups carry
-        ``"file_group_budget_exceeded: <reason>"``; their already-applied fixes
-        are intact and callers MUST NOT revert them — only the remaining findings
-        were skipped.  Callers distinguish the two by the prefix.  Empty dict on
-        full success.
-
+        ``failures``: file -> reason string. Exception-failed groups are already
+        restored and terminal; budget-exceeded groups keep their applied fixes
+        and callers MUST NOT revert them. Empty dict on full success.
     """
     run_context = resolve_run_context(run_context)
     if footprint is None or round_snapshot is None:
@@ -3767,48 +3700,21 @@ async def _do_commit(
 ) -> CommitPushResult:
     """Stage, commit, and optionally push — all host-side, no agent turn.
 
-    Issue #726: the commit is a real subprocess with a real exit status, not
-    an agent-planned turn. Staging is deterministic (``_stage_deterministic``),
-    the message is built by the pure :func:`build_commit_message` (trailers
-    included at commit time — no post-hoc amend), and a ``push=True`` commit
-    only reports success after ``git_ops.remote_contains_commit`` confirms the
-    remote actually holds the pushed HEAD. A failed push raises the project
-    ``PushAttemptError`` even though a local commit exists — the orchestrator's
-    commit-step guard surfaces it as ``Stop(1)`` rather than continuing to
-    remote CI.
-
-    Args:
-        backend: Unused on the host path (kept for call-site/signature
-            stability); no agent turn runs in the commit.
-        work: Current workspace context (repo path, run ID, etc.).
-        push: If True, push to the remote after committing.
-        interactive: If True, prompt the user for confirmation before
-            committing. When the gate is declined, the applied fixes are
-            still validated by re-running the canonical host-side test
-            command (:func:`_validate_declined_fixes`) — a decline no longer
-            silently skips validation (issue #726).
-        config: Optional ``RunConfig`` carrying the CLI ``--test-command``
-            flag and the merged file config, used to resolve the canonical
-            test command for the decline-path validation.
-        items: Optional list of fix dicts (with ``file`` and ``description``
-            keys) summarising changes applied in this run; folded into the
-            deterministic commit message.
-        preexisting_untracked: Optional set of repo-relative paths that were
-            untracked before the daydream run started. Exactly
-            ``changed_files(...) - preexisting`` is committed (never
-            ``git add --all``) so a user's pre-run scratch files can never be
-            swept into the daydream commit (issue #543). When ``None`` (legacy
-            callers), the set is computed defensively at commit time. Caveat:
-            that snapshot is taken after the fix phase, so a NEW file created
-            by the fix is already untracked and, being indistinguishable from
-            user scratch via ``list_untracked``, is excluded from the commit
-            (an under-commit). In-tree callers always pass the pre-run
-            snapshot, which avoids this.
-
-    Returns:
-        Whether a commit was performed and, after a successful push, its exact
-        verified receipt.
-
+    Issue #726: the commit is a real subprocess with a real exit status, not an
+    agent-planned turn. Staging is deterministic, the message is built by the
+    pure :func:`build_commit_message` (trailers included at commit time), and a
+    ``push=True`` commit only reports success after
+    :func:`git_ops.remote_contains_commit` confirms the remote holds the pushed
+    HEAD; a failed push raises ``PushAttemptError`` despite the local commit, so
+    the commit-step guard surfaces it as ``Stop(1)``. Args: ``backend`` is
+    unused on the host path; ``push``/``interactive`` control pushing and the
+    confirmation gate (a decline still re-runs the canonical host-side test
+    command via :func:`_validate_declined_fixes`); ``config`` resolves that test
+    command; ``items`` feed the commit message; ``preexisting_untracked`` (issue
+    #543) restricts staging to ``changed_files(...) - preexisting``, never
+    ``git add --all`` (``None`` computes it defensively, risking an under-commit
+    of new fix-created files). Returns whether a commit was performed and, after
+    a successful push, its verified receipt.
     """
     del backend  # host-native commit: no agent turn (issue #726)
     run_context = resolve_run_context(run_context)
@@ -4930,82 +4836,14 @@ def _fold_structural_duplicates(
 ) -> list[dict[str, Any]]:
     """Drop structural items that restate a merged finding, keeping the higher severity.
 
-    Issue #1103. The structural meta-stack is partitioned out of the dedup
-    pre-filter and the merge agent's record pool, so no upstream stage ever
-    compares a structural finding against the language-stack finding describing
-    the same defect. Concatenating both lists therefore shipped two inline
-    comments for one defect whenever the two lenses landed on the same code.
-
-    A structural item folds into the BEST-matching base item that shares its
-    ``file`` and whose description clears
-    :func:`daydream.deep.dedup.descriptions_match` at
-    :data:`daydream.deep.dedup.FOLD_SIM_THRESHOLD` -- a materially higher bar
-    than the dedup pre-filter's own threshold. The pre-filter's threshold is
-    deliberately loose because every candidate it emits still goes in front
-    of the merge agent (or the arbiter) for adjudication; this fold has no
-    such downstream review, so reusing that loose bar here would collapse
-    unrelated findings (e.g. two distinct "N-line budget exceeded" findings
-    for different budgets) into one silently-dropped record. "Best" means the
-    candidate with the highest bigram similarity, not merely the first one encountered in
-    ``base_items``, so a structural finding cannot be folded into an unrelated
-    base item just because it happens to be checked first. Line numbers are
-    not part of the match: a structural finding is frequently anchored
-    whole-file (``line: 0``) while its language twin cites the exact line, and
-    those are still one defect.
-
-    The match itself is content-derived BY DESIGN and stays that way: it answers
-    "do these two findings describe the same defect?", which is a question about
-    what the findings say, so no host-assigned identity can answer it. Issue
-    #1111 lists first-match ambiguity here as something a ``uid`` closes; it
-    does not, and nothing below pretends otherwise. What #1111 did close is
-    narrower and real: when two base items in the same file clear the threshold
-    at EQUAL similarity, the winner used to be whichever the scan reached first,
-    and the in-place severity boost was then written into that arbitrary choice
-    with nothing in the audit sidecar recording that a choice had been made.
-    The tie is now broken deliberately -- the already-stronger severity wins,
-    since severity is the only field this fold writes, and earlier position is
-    the explicit last resort -- and the sidecar records the tie width plus the
-    chosen base item's identity. Only the tie-break's determinism and the
-    audit's traceability changed; the matching rule is untouched.
-
-    Folding never demotes, which is what the partition was protecting: the
-    survivor takes the stronger of the two severities, so a ``high``
-    structural twin lifts a ``medium`` language finding rather than being
-    discarded in its favour. The survivor is normally the base item, but when
-    the base item carries no grounded evidence of its own while the structural
-    finding does, the structural item survives instead: folding always runs
-    before the evidence gate (``_evidence_gate_then_validate``), so blindly
-    discarding the structural item in favour of an ungrounded base item would
-    hand survivorship to the record the gate is about to drop, deleting a
-    corroborated finding outright instead of reporting it once.
-
-    Matched ``base_items`` entries are revised in place: the stronger severity,
-    and (issue #1111) the union of both sides' ``source_uids``, since the
-    survivor now represents a defect two lenses reported and must be traceable
-    to the records behind both. Every
-    fold decision is recorded to a ``folded-structural.json`` audit sidecar
-    beside ``items_path`` (mirroring the evidence gate's
-    ``dropped-speculative.json``), so a destructive, host-side similarity match
-    stays reviewable instead of collapsing to a bare count. Each entry names
-    the chosen base item by ``base_uid`` (its ``uid`` when it has one, ``""``
-    for the merge-agent-authored items that do not) and by ``base_index`` (its
-    position in ``base_items``), and reports ``tied_candidates`` -- how many
-    base items matched at the winning similarity -- so a tie-broken pick is
-    identifiable after the fact instead of being indistinguishable from an
-    unambiguous one. Each entry also carries ``source_uids``: the merged
-    provenance the survivor came away with, so the fold's effect on
-    traceability is auditable from the sidecar alone.
-
-    Args:
-        base_items: The merged, non-structural items the report is built from.
-        structural_items: Structural items already tagged ``lens="structural"``
-            with their confidence/severity defaults applied.
-        items_path: Canonical ``merged-items.json`` path; the audit sidecar is
-            written beside it.
-
-    Returns:
-        The structural items that found no twin (plus any structural items
-        that won survivorship over an ungrounded base twin), in input order.
+    A structural item folds into the best same-``file`` base item whose
+    description is content-matched at ``FOLD_SIM_THRESHOLD`` (higher than the
+    dedup pre-filter's loose bar, since this fold has no downstream
+    adjudication). Folding never demotes: the survivor takes the stronger
+    severity and the union of both sides' ``source_uids``, and the structural
+    item wins outright when the base twin is ungrounded. Decisions are written
+    to the ``folded-structural.json`` sidecar beside ``items_path``. Returns
+    the structural items that found no twin, in input order.
     """
     from daydream.deep.dedup import (
         FOLD_SIM_THRESHOLD,
@@ -5355,39 +5193,14 @@ def _validate_agent_source_uids(
 ) -> None:
     """Clamp merge-agent ``source_uids`` to this run's real record uids, in place.
 
-    Issue #1111. ``source_uids`` is the one field in the whole pipeline where a
-    *model* gets to name a *host-minted* identity, and that asymmetry is exactly
-    why it cannot be taken on trust. A uid is not content the reader can
-    sanity-check: it is an opaque handle that downstream consumers resolve as
-    fact. An unvalidated string would let a plausible-looking invention
-    (``python:7`` on a run whose python stack produced four records) masquerade
-    as real provenance in the eval scoring and archived-trajectory surfaces,
-    where nothing has the records on hand to notice. Worse, a hallucinated uid
-    that happens to collide with a *different* stack's real record attributes
-    the finding to a record it never came from -- a wrong answer is strictly
-    worse than no answer here. So the host builds the run's actual uid pool and
-    keeps only members of it.
-
-    Validation is **fail-open by construction**: an unknown uid is dropped from
-    the item's list, never escalated. Provenance is metadata about a finding,
-    not the finding, so a bad attribution must cost the attribution and nothing
-    else -- failing the merge over it would throw away every real finding in the
-    response to protect a bookkeeping field. An item left with nothing ships
-    with ``[]``, which :func:`daydream.deep.records.item_source_uids` already
-    defines as the honest "no known provenance" answer.
-
-    Args:
-        agent_items: Merge-agent items, mutated in place. Every dict item comes
-            out carrying a ``source_uids`` list -- ``[]`` when unattributable --
-            so no downstream consumer has to handle the key being absent.
-        per_stack_records_paths: Parsed per-stack record JSON paths that fed the
-            merge; the language-stack half of the uid pool.
-        structural_records_path: Optional structural meta-stack records path.
-            Partitioned out of ``per_stack_records_paths`` by the caller, but
-            its uids are just as real, so it is pooled here too -- the merge
-            agent is told not to emit structural items, and an item that cites a
-            structural record anyway is making a true statement about where the
-            corroboration came from.
+    ``source_uids`` is the one field where a *model* names a *host-minted*
+    identity, and a hallucinated uid that collides with another stack's real
+    record would silently misattribute the finding, so the host keeps only uids
+    from the run's actual pool (per-stack plus ``structural_records_path``).
+    Validation is fail-open: an unknown uid is dropped from the item, never
+    escalated, because provenance is metadata about a finding, not the finding;
+    an item left with nothing ships ``[]`` (the honest "no known provenance"
+    answer). Every dict item comes out carrying a ``source_uids`` list.
     """
     from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
 
@@ -5478,47 +5291,35 @@ async def phase_cross_stack_merge(
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
-    The merge agent returns a schema-validated item list (``MERGED_ITEMS_SCHEMA``)
-    covering per-stack and cross-stack findings, each tagged with ``lens``.
-    Structural records (from ``structural_records_path``) are appended to that
-    list in Python, tagged ``lens="structural"`` -- never requested via prose,
-    so the structural lens cannot be silently dropped by the agent. The combined
-    list is normalized (fresh unique ids), written as the canonical
-    ``merged-items.json``, and rendered to ``review-output.md`` (single source of
-    truth → markdown). The markdown is written inside ``.daydream/deep/`` (which
-    avoids sandbox write restrictions that block dotfiles at the repo root) and
-    then copied to ``work.repo / REVIEW_OUTPUT_FILE`` for downstream consumers.
-
-    Per D-38, never passes the ``agents`` kwarg (Codex parity).
+    The agent returns a schema-validated ``MERGED_ITEMS_SCHEMA`` list of
+    per-stack and cross-stack findings tagged ``lens``. Structural records from
+    ``structural_records_path`` are appended in Python tagged
+    ``lens="structural"`` (never requested via prose), the combined list is
+    normalized, written as ``merged-items.json``, rendered to
+    ``review-output.md`` inside ``.daydream/deep/``, then copied to
+    ``work.repo / REVIEW_OUTPUT_FILE``. Per D-38, the ``agents`` kwarg is never
+    passed (Codex parity).
 
     Args:
         backend: The Backend to execute against.
         work: Workspace context; report is written under ``work.repo``.
-        per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
-            Must NOT include the structural meta-stack records file -- callers
-            partition that out and pass it via ``structural_records_path``.
+        per_stack_records_paths: Parsed per-stack record JSON paths (D-22);
+            must NOT include the structural meta-stack records file.
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
-        dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
+        dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter).
         exploration_dir: Optional pre-scan exploration directory.
-        failed_stacks: Optional stack_name -> reason dict for per-stack agents
-            that failed. Passed through to the merge prompt so the merged
-            report can call out uncovered stacks explicitly.
-        structural_records_path: Optional path to the parsed structural
-            meta-stack records JSON. When provided, its findings are appended to
-            the canonical item list tagged ``lens="structural"``, preserving
-            each record's reported severity -- the anti-slop rubric calibrates
-            structural findings to medium/low (issue #314) -- and defaulting to
-            high only for unlabeled records. The structural lens is not
-            deduplicated against the language stacks. ``None`` when the
-            structural reviewer did not run (docs-only diff, empty diff).
-        intent_authoritative: Issue #279. When True, the merge prompt includes
-            the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
-            the TTT intent summary line, because the intent phase was grounded
-            by a fresh, head-matched PR description.
-        strategy: The profile-owned ``merge`` strategy content rendered by the
-            merge prompt. ``None`` (default) falls back to the packaged
-            default's merge strategy.
+        failed_stacks: Optional stack_name -> reason for per-stack agents that
+            failed, so the merged report can call out uncovered stacks.
+        structural_records_path: Optional parsed structural meta-stack records;
+            appended tagged ``lens="structural"``, preserving reported severity
+            and defaulting unlabeled records to high. ``None`` when the
+            structural reviewer did not run.
+        intent_authoritative: Issue #279. When True, injects
+            ``AUTHORITATIVE_INTENT_RULE`` after the intent summary because intent
+            was grounded by a fresh, head-matched PR description.
+        strategy: The profile-owned ``merge`` strategy; ``None`` (default)
+            falls back to the packaged default's merge strategy.
 
     Returns:
         Path to the rendered merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
@@ -5526,7 +5327,6 @@ async def phase_cross_stack_merge(
     Raises:
         ValueError: If the merge agent returns empty or schema-invalid output
             (no silent ``[]`` fallback that would mask a broken merge).
-
     """
     run_context = resolve_run_context(run_context)
     from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path

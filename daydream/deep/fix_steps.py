@@ -23,7 +23,7 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     REVIEW_OUTPUT_FILE,
 )
-from daydream.config_file import _coerce_quality_threshold
+from daydream.config_file import _coerce_non_negative_float
 from daydream.deep.artifacts import (
     fix_failures_path,
     fix_footprint_path,
@@ -419,7 +419,7 @@ def _quality_gate_threshold(config: RunConfig, attr: str, default: float) -> flo
     the parser.
     """
     value = _resolve_config_value(config, attr, default)
-    coerced = _coerce_quality_threshold(value)
+    coerced = _coerce_non_negative_float(value)
     return coerced if coerced is not None else default
 
 

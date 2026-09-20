@@ -264,9 +264,9 @@ def test_quality_gate_threshold_coercion(raw: object, expected: float | None) ->
     meaningful floors. Each invalid input degrades to ``None`` so the
     ``config.py`` default applies.
     """
-    from daydream.config_file import _coerce_quality_threshold
+    from daydream.config_file import _coerce_non_negative_float
 
-    value = _coerce_quality_threshold(raw)
+    value = _coerce_non_negative_float(raw)
     if expected is None:
         assert value is None
     else:

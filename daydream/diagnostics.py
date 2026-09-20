@@ -1,28 +1,15 @@
 """Verbose fatal diagnostics: one privacy-first, size-bounded exception dump.
 
-:func:`format_verbose_exception` renders an exception chain newest-first —
-the exception passed to the call FIRST, then what it was caused by. The
-interpreter itself narrates oldest-first (the cause page above, the effect
-below); this module deliberately keeps the failing exception FIRST, per the
-pinned newest-first contract, so it adapts the interstitial lines to that
-order — redacts the rendered value with the observability
-:class:`~.PrivacyPolicy` (the same policy that guards every traced span)
-BEFORE any size bound, neutralizes terminal control characters while keeping
-newlines and tabs, and finally caps the result at one bounded head, a single
-explicit truncation marker, and the root cause's tail.
+:func:`format_verbose_exception` renders an exception chain newest-first, so
+it adapts the interpreter's interstitial lines to that order; it redacts the
+rendered value with the observability :class:`~.PrivacyPolicy` BEFORE any size
+bound, neutralizes terminal control characters while keeping newlines and
+tabs, then caps the result at one bounded head, a single truncation marker,
+and the root cause's tail. Every failure mode degrades to one fixed marker
+string, and the module imports only the standard library plus
+:class:`~.PrivacyPolicy` and writes to no log sink, terminal, or tracer.
 
-Every failure mode degrades to one fixed marker string, so a fatal diagnostic
-can never leak a payload, crash twice, or render partial machinery. To keep
-the fatal path from *introducing its own* I/O, the module imports only the
-standard library plus :class:`~.PrivacyPolicy` and never writes to any log
-sink, terminal, or tracer itself; note that :class:`~.PrivacyPolicy`
-transitively imports ``daydream.trajectory`` (which imports
-``daydream.ui``/``anyio``/``daydream.atif``), so the host CLI process already
-has those loaded before the handler runs.
-
-The only public seam::
-
-    format_verbose_exception(exc, *, environ=None) -> str
+Public seam: ``format_verbose_exception(exc, *, environ=None) -> str``.
 """
 
 from __future__ import annotations

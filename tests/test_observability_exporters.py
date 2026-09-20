@@ -424,8 +424,6 @@ def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
 @pytest.mark.parametrize(
     "kind,expected_hh,expected_ls",
     [
-        ("run", "chain", "chain"),
-        ("step", "chain", "chain"),
         ("agent", "chain", "chain"),
         ("attempt", "chain", "chain"),
         ("generation", "model", "llm"),

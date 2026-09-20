@@ -1291,33 +1291,12 @@ def grep_fixed_matches(
 ) -> list[tuple[str, str]]:
     """Return ``(path, matched_pattern)`` pairs from one batched ``git grep``.
 
-    Runs a single ``git grep -F -o -z -f <file>`` so that every pattern is
-    matched in one process invocation, emitting one ``(path, pattern)`` tuple
-    per match. Patterns are deduplicated in input order; patterns containing
-    NUL, CR, or LF are skipped (they cannot be expressed as a single fixed
-    string in the patterns file).
-
-    Args:
-        repo: Repository root to search.
-        patterns: Fixed-string patterns matched literally (``-F``).
-        word: When true, match only at word boundaries (``-w``) so ``app``
-            does not also match ``application`` or ``mapping``.
-        pathspecs: Optional ``git`` pathspecs limiting the search to matching
-            files (e.g. ``("*.py", "*.ts")``). When omitted, every tracked
-            file is searched.
-
-    Returns:
-        List of ``(path, matched_pattern)`` pairs parsed from ``git grep``
-        output — one tuple per match occurrence, so the same pattern may
-        appear multiple times for the same file even when the matches share a
-        single line (``git grep -o`` emits a record per occurrence). Only the
-        input patterns are deduplicated. Empty when there are no matches or
-        no usable patterns.
-
-    Raises:
-        GitError: If ``git grep`` exits with an unexpected status or emits a
-            malformed record. Exit code ``1`` is "no matches" and is treated
-            as success (empty list).
+    Runs a single ``git grep -F -o -z -f <file>`` so every pattern is matched in
+    one invocation, one tuple per match occurrence. Patterns are deduplicated in
+    input order; patterns containing NUL, CR, or LF are skipped. ``word``
+    restricts to word boundaries; ``pathspecs`` limits the search (omitted means
+    every tracked file). Exit code ``1`` is "no matches" and returns empty;
+    a malformed record or unexpected status raises ``GitError``.
     """
     seen: set[str] = set()
     normalized: list[str] = []
