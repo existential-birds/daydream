@@ -154,6 +154,11 @@ _STEP_NUMBER_LIST_SCHEMA: dict[str, Any] = {
     "type": "array",
     "items": {"type": "integer", "minimum": 1},
 }
+_SYMBOL_NAME_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 300,
+}
 _STOP_CONDITION_BODY_PROPERTIES: dict[str, Any] = {
     "condition": {"type": "string", "minLength": 30, "maxLength": 800},
     "evidence_to_report": {"type": "string", "minLength": 20, "maxLength": 500},
@@ -393,11 +398,7 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = strict_object({
             ),
             "items": strict_object({
                 "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                "symbol": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 300,
-                },
+                "symbol": _SYMBOL_NAME_SCHEMA,
                 "behavior": {
                     "type": "string",
                     "minLength": 20,
@@ -415,11 +416,7 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = strict_object({
             ),
             "items": strict_object({
                 "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                "symbol": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 300,
-                },
+                "symbol": _SYMBOL_NAME_SCHEMA,
                 "pattern_to_copy": {
                     "type": "string",
                     "minLength": 20,
@@ -436,11 +433,7 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = strict_object({
                     "maxLength": 200,
                 },
                 "test_file": _REPOSITORY_FILE_PATH_SCHEMA,
-                "test_symbol": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 300,
-                },
+                "test_symbol": _SYMBOL_NAME_SCHEMA,
                 "kind": {
                     "type": "string",
                     "enum": [

@@ -38,6 +38,26 @@ def _matching_prompt(calls: list[dict[str, Any]], fragment: str) -> str:
     return cast(str, next(call["prompt"] for call in calls if fragment in call["prompt"].lower()))
 
 
+def _spy_bound_deep_diff(
+    monkeypatch: pytest.MonkeyPatch,
+    bounded_results: list[str],
+    called_with: list[str] | None = None,
+) -> None:
+    """Patch ``orch_mod.bound_deep_diff`` to record each bounded result."""
+    import daydream.deep.orchestrator as orch_mod
+    from daydream.deep.prompts import bound_deep_diff
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
+        if called_with is not None:
+            called_with.append(diff)
+        result = bound_deep_diff(diff, budget)
+        bounded_results.append(result[0])
+        return result
+
+    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+
+
 async def test_deep_findings_out_emits_artifact_and_stops(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -234,8 +254,6 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
-    import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import bound_deep_diff
     from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Push the diff over the byte budget with a large committed file.
@@ -245,14 +263,7 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     _git(multi_stack_target, "commit", "-m", "add big file")
 
     bounded_results: list[str] = []
-    real = bound_deep_diff
-
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
-        result = real(diff, budget)
-        bounded_results.append(result[0])
-        return result
-
-    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    _spy_bound_deep_diff(monkeypatch, bounded_results)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target) == 0
 
@@ -334,8 +345,6 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL."""
-    import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import bound_deep_diff
     from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
@@ -345,15 +354,7 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
 
     called_with: list[str] = []
     bounded_results: list[str] = []
-    real = bound_deep_diff
-
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
-        called_with.append(diff)
-        result = real(diff, budget)
-        bounded_results.append(result[0])
-        return result
-
-    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    _spy_bound_deep_diff(monkeypatch, bounded_results, called_with)
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target) == 0
@@ -396,8 +397,6 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
 ) -> None:
     """The sweep extracts blocks from the FULL diff.patch, not the bounded ctx.data['diff'], so sweep targets
     cannot diverge from the coverage set."""
-    import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import bound_deep_diff
     from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Push the in-memory diff over the budget with a file that sorts FIRST in
@@ -411,14 +410,7 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
     _git(multi_stack_target, "commit", "-m", "add big file and an uncovered file")
 
     bounded_results: list[str] = []
-    real = bound_deep_diff
-
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
-        result = real(diff, budget)
-        bounded_results.append(result[0])
-        return result
-
-    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    _spy_bound_deep_diff(monkeypatch, bounded_results)
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     # Per-stack reviewers read their scope files; zzuncovered.py is deliberately

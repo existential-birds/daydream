@@ -34,16 +34,8 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     TrajectoryRecorder,
-    _reset_recorder_for_tests,
 )
 from tests.harness.backend import ScriptedBackend
-
-
-@pytest.fixture(autouse=True)
-def _reset_recorder() -> Any:
-    _reset_recorder_for_tests()
-    yield
-    _reset_recorder_for_tests()
 
 
 def _burst_backend(*, count: int = 200, sleep_s: float = 0.0) -> ScriptedBackend:

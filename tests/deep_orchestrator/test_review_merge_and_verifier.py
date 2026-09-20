@@ -33,6 +33,43 @@ if TYPE_CHECKING:
     from daydream.run_context import RunContext
 
 
+def _install_merge_captures(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    captured_merge: dict[str, Any],
+    captured_record_dedup: dict[str, Any],
+    captured_dedup_records: dict[str, Any] | None = None,
+) -> None:
+    """Wrap the merge/dedup builders to capture their arguments."""
+    from daydream.deep import dedup as _dedup
+    from daydream.deep import prompts as _prompts
+
+    real_build_merge = _prompts.build_merge_prompt
+    real_build_dedup = _dedup.build_dedup_candidates
+    real_build_record_dedup = _dedup.build_record_dedup_candidates
+
+    def _capture_merge(**kwargs: Any) -> Any:
+        captured_merge.update(kwargs)
+        return real_build_merge(**kwargs)
+
+    def _capture_dedup(records: Any, alt_issues: Any) -> Any:
+        if captured_dedup_records is not None:
+            captured_dedup_records["records"] = list(records)
+        return real_build_dedup(records, alt_issues)
+
+    def _capture_record_dedup(records: Any, sources: Any) -> Any:
+        captured_record_dedup["records"] = list(records)
+        captured_record_dedup["sources"] = list(sources)
+        return real_build_record_dedup(records, sources=sources)
+
+    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
+    monkeypatch.setattr("daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup)
+    monkeypatch.setattr(
+        "daydream.deep.merge_steps.build_record_dedup_candidates",
+        _capture_record_dedup,
+    )
+
+
 def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -282,36 +319,15 @@ async def test_orchestrator_threads_structural_records_to_merge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural records are partitioned out of the dedup pre-filter pool."""
-    from daydream.deep import dedup as _dedup
-    from daydream.deep import prompts as _prompts
-
-    _real_build_merge = _prompts.build_merge_prompt
 
     captured_merge: dict[str, Any] = {}
     captured_dedup_records: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
-
-    real_build_dedup = _dedup.build_dedup_candidates
-    real_build_record_dedup = _dedup.build_record_dedup_candidates
-
-    def _capture_merge(**kwargs: Any) -> Any:
-        captured_merge.update(kwargs)
-        return _real_build_merge(**kwargs)
-
-    def _capture_dedup(records: Any, alt_issues: Any) -> Any:
-        captured_dedup_records["records"] = list(records)
-        return real_build_dedup(records, alt_issues)
-
-    def _capture_record_dedup(records: Any, sources: Any) -> Any:
-        captured_record_dedup["records"] = list(records)
-        captured_record_dedup["sources"] = list(sources)
-        return real_build_record_dedup(records, sources=sources)
-
-    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
-    monkeypatch.setattr("daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup)
-    monkeypatch.setattr(
-        "daydream.deep.merge_steps.build_record_dedup_candidates",
-        _capture_record_dedup,
+    _install_merge_captures(
+        monkeypatch,
+        captured_merge=captured_merge,
+        captured_dedup_records=captured_dedup_records,
+        captured_record_dedup=captured_record_dedup,
     )
 
     _silence(monkeypatch)
@@ -358,34 +374,13 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fresh-run path (no start_at) applies the same structural partition."""
-    from daydream.deep import dedup as _dedup
-    from daydream.deep import prompts as _prompts
-
-    _real_build_merge = _prompts.build_merge_prompt
 
     captured_merge: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
-
-    real_build_dedup = _dedup.build_dedup_candidates
-    real_build_record_dedup = _dedup.build_record_dedup_candidates
-
-    def _capture_merge(**kwargs: Any) -> Any:
-        captured_merge.update(kwargs)
-        return _real_build_merge(**kwargs)
-
-    def _capture_dedup(records: Any, alt_issues: Any) -> Any:
-        return real_build_dedup(records, alt_issues)
-
-    def _capture_record_dedup(records: Any, sources: Any) -> Any:
-        captured_record_dedup["records"] = list(records)
-        captured_record_dedup["sources"] = list(sources)
-        return real_build_record_dedup(records, sources=sources)
-
-    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
-    monkeypatch.setattr("daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup)
-    monkeypatch.setattr(
-        "daydream.deep.merge_steps.build_record_dedup_candidates",
-        _capture_record_dedup,
+    _install_merge_captures(
+        monkeypatch,
+        captured_merge=captured_merge,
+        captured_record_dedup=captured_record_dedup,
     )
 
     _silence(monkeypatch)

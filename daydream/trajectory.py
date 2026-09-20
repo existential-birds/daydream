@@ -24,7 +24,7 @@ import json
 import math
 import re
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import (
     AbstractAsyncContextManager,
     asynccontextmanager,
@@ -1192,6 +1192,48 @@ def _strict_suffix_is_sensitive(text: str, s2: int, key_end: int) -> bool:
     return "".join(norm) in _SENSITIVE_KEY_SUFFIXES
 
 
+def _sensitive_suffix_matches(
+    text: str,
+    match: re.Match[str],
+    pattern: re.Pattern[str],
+) -> Iterator[re.Match[str]]:
+    """Yield each sensitive suffix a non-sensitive anchored key may hold.
+
+    A non-sensitive key can still hold a SENSITIVE SUFFIX at a later key-START
+    char (``defauthorization`` -> ``authorization``, ``nullpasswd`` ->
+    ``passwd``, ``fooapi_key`` -> ``api_key``). The old engine's one-character
+    advance re-matched every suffix at the SAME separator and redacted the
+    first sensitive one; this reproduces that leftmost-suffix walk. Each
+    candidate's sensitivity test is O(max member length) and the full
+    re-match runs only on candidates that test sensitive, so the pass stays
+    linear.
+    """
+    s2 = match.start(2) + 1
+    key_end = match.end(2)
+    while s2 < key_end:
+        if text[s2] in _STRUCTURED_KEY_START_CHARS:
+            if _strict_suffix_is_sensitive(text, s2, key_end):
+                m2 = pattern.match(text, s2)
+                if m2 is not None:
+                    yield m2
+            if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
+                "A" <= text[s2] <= "Z"
+            ):
+                # Separator-run candidate: every position inside one
+                # contiguous run of non-alphanumeric key chars normalizes to
+                # the SAME suffix (leading separators collapse and the edge is
+                # stripped), so the run needs at most one evaluation — jump
+                # over the rest instead of walking it per position, which
+                # re-enabled the O(n^2) hang on separator-heavy key runs
+                # (issue #1236).
+                while s2 + 1 < key_end and not (
+                    "A" <= text[s2 + 1] <= "Z"
+                    or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
+                ):
+                    s2 += 1
+        s2 += 1
+
+
 def _redact_structured_pairs(text: str) -> str:
     """Redact line-scoped ``key<: or =>value`` pairs, re-scanning every value.
 
@@ -1231,43 +1273,15 @@ def _redact_structured_pairs(text: str) -> str:
             out.append(_redact_structured_key_value(match, text))
             pos = match.end()
         else:
-            # A non-sensitive anchored key may still hold a SENSITIVE SUFFIX at
-            # a later key-START char (`defauthorization` -> `authorization`,
-            # `nullpasswd` -> `passwd`, `fooapi_key` -> `api_key`). The old
-            # engine's one-character advance re-matched every suffix at the
-            # SAME separator and redacted the first sensitive one; reproduce
-            # that leftmost sensitive suffix, then stop — the old redaction
-            # consumed through the value end, so later suffixes were never
-            # visited. Each candidate's sensitivity test is O(max member
-            # length) and the full re-match runs only on the one candidate
-            # that is actually sensitive, so the pass stays linear.
-            suffix: re.Match[str] | None = None
-            s2 = match.start(2) + 1
-            key_end = match.end(2)
-            while s2 < key_end:
-                if text[s2] in _STRUCTURED_KEY_START_CHARS:
-                    if _strict_suffix_is_sensitive(text, s2, key_end):
-                        m2 = _STRUCTURED_KEY_VALUE_PATTERN.match(text, s2)
-                        if m2 is not None:
-                            suffix = m2
-                            break
-                    if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
-                        "A" <= text[s2] <= "Z"
-                    ):
-                        # Separator-run candidate: every position inside one
-                        # contiguous run of non-alphanumeric key chars
-                        # normalizes to the SAME suffix (leading separators
-                        # collapse and the edge is stripped), so the run
-                        # needs at most one evaluation — jump over the rest
-                        # instead of walking it per position, which re-enabled
-                        # the O(n^2) hang on separator-heavy key runs
-                        # (issue #1236).
-                        while s2 + 1 < key_end and not (
-                            "A" <= text[s2 + 1] <= "Z"
-                            or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
-                        ):
-                            s2 += 1
-                s2 += 1
+            # A non-sensitive anchored key may still hold a sensitive suffix
+            # (see _sensitive_suffix_matches). The old engine's one-character
+            # advance re-matched every suffix at the SAME separator and
+            # redacted the first sensitive one, so take the leftmost match and
+            # stop.
+            suffix = next(
+                _sensitive_suffix_matches(text, match, _STRUCTURED_KEY_VALUE_PATTERN),
+                None,
+            )
             if suffix is not None:
                 out.append(text[pos : suffix.start()])
                 out.append(_redact_structured_key_value(suffix, text))
@@ -1319,45 +1333,16 @@ def _redact_structured_blocks(text: str) -> str:
                 continue
             key = match.group(2)
             if not _is_sensitive_key(key):
-                # Sensitive-suffix mirror of the pair scan: `defpasswd` holds
-                # `passwd`, `fooapi_key` holds `api_key`. The old engine's
-                # one-character advance re-matched every suffix at the same
-                # separator and redacted the first sensitive one that opens a
-                # real block; reproduce that leftmost block-bearing sensitive
-                # suffix, then stop (the old redaction consumed through the
-                # block end). A sensitive suffix whose block is EMPTY is not a
-                # redaction either way — the old scan advanced one character
-                # past it and kept looking, so the scan continues to later
-                # suffixes.
+                # Sensitive-suffix mirror of the pair scan, but a sensitive
+                # suffix whose block is EMPTY is not a redaction either way —
+                # the old scan advanced one character past it and kept
+                # looking, so the scan continues to later suffixes.
                 found: tuple[re.Match[str], int] | None = None
-                s2 = match.start(2) + 1
-                key_end = match.end(2)
-                while s2 < key_end:
-                    if text[s2] in _STRUCTURED_KEY_START_CHARS:
-                        if _strict_suffix_is_sensitive(text, s2, key_end):
-                            m2 = _BLOCK_VALUE_PATTERN.match(text, s2)
-                            if m2 is not None:
-                                block_end = _block_value_end(text, m2.end())
-                                if block_end != m2.end():
-                                    found = (m2, block_end)
-                                    break
-                        if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
-                            "A" <= text[s2] <= "Z"
-                        ):
-                            # Separator-run candidate: every position inside one
-                            # contiguous run of non-alphanumeric key chars
-                            # normalizes to the SAME suffix (leading separators
-                            # collapse and the edge is stripped), so the run
-                            # needs at most one evaluation — jump over the rest
-                            # instead of walking it per position, which re-enabled
-                            # the O(n^2) hang on separator-heavy key runs
-                            # (issue #1236).
-                            while s2 + 1 < key_end and not (
-                                "A" <= text[s2 + 1] <= "Z"
-                                or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
-                            ):
-                                s2 += 1
-                    s2 += 1
+                for m2 in _sensitive_suffix_matches(text, match, _BLOCK_VALUE_PATTERN):
+                    block_end = _block_value_end(text, m2.end())
+                    if block_end != m2.end():
+                        found = (m2, block_end)
+                        break
                 if found is not None:
                     m2, block_end = found
                     out.append(text[pos : m2.start()])
@@ -2899,6 +2884,26 @@ class PhaseEvent:
         return d
 
 
+def _finish_terminal(
+    handle: "PhaseScopeHandle | DispatchHandle",
+    scope: str,
+    status: LifecycleStatus,
+    reason_code: LifecycleReasonCode | None,
+) -> None:
+    """Select one explicit terminal state before a scope closes."""
+    if handle._closed:
+        raise RuntimeError(f"{scope} scope is closed")
+    if handle._decision_made:
+        raise RuntimeError(f"{scope} scope terminal decision already made")
+    if not isinstance(status, LifecycleStatus):
+        raise TypeError(f"{scope} status must be LifecycleStatus")
+    if reason_code is not None and not isinstance(reason_code, LifecycleReasonCode):
+        raise TypeError(f"{scope} reason_code must be LifecycleReasonCode")
+    handle.status = status
+    handle.reason_code = reason_code
+    handle._decision_made = True
+
+
 @dataclass
 class PhaseScopeHandle:
     """One identified phase occurrence with a single caller terminal decision."""
@@ -2915,17 +2920,7 @@ class PhaseScopeHandle:
         reason_code: LifecycleReasonCode | None = None,
     ) -> None:
         """Select one explicit terminal state before this scope closes."""
-        if self._closed:
-            raise RuntimeError("phase scope is closed")
-        if self._decision_made:
-            raise RuntimeError("phase scope terminal decision already made")
-        if not isinstance(status, LifecycleStatus):
-            raise TypeError("phase status must be LifecycleStatus")
-        if reason_code is not None and not isinstance(reason_code, LifecycleReasonCode):
-            raise TypeError("phase reason_code must be LifecycleReasonCode")
-        self.status = status
-        self.reason_code = reason_code
-        self._decision_made = True
+        _finish_terminal(self, "phase", status, reason_code)
 
     def _override(
         self,
@@ -3173,17 +3168,7 @@ class DispatchHandle:
         reason_code: LifecycleReasonCode | None = None,
     ) -> None:
         """Select one explicit terminal state before this dispatch closes."""
-        if self._closed:
-            raise RuntimeError("dispatch scope is closed")
-        if self._decision_made:
-            raise RuntimeError("dispatch terminal decision already made")
-        if not isinstance(status, LifecycleStatus):
-            raise TypeError("dispatch status must be LifecycleStatus")
-        if reason_code is not None and not isinstance(reason_code, LifecycleReasonCode):
-            raise TypeError("dispatch reason_code must be LifecycleReasonCode")
-        self.status = status
-        self.reason_code = reason_code
-        self._decision_made = True
+        _finish_terminal(self, "dispatch", status, reason_code)
 
     def _record_completed(self, completed: _CompletedFork) -> None:
         if completed.identity.fork_id not in {fork.fork_id for fork in self._forks}:
