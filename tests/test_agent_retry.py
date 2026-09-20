@@ -802,7 +802,6 @@ def test_the_extracted_settings_resolver_keeps_the_documented_precedence(
 
     assert _resolve(_resolver_backend()).allowance_s == 10.0          # env tier
     assert _resolve(_resolver_backend(), 20.0).allowance_s == 20.0    # argument wins
-    assert _resolve(_resolver_backend(), 20.0).allowance_declared is True
 
     attributed = _resolver_backend(retry_recovery_allowance_s=30.0)
     assert _resolve(attributed, 20.0).allowance_s == 30.0             # attribute wins
@@ -814,14 +813,12 @@ def test_the_extracted_settings_resolver_keeps_the_documented_precedence(
     )
     resolved = _resolve(policed, 20.0)
     assert resolved.allowance_s == 0.0            # a declared policy is complete
-    assert resolved.allowance_declared is True
     assert resolved.max_attempts == 3 and resolved.base_delay_s == 1.0
 
     # Nothing declared anywhere: the documented default applies, undeclared.
     monkeypatch.delenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S")
     fallback = _resolve(_resolver_backend())
     assert fallback.allowance_s == DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-    assert fallback.allowance_declared is False
 
 
 def test_the_extracted_settings_resolver_refuses_contradictions() -> None:

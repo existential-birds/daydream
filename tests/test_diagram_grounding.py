@@ -745,11 +745,10 @@ def test_repo_symbols_survives_a_repo_without_git_history(tmp_path: Path) -> Non
     (plain / "pkg").mkdir(parents=True)
     (plain / "pkg" / "mod.py").write_text("def helper():\n    return 1\n")
     symbols = RepoSymbols(plain)
-    assert symbols.token_defined_anywhere("helper") is False
     assert [r["line"] for r in symbols.definitions("helper", ["pkg/mod.py"])] == [1]
 
     init_repo(plain)
-    assert RepoSymbols(plain).token_defined_anywhere("helper") is False
+    assert RepoSymbols(plain).definitions("helper", ["pkg/mod.py"])
 
 
 # --- Sequence prune semantics ------------------------------------------------

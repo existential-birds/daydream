@@ -353,10 +353,6 @@ class RepoSymbols:
             )
         return sorted(found, key=lambda r: (str(r.get("file", "")), int(str(r.get("line", 0)))))
 
-    def token_defined_anywhere(self, symbol: str) -> bool:
-        """Whether ``symbol`` appears as a whole word anywhere in the repository."""
-        return bool(_token_hits(self._repo_root, symbol))
-
 
 def _definition_location(record: dict[str, object]) -> str:
     """Return the ``path:line`` citation for one definition record."""

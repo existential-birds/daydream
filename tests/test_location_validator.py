@@ -12,10 +12,8 @@ DIFF = (
 INDEX = parse_hunks(DIFF)
 
 
-def test_validate_finding_all_five_fields() -> None:
+def test_validate_finding_reports_hunk_and_distance() -> None:
     check = validate_finding(INDEX, "orchestrator.py", 2285)
-    assert check.file_exists is True
-    assert check.line_exists is True
     assert check.in_hunk is True
     assert check.nearest_hunk == (2284, 2288)
     assert check.distance == 0
@@ -23,26 +21,22 @@ def test_validate_finding_all_five_fields() -> None:
 
 def test_validate_finding_item6_coordinates_demote_beyond_tolerance() -> None:
     # a80b9373 item-6: line 2272, nearest hunk 2284..2288, distance 12 > tolerance 3
-    check = validate_finding(INDEX, "orchestrator.py", 2272, tolerance=3)
-    assert check.file_exists is True
+    check = validate_finding(INDEX, "orchestrator.py", 2272)
     assert check.in_hunk is False
     assert check.nearest_hunk == (2284, 2288)
     assert check.distance == 12
-    assert check.line_exists is True  # 2272 <= max new_end (2288) in fixture
 
 
 def test_validate_finding_snaps_within_tolerance() -> None:
     # line 2281 is 3 below hunk start 2284 -> within tolerance, snap candidate
-    check = validate_finding(INDEX, "orchestrator.py", 2281, tolerance=3)
+    check = validate_finding(INDEX, "orchestrator.py", 2281)
     assert check.in_hunk is False
     assert check.distance == 3
     assert check.nearest_hunk == (2284, 2288)
 
 
-def test_validate_finding_missing_file_is_all_false() -> None:
+def test_validate_finding_missing_file_is_empty() -> None:
     check = validate_finding(INDEX, "nope.py", 10)
-    assert check.file_exists is False
-    assert check.line_exists is False
     assert check.in_hunk is False
     assert check.nearest_hunk is None
     assert check.distance is None

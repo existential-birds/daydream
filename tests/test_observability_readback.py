@@ -1,8 +1,6 @@
 """Hermetic tests for the P18 Task 6 readback verifier and replay tool.
 
-Plan Task 6 steps 1-2 (P18-plan.md SHA-256
-``1bb962866288395f6ddf0504fd8affd9764c019cbe024c8c61140f2f5b6a9738`` plus the
-readback-deadline amendment). All tests run against a fake external HTTP
+Plan Task 6 steps 1-2. All tests run against a fake external HTTP
 boundary on loopback, real loopback slow peers, local OTLP collectors and fake
 vendor HTTP; no real vendor, model call, credential or repository content is
 ever touched.
