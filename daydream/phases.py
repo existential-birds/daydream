@@ -700,7 +700,6 @@ def _resolve_handoff_paths(
 
 def _handoff_write_path(
     handoff_reference: Path,
-    recorder: TrajectoryRecorder | None,
     work: WorkContext,
     *,
     artifact_session: ArtifactSession | None = None,
@@ -1009,7 +1008,6 @@ async def _run_failure_summarizer(
     written = _write_handoff(
         _handoff_write_path(
             handoff_path,
-            recorder,
             work,
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,

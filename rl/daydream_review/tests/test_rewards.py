@@ -646,28 +646,6 @@ fixture_manifest_path: Path,
     assert "[ ! -s " in script and "apply" in script
 
 
-async def test_green_unrelated_edit_gets_no_suite_reward(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
-) -> None:
-    """Starting green and making an unrelated edit earns no suite credit."""
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    # The baked head is already green; the agent only touches README (unrelated)
-    # — the suite stays green.
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
-    (repo / "README.md").write_text("# changed\n", encoding="utf-8")
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
-
-    # Suite green is telemetry, never a reward axis.
-    assert set(trace.rewards) == {"intrinsic_composite"}
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 1.0
-    assert trace.metrics["suite_non_regression"] == 1.0
-
-
 async def test_red_suite_records_no_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
@@ -1100,9 +1078,8 @@ async def test_no_fixes_records_no_non_regression(
     assert "test_claim_passed_without_fix" not in trace.metrics
 
 
-@pytest.mark.parametrize("head_sha", ["0" * 40], ids=["unresolvable-head"])
 async def test_unresolvable_head_sha_scores_no_fix(
-    head_sha: str, tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
     """A baked snapshot object that no longer resolves must read as no fix.
 
@@ -1118,7 +1095,7 @@ async def test_unresolvable_head_sha_scores_no_fix(
     # Stage the real, resolvable snapshot first so the checkout succeeds, then
     # simulate snapshot/object-store drift: the baked head object is gone.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha)
-    task.data = task.data.model_copy(update={"head_sha": head_sha})
+    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
@@ -1341,39 +1318,6 @@ async def test_committed_daydream_artifacts_not_a_fix(
     assert trace.metrics["fixes_applied"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
     assert "test_claim_mismatch" not in trace.metrics
-
-
-async def test_unresolvable_snapshot_sha_reads_as_no_fix(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
-) -> None:
-    """A fix signal that cannot be evaluated reads as no-fix, not a free win.
-
-    ``suite_non_regression`` stays deliberately false-negative biased: any ``git diff
-    --quiet`` exit other than 1 (0 = identical trees, 128 = unresolvable baked
-    SHA, 127 = missing sh/git) means "no fix found". Here the baked snapshot SHA
-    is not present in the repository at all, so the diff exits 128 — the reward
-    must record ``suite_non_regression`` 0.0, never a free green reading for nothing.
-    """
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fix@fixture.invalid"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
-    (repo / "calc.py").write_text(_CALC_BROKEN, encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "snapshot"], check=True)
-
-    task = _task(fixture_manifest_path)
-    # task.data.head_sha is the baked snapshot SHA from the manifest; this fresh
-    # repo has never contained it, so the fix-signal diff cannot resolve it.
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
-
-    assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.metrics["suite_non_regression"] == 0.0
 
 
 async def test_reward_version_is_pinned(

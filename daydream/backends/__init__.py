@@ -1369,7 +1369,7 @@ def create_backend(
             default can win before Pi's GLM fallback is selected.
         cwd: Target workspace used to resolve Pi's configured default model.
         reasoning_effort: Optional reasoning-effort override (one of
-            ``daydream.config.REASONING_EFFORT_LEVELS``). Every backend applies
+            ``low``, ``medium``, ``high``, ``xhigh``, ``max``). Every backend applies
             it through its own native knob: Claude via
             ``ClaudeAgentOptions.effort``, Codex via
             ``-c model_reasoning_effort=...``, Pi via ``--thinking``.

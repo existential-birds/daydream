@@ -17,23 +17,16 @@ omission floor is evaluated -- that is what keeps the floor honest. The
 renderers assert them again and raise ``ValueError`` on an over-cap spec:
 defense in depth against a hand-written or corrupted artifact.
 
-``SEQUENCE_LINE_GRAMMAR`` / ``FLOWCHART_LINE_GRAMMAR`` are the exhaustive line
-grammars for each kind -- every line either renderer can emit ``fullmatch``es
-its kind's grammar, and nothing else does. They are exported so the integration
-tests can re-assert that property against real pipeline output.
-
 Exports:
     render_sequence_mermaid: spec_final -> mermaid ``sequenceDiagram`` text
     render_flowchart_mermaid: spec_final -> mermaid ``flowchart TD`` text
     render_diagram_blocks: per-kind results -> folded markdown blocks
     render_omission_notice: kind + result -> one-paragraph omission text
     sanitize_label: model text + cap -> mermaid-safe label
-    SEQUENCE_LINE_GRAMMAR / FLOWCHART_LINE_GRAMMAR: per-kind line grammars
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from daydream.config import (
@@ -138,47 +131,6 @@ def _code_span(value: Any) -> str:
     """Render ``value`` as a markdown code span, or ``""`` when it is empty."""
     text = _md_text(value)
     return f"`{text}`" if text else ""
-
-
-# Line grammars
-
-# One label character: anything the sanitizer cannot remove, plus our three
-# escapes. ``>`` is excluded, so no label can contain ``->>`` or ``-->>``; ``|``
-# is excluded, so an edge label cannot close its own delimiter; the shape
-# delimiters are excluded, so a node label cannot close its own shape.
-_LABEL_CHAR = r"[^\n;`#<>|\[\]{}()]"
-_LABEL_ATOM = rf"(?:#lt;|#gt;|#quot;|{_LABEL_CHAR})"
-_LABEL_RE = rf"{_LABEL_ATOM}*"
-
-#: Every line :func:`render_sequence_mermaid` can emit ``fullmatch``es this.
-SEQUENCE_LINE_GRAMMAR: re.Pattern[str] = re.compile(
-    "|".join(
-        (
-            r"sequenceDiagram",
-            rf"    participant P\d+ as {_LABEL_RE}",
-            rf"(?:    |        )P\d+(?:->>|-->>)P\d+: {_LABEL_RE}",
-            rf"    (?:alt|else|opt|loop) {_LABEL_RE}",
-            r"    end",
-        )
-    )
-)
-
-_SHAPE_RE = (
-    rf"(?:\(\[{_LABEL_RE}\]\)|\[\[{_LABEL_RE}\]\]|\[/{_LABEL_RE}/\]|\[{_LABEL_RE}\]|\{{{_LABEL_RE}\}})"
-)
-_NODE_REF_RE = rf"N\d+{_SHAPE_RE}?"
-
-#: Every line :func:`render_flowchart_mermaid` can emit ``fullmatch``es this.
-FLOWCHART_LINE_GRAMMAR: re.Pattern[str] = re.compile(
-    "|".join(
-        (
-            r"flowchart TD",
-            rf"    N\d+{_SHAPE_RE}",
-            rf"    {_NODE_REF_RE} --> {_NODE_REF_RE}",
-            rf"    {_NODE_REF_RE} -->\|{_LABEL_RE}\| {_NODE_REF_RE}",
-        )
-    )
-)
 
 
 # Small typed readers over the untyped spec/result dicts

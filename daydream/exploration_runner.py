@@ -11,7 +11,7 @@ Provides two exploration entries:
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
 
 from daydream import git_ops
 from daydream import review_profile as _rp
@@ -89,66 +89,43 @@ def select_tier(file_count: int) -> Tier:
     return "parallel"
 
 
-def _coerce_file_infos(entries: Any) -> list[FileInfo]:
-    out: list[FileInfo] = []
+def _coerce_records(
+    entries: Any,
+    factory: Callable[..., Any],
+    required: tuple[str, ...],
+    optional: tuple[str, ...] = (),
+    fixed: dict[str, Any] | None = None,
+) -> list[Any]:
+    out: list[Any] = []
     if not isinstance(entries, list):
         return out
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         try:
-            out.append(
-                FileInfo(
-                    path=str(entry["path"]),
-                    role=str(entry["role"]),
-                    summary=str(entry.get("summary", "")),
-                    provenance="llm",
-                    source_file=str(entry.get("source_file", "")),
-                )
-            )
+            kwargs: dict[str, Any] = {field: str(entry[field]) for field in required}
+            kwargs.update({field: str(entry.get(field, "")) for field in optional})
+            if fixed:
+                kwargs.update(fixed)
+            out.append(factory(**kwargs))
         except (KeyError, TypeError, ValueError):
             continue
     return out
+
+
+def _coerce_file_infos(entries: Any) -> list[FileInfo]:
+    return _coerce_records(
+        entries, FileInfo, ("path", "role"), ("summary", "source_file"),
+        {"provenance": "llm"},
+    )
 
 
 def _coerce_conventions(entries: Any) -> list[Convention]:
-    out: list[Convention] = []
-    if not isinstance(entries, list):
-        return out
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            out.append(
-                Convention(
-                    name=str(entry["name"]),
-                    description=str(entry["description"]),
-                    source=str(entry.get("source", "")),
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
+    return _coerce_records(entries, Convention, ("name", "description"), ("source",))
 
 
 def _coerce_dependencies(entries: Any) -> list[Dependency]:
-    out: list[Dependency] = []
-    if not isinstance(entries, list):
-        return out
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            out.append(
-                Dependency(
-                    source=str(entry["source"]),
-                    target=str(entry["target"]),
-                    relationship=str(entry["relationship"]),
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
+    return _coerce_records(entries, Dependency, ("source", "target", "relationship"))
 
 
 def _coerce_guidelines(entries: Any) -> list[str]:

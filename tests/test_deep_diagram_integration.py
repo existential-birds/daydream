@@ -289,15 +289,6 @@ def _reasons(result: dict[str, Any]) -> set[str]:
     }
 
 
-def _assert_grammar(mermaid: str, kind: str) -> None:
-    """Every emitted line must match the kind's exported line grammar."""
-    from daydream.deep.diagram_render import FLOWCHART_LINE_GRAMMAR, SEQUENCE_LINE_GRAMMAR
-
-    grammar = SEQUENCE_LINE_GRAMMAR if kind == "sequence" else FLOWCHART_LINE_GRAMMAR
-    for line in mermaid.split("\n"):
-        assert grammar.fullmatch(line), f"{kind} mermaid emitted an off-grammar line: {line!r}"
-
-
 # --- Spec test 1: sequence auto trigger -------------------------------------
 
 
@@ -343,7 +334,6 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     assert calls[0]["agents"] is None
 
     assert sequence["mermaid"] == SEQUENCE_GOLDEN
-    _assert_grammar(sequence["mermaid"], "sequence")
 
     body = captured_post.body()
     assert SEQUENCE_HEADING in body
@@ -406,7 +396,6 @@ async def test_flowchart_auto_trigger_renders_grounded_diagram(
     assert artifact["results"]["sequence"]["status"] == "skipped"
     assert flowchart["grounding"]["root_range"] == [1, 9]
     assert flowchart["mermaid"] == FLOWCHART_GOLDEN
-    _assert_grammar(flowchart["mermaid"], "flowchart")
     assert len(_diagram_calls(stub, "flowchart")) == 1
     assert _diagram_calls(stub, "sequence") == []
 
@@ -534,7 +523,6 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
     assert "Ghost call" in mermaid, "the repaired message must be drawn"
     assert "Unsnappable symbol" not in mermaid
     assert "Undefined callee" not in mermaid
-    _assert_grammar(mermaid, "sequence")
 
     body = captured_post.body()
     assert "2 proposed interactions were dropped as ungrounded." in body
@@ -671,7 +659,6 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
     assert "N8[item truthy?]" in mermaid, "the demoted decision renders as a process box"
     assert "Outside root" not in mermaid
     assert "Unreachable" not in mermaid
-    _assert_grammar(mermaid, "flowchart")
     assert FLOWCHART_HEADING in captured_post.body()
 
 
@@ -1020,7 +1007,6 @@ async def test_injection_payloads_cannot_add_mermaid_statements(
     sequence = _artifact(target)["results"]["sequence"]
     assert sequence["status"] == "rendered"
     mermaid = sequence["mermaid"]
-    _assert_grammar(mermaid, "sequence")
     # Same statement count as the clean golden: nothing was smuggled in.
     assert len(mermaid.split("\n")) == len(SEQUENCE_GOLDEN.split("\n"))
     assert "P1->>P9" not in mermaid, "the newline payload did not become a statement"

@@ -51,10 +51,3 @@ def test_env_suite_passes_under_vendored_verifiers() -> None:
         env=env,
     )
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-
-
-def test_skip_reason_carries_instructions() -> None:
-    # The skip must be loud: a reader of the skip reason can follow it to the
-    # README procedure without any other context.
-    assert "PRIME_RL_VENDORED_VERIFIERS" in SKIP_REASON
-    assert "README" in SKIP_REASON

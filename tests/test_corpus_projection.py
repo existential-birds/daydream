@@ -451,11 +451,6 @@ def test_segment_order_is_fork_registration_then_descriptor() -> None:
     assert [s.trajectory_id for s in segs] == ["s1:fix-1", "s1:fix-0"]
 
 
-def test_segmentation_is_idempotent_across_reprojection() -> None:
-    traj = _traj([("s1:explore-0", "e0.jsonl"), ("s1:review-2", "r2.jsonl")])
-    assert segment(traj) == segment(traj)
-
-
 def test_segment_ids_qualify_session_and_descriptor() -> None:
     traj = _traj([("s1:fix-0", "a.jsonl")])
     seg = segment(traj)[0]

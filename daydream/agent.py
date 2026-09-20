@@ -110,7 +110,6 @@ class _ResolvedRetrySettings:
     base_delay_s: float
     max_delay_s: float
     allowance_s: float
-    allowance_declared: bool
 
 
 def _resolve_retry_settings(
@@ -228,7 +227,6 @@ def _resolve_retry_settings(
         base_delay_s=base_delay,
         max_delay_s=max_delay,
         allowance_s=resolved_allowance,
-        allowance_declared=declared_allowance,
     )
 
 

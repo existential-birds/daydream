@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Verify stored HoneyHive/LangSmith native trees against an immutable receipt.
 
-P18/#1156 Task 6 bounded native readback verifier. The transport contract is the
-frozen plan (P18-plan.md SHA-256 ``1bb962866288395f6ddf0504fd8affd9764c019cbe024c8c61140f2f5b6a9738``
-plus the readback-deadline amendment, P18-readback-deadline-plan-correction.md):
+P18/#1156 Task 6 bounded native readback verifier. Its transport contract is
+frozen as follows:
 
 - JSON parsing only (this tool never reuses the OTLP protobuf machinery);
 - one AnyIO run owning exactly one ``httpx.AsyncClient(trust_env=False,

@@ -7,8 +7,6 @@ set -euo pipefail
 #   zip-review.sh <daydream-dir> [branch-name]
 #
 # Examples:
-#   zip-review.sh /Users/ka/ro/mono-daydream-review/.daydream gsadalgekar/fix-cancel-future-shipments-crm
-#   zip-review.sh /Users/ka/.daydream/archive
 #   zip-review.sh .daydream  # relative path works too
 
 DAYDREAM_DIR="${1:?Usage: zip-review.sh <daydream-dir> [branch-name]}"

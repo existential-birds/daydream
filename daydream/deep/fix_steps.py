@@ -792,7 +792,6 @@ class FixCycleState:
     footprint: AuthorizedFixFootprint
     latest_retained: RetainedTreeSnapshot | None = None
     verifier_key: EvidenceKey | None = None
-    test_evidence: TestAttemptEvidence | None = None
     last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
 
 
@@ -1385,7 +1384,7 @@ async def _step_fix_verify_authorized(
     actionable = _actionable_verdicts(outcomes)
     if actionable and iteration not in (None, 3):
         return None
-    _render_fix_outcome_summary(deep_state.dd, deep_state.items, outcomes)
+    _render_fix_outcome_summary(deep_state.items, outcomes)
     if actionable:
         return Stop(1)
     return BreakLoop()
@@ -1408,7 +1407,6 @@ def _actionable_verdicts(outcomes: dict[Any, dict[str, Any]]) -> list[str]:
 
 
 def _render_fix_outcome_summary(
-    dd: Path,
     items: list[dict[str, Any]],
     outcomes: dict[Any, dict[str, Any]],
 ) -> None:
@@ -1512,7 +1510,6 @@ async def finalize_retained_tree_after_test(
             ctx, state, "test produced no evidence", round_number=None
         )
     evidence = attempts[-1]
-    state.test_evidence = evidence
     ignored = result.ignored
 
     for pass_number in range(1, MAX_POST_TEST_STABILIZATION_PASSES + 1):
@@ -1581,7 +1578,6 @@ async def finalize_retained_tree_after_test(
                     round_number=pass_number,
                 )
             attempts.append(evidence)
-            state.test_evidence = evidence
             ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
             _persist_test_verdict(

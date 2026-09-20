@@ -574,7 +574,7 @@ async def test_stabilization_audit_write_failure_stops_before_retest(
     assert "audit disk full" in failure["reason"]
 
 
-def test_fix_outcome_summary_renders_uid_keyed_outcomes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fix_outcome_summary_renders_uid_keyed_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.deep.fix_steps import _render_fix_outcome_summary
 
     rendered: list[tuple[int, int, str | None]] = []
@@ -585,7 +585,7 @@ def test_fix_outcome_summary_renders_uid_keyed_outcomes(tmp_path: Path, monkeypa
     items = [{**_merge_item(7, "a.py", "high"), "item_uid": "item:a"}]
     outcomes = {"item:a": {"issue_id": 7, "verdict": "resolved", "reason": "fixed"}}
 
-    _render_fix_outcome_summary(tmp_path, items, outcomes)
+    _render_fix_outcome_summary(items, outcomes)
 
     assert rendered == [(1, 1, "resolved")]
 
