@@ -52,6 +52,7 @@ from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
 from tests.harness.git_helpers import commit, git, init_repo
@@ -4675,3 +4676,52 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
     assert removed == 1
     assert not stale.exists()
     assert "run-dead-reanchor" not in git(repo, "worktree", "list")
+
+
+_NESTED_SECRET = "credential sk-abcdef123456 in the note"
+_NESTED_REDACTED = "credential [REDACTED_API_KEY] in the note"
+
+
+def test_model_value_redaction_recurses_into_nested_containers() -> None:
+    """The public owner ``redact_model_value`` reaches a leaf three levels down.
+
+    A tuple holding a list holding a dict: any policy that stops recursing below
+    the top level leaves ``sk-abcdef123456`` in the innermost value and fails here.
+    """
+    redacted = redact_model_value(([{"note": _NESTED_SECRET}],))
+
+    assert isinstance(redacted, tuple)
+    assert isinstance(redacted[0], list)
+    assert isinstance(redacted[0][0], dict)
+    assert redacted[0][0]["note"] == _NESTED_REDACTED
+
+
+def test_model_value_redaction_rebuilds_each_container_shape() -> None:
+    """A list stays a list, a tuple a tuple, and a dict a fresh dict with its keys."""
+    assert redact_model_value(["sk-abcdef123456"]) == ["[REDACTED_API_KEY]"]
+    assert redact_model_value(("sk-abcdef123456",)) == ("[REDACTED_API_KEY]",)
+    assert redact_model_value({"note": "sk-abcdef123456", "count": 3}) == {
+        "note": "[REDACTED_API_KEY]",
+        "count": 3,
+    }
+
+
+def test_model_value_redaction_passes_non_container_leaves_through() -> None:
+    """Numbers, ``None``, booleans and arbitrary objects come back untouched."""
+    sentinel = object()
+
+    assert redact_model_value(None) is None
+    assert redact_model_value(7) == 7
+    assert redact_model_value(True) is True
+    assert redact_model_value(sentinel) is sentinel
+
+
+def test_model_value_redaction_does_not_mutate_its_argument() -> None:
+    """The caller's object keeps its secret; only a fresh redacted copy moves on."""
+    source = {"note": "sk-abcdef123456", "tags": ["sk-abcdef123456"]}
+
+    redacted = redact_model_value(source)
+
+    assert source == {"note": "sk-abcdef123456", "tags": ["sk-abcdef123456"]}
+    assert redacted is not source
+    assert redacted["tags"] is not source["tags"]

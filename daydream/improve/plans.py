@@ -23,8 +23,8 @@ from daydream.artifact_visibility import (
     validate_private_workspace_owner,
 )
 from daydream.improve.prioritize import member_alias, plan_priority
+from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import (
-    _redact_model_value,
     markdown_cell,
     plan_slug,
     render_plan,
@@ -102,11 +102,11 @@ def record_rejections(
     if not entries:
         return
     rejected = [
-        _redact_model_value(entry)
+        redact_model_value(entry)
         for entry in load_rejections(plans_dir).values()
     ]
     rejected.extend(
-        _redact_model_value(dict(entry))
+        redact_model_value(dict(entry))
         for entry in entries
     )
     plans_dir.mkdir(parents=True, exist_ok=True)
@@ -298,7 +298,7 @@ def record_plan_write_diagnostics(
             )
         ):
             existing_attempts = [
-                _redact_model_value(item)
+                redact_model_value(item)
                 for item in existing["attempts"]
                 if isinstance(item, dict)
             ]
@@ -311,7 +311,7 @@ def record_plan_write_diagnostics(
             else {}
         ),
         "attempts": [
-            _redact_model_value(item)
+            redact_model_value(item)
             for item in [*existing_attempts, *attempts]
         ],
     }
@@ -1133,7 +1133,7 @@ class PlanWriteSession:
         selection: dict[str, Any],
     ) -> PlanOutcome:
         """Land one plan-writer result, writing its file when it is complete."""
-        safe = _redact_model_value(selection)
+        safe = redact_model_value(selection)
         if not isinstance(safe, dict):
             return PlanOutcome("ignored", None, None, "")
         finding = safe.get("finding")
