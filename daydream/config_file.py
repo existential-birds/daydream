@@ -340,20 +340,6 @@ def _coerce_float(raw: Any) -> float | None:
     return None
 
 
-def _coerce_quality_threshold(raw: Any) -> float | None:
-    """Return ``raw`` as a finite non-negative float, else None (degrade to default).
-
-    Quality-gate thresholds must be finite and non-negative
-    (#329 / Finding 7): a NaN or infinite threshold makes every ``>``
-    comparison False, silently disabling the metric (and non-standard ``NaN``
-    reaches JSON); a negative threshold makes a zero delta (an unchanged file)
-    exceed it, flagging files that did not regress. Anything invalid --
-    negative, NaN, inf, bool, or non-number -- degrades to ``None`` so the
-    ``config.py`` default applies.
-    """
-    return _coerce_non_negative_float(raw)
-
-
 def _coerce_non_negative_float(raw: Any) -> float | None:
     """Return ``raw`` as a finite non-negative float, else None (degrade to default).
 
@@ -497,7 +483,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     )
     # quality_gate_enabled: bool only, same degrade-to-None rule. The delta AND
     # absolute thresholds are finite non-negative floats (reject bool, coerce
-    # ints, reject negative / NaN / inf) via _coerce_quality_threshold.
+    # ints, reject negative / NaN / inf) via _coerce_non_negative_float.
     raw_quality_gate_enabled = merged.get("quality_gate_enabled")
     quality_gate_enabled: bool | None = (
         raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
@@ -544,10 +530,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         deep_shard_fanout_cap=_coerce_non_negative_int(merged.get("deep_shard_fanout_cap")),
         deep_shard_frontier_max=_coerce_non_negative_int(merged.get("deep_shard_frontier_max")),
         quality_gate_enabled=quality_gate_enabled,
-        quality_gate_erosion_delta=_coerce_quality_threshold(merged.get("quality_gate_erosion_delta")),
-        quality_gate_verbosity_delta=_coerce_quality_threshold(merged.get("quality_gate_verbosity_delta")),
-        quality_gate_erosion_absolute=_coerce_quality_threshold(merged.get("quality_gate_erosion_absolute")),
-        quality_gate_verbosity_absolute=_coerce_quality_threshold(merged.get("quality_gate_verbosity_absolute")),
+        quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
+        quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),
+        quality_gate_erosion_absolute=_coerce_non_negative_float(merged.get("quality_gate_erosion_absolute")),
+        quality_gate_verbosity_absolute=_coerce_non_negative_float(merged.get("quality_gate_verbosity_absolute")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),

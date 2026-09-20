@@ -57,13 +57,12 @@ _GITHUB_NEW_APP_URL = "https://github.com/settings/apps/new"
 _GITHUB_NEW_APP_ORG_URL = "https://github.com/organizations/{org}/settings/apps/new"
 
 
-def _manifest_payload(*, redirect_url: str, org: str | None) -> dict[str, object]:
+def _manifest_payload(*, redirect_url: str) -> dict[str, object]:
     """Build the GitHub App manifest JSON for the from-manifest flow.
 
     Args:
         redirect_url: The ``http://localhost:<port>/callback`` URL GitHub
             redirects to with the conversion code.
-        org: Organization login when registering an org-owned App, else None.
 
     Returns:
         The manifest dict: name, the homepage/redirect URLs, the
@@ -169,7 +168,7 @@ class _ManifestListener:
 
             def _serve_form(self) -> None:
                 redirect_url = f"http://localhost:{listener._port}/callback"
-                manifest = _manifest_payload(redirect_url=redirect_url, org=listener.org)
+                manifest = _manifest_payload(redirect_url=redirect_url)
                 body = _manifest_form_html(action_url=listener._action_url(), manifest=manifest).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")

@@ -50,7 +50,6 @@ def test_manifest_events_exclude_pull_request() -> None:
 def test_app_manifest_requests_issue_write_for_improve_publication() -> None:
     manifest = bot_setup._manifest_payload(
         redirect_url="http://localhost:8080/callback",
-        org=None,
     )
 
     permissions = manifest["default_permissions"]

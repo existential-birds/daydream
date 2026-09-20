@@ -685,15 +685,6 @@ def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
     return True
 
 
-def _redact_log_value(value: Any) -> Any:
-    """Recursively redact a log-mode value without mutating its argument.
-
-    Delegates to the canonical :func:`daydream.trajectory.redact_value`
-    redactor so the security-relevant recursion lives in exactly one place.
-    """
-    return redact_value(value)
-
-
 def _print_log(value: str) -> None:
     """The safe ``--verbose`` emitter for run_agent events: redact, then print.
 
@@ -1242,7 +1233,7 @@ async def _run_agent(
                                     structured_result = event.structured_output
                                     if event.structured_output is not None:
                                         if policy.log_mode:
-                                            redacted = _redact_log_value(event.structured_output)
+                                            redacted = redact_value(event.structured_output)
                                             _print_log(
                                                 f"[result] {json.dumps(redacted)[:500]}",
                                             )
