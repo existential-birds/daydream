@@ -1,18 +1,9 @@
-"""Phase-seam render tests for the de-silenced structured phases (Task 3).
+"""Phase-seam render tests for the de-silenced structured phases.
 
-After Task 1 suppressed raw structured-output JSON in ``run_agent``, the
-structured phases (parse-feedback, cross-stack merge, arbiter) produced no
-visible terminal output. These tests drive the real phase entrypoints with a
-``MockBackend`` whose ``ResultEvent.structured_output`` matches each phase's
-schema and assert the restored summaries render observable content (counts,
-a table) without dumping raw JSON.
-
-Verified harness (from Task 0): record console is
-``Console(file=StringIO(), record=True, force_terminal=True, width=100)``; tests patch the
-importing module's binding via ``monkeypatch.setattr("daydream.phases.console", rec)``.
-``MockBackend`` mirrors tests/test_agent_recorder_integration.py:61-96 and
-accounts for ``run_agent``'s keyword-only ``phase`` argument (passed by the
-phases themselves, not the backend).
+These tests drive the real phase entrypoints with a ``MockBackend`` whose
+``ResultEvent.structured_output`` matches each phase's schema and assert the
+restored summaries render observable content (counts, a table) without dumping
+raw JSON.
 """
 from __future__ import annotations
 

@@ -26,7 +26,6 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -208,7 +207,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     # ledger so ``status`` can surface whether the last import/refresh actually
     # re-verified repository identity + read access.
     ledger = schema.PreflightLedger(
-        last_verified_at=_now_rfc3339(),
+        last_verified_at=schema.rfc3339_now(),
         repository=repo_slug,
         repository_id=repository_id,
         visibility=visibility,
@@ -330,11 +329,6 @@ def parse_import_targets(
         requested_heads=["final", *dict.fromkeys(all_valid)],
         pr_heads=pr_heads,
     )
-
-
-def _now_rfc3339() -> str:
-    """Current UTC time as an RFC3339 string."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _parse_ndjson(text: str) -> list[Any]:
@@ -2467,7 +2461,7 @@ def fetch_and_normalize(
         {
             **import_doc,
             "fetch": {
-                "fetched_at": _now_rfc3339(),
+                "fetched_at": schema.rfc3339_now(),
                 "etag": None,
                 "payload_sha256": _payload_sha256(import_doc),
             },
