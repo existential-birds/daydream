@@ -135,12 +135,10 @@ class StubBackend:
         self.verifier_unverified_assumptions: list[str] = []
         # Post-fix fix-verifier knobs (#744). fix_verify_verdicts overrides the
         # verdict for a finding id (default: resolved) on round 1 only; when
-        # None every dispatched finding resolves. fix_verify_requires_read_only
-        # pins the phase's read_only=True contract (default True).
+        # None every dispatched finding resolves.
         # fix_verify_resolve_after_round returns unresolved for rounds below
         # the threshold, resolved thereafter (drives the re-dispatch loop).
         self.fix_verify_verdicts: dict[int, dict[str, Any]] | None = None
-        self.fix_verify_requires_read_only: bool = True
         self.fix_verify_resolve_after_round: int = 1
         # Counts test-suite invocations so a test can fail the FIRST run (driving
         # the heal loop into choice "2") and pass the SECOND.
@@ -269,10 +267,8 @@ class StubBackend:
         # tool-call budget trips and returns a budget_reason.
         # ``runaway_alternatives``: the wonder turn.
         # ``runaway_stack``: the per-stack review turn for that stack name.
-        # ``runaway_parse``: the parse turn for that stack name.
         self.runaway_alternatives: bool = False
         self.runaway_stack: str | None = None
-        self.runaway_parse: str | None = None
         # ``runaway_test``: the test-suite turn (a hung suite, never a result).
         self.runaway_test: bool = False
         # When >0, the wonder turn emits this many ToolStartEvents and THEN its
@@ -482,8 +478,6 @@ class StubBackend:
             "would you have done this differently" in pl or "evaluate the implementation" in pl
         ):
             return True
-        stack_match = re.search(r"stack-(\S+?)-review\.md", prompt)
-        stack_name = stack_match.group(1) if stack_match else None
         if (
             self.runaway_stack is not None
             and "you are reviewing the" in pl
@@ -492,11 +486,7 @@ class StubBackend:
             return True
         if self.runaway_test and "run the project's test suite" in pl:
             return True
-        return (
-            self.runaway_parse is not None
-            and "extract only actionable issues" in pl
-            and stack_name == self.runaway_parse
-        )
+        return False
 
     def _apply_parse_by_stack_override(
         self, prompt: str, issue: dict[str, Any]
@@ -1185,11 +1175,10 @@ class StubBackend:
         # Post-fix fix-verifier (issue #744). Discriminator is the role sentence
         # of build_fix_verify_prompt. Returns one verdict per dispatched finding
         # id rendered in the prompt (default resolved), honoring the
-        # fix_verify_verdicts override map. Read-only enforcement is pinned:
-        # when fix_verify_requires_read_only and the call arrived
-        # read_only=False, raise (the phase must ALWAYS pass read_only=True).
+        # fix_verify_verdicts override map. The phase must ALWAYS pass
+        # read_only=True.
         if "post-fix fix-verifier agent" in pl:
-            if self.fix_verify_requires_read_only and not read_only:
+            if not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
             round_match = re.search(
                 r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))",

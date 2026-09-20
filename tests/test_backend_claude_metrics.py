@@ -224,32 +224,6 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_prompt_tokens_is_total_of_all_input_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """prompt_tokens is the total (uncached + read + creation); cached_tokens is the read subset."""
-    events = await _collect_events(
-        monkeypatch,
-        [
-            MockAssistantMessageWithUsage(
-                content=[MockTextBlock(text="ok")],
-                message_id="msg_02",
-                usage={"input_tokens": 500, "output_tokens": 200, "cache_read_input_tokens": 300},
-            ),
-            MockResultMessageWithUsage(
-                total_cost_usd=0.005,
-                structured_output=None,
-                usage={"input_tokens": 500, "output_tokens": 200, "cache_read_input_tokens": 300},
-            ),
-        ],
-    )
-    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
-    cost = [e for e in events if isinstance(e, CostEvent)][0]
-    assert metrics.prompt_tokens == 800  # 500 uncached + 300 read
-    assert metrics.cached_tokens == 300
-    assert cost.input_tokens == 800
-    assert cost.cached_tokens == 300
-
-
-@pytest.mark.asyncio
 async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """AssistantMessage.usage None => no MetricsEvent emitted, but TextEvent still flows."""
     events = await _collect_events(

@@ -376,7 +376,6 @@ class ImproveStubBackend:
         n_findings: int | None = None,
         attempt_write: bool = False,
         fanout_concurrency: int = 4,
-        audit_delay: float = 0,
     ) -> None:
         self._target = target
         self.audit_root_isolation: str | None = None
@@ -392,9 +391,6 @@ class ImproveStubBackend:
         self.retry_attempts = 20
         self.retry_base_delay_s = 0.0
         self.retry_max_delay_s = 0.0
-        self.audit_delay = audit_delay
-        self.audit_active = 0
-        self.audit_peak = 0
         self.calls: list[dict[str, Any]] = []
         self.fail_categories: set[str] = set()
         self.vet_reject_titles: set[str] = set()
@@ -404,7 +400,6 @@ class ImproveStubBackend:
         self.plan_writer_calls = 0
         self.inject_credential = False
         self.all_recon_commands_invalid = False
-        self.recon_commands_override: list[dict[str, Any]] | None = None
         self.recon_commands_extra: list[dict[str, Any]] = []
         self.recon_languages_override: Any = None
         self.recon_output_override: Any = None
@@ -510,13 +505,6 @@ class ImproveStubBackend:
                 )
         if category in self.fail_categories:
             raise RuntimeError(f"{category} audit failed")
-        if category is not None and self.audit_delay:
-            self.audit_active += 1
-            self.audit_peak = max(self.audit_peak, self.audit_active)
-            try:
-                await anyio.sleep(self.audit_delay)
-            finally:
-                self.audit_active -= 1
         if marker == "repo-scan":
             yield ResultEvent(
                 structured_output={
@@ -540,7 +528,7 @@ class ImproveStubBackend:
                     continuation=None,
                 )
                 return
-            commands = self.recon_commands_override or stub_recon_commands(
+            commands = stub_recon_commands(
                 all_invalid=self.all_recon_commands_invalid
             )
             commands = [*commands, *self.recon_commands_extra]
@@ -869,9 +857,7 @@ class ProductionPathBackend(ImproveStubBackend):
             fanout_concurrency=10,
         )
         self.failed_title = failed_title
-        self.audit_findings_issued = 0
         self.plan_active = 0
-        self.peak_active = 0
 
     def _recon_commands(self) -> list[dict[str, Any]]:
         commands: list[dict[str, Any]] = []
@@ -999,7 +985,6 @@ class ProductionPathBackend(ImproveStubBackend):
             if group != "group-01":
                 findings: list[dict[str, Any]] = []
             else:
-                self.audit_findings_issued += 1
                 finding_number = AUDIT_CATEGORIES.index(category) + 1
                 findings = [
                     {
@@ -1035,7 +1020,6 @@ class ProductionPathBackend(ImproveStubBackend):
                     "provider plan concurrency limit exceeded"
                 )
             self.plan_active += 1
-            self.peak_active = max(self.peak_active, self.plan_active)
             try:
                 await anyio.sleep(0.05)
                 member_titles = {
@@ -1200,14 +1184,12 @@ def install_improve_stub(
     n_findings: int | None = None,
     attempt_write: bool = False,
     fanout_concurrency: int = 4,
-    audit_delay: float = 0,
 ) -> ImproveStubBackend:
     stub = ImproveStubBackend(
         target,
         n_findings=n_findings,
         attempt_write=attempt_write,
         fanout_concurrency=fanout_concurrency,
-        audit_delay=audit_delay,
     )
     def _factory(*args: Any, **kwargs: Any) -> ImproveStubBackend:
         audit_root = kwargs.get("audit_root")

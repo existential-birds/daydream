@@ -12,7 +12,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 # Labeler names that identify a model/LLM classifier rather than a human
 # (mirrors the versioned classifier identity convention, e.g.
@@ -98,3 +98,22 @@ def load_observations(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def group_observations_by_record(
+    observations: Sequence[Mapping[str, Any]],
+    known_record_ids: set[str],
+    context: str,
+) -> dict[str, list[Mapping[str, Any]]]:
+    """Group observations by ``record_id``, fail-closed on an unknown id."""
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for obs in observations:
+        record_id = str(obs["record_id"])
+        if record_id not in known_record_ids:
+            raise ValueError(
+                f"{context}: observation references record_id {record_id!r} "
+                f"which is not in the adjudication queue "
+                f"(observation evidence digest {obs.get('evidence_digest')!r})"
+            )
+        grouped.setdefault(record_id, []).append(obs)
+    return grouped

@@ -38,7 +38,10 @@ from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
     index_sessions,
 )
-from daydream.training.adjudication.observations import load_observations
+from daydream.training.adjudication.observations import (
+    group_observations_by_record,
+    load_observations,
+)
 from daydream.training.adjudication.precedence import (
     DECISIVE_DISPOSITIONS,
     HUMAN_ROLES,
@@ -221,17 +224,10 @@ def run_canonical_harvest(
 
     # Merge human observations under three-tier precedence (M4/M5).
     known_record_ids = {str(record["record_id"]) for record in materialized}
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    if observations_path is not None and observations_path.is_file():
-        for obs in load_observations(observations_path):
-            record_id = str(obs["record_id"])
-            if record_id not in known_record_ids:
-                raise ValueError(
-                    f"run_canonical_harvest: observation references record_id {record_id!r} "
-                    f"which is not in the materialized snapshot over the hydrated index "
-                    f"(observation evidence digest {obs.get('evidence_digest')!r})"
-                )
-            grouped.setdefault(record_id, []).append(obs)
+    observations = load_observations(observations_path) if observations_path is not None else []
+    grouped = group_observations_by_record(
+        observations, known_record_ids, "run_canonical_harvest"
+    )
 
     human_adjudicated = 0
     flagged_after_as_of: list[str] = []

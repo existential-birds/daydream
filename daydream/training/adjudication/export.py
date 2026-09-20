@@ -1,9 +1,9 @@
 """Projector-format export + dry-run validation for adjudication results (issue #984, Task 12).
 
-One serializer, two entry points: the canonical harvest
-(:func:`daydream.training.adjudication.harvest.run_harvest`) and the
-``corpus adjudicate export`` CLI verb both write through
-:func:`write_export_rows`, so the on-disk shape — the
+One serializer for the ``corpus adjudicate export`` CLI verb:
+:func:`~daydream.training.adjudication.harvest.build_export_entries` produces
+the rows and
+:func:`write_export_rows` writes them, so the on-disk shape — the
 ``corpus_projection.projector.project_findings`` adjudication entry shape plus
 ``record_id``/``evidence_digest`` — is produced by exactly one code path.
 
