@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.harness.benchmark_judge import MatchClient, judge_env
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git
 from tests.harness.git_helpers import init_repo, seed_pr_origin
@@ -1308,18 +1309,13 @@ def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path
     build.compile_workspace(ws)
     case = ws / "harbor" / key
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     gold_path = case / "tests" / "golden-review.json"
     oracle_path = case / "solution" / "golden-review.json"
     out = tmp_path / "out"
     reward = sr_module.run_verifier(
         gold_path, oracle_path, out,
         client=MatchClient(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+        env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.verifier_error == 0
 
@@ -1373,16 +1369,11 @@ def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
     oracle_path = case / "solution" / "golden-review.json"
     oracle_path.write_bytes(json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8"))
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     out = tmp_path / "out"
     reward = sr_module.run_verifier(
         case / "tests" / "golden-review.json", oracle_path, out,
         client=MatchClient(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+        env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.verifier_error == 0
     rj = json.loads((out / "reward.json").read_bytes())
@@ -1417,16 +1408,11 @@ def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
     oracle_path = case / "solution" / "golden-review.json"
     oracle_path.write_bytes(json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8"))
 
-    class MatchClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
-
     out = tmp_path / "out"
     reward = sr_module.run_verifier(
         case / "tests" / "golden-review.json", oracle_path, out,
         client=MatchClient(),
-        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
-             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+        env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.verifier_error == 0
     rj = json.loads((out / "reward.json").read_bytes())

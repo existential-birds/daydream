@@ -398,45 +398,23 @@ def test_committed_fixture_contains_both_classes_and_c5_repo(committed_fixture: 
     assert any(r["repo_slug"] == C5_SLUG for r in variant_records)
 
 
-def test_committed_fixture_variant_c5_excluded_fails_closed(
-    committed_fixture: Path, tmp_path: Path
+@pytest.mark.parametrize(
+    ("variant", "match"),
+    [
+        ("c5-excluded", r"excluded repository list \(C5\)"),
+        ("posterior", "posterior to as_of"),
+        ("digest", "digest mismatch"),
+    ],
+)
+def test_committed_fixture_variants_fail_closed(
+    committed_fixture: Path, tmp_path: Path, variant: str, match: str
 ) -> None:
-    with pytest.raises(CalibrationError, match=r"excluded repository list \(C5\)"):
+    with pytest.raises(CalibrationError, match=match):
         run_calibration(
             _config(
                 committed_fixture,
                 tmp_path,
-                corpus_dir=committed_fixture / "variants" / "c5-excluded",
-                gold_labels=committed_fixture / "gold.json",
-                breakdowns=committed_fixture / "breakdowns.json",
-            )
-        )
-
-
-def test_committed_fixture_variant_posterior_fails_closed(
-    committed_fixture: Path, tmp_path: Path
-) -> None:
-    with pytest.raises(CalibrationError, match="posterior to as_of"):
-        run_calibration(
-            _config(
-                committed_fixture,
-                tmp_path,
-                corpus_dir=committed_fixture / "variants" / "posterior",
-                gold_labels=committed_fixture / "gold.json",
-                breakdowns=committed_fixture / "breakdowns.json",
-            )
-        )
-
-
-def test_committed_fixture_variant_digest_tamper_fails_closed(
-    committed_fixture: Path, tmp_path: Path
-) -> None:
-    with pytest.raises(CalibrationError, match="digest mismatch"):
-        run_calibration(
-            _config(
-                committed_fixture,
-                tmp_path,
-                corpus_dir=committed_fixture / "variants" / "digest",
+                corpus_dir=committed_fixture / "variants" / variant,
                 gold_labels=committed_fixture / "gold.json",
                 breakdowns=committed_fixture / "breakdowns.json",
             )

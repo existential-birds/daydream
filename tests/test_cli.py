@@ -641,34 +641,20 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path: Path) -> None:
         ("--test-model", "test"),
     ],
 )
+@pytest.mark.parametrize(
+    "sep",
+    [" ", "="],
+)
 def test_per_phase_flag_rejected_with_config_pointer(
     flag: Any,
     phase: Any,
+    sep: str,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    argv = [flag, "claude-opus-5", str(tmp_path)] if sep == " " else [f"{flag}=claude-opus-5", str(tmp_path)]
     with pytest.raises(SystemExit):
-        _parse_args([flag, "claude-opus-5", str(tmp_path)])
-    err = capsys.readouterr().err
-    assert flag in err
-    assert f"[tool.daydream.phases.{phase}]" in err
-
-
-@pytest.mark.parametrize(
-    "flag,phase",
-    [
-        ("--fix-model", "fix"),
-        ("--review-backend", "review"),
-    ],
-)
-def test_per_phase_flag_rejected_equals_form(
-    flag: Any,
-    phase: Any,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit):
-        _parse_args([f"{flag}=claude-opus-5", str(tmp_path)])
+        _parse_args(argv)
     err = capsys.readouterr().err
     assert flag in err
     assert f"[tool.daydream.phases.{phase}]" in err
