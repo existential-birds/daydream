@@ -52,42 +52,26 @@ from daydream.ui.tools import (
 )
 
 
-class LiveThinkingPanel:
-    """Thinking panel rendered statically.
-
-    Displays the AI's thought process in a purple-styled panel
-    with a stable title, rendered immediately.
-    """
-
-    def __init__(self, console: Console, content: str, max_length: int = 300) -> None:
-        """Initialize the panel."""
-        self._console = console
-        self._content = content if len(content) <= max_length else content[:max_length] + "..."
-
-    def show(self) -> None:
-        """Render the thinking panel immediately."""
-        self._console.print()
-        self._console.print(
-            Panel(
-                Markdown(self._content),
-                title="💭 Thinking",
-                title_align="left",
-                box=box.ROUNDED,
-                border_style=STYLE_PURPLE,
-                style=Style(color=NEON_COLORS["purple"], italic=True),
-                padding=(0, 1),
-            )
-        )
-
-
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
     """Print a stable thinking panel.
 
     Displays the AI's thought process in a purple-styled panel
     with a static title, rendered immediately.
     """
-    panel = LiveThinkingPanel(console, content, max_length)
-    panel.show()
+    if len(content) > max_length:
+        content = content[:max_length] + "..."
+    console.print()
+    console.print(
+        Panel(
+            Markdown(content),
+            title="💭 Thinking",
+            title_align="left",
+            box=box.ROUNDED,
+            border_style=STYLE_PURPLE,
+            style=Style(color=NEON_COLORS["purple"], italic=True),
+            padding=(0, 1),
+        )
+    )
 
 
 class CrazySpinner:
@@ -200,11 +184,6 @@ class LiveToolPanel:
         self._spinner = CrazySpinner(num_spinners=3)
         self._quiet_mode = quiet_mode
         self._frame = 0  # Animation frame counter for Edit surgery visualization
-
-    @property
-    def name(self) -> str:
-        """Return the tool name."""
-        return self._name
 
     def _build_tool_header_content(self) -> Text:
         """Build the tool call header content.

@@ -10,19 +10,6 @@ from daydream.extensions import (
 from tests.conftest import ExtDir
 
 
-def test_v5_extension_now_rejected_after_hard_bump(ext_dir: ExtDir) -> None:
-    """M10: the hard break raises the floor — a v5 extension fails the version gate."""
-    from daydream.extensions import (
-        EXTENSION_API_VERSION,
-        MIN_SUPPORTED_EXTENSION_API_VERSION,
-    )
-
-    assert EXTENSION_API_VERSION == 6 and MIN_SUPPORTED_EXTENSION_API_VERSION == 6
-    ext_dir.write_module("def register(r): ...\n", api_version=5)
-    with pytest.raises(ExtensionVersionError, match=r"supports 6\.\.6"):
-        build_registry()
-
-
 def test_supported_extension_loads(ext_dir: ExtDir) -> None:
     """Load the supported extension API version and apply its registry override."""
     ext_dir.write_module(

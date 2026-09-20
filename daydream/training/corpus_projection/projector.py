@@ -18,7 +18,7 @@ atomically with a lineage pin.
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -524,7 +524,7 @@ def project_findings(
     return records
 
 
-def _count_by(records: list[Record], key: Any) -> dict[str, int]:
+def _count_by(records: Iterable[Any], key: Any) -> dict[str, int]:
     counts: dict[str, int] = {}
     for r in records:
         k = key(r)
@@ -537,15 +537,10 @@ def _license_decision_distribution(
 ) -> dict[str, int]:
     """Admitted/rejected decision counts across admitted batches, keyed by
     ``admitted`` or the rejection reason code — deterministic order."""
-    distribution: dict[str, int] = {}
-    for decision in decisions.values():
-        key = (
-            "admitted"
-            if decision["status"] == "admitted"
-            else str(decision["reason_code"])
-        )
-        distribution[key] = distribution.get(key, 0) + 1
-    return dict(sorted(distribution.items()))
+    return _count_by(
+        list(decisions.values()),
+        lambda d: "admitted" if d["status"] == "admitted" else str(d["reason_code"]),
+    )
 
 
 _SHARE_DIMENSIONS: tuple[tuple[str, str, Callable[[Record], Any]], ...] = (
