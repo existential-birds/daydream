@@ -123,34 +123,11 @@ not bump the version.
 
 ### Migration guidance
 
-To migrate a fork to a new contract version: read the matching `### Changelog`
-entry, adjust the registered steps, prompts, and `StackRule`/findings surface to
+To migrate a fork to a new contract version: adjust the registered steps, prompts, and `StackRule`/findings surface to
 the new inventory, then declare the new `DAYDREAM_EXT_API` and validate with
 `daydream ext validate`. A hard-breaking bump (where ceiling and floor rise
 together) requires the declaration and the new surface in the same change; an
 additive bump only widens the window and needs no code migration.
-
-### Changelog
-
-- **Version 6** — **hard-breaking**. Removes the feedback command and its deep-flow
-  prefix, and removes all extension-owned agent capability selection. `StackRule`
-  now contains only `stack_name` and `patterns`; review behavior comes from the
-  resolved review profile and prompt hooks. The corresponding registry methods
-  and prompt kwargs are gone. Because older extensions cannot run against this
-  contract, both the ceiling and floor rise together: the supported range is
-  `6..6`, and every fork must declare `DAYDREAM_EXT_API = 6`.
-- **Version 5** — **hard-breaking**. The `review` and `shallow` flows collapsed
-  into modes of the single `deep` flow, and the `review` prompt slot was removed.
-  The `cleanup` step also moved out of the registered flow and into the review
-  spine's success path. The supported range was `5..5` at the time.
-- **Version 4** — **hard-breaking**. Removed the `alternatives` step from the
-  `deep` flow when alternative review moved inside `per-stack-reviews`. The
-  supported range was `4..4` at the time.
-- **Version 3** — additive. Added the `improve` flow and the `audit`, `vet`, and
-  `plan-writer` prompt slots.
-- **Version 2** — added the synchronous tool-supervisor seam, the
-  `ToolDecision` result, and the public `items_file` findings surface.
-- **Version 1** — initial flow, prompt, stack, loader, and validation contract.
 
 ## Tool supervision
 

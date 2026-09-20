@@ -796,7 +796,7 @@ class ClaudeCliJudgeClient:
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 
 
-def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
+def resolve_base_url(base_url_env: str | None) -> str:
     """Resolve the Chat Completions base URL from the environment.
 
     A configured base URL is required. The resolved URL is validated against
@@ -1403,7 +1403,7 @@ def _build_client(env: dict[str, Any]) -> Any:
             model,
             allowlist=allowlist,
         )
-    base_url = resolve_base_url(api_key, env.get(_ENV_BASE_URL))
+    base_url = resolve_base_url(env.get(_ENV_BASE_URL))
     allowlist = _effective_allowlist(base_url, env)
     initial_url = base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
     _validate_base_url(initial_url, allowlist)  # fail-closed before any request

@@ -112,8 +112,6 @@ class _PresetPolicy:
 
     trust_env = False
     follow_redirects = False
-    verify = True
-    cert = None
     compression = "none"
 
 

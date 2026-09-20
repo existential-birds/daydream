@@ -26,7 +26,6 @@ _MAKE_DECLARATION = re.compile(
 )
 _SCRIPT_KEY = re.compile(r'^\s*"(?P<key>(?:[^"\\]|\\.)*)"\s*:')
 _ID_SEPARATOR = re.compile(r"[^a-z0-9]+")
-_COMMAND_NAME_WORDS = re.compile(r"[^a-z0-9]+")
 _VERIFICATION_WORDS = frozenset(
     {
         "build",
@@ -90,7 +89,7 @@ def _is_verification_name(name: str) -> bool:
     deliberately conservative: require a verification-oriented name and
     exclude names that conventionally perform repository mutation.
     """
-    words = {word for word in _COMMAND_NAME_WORDS.split(name.lower()) if word}
+    words = {word for word in _ID_SEPARATOR.split(name.lower()) if word}
     return bool(words & _VERIFICATION_WORDS) and not bool(words & _MUTATING_WORDS)
 
 

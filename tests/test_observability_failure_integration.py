@@ -132,7 +132,11 @@ async def test_runner_retry_keeps_failed_billed_attempt_separate_from_success(
     assert root["status"]["code"] == "STATUS_CODE_OK"
 
 
-class _FanoutBackend:
+class _NoCancelBackend:
+    """Backend stub for tests that never exercise cancellation."""
+
+
+class _FanoutBackend(_NoCancelBackend):
     model = "shared-model"
 
     def __init__(self) -> None:
@@ -150,9 +154,6 @@ class _FanoutBackend:
         yield TextEvent(f"answer for {prompt}")
         yield CostEvent(0.01, 10, 1)
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_fanout_shared_backend_and_tool_ids_keep_sibling_content_isolated(
@@ -345,7 +346,7 @@ async def test_runner_attempt_duration_requires_terminal_result(
     if last_duration_source == "message":
         timings.reverse()
 
-    class TimedBackend:
+    class TimedBackend(_NoCancelBackend):
         model = "timed-model"
 
         async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
@@ -359,9 +360,6 @@ async def test_runner_attempt_duration_requires_terminal_result(
             else:
                 emitted.set()
                 await anyio.sleep_forever()
-
-        async def cancel(self) -> None:
-            pass
 
     install_backend(TimedBackend())
     with otlp_collector() as collector:
@@ -491,7 +489,7 @@ async def _run_lifecycle_flow(
     return collector
 
 
-class _ExactAllocationBackend:
+class _ExactAllocationBackend(_NoCancelBackend):
     """Two complete generations, late per-generation usage, terminal total."""
 
     model = "lifecycle-model"
@@ -513,9 +511,6 @@ class _ExactAllocationBackend:
         yield TextEvent("final answer")
         yield ResultEvent(None, None)
         self.ended = True
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
@@ -567,7 +562,7 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     assert gens["gen-a"]["parentSpanId"] == attempt["spanId"]
 
 
-class _LateMissingMetricsBackend:
+class _LateMissingMetricsBackend(_NoCancelBackend):
     """Terminal total without any per-generation usage: partial evidence."""
 
     model = "lifecycle-model"
@@ -579,9 +574,6 @@ class _LateMissingMetricsBackend:
         yield CostEvent(0.02, 200, 40, measurement_source="terminal")
         yield TextEvent("answer")
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
@@ -618,7 +610,7 @@ async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
     assert billed["gen_ai.usage.cost"] == pytest.approx(0.02)
 
 
-class _DuplicateMetricsBackend:
+class _DuplicateMetricsBackend(_NoCancelBackend):
     """Per-generation usage whose sum exceeds the terminal total."""
 
     model = "lifecycle-model"
@@ -631,9 +623,6 @@ class _DuplicateMetricsBackend:
         yield CostEvent(0.002, 70, 25, measurement_source="terminal")  # contradiction
         yield TextEvent("answer")
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
@@ -668,7 +657,7 @@ async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
     assert "billing_contradiction" not in payload  # diagnostic stays local
 
 
-class _DuplicateIdempotentBackend:
+class _DuplicateIdempotentBackend(_NoCancelBackend):
     """Identical terminal totals twice: idempotent, children bill."""
 
     model = "lifecycle-model"
@@ -682,9 +671,6 @@ class _DuplicateIdempotentBackend:
         yield CostEvent(0.003, 60, 15, measurement_source="terminal")  # exact duplicate
         yield TextEvent("answer")
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_duplicate_identical_totals_are_idempotent(
@@ -707,7 +693,7 @@ async def test_runner_duplicate_identical_totals_are_idempotent(
     assert attributes(generation)["daydream.generation.billed"] is True
 
 
-class _ResidualTotalBackend:
+class _ResidualTotalBackend(_NoCancelBackend):
     """Terminal total above the per-message sum: residual folds to the chain."""
 
     model = "lifecycle-model"
@@ -719,9 +705,6 @@ class _ResidualTotalBackend:
         yield CostEvent(0.004, 90, 18, measurement_source="terminal")  # residual 50/10
         yield TextEvent(" more")
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_residual_unallocated_total_folds_onto_chain(
@@ -751,7 +734,7 @@ async def test_runner_residual_unallocated_total_folds_onto_chain(
     assert message_usage[0]["usage"]["input_tokens"] == 40
 
 
-class _ToolErrorAfterSealBackend:
+class _ToolErrorAfterSealBackend(_NoCancelBackend):
     """Tool error after a sealed completed generation."""
 
     model = "lifecycle-model"
@@ -766,9 +749,6 @@ class _ToolErrorAfterSealBackend:
         yield CostEvent(0.0005, 30, 6, measurement_source="terminal")
         yield TextEvent("recovered answer")
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
@@ -803,7 +783,7 @@ async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
     assert attributes(_kind(spans, "run")[0])["daydream.exit_code"] == 0
 
 
-class _PendingCapBackend:
+class _PendingCapBackend(_NoCancelBackend):
     """513 sealed generations trip the 512-draft cap on the final seal."""
 
     model = "lifecycle-model"
@@ -817,9 +797,6 @@ class _PendingCapBackend:
         yield CostEvent(0.01, 100, 10, measurement_source="terminal")
         yield TextEvent("done")
         yield ResultEvent(None, None)
-
-    async def cancel(self) -> None:
-        pass
 
 
 async def test_runner_pending_count_cap_drains_children_stay_unbilled(
