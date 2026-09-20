@@ -211,7 +211,7 @@ def _otlp_http_headers_from_env(setting_traces: str, setting_shared: str) -> dic
     return headers
 
 
-def _otlp_http_compression() -> Literal["none", "gzip"]:
+def _otlp_compression_setting() -> Literal["none", "gzip"]:
     value = os.environ.get(
         "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", os.environ.get("OTEL_EXPORTER_OTLP_COMPRESSION", "none")
     )
@@ -274,7 +274,7 @@ def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     client_key = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY", os.environ.get("OTEL_EXPORTER_OTLP_CLIENT_KEY"))
     if client_certificate and not client_key:
         raise ObservabilityError("A client certificate requires its client key")
-    compression = _otlp_http_compression()
+    compression = _otlp_compression_setting()
     ledger = DeliveryLedger()
     with diagnostic_scope(PrivacyPolicy(capture_content=config.capture_content)):
         transport = build_http_transport(
@@ -308,17 +308,9 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     else:
         parsed = urlsplit("http://localhost:4317")
         insecure = None
-    compression_value = os.environ.get(
-        "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", os.environ.get("OTEL_EXPORTER_OTLP_COMPRESSION", "none")
+    compression = (
+        grpc.Compression.Gzip if _otlp_compression_setting() == "gzip" else grpc.Compression.NoCompression
     )
-    if compression_value == "none":
-        compression = grpc.Compression.NoCompression
-    elif compression_value == "gzip":
-        compression = grpc.Compression.Gzip
-    else:
-        raise ObservabilityError(
-            "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION / OTEL_EXPORTER_OTLP_COMPRESSION must be 'none' or 'gzip'"
-        )
     from opentelemetry.metrics import NoOpMeterProvider
 
     ledger = DeliveryLedger()
@@ -478,6 +470,18 @@ class _NativeSpanExporter(SpanExporter):
         return _snapshot_of(self._exporter)
 
 
+# Structural aggregates (run/step/logical agent/attempt) are chains in every
+# vendor's native vocabulary and tool calls are tool events; only the approved
+# generation kind differs per vendor.
+_STRUCTURAL_EVENT_TYPES = {
+    "run": "chain",
+    "step": "chain",
+    "agent": "chain",
+    "attempt": "chain",
+    "tool": "tool",
+}
+
+
 class HoneyHiveExporter(_NativeSpanExporter):
     """Add native event types and billed metadata without changing portable spans."""
 
@@ -485,14 +489,7 @@ class HoneyHiveExporter(_NativeSpanExporter):
     # agent/attempt) stay chain; only an approved generation is a model event;
     # opaque backends emit no model event because they create no generation
     # span. Tool calls are tool events.
-    _EVENT_TYPES = {
-        "run": "chain",
-        "step": "chain",
-        "agent": "chain",
-        "attempt": "chain",
-        "generation": "model",
-        "tool": "tool",
-    }
+    _EVENT_TYPES = {**_STRUCTURAL_EVENT_TYPES, "generation": "model"}
 
     @staticmethod
     def _adapt(span: ReadableSpan) -> ReadableSpan:
@@ -528,14 +525,7 @@ class LangSmithExporter(_NativeSpanExporter):
     # LangSmith native run types: every structural aggregate (run/step/logical
     # agent/attempt) is a chain; approved generations are llm; tool is tool;
     # no aggregate is ever an llm and no fake agent run type is authored.
-    _RUN_TYPES = {
-        "run": "chain",
-        "step": "chain",
-        "agent": "chain",
-        "attempt": "chain",
-        "generation": "llm",
-        "tool": "tool",
-    }
+    _RUN_TYPES = {**_STRUCTURAL_EVENT_TYPES, "generation": "llm"}
 
     @staticmethod
     def _adapt(span: ReadableSpan) -> ReadableSpan:
@@ -548,13 +538,10 @@ class LangSmithExporter(_NativeSpanExporter):
         role = attributes.get("daydream.agent.role")
         if kind == "agent" and role in ("root", "subagent"):
             attributes["langsmith.metadata.ls_agent_type"] = role
-        if LangSmithExporter._is_billed_owner(attributes) and kind == "attempt":
-            # LangSmith's documented aggregation hook for the structural chain.
-            attributes["langsmith.metadata.invocation_aggregate"] = True
-            usage = _langsmith_usage(attributes)
-            if usage:
-                attributes["langsmith.usage_metadata"] = json.dumps(usage, separators=(",", ":"))
-        elif LangSmithExporter._is_billed_owner(attributes):
+        if LangSmithExporter._is_billed_owner(attributes):
+            if kind == "attempt":
+                # LangSmith's documented aggregation hook for the structural chain.
+                attributes["langsmith.metadata.invocation_aggregate"] = True
             usage = _langsmith_usage(attributes)
             if usage:
                 attributes["langsmith.usage_metadata"] = json.dumps(usage, separators=(",", ":"))
