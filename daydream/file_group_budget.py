@@ -18,23 +18,14 @@ def _wall_start() -> float:
 class FileGroupBudget:
     """Aggregate guard over all fix ``run_agent`` calls for one file group (#201).
 
-    The per-invocation guard (``DEFAULT_WALL_BUDGET_S``) bounds each individual
-    turn. This bounds their *sum* within a single file
-    group so one file with many findings cannot silently dominate a
-    review-fix-test run.
-    Enforced two ways: :meth:`check` is a pure between-calls guard consulted
-    before each fix call, and :attr:`deadline` is the same absolute wall limit
-    threaded into a fix call so it can abort mid-call.
-
-    Two axes bound the group: cumulative wall-clock (starts at construction via
-    the shared clock seam) and the serial-item count (bumped once per completed
-    fix call via :meth:`record_item`). Output tokens are deliberately not an
-    axis — they are collinear with wall-time and call-count on the only
-    population this guard can reach, so they add no independent signal.
-
-    Attributes:
-        max_wall_seconds: Total wall-clock ceiling for the group.
-        max_serial_items: Max number of per-finding fix calls in the group.
+    Where the per-invocation guard bounds each turn,
+    ``DEFAULT_WALL_BUDGET_S``/this bounds their *sum* in one group so a file
+    with many findings cannot dominate a run. Two axes bound the group:
+    cumulative wall-clock (started at construction via the shared clock seam)
+    and serial-item count (bumped per completed call by :meth:`record_item`).
+    Output tokens are deliberately not an axis, being collinear with wall-time
+    and call-count here. Enforced by the pure between-calls :meth:`check` and
+    the absolute :attr:`deadline` threaded into a fix call for mid-call abort.
     """
 
     max_wall_seconds: float

@@ -73,29 +73,6 @@ def _attribution_unusable(diff_text: str) -> bool:
     return not all(not line or line.startswith(_NON_HUNK_DIFF_LINES) for line in lines)
 
 
-def _added_line_numbers(diff_text: str) -> dict[str, set[int]]:
-    """Map repo-relative paths in a working-tree diff to the new-file line
-    numbers the diff adds.
-
-    Parses ``git diff <ref>`` unified-diff output: within each ``+++`` file
-    section it tracks the new-file line counter and records every ``+`` line.
-    Context lines advance the counter; deletions (``-``) and header lines do
-    not, matching how git numbers the new file. Every file present in the diff
-    is a key (mapping to the possibly-empty set of added lines); files absent
-    from the diff (untracked new files) are not keys at all.
-
-    A ``+++`` line is treated as a file header only when the previous line was
-    its ``--- `` counterpart (git always emits the pair adjacently), so an added
-    line whose content starts with ``++ b/`` — rendered identically to a header
-    — is parsed as content and cannot re-key the current file.
-
-    Delegates to the shared unified-diff parser in ``daydream.hunk_index``
-    (``added_line_numbers(parse_hunks(...))``) so quote_scrub, pr_review and
-    coverage all count from the same source and cannot drift.
-    """
-    from daydream.hunk_index import added_line_numbers, parse_hunks
-
-    return added_line_numbers(parse_hunks(diff_text))
 def _normalize_added_lines(text: str, added: set[int]) -> str:
     """Normalize smart quotes only on the 1-based new-file lines in *added*.
 
@@ -196,7 +173,9 @@ def scrub_smart_quotes_changed_files(
                 "attribution diff for smart-quote scrub is not unified-diff output "
                 f"(external diff driver?): {diff_text[:120]!r}"
             )
-        added_lines = _added_line_numbers(diff_text)
+        from daydream.hunk_index import added_line_numbers, parse_hunks
+
+        added_lines = added_line_numbers(parse_hunks(diff_text))
     scrubbed: list[str] = []
     for path in changed:
         if path.startswith(".daydream/"):

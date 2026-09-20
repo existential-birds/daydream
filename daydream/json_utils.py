@@ -111,27 +111,14 @@ def atomic_write_bytes(
 ) -> None:
     """Atomically write ``content`` to ``path`` (same-dir temp + ``os.replace``).
 
-    The single shared crash-safe write primitive. The temp file is created
-    exclusively in ``path``'s directory so the rename never crosses
-    filesystems; a crash mid-write leaves either the prior file or nothing.
-    Parent directories are created as needed. On failure the temp file is
-    removed best-effort and the original exception re-raised.
-
-    Knobs let callers preserve (or strengthen) their prior hardening:
-
-    - ``fsync``: flush + fsync the file *before* the rename.
-    - ``mode``: when given, the temp file is chmod'ed to this mode before the
-      rename and the final path is chmod'ed again after it (the post-rename
-      chmod is umask-immune and covers a pre-existing destination).
-    - ``dir_fsync``: fsync the parent directory after the rename so the new
-      name survives a crash.
-
-    The corpus/benchmark writers migrated by #1215 pass ``fsync``,
-    ``dir_fsync`` and ``mode`` **explicitly** to reproduce their prior
-    behaviour (``fsync=False`` everywhere; ``mode=umask_derived_mode()`` for
-    the former ``write_text`` writers and ``mode=None``, i.e. mkstemp's
-    ``0600``, for the two that already used ``mkstemp``), so these knobs are
-    load-bearing rather than decorative.
+    The shared crash-safe write primitive: the temp file is created exclusively
+    in ``path``'s directory so the rename never crosses filesystems, parent
+    directories are created as needed, and a failure removes the temp file
+    best-effort before re-raising. ``fsync`` flushes the file before the rename;
+    ``mode`` chmods the temp file before and the final path after the rename
+    (umask-immune, covers a pre-existing destination); ``dir_fsync`` fsyncs the
+    parent directory after the rename. Callers migrating from prior writers
+    pass these knobs explicitly, so they are load-bearing.
     """
     tmp = _stage_bytes(path, content, fsync=fsync, mode=mode)
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)

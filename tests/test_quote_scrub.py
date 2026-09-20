@@ -4,8 +4,8 @@ from typing import Any
 import pytest
 
 from daydream.git_ops import GitError
+from daydream.hunk_index import added_line_numbers, parse_hunks
 from daydream.quote_scrub import (
-    _added_line_numbers,
     normalize_smart_quotes,
     scrub_smart_quotes_changed_files,
 )
@@ -219,7 +219,7 @@ def test_added_line_numbers_parses_unified_diff() -> None:
         "-old\n"
         "+new\n"
     )
-    assert _added_line_numbers(diff) == {"main.go": {3, 12, 13}, "other.py": {5}}
+    assert added_line_numbers(parse_hunks(diff)) == {"main.go": {3, 12, 13}, "other.py": {5}}
 
 
 def test_added_line_numbers_added_line_looking_like_header_is_content(tmp_path: Path) -> None:
@@ -241,7 +241,7 @@ def test_added_line_numbers_added_line_looking_like_header_is_content(tmp_path: 
         "-old\n"
         "+new\n"
     )
-    assert _added_line_numbers(diff) == {"main.go": {3, 4}, "other.go": {1}}
+    assert added_line_numbers(parse_hunks(diff)) == {"main.go": {3, 4}, "other.go": {1}}
 
 
 def test_added_line_numbers_noprefix_and_space_paths() -> None:
@@ -262,7 +262,7 @@ def test_added_line_numbers_noprefix_and_space_paths() -> None:
         "@@ -0,0 +1 @@\n"
         "+x = 1\n"
     )
-    assert _added_line_numbers(diff) == {"main.go": {2}, "has space.py": {1}}
+    assert added_line_numbers(parse_hunks(diff)) == {"main.go": {2}, "has space.py": {1}}
 
 
 def test_added_line_numbers_quoted_path_with_space() -> None:
@@ -275,7 +275,7 @@ def test_added_line_numbers_quoted_path_with_space() -> None:
         "@@ -0,0 +1 @@\n"
         "+x = 1\n"
     )
-    assert _added_line_numbers(diff) == {"na\u00efve ve.py": {1}}
+    assert added_line_numbers(parse_hunks(diff)) == {"na\u00efve ve.py": {1}}
 
 
 def test_scrub_driver_raises_git_error_on_external_driver_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
