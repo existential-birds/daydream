@@ -8,31 +8,19 @@ from datetime import date
 from typing import Any
 
 from daydream.improve.prioritize import plan_priority
+from daydream.improve.redaction import redact_model_value
 from daydream.trajectory import redact_text
 
 _SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+# Keep imports working until the remaining consumers migrate to the public owner.
+_redact_model_value = redact_model_value
 
 
 def plan_slug(title: Any) -> str:
     """Derive a plan's filename and branch slug from its title."""
     derived = _SLUG_SEPARATOR.sub("-", str(title or "").lower()).strip("-")
     return derived[:60].rstrip("-") or "plan"
-
-
-def _redact_model_value(value: Any) -> Any:
-    """Redact nested model-authored strings before durable host rendering."""
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, list):
-        return [_redact_model_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_model_value(item) for item in value)
-    if isinstance(value, dict):
-        return {
-            key: _redact_model_value(item)
-            for key, item in value.items()
-        }
-    return value
 
 
 def markdown_cell(value: Any) -> str:
@@ -256,8 +244,8 @@ def render_plan(
     run_session_id: str | None = None,
 ) -> str:
     """Render validated PlanWriterResult data without authored Markdown."""
-    finding = _redact_model_value(finding)
-    plan = _redact_model_value(plan)
+    finding = redact_model_value(finding)
+    plan = redact_model_value(plan)
     scope = plan["scope"]
     why = plan["why_this_matters"]
     current_state: list[str] = []
