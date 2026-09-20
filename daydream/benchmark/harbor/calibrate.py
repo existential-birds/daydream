@@ -179,9 +179,7 @@ def _judge_host_from_env(env: dict[str, Any]) -> str:
         return "api.anthropic.com"
     if not env.get("DAYDREAM_JUDGE_BASE_URL"):
         raise ValueError("missing DAYDREAM_JUDGE_BASE_URL for openai-compatible provider")
-    base_url = sr.resolve_base_url(
-        env.get("DAYDREAM_JUDGE_API_KEY") or "", env.get("DAYDREAM_JUDGE_BASE_URL")
-    )
+    base_url = sr.resolve_base_url(env.get("DAYDREAM_JUDGE_BASE_URL"))
     return str(urllib.parse.urlsplit(base_url).hostname or "").lower()
 
 
