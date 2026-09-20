@@ -44,7 +44,10 @@ from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
     index_sessions,
 )
-from daydream.training.adjudication.observations import load_observations
+from daydream.training.adjudication.observations import (
+    group_observations_by_record,
+    load_observations,
+)
 from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
@@ -265,15 +268,7 @@ def _enrich_report_items(
     it (fail-closed, mirroring the CLI twin).
     """
     queue_ids = {str(item["record_id"]) for item in items}
-    grouped: dict[str, list[Mapping[str, Any]]] = {}
-    for obs in observations:
-        record_id = str(obs["record_id"])
-        if record_id not in queue_ids:
-            raise ValueError(
-                f"observation references record_id {record_id!r} which is not in the "
-                f"adjudication queue over the hydrated index"
-            )
-        grouped.setdefault(record_id, []).append(obs)
+    grouped = group_observations_by_record(observations, queue_ids, "report")
 
     enriched: list[dict[str, Any]] = []
     for item in items:

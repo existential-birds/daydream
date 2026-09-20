@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from daydream.archive.hydrate import HydrationError, MovingBranchError
-from daydream.training.adjudication.harvest import AdjudicationDriftError, run_harvest
+from daydream.training.adjudication.harvest import AdjudicationDriftError, build_export_entries
 from daydream.training.adjudication.preview import run_preview
 
 
@@ -144,52 +144,44 @@ def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: P
         run_preview(root, tmp_path / "ledger.json")
 
 
-def test_harvest_fails_closed_and_requeues_on_digest_drift(tmp_path: Path) -> None:
+def test_export_fails_closed_and_requeues_on_digest_drift(tmp_path: Path) -> None:
     root = _hydrated_index(tmp_path)
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
     drifted = _mutate_one_digest(root, tmp_path / "root2")
     with pytest.raises(AdjudicationDriftError) as excinfo:
-        run_harvest(drifted, ledger, tmp_path / "out")
+        build_export_entries(drifted, ledger)
     assert excinfo.value.requeued_record_ids  # affected findings requeued, nothing merged
-    assert not (tmp_path / "out").exists()  # fail closed: export never written on drift
 
 
-def test_harvest_identity_and_digests_stable_without_drift(tmp_path: Path) -> None:
+def test_export_identity_and_digests_stable_without_drift(tmp_path: Path) -> None:
     root = _hydrated_index(tmp_path)
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
-    out_a, out_b = tmp_path / "a", tmp_path / "b"
-    summary_a = run_harvest(root, ledger, out_a)
-    summary_b = run_harvest(root, ledger, out_b)
-    assert summary_a["export_sha256"] == summary_b["export_sha256"]
-    # Preview identities == harvest identities (AC 8 identity/digest stability).
+    rows_a = build_export_entries(root, ledger)
+    rows_b = build_export_entries(root, ledger)
+    assert rows_a == rows_b
+    # Preview identities == export identities (AC 8 identity/digest stability).
     ledger_items = json.loads(ledger.read_text())["items"]
-    exported = [
-        json.loads(line) for line in (out_a / "adjudication.jsonl").read_text().splitlines()
-    ]
-    assert sorted(i["record_id"] for i in ledger_items) == sorted(e["record_id"] for e in exported)
-    digests = {e["record_id"]: e["evidence_digest"] for e in exported}
+    assert sorted(i["record_id"] for i in ledger_items) == sorted(e["record_id"] for e in rows_a)
+    digests = {e["record_id"]: e["evidence_digest"] for e in rows_a}
     assert all(digests[i["record_id"]] == i["evidence_digest"] for i in ledger_items)
 
 
-def test_preview_and_harvest_identity_digest_stability_gate(tmp_path: Path) -> None:
-    """The parallel-implementation gate: preview and harvest must agree exactly."""
+def test_preview_and_export_identity_digest_stability_gate(tmp_path: Path) -> None:
+    """The parallel-implementation gate: preview and export must agree exactly."""
     root = _hydrated_index(tmp_path)
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
-    run_harvest(root, ledger, tmp_path / "out")
-    exported = [
-        json.loads(line) for line in (tmp_path / "out" / "adjudication.jsonl").read_text().splitlines()
-    ]
-    # Every queue item's identity AND digest are identical across preview ledger and harvest export.
-    by_id = {e["record_id"]: e for e in exported}
+    rows = build_export_entries(root, ledger)
+    # Every queue item's identity AND digest are identical across preview ledger and export.
+    by_id = {e["record_id"]: e for e in rows}
     for item in json.loads(ledger.read_text())["items"]:
         assert item["record_id"] in by_id
         assert by_id[item["record_id"]]["evidence_digest"] == item["evidence_digest"]
     # record_id recomputation from the exported entries round-trips.
     from daydream.training.corpus_projection.identity import record_id as rid
-    for e in exported:
+    for e in rows:
         assert e["record_id"] == rid(e["session_id"], e["trajectory_id"], e["segment_id"], e["fingerprint"])
 
 
@@ -238,8 +230,8 @@ def test_posterior_feed_is_pr_review_only(tmp_path: Path) -> None:
             "observed_at": "2026-08-30T10:00:01+00:00",
             "rubric_version": ADJUDICATION_LABELER_VERSION,
         })
-    summary = run_harvest(root, ledger, tmp_path / "out", observations_path=obs_path)
-    gold = [e for e in summary["exported"] if e["tier"] == "gold"]
+    exported = build_export_entries(root, ledger, observations_path=obs_path)
+    gold = [e for e in exported if e["tier"] == "gold"]
     assert len(gold) == 2  # decisive human verdicts promote both rows to gold
     # The task-profile gold row must never enter the posterior feed...
     assert all(e["posterior_eligible"] is False for e in gold if e["profile"] != "pr_review")
