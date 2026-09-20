@@ -54,10 +54,6 @@ No single job ever holds both PR code and the App private key:
   and posts. Untrusted values reach shells via `env:` only, never `${{ }}`
   interpolation.
 
-The binding security spec is the daydream repo's
-`.beagle/concepts/self-hosted-review-bot/roadmap.md` §"Sub-project #2
-security design — the privilege split"; these workflows implement it.
-
 ## Dedup limitations (v1)
 
 Re-reviews deduplicate against the bot's own prior comments via hidden

@@ -116,9 +116,8 @@ def _projection_record(
     *, session_id: str, split: str, label: str | None,
     finding_text: str | None, diff_body: str, base_sha: str, head_sha: str,
 ) -> dict[str, object]:
-    """A projected-corpus record the projector would emit for one finding (mirrors
-    tests/test_training_coordinator_v2.py::_v2_record — kept minimal but
-    schema-faithful so the coordinator's fail-closed gates admit it)."""
+    """A projected-corpus record the projector would emit for one finding, kept
+    minimal but schema-faithful so the coordinator's fail-closed gates admit it."""
     diff_digest = hashlib.sha256(diff_body.encode("utf-8")).hexdigest()
     record: dict[str, object] = {
         "schema_version": "2",
@@ -175,8 +174,7 @@ def _projection_record(
 
 def _build_projection(tmp_path: Path) -> Path:
     """Build a real projected-corpus projection directory with accepted + rejected
-    gold outcome rows on both sides of the frozen split (mirrors
-    tests/test_training_coordinator_v2.py::_build_projection)."""
+    gold outcome rows on both sides of the frozen split."""
     from daydream.training.corpus_projection.splits import assign_split
 
     salt = "gate-refusal-projection-salt"
