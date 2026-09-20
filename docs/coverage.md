@@ -23,12 +23,6 @@ The current `fail_under` value is:
 |------------|-----------|---------|------|-----------------|
 | 86 | 86.94% | 411a50d | 2026-08-28 | blacksmith-4vcpu-ubuntu-2404 |
 
-Regression note: the 2026-08-27 baseline (87.65% at 480c76a) was a whole-percent
-round up to 87 that the full-suite run could not reproduce once the coverage flags
-moved from the global `addopts` to the `make test`/CI invocation row (measured
-86.94%). The floor was lowered to the reproduced measurement (rounded down), per
-the ratchet's regression rule.
-
 ## Ratchet procedure
 
 1. `git pull` latest main.

@@ -1238,9 +1238,7 @@ def _summary_body_block(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
 def _render_body_section(findings: tuple[SummaryFinding, ...]) -> str:
     """Assemble the by-file collapsible ``<details>`` non-inline findings section.
 
-    Shared by :func:`_format_body_section` (the ``ParsedIssue`` entry point) and
-    :func:`default_render_summary` (the ``SummaryContext`` entry point). Consumes
-    each finding's host-rendered ``body_block`` (marker already embedded) as a
+    Consumes each finding's host-rendered ``body_block`` (marker already embedded) as a
     single unit, preserving the exact whitespace of the pre-seam layout.
     """
     if not findings:
@@ -1273,16 +1271,6 @@ def _summary_findings(body_only: list[ParsedIssue], renderers: ReviewRenderers) 
         SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue, renderers))
         for issue in body_only
     )
-
-
-def _format_body_section(body_only: list[ParsedIssue], renderers: ReviewRenderers) -> str:
-    """Render the by-file non-inline findings section from internal issues.
-
-    Retained as the ``ParsedIssue`` entry point (approval-snapshot guard);
-    delegates to :func:`_render_body_section` so the default summary renderer
-    and this path share one scaffolding implementation.
-    """
-    return _render_body_section(_summary_findings(body_only, renderers))
 
 
 def default_render_summary(ctx: SummaryContext) -> str:

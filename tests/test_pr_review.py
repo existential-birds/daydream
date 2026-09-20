@@ -18,9 +18,10 @@ from daydream.pr_review import (
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
-    _format_body_section,
     _format_comment_body,
     _parse_hunks,
+    _render_body_section,
+    _summary_findings,
     build_payload,
     classify,
     default_render_finding,
@@ -68,8 +69,11 @@ def test_finding_and_summary_markdown_is_byte_stable() -> None:
         _format_comment_body(replace(i, is_cross_stack=True), "file_level", renderers=BUILTIN_RENDERERS)
         == (SNAP / "file_level.md").read_text()
     )
-    section = _format_body_section(
-        [replace(i, line=None), replace(i, path="b.py", line=None, fingerprint="b" * 64)], renderers=BUILTIN_RENDERERS
+    section = _render_body_section(
+        _summary_findings(
+            [replace(i, line=None), replace(i, path="b.py", line=None, fingerprint="b" * 64)],
+            renderers=BUILTIN_RENDERERS,
+        )
     )
     assert section == (SNAP / "summary_body.md").read_text()
 
@@ -263,7 +267,9 @@ def test_no_marker_without_fingerprint() -> None:
 
 def test_body_section_markers_one_per_fingerprinted_issue() -> None:
     issues = [ParsedIssue(path="a.py", line=None, title=f"T{i}", body="B", fingerprint=f"{i:064x}") for i in range(2)]
-    assert parse_finding_markers(_format_body_section(issues, renderers=BUILTIN_RENDERERS)) == [
+    assert parse_finding_markers(
+        _render_body_section(_summary_findings(issues, renderers=BUILTIN_RENDERERS))
+    ) == [
         f"{i:064x}" for i in range(2)
     ]
 
