@@ -1805,7 +1805,7 @@ async def test_signal_flush_freezes_all_documents_before_one_callback(
             assert {payload["extra"]["snapshot_at"] for payload in payloads} == {snapshot.cutoff_at}
             assert all("run_ended_at" not in payload["extra"] for payload in payloads)
             assert all(document.path.read_bytes() == document.json_bytes for document in snapshot.documents)
-            timing = root.compute_timing_summary(snapshot)
+            timing = trajectory_module.compute_timing_summary(snapshot)
             assert timing is not None
             assert timing.agent_completeness["total"] == 3
             assert timing.diagnostics["malformed_invocation"] == 2
@@ -1865,7 +1865,7 @@ async def test_signal_flush_with_child_evidence_freezes_schema_valid_empty_root(
                 }
             ]
             assert root.steps == []
-            assert root.compute_timing_summary(snapshot) is not None
+            assert trajectory_module.compute_timing_summary(snapshot) is not None
             release.set()
 
 
@@ -2574,7 +2574,7 @@ async def test_host_phase_scope_records_duration_and_stop_reason(
         async with host_phase_scope(DaydreamPhase.HOOK_RUN):
             pass
 
-    events = rec.phase_event_dicts()
+    events = [x.to_dict() for x in rec._phase_events]
     ends = {(e["phase"], e["event"]): e for e in events if e["event"] == "phase_end"}
     commit = ends[(DaydreamPhase.COMMIT.value, "phase_end")]
     assert commit["status"] == "timed_out"
@@ -2607,11 +2607,9 @@ async def test_host_phase_scope_records_duration_and_stop_reason(
 async def test_host_phase_scope_noop_without_recorder() -> None:
     from daydream.trajectory import (
         DaydreamPhase,
-        _reset_recorder_for_tests,
         host_phase_scope,
     )
 
-    _reset_recorder_for_tests()
     async with host_phase_scope(DaydreamPhase.COMMIT):
         pass  # must not raise when no recorder is active
 
@@ -2649,7 +2647,7 @@ async def test_remote_ci_host_phases_record_exact_terminal_reasons(
 
     remote_events = [
         event
-        for event in rec.phase_event_dicts()
+        for event in [x.to_dict() for x in rec._phase_events]
         if event["phase"] == DaydreamPhase.REMOTE_CI.value
     ]
     assert [event["event"] for event in remote_events] == ["phase_start", "phase_end"]
@@ -3069,7 +3067,7 @@ async def test_do_commit_records_commit_phase_event(
     assert ok.committed is True
     assert ok.push is None
 
-    commit_ends = [e for e in rec.phase_event_dicts() if e["phase"] == "commit" and e["event"] == "phase_end"]
+    commit_ends = [x.to_dict() for x in rec._phase_events if x.phase.value == "commit" and x.event == "phase_end"]
     assert len(commit_ends) == 1
     assert commit_ends[0]["metadata"]["stop_reason"] == "completed"
     assert commit_ends[0]["metadata"]["duration_ms"] >= 0

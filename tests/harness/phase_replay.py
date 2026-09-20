@@ -3,11 +3,11 @@
 These context managers inject a *real* backend through the
 ``daydream.runner.create_backend`` seam and stub only that backend's external
 boundary (the Codex subprocess / the Claude SDK client). The stub is keyed on
-the *firing* phase, read live from ``TrajectoryRecorder.current_phase()``: when
+the *firing* phase, read live from the recorder's active invocation stack: when
 ``CodexBackend.execute`` (or the Claude analog) iterates, the active invocation
 opened by ``run_agent`` (``daydream/agent.py:432-436``) makes the phase readable
-via ``get_current_recorder().current_phase()`` (see the ordering note in
-``agent.py:415-436``). The factory serves that phase's synthesized fixture.
+(see the ordering note in ``agent.py:415-436``). The factory serves that phase's
+synthesized fixture.
 
 Limitation (matches the spec's rejected per-phase response *queue* decision):
 ONE response per phase per firing. A phase that fires more than once replays the
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 def _firing_phase() -> DaydreamPhase:
     """Read the firing phase from the active recorder, or fail loudly.
 
-    Reads ``get_current_recorder().current_phase()`` — the public read-seam set
+    Reads the innermost open invocation from ``get_current_recorder()``, set
     by the ``run_agent`` invocation scope. Raises ``AssertionError`` when no
     recorder/phase is active, since the replay context managers are only valid
     inside an open recorder + invocation.
@@ -51,7 +51,7 @@ def _firing_phase() -> DaydreamPhase:
             "no active TrajectoryRecorder — phase-keyed replay requires the boundary "
             "stub to fire inside an open recorder invocation"
         )
-    phase = recorder.current_phase()
+    phase = recorder._active_invocations[-1].phase if recorder._active_invocations else None
     if phase is None:
         raise AssertionError(
             "no active invocation phase — the boundary stub fired outside a run_agent "
@@ -65,7 +65,7 @@ def codex_subprocess_for_phases(phase_scripts: PhaseScripts) -> AbstractContextM
 
     Patches ``daydream.backends._transport.asyncio.create_subprocess_exec`` with a
     ``side_effect`` factory that, on each subprocess launch, reads the firing
-    phase via ``current_phase()`` and returns ``make_mock_process`` over that
+    phase from the active invocation and returns ``make_mock_process`` over that
     phase's rendered Codex JSONL lines.
 
     Args:

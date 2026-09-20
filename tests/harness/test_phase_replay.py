@@ -1,7 +1,7 @@
 """Tests for the phase-keyed replay context managers (the harness core).
 
 The unit-level proof here is that the Codex subprocess ``side_effect`` keys on
-the firing phase read from ``TrajectoryRecorder.current_phase()``: two phases
+the firing phase read from the recorder active invocation stack: two phases
 fire under one open recorder, and each ``run_agent`` call observes ITS phase's
 fixture. The PARSE phase's structured-output ``id == 1`` (produced by the REAL
 backend parser) proves the keying — a mis-keyed factory would serve REVIEW's

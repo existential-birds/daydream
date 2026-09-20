@@ -40,39 +40,6 @@ class ProfileError(Exception):
         super().__init__(f"invalid review profile: {kind} (source: {source})")
 
 
-# Every model-bearing review-spine and Improve-judgment stage (R2). This is
-# the canonical stage registry the completeness guard (R13) and the #886
-# migration manifest must match.
-STAGE_KEYS: frozenset[str] = frozenset(
-    {
-        "exploration.repository_survey",
-        "exploration.pattern_scan",
-        "exploration.dependency_trace",
-        "exploration.test_mapping",
-        "intent",
-        "alternatives",
-        "discovery.per_stack",
-        "discovery.structural",
-        "discovery.generic_fallback",
-        "uncovered_review",
-        "arbitration",
-        "suppression",
-        "merge",
-        "supervision",
-        "verification",
-        "improve.audit.correctness",
-        "improve.audit.security",
-        "improve.audit.performance",
-        "improve.audit.tests",
-        "improve.audit.tech-debt",
-        "improve.audit.dependencies",
-        "improve.audit.dx",
-        "improve.audit.docs",
-        "improve.vetting",
-    }
-)
-
-
 # Host-owned severity/confidence vocabularies (R5): severity derives from the
 # canonical vocabulary in daydream/severity.py (CANONICAL_LEVELS -- the only
 # declaration of the lowercase low|medium|high scale); confidence is the
@@ -189,7 +156,7 @@ class ReviewProfile:
     """The single per-run review-profile value.
 
     ``schema_version``: int; ``name``: human-readable; ``strategies``: one
-    named ``Strategy`` per ``STAGE_KEYS`` entry; ``pipeline``: the bounded
+    named ``Strategy`` per registered stage; ``pipeline``: the bounded
     pipeline section.
     """
 
@@ -259,7 +226,7 @@ ALTERNATIVES_STRATEGY_JUDGMENT_MARKER = "Report only concrete problems you can s
 def build_default_profile() -> ReviewProfile:
     """Return the packaged default profile (R7).
 
-    Every ``STAGE_KEYS`` entry gets nonempty, real strategy content copied
+    Every registered stage gets nonempty, real strategy content copied
     verbatim from its named production symbol, with ``copied:`` provenance.
     """
 

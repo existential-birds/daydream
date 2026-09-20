@@ -112,7 +112,7 @@ async def test_group_budget_event_records_the_ceiling_and_group_elapsed(
             items_processed=0, items_skipped=6, elapsed_s=budget.elapsed_s(),
         )
 
-    meta = recorder.phase_event_dicts()[0]["metadata"]
+    meta = recorder._phase_events[0].metadata
     assert meta["reason"] == "group_wall_budget_exceeded"
     assert meta["elapsed_s"] == 700.0
 

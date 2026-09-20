@@ -644,15 +644,19 @@ def _reset_trajectory_recorder() -> Iterator[Any]:
     Prevents cross-test bleed when a test forgets to wrap recorder usage in
     ``async with TrajectoryRecorder(...)``.
 
-    Lazy-imports ``_reset_recorder_for_tests`` to avoid eagerly loading
+    Lazy-imports the recorder registry to avoid eagerly loading
     ``daydream.trajectory`` (and its Pydantic-heavy ATIF imports) at
     pytest-collect time.
     """
-    from daydream.trajectory import _reset_recorder_for_tests
+    from daydream.trajectory import _ACTIVE_SIGNAL_RUNS, _RECORDER_VAR
 
-    _reset_recorder_for_tests()
+    def _reset() -> None:
+        _RECORDER_VAR.set(None)
+        _ACTIVE_SIGNAL_RUNS.clear()
+
+    _reset()
     yield
-    _reset_recorder_for_tests()
+    _reset()
 
 
 @pytest.fixture(autouse=True)

@@ -269,27 +269,6 @@ def test_phase_event_to_dict_includes_metadata() -> None:
     assert d["metadata"] == {"stage": "review"}
 
 
-# --- emit_phase_start / emit_phase_end -------------------------------------
-
-
-async def test_emit_phase_start_end_appends_events(tmp_path: Path) -> None:
-    """emit_phase_start/emit_phase_end append PhaseEvents in order."""
-    rec = make_recorder(tmp_path)
-    rec.emit_phase_start(DaydreamPhase.REVIEW)
-    rec.emit_phase_end(DaydreamPhase.REVIEW)
-    assert len(rec._phase_events) == 2
-    assert rec._phase_events[0].event == "phase_start"
-    assert rec._phase_events[0].phase is DaydreamPhase.REVIEW
-    assert rec._phase_events[1].event == "phase_end"
-
-
-async def test_emit_phase_carries_metadata(tmp_path: Path) -> None:
-    """Keyword metadata is stored on the PhaseEvent."""
-    rec = make_recorder(tmp_path)
-    rec.emit_phase_start(DaydreamPhase.DEEP, stage="arbiter")
-    assert rec._phase_events[0].metadata == {"stage": "arbiter"}
-
-
 async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     """Supervisor decisions and tool vetoes are recorded as phase events."""
     rec = make_recorder(tmp_path)
@@ -344,8 +323,8 @@ async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> N
     """Phase events appear in Trajectory.extra["phase_events"] when present."""
     rec = make_recorder(tmp_path)
     async with rec:
-        rec.emit_phase_start(DaydreamPhase.REVIEW)
-        rec.emit_phase_end(DaydreamPhase.REVIEW)
+        async with phase_scope(DaydreamPhase.REVIEW):
+            pass
         # Need at least one step so _write doesn't skip.
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="x"))

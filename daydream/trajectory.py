@@ -1573,8 +1573,8 @@ class Redactor:
 
 # Recorder propagation uses a ContextVar (not a module-level dataclass, per
 # PROJECT.md "propagated via ContextVar (not AgentState)"). Access via
-# get_current_recorder() ONLY; never import _RECORDER_VAR directly. Test isolation
-# goes through _reset_recorder_for_tests() (CORE-10 / D-17).
+# get_current_recorder() ONLY. Test isolation resets _RECORDER_VAR and
+# _ACTIVE_SIGNAL_RUNS directly (CORE-10 / D-17).
 _RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
     "_RECORDER_VAR",
     default=None,
@@ -1788,17 +1788,6 @@ def flush_active_signal_recorders() -> None:
     """Synchronously flush every active recorder in the selected run."""
     if _ACTIVE_SIGNAL_RUNS:
         _ACTIVE_SIGNAL_RUNS[-1].flush_active()
-
-
-def _reset_recorder_for_tests() -> None:
-    """Test-only: clear the recorder ContextVar and active run registries.
-
-    Use exclusively from the autouse ``_reset_trajectory_recorder`` fixture
-    in ``tests/conftest.py`` (CORE-10, D-17). Production code MUST go through
-    ``TrajectoryRecorder.__aenter__`` / ``__aexit__``.
-    """
-    _RECORDER_VAR.set(None)
-    _ACTIVE_SIGNAL_RUNS.clear()
 
 
 def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
@@ -2825,19 +2814,6 @@ class Invocation:
         self._generation_ledger.finalize()
         self.recorder._extend_steps(self.steps)
 
-    def generation_lifecycle(self) -> dict[str, Any]:
-        """Return the P18 pending-generation lifecycle summary for this invocation.
-
-        Shape: ``drafts`` (one entry per generation: sealed choice parts,
-        strict native timing, late usage, billed flag), ``billing_owner``
-        (``unresolved | generation_children | structural_attempt | none``),
-        ``authoritative_total``, fixed ``diagnostics`` and
-        ``children_after_cap``. Surfaced as
-        ``Trajectory.extra["subtrajectories"][...]["generation_lifecycle"]``
-        when the invocation carried generation evidence.
-        """
-        return self._generation_ledger.to_dict()
-
 
 @dataclass
 class PhaseEvent:
@@ -3329,7 +3305,7 @@ class TrajectoryRecorder:
     # work rather than dropping it.
     _active_invocations: list[Invocation] = field(default_factory=list)
     # Explicit phase-boundary events (phase_start/phase_end) emitted by
-    # emit_phase_start/emit_phase_end via phase_scope. Serialized into
+    # phase_scope/host_phase_scope. Serialized into
     # Trajectory.extra["phase_events"] when non-empty (issue #203).
     _phase_events: list[PhaseEvent] = field(default_factory=list)
     # Per-Invocation timing summaries registered at _InvocationCM.__aexit__.
@@ -3414,24 +3390,6 @@ class TrajectoryRecorder:
             return f"{self.session_id}:{self.descriptor}"
         return self.session_id
 
-    def current_phase(self) -> DaydreamPhase | None:
-        """Return the firing :class:`DaydreamPhase`, or None if no invocation is active.
-
-        The public read-seam for the phase of the innermost open Invocation,
-        complementing :func:`get_current_recorder`. The replay harness reads this
-        during ``execute()`` iteration to serve the right per-phase fixture: by
-        the time a backend's first event is pulled, ``agent.py`` has already
-        opened ``recorder.invocation(phase=...)`` around the stream, so the
-        active phase is observable here.
-
-        Returns:
-            The ``.phase`` of the last (innermost) active Invocation, or
-            ``None`` when ``self._active_invocations`` is empty — the documented,
-            correct default for the direct-call no-op path (no active invocation),
-            mirroring :func:`get_current_recorder`.
-        """
-        return self._active_invocations[-1].phase if self._active_invocations else None
-
     def _emit_phase_event(
         self,
         phase: DaydreamPhase,
@@ -3469,32 +3427,6 @@ class TrajectoryRecorder:
             "profile_source_kind": source_kind,
             "profile_digest": digest,
         }
-
-    def emit_phase_start(self, phase: DaydreamPhase, **metadata: Any) -> None:
-        """Record a ``phase_start`` boundary event (issue #203).
-
-        Args:
-            **metadata: Optional structured metadata (e.g. ``stage="review"``
-                for the deep orchestrator's DEEP sub-stages).
-        """
-        self._emit_phase_event(phase, "phase_start", **metadata)
-
-    def phase_event_dicts(self) -> list[dict[str, Any]]:
-        """JSON-serializable copies of the phase events emitted so far.
-
-        Read seam for tests/diagnostics: the recorder skips writing an empty
-        trajectory (``steps`` min_length=1), so phase events emitted without
-        any agent invocation are only observable in memory.
-        """
-        return [e.to_dict() for e in self._phase_events]
-
-    def emit_phase_end(self, phase: DaydreamPhase, **metadata: Any) -> None:
-        """Record a ``phase_end`` boundary event (issue #203).
-
-        Args:
-            **metadata: Optional structured metadata (mirrors emit_phase_start.
-        """
-        self._emit_phase_event(phase, "phase_end", **metadata)
 
     def emit_file_group_budget_exceeded(
         self,
@@ -3744,15 +3676,6 @@ class TrajectoryRecorder:
         if cost_usd is not None:
             self._final_totals["cost"] += cost_usd
             self._final_totals["any_cost_seen"] = True
-
-    def compute_timing_summary(
-        self,
-        write_snapshot: RunWriteSnapshot,
-    ) -> TimingSummary | None:
-        """Delegate timing projection to the immutable run-wide reducer."""
-        if write_snapshot.root_trajectory_id != self.trajectory_id:
-            raise ValueError("timing snapshot belongs to a different root trajectory")
-        return compute_timing_summary(write_snapshot)
 
     def _sibling_path_for(
         self,
