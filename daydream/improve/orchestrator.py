@@ -111,7 +111,7 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
-    from daydream.trajectory import DispatchHandle, TrajectoryRecorder
+    from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
 
 
 RECON_SCHEMA: dict[str, Any] = {
@@ -1045,6 +1045,26 @@ async def _run_audit_assignments(
     return results, failures
 
 
+def _finish_fanout(
+    phase: PhaseScopeHandle,
+    dispatch: DispatchHandle | None,
+    *,
+    failed: int,
+    total: int,
+) -> None:
+    """Record one terminal fan-out decision from its failed-child count."""
+    all_failed = failed == total
+    status = LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL
+    reason = (
+        LifecycleReasonCode.ALL_CHILDREN_FAILED
+        if all_failed
+        else LifecycleReasonCode.SOME_CHILDREN_FAILED
+    )
+    if dispatch is not None:
+        dispatch.finish(status, reason)
+    phase.finish(status, reason)
+
+
 async def _step_audit(ctx: FlowContext) -> Stop | None:
     """Run tier-driven category audits and persist grounded findings."""
     directory: Path = ctx.data["improve_dir"]
@@ -1078,18 +1098,9 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 dispatch=dispatch,
             )
             if failures:
-                all_failed = len(failures) == len(assignments)
-                status = (
-                    LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL
+                _finish_fanout(
+                    phase, dispatch, failed=len(failures), total=len(assignments)
                 )
-                reason = (
-                    LifecycleReasonCode.ALL_CHILDREN_FAILED
-                    if all_failed
-                    else LifecycleReasonCode.SOME_CHILDREN_FAILED
-                )
-                if dispatch is not None:
-                    dispatch.finish(status, reason)
-                phase.finish(status, reason)
             elif not assignments:
                 phase.finish(
                     LifecycleStatus.SKIPPED,
@@ -1444,18 +1455,9 @@ async def _step_vet(ctx: FlowContext) -> None:
 
                     task_group.start_soon(_task)
             if failed_slots:
-                all_failed = len(failed_slots) == len(batches)
-                status = (
-                    LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL
+                _finish_fanout(
+                    phase, dispatch, failed=len(failed_slots), total=len(batches)
                 )
-                reason = (
-                    LifecycleReasonCode.ALL_CHILDREN_FAILED
-                    if all_failed
-                    else LifecycleReasonCode.SOME_CHILDREN_FAILED
-                )
-                if dispatch is not None:
-                    dispatch.finish(status, reason)
-                phase.finish(status, reason)
             elif not batches:
                 phase.finish(
                     LifecycleStatus.SKIPPED,

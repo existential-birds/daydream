@@ -918,24 +918,15 @@ def _blocked_entry(
     planned_at: str,
 ) -> PlanIndexEntry:
     """Record a blocked attempt without consulting rejected planner metadata."""
-    return PlanIndexEntry(
+    return _index_entry(
         number=number,
         slug="",
-        title=_index_field(finding.get("title") or "Selected finding"),
+        title=finding.get("title") or "Selected finding",
         fingerprint=fingerprint,
-        package_fingerprint=_finding_package_fingerprint(finding) or fingerprint,
-        member_fingerprints=_finding_member_fingerprints(finding, fallback=fingerprint),
-        member_aliases=_finding_member_aliases(finding),
-        priority=plan_priority(finding),
-        effort=_index_field(finding.get("effort")),
-        risk=_index_field(finding.get("risk")),
-        category=_index_field(finding.get("category")),
+        finding=finding,
         planned_at=planned_at,
         status=status,
         host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
-        change_shape=_index_field(finding.get("change_shape") or "unknown"),
-        maintenance_signals=_string_tuple(finding.get("maintenance_signals")),
-        reuse_target=_index_field(finding.get("reuse_target")),
     )
 
 

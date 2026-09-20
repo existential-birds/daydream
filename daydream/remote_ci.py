@@ -144,6 +144,23 @@ class RequiredPolicy:
             raise ValueError("required policy strict must be boolean")
 
 
+def _normalize_remote_identity(target: RemoteCITarget | PRCIBinding) -> None:
+    """Normalize the repository/ref/url identity shared by remote-CI targets."""
+    object.__setattr__(
+        target,
+        "base_repository",
+        _normalize_repository(target.base_repository, "base repository"),
+    )
+    object.__setattr__(
+        target,
+        "head_repository",
+        _normalize_repository(target.head_repository, "head repository"),
+    )
+    _required_text(target.base_ref, "base ref")
+    _required_text(target.head_ref, "head ref")
+    object.__setattr__(target, "pr_url", _safe_url(target.pr_url, _URL_CHARS, "PR URL"))
+
+
 @dataclass(frozen=True)
 class RemoteCITarget:
     target_dir: Path
@@ -159,17 +176,9 @@ class RemoteCITarget:
     def __post_init__(self) -> None:
         if not isinstance(self.target_dir, Path) or not self.target_dir.is_absolute():
             raise ValueError("remote CI target directory must be an absolute Path")
-        object.__setattr__(
-            self, "base_repository", _normalize_repository(self.base_repository, "base repository")
-        )
-        object.__setattr__(
-            self, "head_repository", _normalize_repository(self.head_repository, "head repository")
-        )
-        _required_text(self.base_ref, "base ref")
-        _required_text(self.head_ref, "head ref")
+        _normalize_remote_identity(self)
         if not _is_positive_int(self.pr_number):
             raise ValueError("PR number must be a positive integer")
-        object.__setattr__(self, "pr_url", _safe_url(self.pr_url, _URL_CHARS, "PR URL"))
         _required_text(self.remote, "remote")
         _require_sha(self.pushed_sha, "pushed SHA")
 
@@ -191,15 +200,7 @@ class PRCIBinding:
     def __post_init__(self) -> None:
         if not _is_positive_int(self.pr_number):
             raise ValueError("PR binding number must be a positive integer")
-        object.__setattr__(self, "pr_url", _safe_url(self.pr_url, _URL_CHARS, "PR URL"))
-        object.__setattr__(
-            self, "base_repository", _normalize_repository(self.base_repository, "base repository")
-        )
-        object.__setattr__(
-            self, "head_repository", _normalize_repository(self.head_repository, "head repository")
-        )
-        _required_text(self.base_ref, "base ref")
-        _required_text(self.head_ref, "head ref")
+        _normalize_remote_identity(self)
         _require_sha(self.head_sha, "head SHA")
         if self.merge_sha is not None:
             _require_sha(self.merge_sha, "merge SHA")
