@@ -9,7 +9,7 @@ non-decisive set, so the queue builder adds no second filtering pass.
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from daydream.training.adjudication.precedence import reopen_on_digest_change
+from daydream.training.adjudication.precedence import HUMAN_ROLES, reopen_on_digest_change
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import project_findings
 from daydream.training.corpus_projection.provenance import extract_provenance
@@ -22,8 +22,6 @@ from daydream.training.dispositions import (
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
 
 __all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]
-
-_HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
 
 def _profile_label(
@@ -172,7 +170,7 @@ def build_queue(
                 item["review_required"] = bool(prior.get("review_required", False))
             if (
                 prior is not None
-                and prior.get("role") in _HUMAN_ROLES
+                and prior.get("role") in HUMAN_ROLES
                 and reopen_on_digest_change(prior, current_digest=fresh_digest)
             ):
                 item["status"] = "reopened"

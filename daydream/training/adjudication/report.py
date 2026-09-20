@@ -13,9 +13,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from daydream.training.dispositions import DECISIVE_DISPOSITIONS
+
 __all__ = ["build_report"]
 
-_DECISIVE_DISPOSITIONS = frozenset({"accepted", "rejected"})
 _ADMISSION_GATE_VERSION = 1
 
 
@@ -87,7 +88,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
 
         tier = str(item.get("tier", ""))
         posterior_eligible = bool(item.get("posterior_eligible", False))
-        decisive = disposition in _DECISIVE_DISPOSITIONS
+        decisive = disposition in DECISIVE_DISPOSITIONS
         # Outcome-bearing records (C5/M9): gold-tier, posterior-eligible
         # pr_review records only — task-only and silver never count, and
         # neither do evidence-after-as_of records. Only these can ever be
@@ -120,7 +121,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         if len(human) >= 2 and len(set(human)) > 1:
             inter_rater_items += 1
             if any(
-                str(obs.get("role")) == "adjudicator" and str(obs.get("disposition")) in {"accepted", "rejected"}
+                str(obs.get("role")) == "adjudicator" and str(obs.get("disposition")) in DECISIVE_DISPOSITIONS
                 for obs in observations
             ):
                 inter_rater_agreeing += 1

@@ -11,9 +11,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-DECISIVE_DISPOSITIONS = frozenset({"accepted", "rejected"})
+from daydream.training.dispositions import DECISIVE_DISPOSITIONS as DECISIVE_DISPOSITIONS
 
-_HUMAN_ROLES = frozenset({"rater", "adjudicator"})
+HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
 # Secondary sort key so identical timestamps still resolve deterministically
 # regardless of input order.
@@ -21,7 +21,7 @@ _SORT_TIEBREAK_KEYS = ("observed_at", "labeler")
 
 
 def _is_human(obs: Mapping[str, Any]) -> bool:
-    return obs.get("role") in _HUMAN_ROLES
+    return obs.get("role") in HUMAN_ROLES
 
 
 def _sorted_by_recency(observations: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
@@ -101,7 +101,7 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
         effective = human_raters[-1]
     elif automatic:
         effective = automatic[-1]
-    else:  # pragma: no cover - role sets above are exhaustive over _HUMAN_ROLES
+    else:  # pragma: no cover - role sets above are exhaustive over HUMAN_ROLES
         msg = f"no resolvable observation for record_id {record_id!r}"
         raise ValueError(msg)
 

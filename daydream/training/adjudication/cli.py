@@ -78,10 +78,11 @@ from daydream.training.adjudication.export import validate_export_rows, write_ex
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import (
+    _DISPOSITIONS,
     append_observation,
     load_observations,
 )
-from daydream.training.adjudication.precedence import has_rater_conflict
+from daydream.training.adjudication.precedence import HUMAN_ROLES, has_rater_conflict
 from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.publish import (
     publish_annotation_state,
@@ -111,8 +112,6 @@ __all__ = [
 ]
 
 _ANNOTATION_HUB_REPO = "existentialbirds/daydream-trajectories"
-
-_HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
 _QUEUE_FILENAME = "queue.json"
 _OBSERVATIONS_FILENAME = "observations.jsonl"
@@ -148,7 +147,7 @@ def _resolved_record_ids(
     """
     human_by_record: dict[str, str] = {}
     for obs in observations:
-        if obs.get("role") in _HUMAN_ROLES:
+        if obs.get("role") in HUMAN_ROLES:
             human_by_record[str(obs["record_id"])] = str(obs["evidence_digest"])
     resolved: set[str] = set()
     for item in queue:
@@ -247,13 +246,13 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     target.add_argument("--batch", type=_positive_int, default=None, metavar="N",
                         help="Label the next N unresolved items in deterministic order")
     p_label.add_argument("--disposition", type=str, required=True,
-                         choices=sorted({"accepted", "rejected", "ambiguous", "unknown"}),
+                         choices=sorted(_DISPOSITIONS),
                          help="Human disposition for the finding(s)")
     p_label.add_argument("--rationale", type=str, required=True,
                          help="Why this disposition was chosen (stored provenance)")
     p_label.add_argument("--labeler", type=str, required=True,
                          help="Human labeler identity (stored provenance)")
-    p_label.add_argument("--role", type=str, default="rater", choices=sorted(_HUMAN_ROLES),
+    p_label.add_argument("--role", type=str, default="rater", choices=sorted(HUMAN_ROLES),
                          help="Human role: rater (default) or adjudicator (conflict resolution)")
     p_label.add_argument("--valid-at", type=str, default=None, metavar="ISO_TS",
                          help="ISO-8601 valid-time pin (default: now)")
@@ -400,12 +399,9 @@ def handle_build(argv: list[str]) -> int:
     from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["build", *argv])
-    sessions_path = args.index_root / _SESSIONS_FILENAME
     try:
-        if not sessions_path.is_file():
-            raise ValueError(f"hydrated index sessions file not found: {sessions_path}")
-        raw = [json.loads(line) for line in sessions_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    except (ValueError, json.JSONDecodeError) as exc:
+        raw = _load_sessions_for_index(args.index_root)
+    except ValueError as exc:
         print_error(create_console(), "adjudicate build failed", str(exc))
         return 1
     observations = load_observations(args.state_dir / _OBSERVATIONS_FILENAME)
@@ -641,7 +637,7 @@ def _print_conflicts(enriched: list[dict[str, Any]]) -> None:
     """List disagreeing-rater findings oldest-first (by earliest observation)."""
     conflicts: list[tuple[str, str, list[dict[str, Any]]]] = []
     for item in enriched:
-        human = [o for o in item["observations"] if o.get("role") in _HUMAN_ROLES]
+        human = [o for o in item["observations"] if o.get("role") in HUMAN_ROLES]
         by_digest: dict[str, list[dict[str, Any]]] = {}
         for obs in human:
             by_digest.setdefault(str(obs["evidence_digest"]), []).append(obs)
@@ -1043,26 +1039,10 @@ def _seed_target_runs(
         conn.close()
 
 
-class _ImportBlockedError(Exception):
-    """Fail-closed redaction gate raised by the import merge phase.
+class _ImportGateError(Exception):
+    """Fail-closed import gate raised when a prerequisite blocks the import.
 
-    Raised (instead of merging) when the post-redaction secret scan is dirty:
-    the payload must not be imported. ``message`` carries the composed blocked
-    reason the handler prints verbatim.
-    """
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-class _ImportPublishError(Exception):
-    """Fail-closed publish-payload gate raised by the import publish phase.
-
-    Raised when the state archive is missing a publishable adjudication-state
-    file: the import itself only writes ``index.db``, so publishing a fresh
-    state-dir would fail with a bare ``FileNotFoundError``. ``message`` carries
-    the composed prerequisite hint the handler prints verbatim.
+    ``message`` carries the composed reason the handler prints verbatim.
     """
 
     def __init__(self, message: str) -> None:
@@ -1347,7 +1327,7 @@ def _write_import_merge(
         plus the redaction result for the report's ``redaction`` block.
 
     Raises:
-        _ImportBlockedError: When the post-redaction scan is dirty — the
+        _ImportGateError: When the post-redaction scan is dirty — the
             payload cannot be imported.
         ValueError/sqlite3.Error/OSError: Redaction, drift-gate, seed, or
             merge failures — the caller's fail-closed surface.
@@ -1362,7 +1342,7 @@ def _write_import_merge(
         # foreign dirty artifact (M9/AC6).
         (state_dir / "import-scan" / "payload.json").unlink(missing_ok=True)
         message = "; ".join(scan["blocked_reasons"]) + f" ({scan['scan_summary']})"
-        raise _ImportBlockedError(message)
+        raise _ImportGateError(message)
     # The merge commits the scan's *redacted* payload — never the unredacted
     # originals — so credential-bearing metadata cannot reach the state
     # archive (M9). Redaction is deterministic over the same in-memory rows
@@ -1456,7 +1436,7 @@ def _publish_import_state(
         ``{"prefix": ..., "uploaded": ...}``.
 
     Raises:
-        _ImportPublishError: When the state archive is missing a publishable
+        _ImportGateError: When the state archive is missing a publishable
             adjudication-state file.
         ValueError/HubUnavailableError/HydrationError/PublicDestinationError/
         OSError: Propagated from the staging copy (OSError) and the
@@ -1475,7 +1455,7 @@ def _publish_import_state(
         if not (state_dir / name).is_file()
     ]
     if missing:
-        raise _ImportPublishError(
+        raise _ImportGateError(
             "state archive is missing publishable adjudication-state file(s): "
             + ", ".join(missing)
             + "; run `corpus adjudicate build`/`label`/`export` to produce the "
@@ -1555,7 +1535,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
                 index_runs_by_session,
             )
         )
-    except _ImportBlockedError as exc:
+    except _ImportGateError as exc:
         print_error(
             console,
             "adjudicate import-local-observations blocked by unredactable metadata",
@@ -1575,7 +1555,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
             report["publish"] = _publish_import_state(
                 args.archive_dir, args.state_dir, args.hub_repo, args.manifest
             )
-        except _ImportPublishError as exc:
+        except _ImportGateError as exc:
             print_error(
                 console, "adjudicate import-local-observations publish failed", exc.message
             )

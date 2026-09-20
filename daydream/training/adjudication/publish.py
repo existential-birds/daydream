@@ -861,6 +861,55 @@ def _remove_owned_tree(path: Path, identity: tuple[int, int]) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _install_staging(
+    destination: Path,
+    files: Mapping[str, bytes],
+    *,
+    error_label: str,
+    propagate: tuple[type[BaseException], ...] = (),
+) -> None:
+    """Atomically install ``files`` into a freshly staged ``destination`` tree."""
+    stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+    stage_fd: int | None = None
+    owned_identity: tuple[int, int] | None = None
+    installed = False
+    try:
+        stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stage_info = os.fstat(stage_fd)
+        if not stat.S_ISDIR(stage_info.st_mode):
+            raise HydrationError("installation staging descriptor is not a directory")
+        owned_identity = (stage_info.st_dev, stage_info.st_ino)
+        if _directory_identity(stage) != owned_identity:
+            raise HydrationError("installation staging directory changed")
+        for name, data in sorted(files.items()):
+            target = stage / name
+            with target.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.fsync(stage_fd)
+        if _directory_identity(stage) != owned_identity:
+            raise HydrationError("installation staging directory changed")
+        os.replace(stage, destination)
+        installed = True
+        if _directory_identity(destination) != owned_identity:
+            raise HydrationError("installation destination changed")
+        parent_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except Exception as exc:
+        if owned_identity is not None:
+            _remove_owned_tree(destination if installed else stage, owned_identity)
+        if propagate and isinstance(exc, propagate):
+            raise
+        raise HydrationError(redact_text(f"{error_label}: {exc}")) from None
+    finally:
+        if stage_fd is not None:
+            os.close(stage_fd)
+
+
 def _commit_final_mapping(
     client: AnnotationHubClient,
     *,
@@ -1128,43 +1177,7 @@ def download_final_annotation_bundle(
         },
     )
 
-    stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
-    stage_fd: int | None = None
-    owned_identity: tuple[int, int] | None = None
-    installed = False
-    try:
-        stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        stage_info = os.fstat(stage_fd)
-        if not stat.S_ISDIR(stage_info.st_mode):
-            raise HydrationError("installation staging descriptor is not a directory")
-        owned_identity = (stage_info.st_dev, stage_info.st_ino)
-        if _directory_identity(stage) != owned_identity:
-            raise HydrationError("installation staging directory changed")
-        for name, data in sorted(downloaded.items()):
-            target = stage / name
-            with target.open("wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-        os.fsync(stage_fd)
-        if _directory_identity(stage) != owned_identity:
-            raise HydrationError("installation staging directory changed")
-        os.replace(stage, destination)
-        installed = True
-        if _directory_identity(destination) != owned_identity:
-            raise HydrationError("installation destination changed")
-        parent_fd = os.open(destination.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-    except Exception as exc:
-        if owned_identity is not None:
-            _remove_owned_tree(destination if installed else stage, owned_identity)
-        raise HydrationError(redact_text(f"final bundle installation failed: {exc}")) from None
-    finally:
-        if stage_fd is not None:
-            os.close(stage_fd)
+    _install_staging(destination, downloaded, error_label="final bundle installation failed")
     return {
         "hub_commit_sha": pinned,
         "data_commit_sha": data_oid,
@@ -1202,45 +1215,12 @@ def resume_annotation_state(
         if pointer["snapshot_id"] != expected_snapshot_id:
             raise HydrationError("published checkpoint snapshot does not match the expected snapshot")
 
-    stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
-    stage_fd: int | None = None
-    owned_identity: tuple[int, int] | None = None
-    installed = False
-    try:
-        stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        stage_info = os.fstat(stage_fd)
-        if not stat.S_ISDIR(stage_info.st_mode):
-            raise HydrationError("installation staging descriptor is not a directory")
-        owned_identity = (stage_info.st_dev, stage_info.st_ino)
-        if _directory_identity(stage) != owned_identity:
-            raise HydrationError("installation staging directory changed")
-        for name, data in sorted(payloads.items()):
-            target = stage / name
-            with target.open("wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-        os.fsync(stage_fd)
-        if _directory_identity(stage) != owned_identity:
-            raise HydrationError("installation staging directory changed")
-        os.replace(stage, destination)
-        installed = True
-        if _directory_identity(destination) != owned_identity:
-            raise HydrationError("installation destination changed")
-        parent_fd = os.open(destination.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-    except Exception as exc:
-        if owned_identity is not None:
-            _remove_owned_tree(destination if installed else stage, owned_identity)
-        if isinstance(exc, (HydrationError, ValueError, PublicDestinationError)):
-            raise
-        raise HydrationError(redact_text(f"checkpoint installation failed: {exc}")) from None
-    finally:
-        if stage_fd is not None:
-            os.close(stage_fd)
+    _install_staging(
+        destination,
+        payloads,
+        error_label="checkpoint installation failed",
+        propagate=(HydrationError, ValueError, PublicDestinationError),
+    )
     return {
         "curation_id": curation_id,
         "snapshot_id": pointer["snapshot_id"],
