@@ -56,14 +56,12 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
             order.append("merge")
 
     first = {name: order.index(name) for name in set(order)}
-    assert first["intent"] < first["alternatives"]
-    # Wonder runs concurrently with the per-stack fan-out, but must join before
-    # merge consumes the per-stack records.
-    assert first["alternatives"] < first["merge"]
+    assert "alternatives" not in first
+    assert first["intent"] < first["per-stack"]
     assert first["per-stack"] < first["merge"]
     assert "parse" not in {name.lower() for name in order}
 
-    # At minimum: intent + alternatives + per-stack fan-out + merge.
+    # At minimum: intent + four reviews (including structural design review) + merge.
     assert len(stub.calls) >= 6
     # Each stage fires a distinct execute call -- prompts must be unique.
     prompts = [c["prompt"] for c in stub.calls]
@@ -101,8 +99,7 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     for p in per_stack_prompts:
         assert "intent.md" in p
-        # Multi-stack: wonder runs alongside this fan-out, so alternatives.json
-        # does not exist yet and its pointer is deliberately omitted.
+        # Folded design review has no independent alternatives to consume.
         assert "alternatives.json" not in p
 
     # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
@@ -561,15 +558,14 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     notice = captured[0]
     assert notice["stages"] == [
         "TTT intent",
-        "TTT alternative-review",
+        "design alternatives (included in structural review)",
         "per-stack reviews",
         "structural review (parallel with per-stack reviews)",
         "cross-stack merge",
         "optional fix gate",
     ]
-    # The fixture yields four review assignments and the fixed TTT/merge/fix-gate
-    # work, for a total of twelve agents.
-    assert notice["agent_count"] == 12
+    # Folding default alternatives removes one invocation from the legacy estimate.
+    assert notice["agent_count"] == 11
     assert notice["stack_lines"] == [
         "python: 1 file(s)",
         "react: 1 file(s)",

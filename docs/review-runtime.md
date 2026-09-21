@@ -365,3 +365,78 @@ For that later rollout:
 5. Preserve strict findings schema/head validation and existing posting gates.
    Diagnostics availability does not authorize posting, approval or resolving
    absent prior findings from an incomplete review.
+
+## Third incident: export rejection and repeated investigation
+
+[Shelfspace run 35633835751, PR 2826](https://github.com/shelfspace-app/shelfspace-mono/actions/runs/35633835751/job/106446456074?pr=2826)
+installed `bb7efbc7956b80ab19c8858dc659cced5c9f0de3`. The reviewed head was
+`406a4ca638533fa6ff560373ce1d9631c902284e`: ten files, 503 additions and nine
+deletions, mostly a workflow, its tests and documentation. Analysis ran from
+17:44:43 to 17:56:39 UTC (about twelve minutes). The Actions log contains 160
+tool-start headers: 91 reads, 53 shell commands, 12 greps, three finds and one
+listing. These are logged starts, not necessarily completed tool executions.
+
+Six cutoffs occurred: three during exploration, then alternatives' wall limit,
+structure's tool limit and React's wall limit. Merge still completed and findings
+were prepared. The fatal exit came afterward: diagnostic publication rejected
+four blocking `url_credential` matches in the generic/React trajectories. A fifth
+`env_var` match in the diff was advisory. Finalization rolled back publication;
+the findings upload was skipped and the diagnostics directory was absent. The
+GitHub artifacts API returned no artifacts, so the four matched values cannot
+be recovered from this run.
+
+The reviewed Makefile contains a PostgreSQL connection template whose username
+and host are Make-variable expansions and whose password is the literal `***`.
+Both reviewers read that file. The existing scanner reproduced a blocking match
+on that non-secret template, and the live trajectory redactor left it unchanged.
+This is a plausible explanation for the incident matches, not proof of their
+exact contents. Separate synthetic regressions reproduce a broader mismatch:
+the live redactor did not cover all credential URL forms that the publication
+scanner rejected.
+
+Budget enforcement itself worked. Work allocation and investigation scope were
+poorly matched to the change:
+
+- The sole detected language absorbed root Makefile/JSON and standalone Node
+  scripts into React: seven assigned files versus three generic files.
+- All exploration specialists received the expanded affected-file list. The
+  test mapper treated imported/context files as additional changed targets.
+- Reviewers repeatedly reconsidered dismissed concerns, read sibling stacks,
+  and attempted dependency installation after missing-package test failures.
+- The structural diff exceeded its inline allowance and dropped five of ten
+  blocks. Bounded finalization evidence also omitted late reads, so a long
+  investigation did not guarantee recoverable complete coverage.
+
+The fixes align live redaction with publication checks while preserving rejection
+of real credentials, correct ownership of root infrastructure, and separate
+changed exploration targets from known context. Oversized exploration diffs receive
+bounded per-file changed-line excerpts with explicit omissions; these advisory
+excerpts do not establish review coverage. This gives mapping agents without a
+shell tool the changed behavior they previously had to infer from whole files.
+Changed tests, documentation, configuration and build manifests remain mapping
+evidence rather than additional test-mapper source targets. One confirmed covering
+test per source completes the mapping task; a no-source change skips that specialist.
+Review prompts define a finite pass, allow extra reads only for concrete candidates,
+and prohibit dependency installation or environment repair during review.
+
+For nontrivial default-policy changes with at most three non-test source files
+and a diff at most 64 KiB, exploration uses the static impact map and bounded repository
+guidance directly. It makes no model mapping calls. Larger changes and custom
+exploration strategies retain the specialist path. All changed files still
+reach the primary reviewers; the optimization removes advisory discovery work,
+not correctness review. Exploration caches include strategy identity so cached
+default results cannot suppress a custom exploration policy.
+
+When structural review is scheduled, it also owns the packaged default design
+alternatives check. The host omits the independent default alternatives invocation
+and writes its empty compatibility artifact. Custom alternatives strategies and
+runs without structural review retain their independent pass. Structural failures
+retain incomplete-review warnings; resume preserves prior alternatives and the
+structural design responsibility. This removes a duplicated investigation without
+raising limits or dropping design review.
+
+Existing wall/tool limits, finalization reserves and honest incomplete-coverage warnings remain in force.
+Prompt and routing tests establish these contracts; they do not by themselves
+establish model convergence or equivalent recall. Evidence retention remains
+bounded, and this change does not promise that every review completes before a
+limit.

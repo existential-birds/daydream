@@ -66,7 +66,12 @@ class PreparedSanctionedInputs:
         if not self.inputs:
             return ""
         if self.transport is SanctionedInputTransport.EXACT_PATHS:
-            lines = ["Sanctioned phase inputs (read only these exact files):"]
+            lines = [
+                "The exact-file restriction below applies to host phase artifacts only. "
+                "It does not restrict repository source reads permitted by the assigned task; "
+                "do not browse other host artifacts.",
+                "Sanctioned phase inputs (read only these exact files):",
+            ]
             lines.extend(f"- {item.label}: {item.path}" for item in self.inputs)
             return "\n".join(lines)
         blocks = [_SANCTIONED_INLINE_HEADER]

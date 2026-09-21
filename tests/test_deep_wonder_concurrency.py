@@ -12,13 +12,14 @@ import pytest
 from daydream.backends import AgentEvent
 from daydream.runner import RunConfig
 from tests.deep_orchestrator.support import _scan_trajectory_extra
+from tests.harness.review_profile import independent_alternatives_profile as _independent_alternatives
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
 async def _run_deep(target: Path) -> int:
     from daydream.runner import RunConfig, run
 
-    return await run(RunConfig(target=str(target), cleanup=False))
+    return await run(RunConfig(target=str(target), cleanup=False, review_profile=_independent_alternatives()))
 
 
 def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
@@ -42,7 +43,8 @@ async def test_tool_heavy_wonder_is_bounded_and_publishes_incomplete_review(
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(60):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                                          review_profile=_independent_alternatives()))
 
     assert isinstance(exit_code, int)
     alts = json.loads((multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text())
@@ -68,7 +70,8 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(60):
-        await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                              review_profile=_independent_alternatives()))
 
     payload = json.loads(traj.read_text())
     ids = [s["step_id"] for s in payload["steps"]]
@@ -96,6 +99,7 @@ async def test_budget_truncated_wonder_keeps_review_results(
     with anyio.fail_after(30):
         assert await run(make_config(
             multi_stack_target, trajectory_path=traj, assume="yes", output_mode="review",
+            review_profile=_independent_alternatives(),
         )) == 0
 
     run_root = multi_stack_target / ".daydream"

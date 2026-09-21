@@ -107,6 +107,14 @@ def _is_config_generic_default(path: str) -> bool:
         return True
     if path.startswith(".github/workflows/") and suffix in {".yml", ".yaml"}:
         return True
+    # Repository infrastructure has no ownership relationship to a co-changed
+    # frontend file. Keep it out of the ambiguous single-stack shortcut while
+    # preserving that inference for configs/helpers nested inside an app.
+    # Named ownership signals (package.json/tsconfig.json) still promote below.
+    if PurePosixPath(path).parent == PurePosixPath(".") and (base == "Makefile" or suffix == ".json"):
+        return True
+    if path.startswith("scripts/") and suffix in {".mjs", ".cjs"}:
+        return True
     return False
 
 

@@ -30,7 +30,7 @@ from daydream.deep.coverage import (
 from daydream.deep.diff import _read_full_diff, _ttt_diff_text
 from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
-from daydream.deep.settings import fresh_ttt
+from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
 from daydream.extensions.api import Stop
@@ -148,7 +148,10 @@ async def _step_exploration(ctx: FlowContext) -> None:
         # The in-process context short-circuits first; the disk cache is only
         # consulted when there is no in-memory context to reuse.
         cache_key = exploration_cache_key(
-            ctx.work.head_sha or "", diff, tier
+            ctx.work.head_sha or "", diff, tier,
+            strategies={name: ctx.strategy(name) for name in (
+                "exploration.pattern_scan", "exploration.dependency_trace", "exploration.test_mapping",
+            )},
         )
         if (
             exploration_path.is_dir()
@@ -294,8 +297,11 @@ async def _wonder(ctx: FlowContext) -> None:
     intent_summary = deep_state.intent_summary
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-    if deep_state.tier == "skip":
+    if fold_default_alternatives(deep_state.stacks, ctx.strategy("alternatives")):
         alt_issues: list[dict[str, Any]] = []
+        print_dim(console, "Design alternatives are included in the structural review")
+    elif deep_state.tier == "skip":
+        alt_issues = []
         print_dim(console, "Skipping alternatives -- trivial diff")
     else:
         async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
@@ -322,9 +328,12 @@ async def _wonder(ctx: FlowContext) -> None:
 
 
 async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
-    """Wonder (TTT alternative-review) alongside the per-stack review fan-out.
+    """Fold default design review into structure; schedule independent policies.
 
-    On a fresh multi-stack run the two are siblings in one task group: wonder
+    A fresh default run writes the compatibility alternatives artifact before
+    fan-out; its structural reviewer owns the design lens. A custom alternatives
+    policy (or absent structural reviewer) retains the independent pass.
+    On a fresh multi-stack run these are siblings in one task group: wonder
     only feeds the merge agent and the dedup pre-filter, so the reviewers do not
     need to wait for it. Their prompts drop the ``alternatives.json`` pointer,
     since the file does not exist yet.
@@ -337,7 +346,8 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
     # A resume (--start-at per-stack/merge/fix) skips wonder entirely — its
     # artifact is already on disk, which is also why the pointer stays on.
     run_wonder = fresh_ttt(ctx.config)
-    concurrent = run_wonder and not deep_state.single_stack_mode
+    folded = fold_default_alternatives(deep_state.stacks, ctx.strategy("alternatives"))
+    concurrent = run_wonder and not folded and not deep_state.single_stack_mode
     holder: dict[str, BaseException | None] = {"exc": None}
 
     async def _wonder_guarded() -> None:
@@ -354,7 +364,7 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
     async with anyio.create_task_group() as tg:
         if concurrent:
             tg.start_soon(_wonder_guarded)
-        await _per_stack_body(ctx, include_alternatives=not concurrent)
+        await _per_stack_body(ctx, include_alternatives=not concurrent and not (run_wonder and folded))
 
     if holder["exc"] is not None:
         raise holder["exc"]
@@ -369,6 +379,12 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
 
     failed_stacks: dict[str, str] = deep_state.failed_stacks
     if config.start_at not in ("merge", "fix"):
+        structural_strategy = ctx.strategy("discovery.structural")
+        if fold_default_alternatives(stacks, ctx.strategy("alternatives")):
+            from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION
+
+            if FOLDED_ALTERNATIVES_INSTRUCTION not in structural_strategy:
+                structural_strategy += "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION
         print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
         async with phase_scope(DaydreamPhase.DEEP, stage="review"):
             _, failed_stacks = await phase_per_stack_reviews(
@@ -384,7 +400,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 include_alternatives=include_alternatives,
                 strategies={
                     "discovery.per_stack": ctx.strategy("discovery.per_stack"),
-                    "discovery.structural": ctx.strategy("discovery.structural"),
+                    "discovery.structural": structural_strategy,
                     "discovery.generic_fallback": ctx.strategy("discovery.generic_fallback"),
                 },
                 # Issue #731: always write deterministic coverage receipts so

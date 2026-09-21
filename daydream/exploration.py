@@ -348,17 +348,20 @@ CACHE_KEY_FILENAME = "cache-key"
 
 # Bump when the artifact generator changes (e.g. a new boundary rendering) so
 # upgrades force regeneration instead of serving pre-upgrade artifacts on a key match.
-_CACHE_VERSION = 4
+_CACHE_VERSION = 5
 
 
-def exploration_cache_key(head_sha: str, diff: str, tier: str) -> str:
-    """Content key identifying one exploration pre-scan result.
+def exploration_cache_key(
+    head_sha: str, diff: str, tier: str, *, strategies: dict[str, str] | None = None,
+) -> str:
+    """Content key identifying one exploration pre-scan result and its strategy.
 
     Exact-match only: a stale hit misgrounds every downstream review prompt, so
     a near-match must never count. The HEAD sha closes the live-file-drift hole
     left by ``git_ops.diff`` being committed-only three-dot, at no cost to the
     real reuse cases (bot re-review, --start-at resume, and an immediate re-run
-    all share HEAD).
+    all share HEAD). Effective strategy contents distinguish default static
+    context from customized specialist results on the same change.
 
     An exact key match is reused even with uncommitted worktree edits: the key
     intentionally excludes uncommitted edits because reuse is exact-match-only
@@ -367,7 +370,7 @@ def exploration_cache_key(head_sha: str, diff: str, tier: str) -> str:
     (``_CACHE_VERSION``) never serves stale pre-upgrade artifacts on an exact
     match.
     """
-    payload = f"{_CACHE_VERSION}\n{head_sha}\n{diff}\n{tier}"
+    payload = json.dumps([_CACHE_VERSION, head_sha, diff, tier, strategies or {}], sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

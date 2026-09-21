@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 from daydream.runner import RunConfig
+from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import install_stub_backend, silence
 
 
@@ -151,6 +152,7 @@ async def test_review_budget_stop_emits_partial_findings(
     with anyio.fail_after(30):
         code = await run(make_config(
             multi_stack_target, pr_number=7, findings_out=str(out), file_config=file_config,
+            review_profile=independent_alternatives_profile() if phase == "alternatives" else None,
         ))
     assert code == 0
     artifact = json.loads(out.read_text())
@@ -181,7 +183,9 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
     _pin_findings_pr(monkeypatch, tiny_diff_target)
     out = tiny_diff_target / "findings.json"
-    assert await run(make_config(tiny_diff_target, pr_number=7, findings_out=str(out))) == 0
+    assert await run(make_config(
+        tiny_diff_target, pr_number=7, findings_out=str(out), review_profile=independent_alternatives_profile(),
+    )) == 0
     artifact = json.loads(out.read_text())
     assert artifact["review_warnings"] == ["Alternatives: tool_call_budget_exceeded"]
 

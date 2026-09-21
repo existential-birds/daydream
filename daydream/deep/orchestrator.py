@@ -58,7 +58,7 @@ from daydream.deep.review_steps import (
     _step_uncovered_sweep,
     _step_wonder_and_per_stack,
 )
-from daydream.deep.settings import _resolve_config_value, fresh_ttt
+from daydream.deep.settings import _resolve_config_value, fold_default_alternatives, fresh_ttt
 from daydream.deep.sharding import shard_stacks
 from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
@@ -309,9 +309,11 @@ def _stack_preflight_line(stack: StackAssignment) -> str:
     return f"{stack.stack_name}: {len(stack.files)} file(s){docs_suffix}"
 
 
-def _preflight_stage_names(stacks: list[StackAssignment]) -> list[str]:
+def _preflight_stage_names(stacks: list[StackAssignment], *, folded_alternatives: bool = False) -> list[str]:
     """Return user-facing stages, including the structural review when active."""
     stages = list(_PIPELINE_STAGE_NAMES)
+    if folded_alternatives:
+        stages[1] = "design alternatives (included in structural review)"
     if any(stack.stack_name == STRUCTURE_STACK_NAME for stack in stacks):
         stages.insert(3, "structural review (parallel with per-stack reviews)")
     return stages
@@ -838,6 +840,14 @@ async def _run_review_spine(
             if single_stack_mode
             else total_agent_count(len(stacks))
         )
+        from daydream.review_profile import build_default_profile
+
+        default_profile = build_default_profile()
+        profile = config.review_profile.profile if config.review_profile is not None else default_profile
+        alternatives_strategy = profile.strategies.get("alternatives", default_profile.strategies["alternatives"])
+        folded_alternatives = fold_default_alternatives(stacks, alternatives_strategy.content)
+        if folded_alternatives:
+            notice_agent_count -= 1
         # Issue #1113: the notice hardcodes "Deep-review pipeline pre-flight",
         # the five deep pipeline stages and a 2+2N+2 agent estimate. A two-step
         # diagram flow executes none of that, so printing it would be a lie
@@ -845,7 +855,7 @@ async def _run_review_spine(
         if mode != "diagram":
             print_preflight_notice(
                 console,
-                stages=_preflight_stage_names(stacks),
+                stages=_preflight_stage_names(stacks, folded_alternatives=folded_alternatives),
                 stack_lines=stack_lines,
                 agent_count=notice_agent_count,
                 exploration_available=review_steps.EXPLORATION_AVAILABLE,

@@ -117,7 +117,7 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "this gate; paths and speculative notes do not.\n"
     "  A `clean` verdict for a file also requires a completed read in this logical review: "
     "absent the read, mark the file `not reviewed`, never `clean`.\n"
-    "  Gate 1 (anchor): read the full enclosing symbol/module, not just the diff "
+    "  Gate 1 (anchor): read the full enclosing symbol or configuration section, not just the diff "
     "hunk; state the file path and line range you are judging.\n"
     "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
     'tool output, a file:line citation, or an explicit "none" / "N matches" '
@@ -243,6 +243,9 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
         f"You are reviewing the {stack_name} stack. Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
         f"parallel and will be merged afterwards.\n"
+        "Read another stack's file only to resolve a concrete candidate in your assigned "
+        "changed behavior. End that context trace when the candidate is resolved; do "
+        "not independently audit the other stack's workflow, tests, or configuration.\n"
         f"Return ONE entry per assigned file in the JSON verdicts array with "
         f"path, lines_read, verdict (clean | has_findings | not_reviewed), and n_findings. "
         f"A file you did not read in this same review must be marked "

@@ -1548,7 +1548,9 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
         f"deterministic structural/import map at {exploration_dir / 'affected_files.md'} "
         "as bounded context for this review. Do not infer or enumerate sibling "
         "artifact files.\n"
-        "Assigned source files are different: you MUST read in full all assigned source files.\n"
+        "Assigned source files are different: read the changed hunks in all assigned source files "
+        "with the full enclosing symbol or configuration section; expand only as needed "
+        "to resolve concrete candidates.\n"
     )
 
 

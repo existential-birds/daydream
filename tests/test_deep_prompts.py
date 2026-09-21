@@ -1001,7 +1001,9 @@ def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp
     assert "Read the pre-scan summary at" in out
     assert str(tmp_path / ".daydream" / "exploration" / "summary.md") in out
     assert "Do not infer or enumerate sibling artifact files" in out
-    assert "assigned source files" in out and "MUST read in full" in out
+    assert "assigned source files" in out
+    assert "MUST read in full all assigned source files" not in out
+    assert "enclosing symbol or configuration section" in out
     # The bounded-exploration rule is scoped to exploration artifacts ONLY: the
     # sentence that bounds exploration reads must not also carry the assigned-
     # source-files mandate.
