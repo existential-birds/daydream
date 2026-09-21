@@ -966,8 +966,10 @@ def build_merge_prompt(
             f"  - {name}: {reason}" for name, reason in sorted(failed_stacks.items())
         )
         parts.append(
-            "Uncovered stacks (per-stack agent raised; no records available):\n"
+            "Uncovered stacks (review did not complete):\n"
             f"{failed_block}\n"
+            "Some inputs may contain validated partial records from these stacks. Retain their "
+            "substantiated findings while keeping coverage explicitly incomplete.\n"
             "Note these uncovered stacks in your reasoning. Do NOT silently omit "
             "them -- downstream readers must be able to tell 'no findings' apart "
             "from 'this stack never ran'."

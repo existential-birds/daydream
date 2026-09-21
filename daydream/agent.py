@@ -720,7 +720,11 @@ async def run_agent(
     executor. The outer scope owns exactly the result the phase receives.
     """
     if sanctioned_inputs is not None:
-        prompt = sanctioned_inputs.render_prompt(prompt)
+        # Callers may already have rendered this suffix. Move it after the
+        # host's budget/finalization instructions without duplicating inputs.
+        rendered_suffix = sanctioned_inputs.render_prompt("")
+        if rendered_suffix and prompt.endswith(rendered_suffix):
+            prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
     evidence = ReviewEvidence(output_schema) if review_limits is not None else None
     hard_deadline = deadline
@@ -747,6 +751,9 @@ async def run_agent(
             "Do not repeat an unsuccessful search or investigate upstream releases without a concrete "
             "changed contract that requires it. Leave unresolved hypotheses out of findings."
         )
+    base_prompt = prompt
+    if sanctioned_inputs is not None:
+        prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
     with bind_run_context(context), agent_scope(
         phase.value, backend=backend_name, model=backend.model
@@ -773,8 +780,11 @@ async def run_agent(
                 result = (evidence.checkpoint, token, reason)
             elif hard_deadline is not None and clock.monotonic() < hard_deadline:
                 try:
+                    final_prompt = evidence.finalization_prompt(base_prompt, partial)
+                    if sanctioned_inputs is not None:
+                        final_prompt = sanctioned_inputs.render_prompt(final_prompt)
                     finalized, _, final_reason = await _run_agent(
-                        backend, cwd, evidence.finalization_prompt(prompt, partial), phase=phase,
+                        backend, cwd, final_prompt, phase=phase,
                         output_schema=output_schema, progress_callback=progress_callback,
                         max_turns=1, read_only=read_only, persist_session=persist_session,
                         deadline=min(hard_deadline, clock.monotonic() + review_limits.finalization_s),

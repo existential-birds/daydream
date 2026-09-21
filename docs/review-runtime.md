@@ -121,6 +121,12 @@ is revalidated before finalization; capture failures still propagate. Finalized
 partial results require full schema validation, not merely a salvageable shape.
 Closing a budget-stopped stream does not call backend-wide cancellation.
 
+The full hook suite also exposed a signal-handling race: an interrupt delivered
+inside an AnyIO task-group body can arrive at the CLI wrapped in an exception
+group. Pure interrupt groups now take the normal shutdown/exit-130 path; mixed
+groups still propagate their other failures. The existing real-signal recorder
+test and deterministic grouped-interrupt regressions cover this behavior.
+
 Partial stack records carry `incomplete: true`, survive adjudication rewrites
 and merge resume, and retain their stable finding identities. Their declared
 clean verdicts are discarded. Warnings still prevent approval or resolution of

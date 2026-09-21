@@ -143,13 +143,13 @@ class Pipeline:
     high-severity/contested; suppression opt-in off).
     """
 
-    review_wall_budget_s: int = 2700
     structural_enabled: bool = True
     uncovered_sweep_enabled: bool = True
     uncovered_sweep_max_files: int = 10
     uncovered_sweep_min_hunk_lines: int = 5
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
+    review_wall_budget_s: int = 2700
 
 
 @dataclass(frozen=True)
@@ -277,7 +277,7 @@ def build_default_profile() -> ReviewProfile:
                 f"{INTENT_STRATEGY_JUDGMENT_MARKER}, already computed against the "
                 "repository's base branch — this run is not tied to a GitHub pull request, so "
                 "do not look up, list, or ask about pull requests. Do not invoke any skills or "
-                "slash commands. Use the supplied PR description, diff, and shared context first; "
+                "slash commands. Use the supplied author context and diff first; "
                 "read source only to resolve ambiguity about intent, not to conduct a correctness review. "
                 "Present your understanding concisely — what problem is being "
                 "solved and how — as plain text in your reply."
@@ -932,4 +932,3 @@ def resolve_harbor_profile(
             profile=profile, source_kind="candidate", source_path=Path(raw)
         )
     return ResolvedProfile(profile=build_default_profile(), source_kind="default")
-

@@ -252,3 +252,36 @@ async def test_finalization_revalidates_inputs_and_propagates_capture_failure(tm
             review_limits=ReviewLimits(10, 2, 0), progress_callback=lambda _: None,
         )
     assert backend.call_count == 1
+
+
+def test_merge_prompt_retains_validated_records_from_incomplete_stacks(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_merge_prompt
+
+    prompt = build_merge_prompt(
+        strategy="Merge provided findings.", per_stack_records_paths=[tmp_path / "stack-python-records.json"],
+        intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",
+        dedup_candidates_path=tmp_path / "dedup.json", failed_stacks={"python": "budget exhausted"},
+    )
+    assert "no records available" not in prompt
+    assert "validated partial records" in prompt
+
+
+async def test_pre_rendered_inputs_remain_single_tail_block_during_finalization(tmp_path: Path) -> None:
+    from daydream.prompt_budget import prepare_sanctioned_inputs
+
+    artifact = tmp_path / "intent.md"
+    artifact.write_text("captured")
+    backend = ScriptedBackend(script=[
+        [ToolStartEvent(id="extra", name="read", input={"path": "src.py"})],
+        [ResultEvent(structured_output=FINDINGS, continuation=None)],
+    ])
+    prepared = prepare_sanctioned_inputs(backend, tmp_path, {"intent": artifact}, read_only=False)
+    result = await run_agent(
+        backend, tmp_path, prepared.render_prompt("review"), phase=DaydreamPhase.DEEP,
+        output_schema=SCHEMA, sanctioned_inputs=prepared, review_limits=ReviewLimits(10, 2, 0),
+        progress_callback=lambda _: None,
+    )
+    assert result[0] == FINDINGS
+    for prompt in backend.prompts:
+        assert prompt.count("Sanctioned phase inputs") == 1
+        assert prompt.endswith(f"- intent: {artifact}")

@@ -936,6 +936,32 @@ def test_signal_flushes_all_runner_recorders(
     ]
 
 
+def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from daydream import cli
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])])
+
+    monkeypatch.setattr(cli.anyio, "run", interrupted)
+    with pytest.raises(SystemExit) as caught:
+        cli.main([str(tmp_path), "--non-interactive"])
+    assert caught.value.code == 130
+
+
+def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from daydream import cli
+
+    failure = BaseExceptionGroup("task group", [KeyboardInterrupt(), RuntimeError("sibling failed")])
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(cli.anyio, "run", interrupted)
+    with pytest.raises(BaseExceptionGroup) as caught:
+        cli.main([str(tmp_path), "--non-interactive"])
+    assert caught.value is failure
+
+
 
 def test_harvest_parser_accepts_repo_clone_root() -> None:
     """--repo-clone-root is parsed and forwarded to HarvestConfig."""

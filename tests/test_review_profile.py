@@ -17,6 +17,12 @@ def test_review_deadline_is_profiled_and_validated() -> None:
         rp.parse_profile('schema_version = 1\nname = "p"\n[pipeline]\nreview_wall_budget_s = -1')
 
 
+def test_pipeline_keeps_existing_positional_constructor_order() -> None:
+    pipeline = rp.Pipeline(False)
+    assert pipeline.structural_enabled is False
+    assert pipeline.review_wall_budget_s == 2700
+
+
 def test_stage_keys_cover_every_model_bearing_stage() -> None:
     # Every named stage from spec R2 must be present (subset of the #886 manifest keys).
     assert {
