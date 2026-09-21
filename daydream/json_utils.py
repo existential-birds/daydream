@@ -196,7 +196,7 @@ def extract_json(text: str) -> Any:
     2. Strip markdown code fences (```` ```json ... ``` ```` or bare ```` ``` ````).
     3. ``json.loads`` on the cleaned text (fast path for clean JSON).
     4. If that fails, scan for every balanced, parseable ``{...}`` or ``[...]``
-       span (depth-counting, string-aware) and return the LARGEST one. The real
+       span with the JSON decoder and return the LARGEST one. The real
        structured-output payload is a substantial object/array, so size
        disambiguates it from incidental brackets in the surrounding prose — e.g.
        a ``metadata["sender"]`` code snippet, which parses as the tiny list
@@ -239,57 +239,25 @@ def extract_json(text: str) -> Any:
     # the real payload dwarfs prose noise.
     best: Any = None
     best_len = 0
-    for start_char, end_char in (("{", "}"), ("[", "]")):
+    decoder = json.JSONDecoder()
+    for start_char in ("{", "["):
         scan_from = 0
         while True:
             start_idx = cleaned.find(start_char, scan_from)
             if start_idx == -1:
                 break
-            depth = 0
-            in_string = False
-            escape = False
-            end_idx = -1
-            for i in range(start_idx, len(cleaned)):
-                ch = cleaned[i]
-                if escape:
-                    escape = False
-                    continue
-                if ch == "\\":
-                    escape = True
-                    continue
-                if ch == '"':
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if ch == start_char:
-                    depth += 1
-                elif ch == end_char:
-                    depth -= 1
-                    if depth == 0:
-                        end_idx = i
-                        break
-            if end_idx == -1:
-                # Unbalanced from here; advance one char and keep scanning for a
-                # later valid span of this brace type.
+            try:
+                parsed, end_idx = decoder.raw_decode(cleaned, start_idx)
+            except ValueError:
+                # Invalid or unbalanced: a nested span may still be valid JSON.
                 scan_from = start_idx + 1
                 continue
-            span_len = end_idx + 1 - start_idx
-            try:
-                parsed = json.loads(cleaned[start_idx : end_idx + 1])
-            except ValueError:
-                parsed = None
-            if parsed is not None and span_len > best_len:
+            span_len = end_idx - start_idx
+            if span_len > best_len:
                 best = parsed
                 best_len = span_len
-            if parsed is not None:
-                # A parsed span's nested children can only be smaller, so
-                # skipping past it never drops the winner and keeps the scan
-                # near-linear on well-formed payloads.
-                scan_from = end_idx + 1
-            else:
-                # Balanced but invalid: a nested {...}/[...] inside may still be
-                # valid JSON, so re-enter the span instead of discarding it.
-                scan_from = start_idx + 1
+            # A parsed span's nested children can only be smaller, so skipping
+            # past it never drops the winner and keeps well-formed scans near-linear.
+            scan_from = end_idx
 
     return best
