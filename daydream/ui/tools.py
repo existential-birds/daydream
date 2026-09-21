@@ -113,6 +113,30 @@ def _primary_value_style(key: str | None) -> Style:
     return STYLE_ORANGE
 
 
+def _redacted_bash_command(
+    name: str,
+    command: str,
+    *,
+    ellipsis: bool = False,
+    max_chars: int = _BASH_COMMAND_MAX_CHARS,
+) -> str:
+    """Redact (and Codex 'shell'-strip) a Bash command for single-line display.
+
+    Codex ('shell') commands carry the replayable cd-prefixed payload; only the
+    display variant strips it. The complete value is redacted before truncation
+    so a credential cannot be shortened into an unmatchable fragment.
+    """
+    from daydream.backends.codex import display_shell_command
+    from daydream.trajectory import redact_structured_text
+
+    if name == "shell":
+        command = display_shell_command(command)
+    command = redact_structured_text(command)
+    if len(command) > max_chars:
+        command = command[:max_chars] + ("..." if ellipsis else "")
+    return command
+
+
 def _parse_assigned_task_id(name: str, output: str) -> str | None:
     """Extract the assigned task id from an originating tool's result string.
 
@@ -243,31 +267,10 @@ def format_callback_progress(
 
     value, key = _primary_tool_value(name, args)
     if value:
-        # Import lazily because trajectory initializes the UI facade used to
-        # reach this renderer while the application import graph is loading.
-        from daydream.trajectory import redact_structured_text
-
-        # Redact only the Bash command — the same scope the panel header applies
-        # in _build_tool_header's Bash branch, where paths and grep patterns
-        # render raw. Redacting every primary value would rewrite the operator's
-        # own /home/<user>/ paths into [REDACTED_USER] markers on the callback
-        # line. Redact the complete value before slicing so a credential
-        # crossing the display boundary cannot be truncated into an unmatchable
-        # fragment.
-        display_value = value
         if name in ("Bash", "shell") and key == "command":
-            # Display variant only, and only for Codex ('shell') commands that
-            # passed through the wrapper: strip the decoded cd prefix for
-            # rendering. The stored ToolStartEvent input is untouched, and
-            # Claude/Pi Bash commands — which never pass through a Codex
-            # wrapper — keep their operator-authored cd prefix.
-            if name == "shell":
-                from daydream.backends.codex import display_shell_command
-
-                value = display_shell_command(value)
-            display_value = redact_structured_text(value)
+            value = _redacted_bash_command(name, value, max_chars=max_len)
         line.append(" ")
-        line.append(display_value[:max_len], style=_primary_value_style(key))
+        line.append(value[:max_len], style=_primary_value_style(key))
     return line
 
 
@@ -319,12 +322,7 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
 
 
 def _format_label_and_id_str(label: str | None, task_id: str, *, id_prefix: str = "") -> str:
-    """Return the plain-string ``lead (id)`` suffix shared by all task-tool paths.
-
-    This is the single source of truth for the lead-label / id-suffix pattern
-    (R13). Both the Rich panel path (``_append_label_and_id``) and the plain
-    callback/quiet path (``format_callback_progress``) delegate here so the
-    logic is never duplicated.
+    """Return the plain-string ``lead (id)`` suffix used by the callback path.
 
     Args:
         id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
@@ -493,28 +491,8 @@ def _build_tool_header(
             content.append("\n")
             content.append(description, style=STYLE_CYAN)
 
-        # Import lazily because trajectory initializes the UI facade used to
-        # reach this renderer while the application import graph is loading.
-        from daydream.trajectory import redact_structured_text
-
         raw_command = str(args.get("command", ""))
-        if name == "shell":
-            # Codex-only ('shell') display variant: the stored command is the
-            # replayable -lc argument (cd prefix retained); show the
-            # cd-stripped friendly variant instead. Claude/Pi Bash commands
-            # never pass through the Codex wrapper, so their operator-authored
-            # cd prefix must render — stripping it hides cwd context and makes
-            # distinct cd-targeted commands display identically.
-            from daydream.backends.codex import display_shell_command
-
-            raw_command = display_shell_command(raw_command)
-
-        # Redact the complete command before slicing so a credential crossing
-        # the display boundary cannot be truncated into an unmatchable fragment.
-        full_command = redact_structured_text(raw_command)
-        command = full_command[:_BASH_COMMAND_MAX_CHARS]
-        if len(full_command) > _BASH_COMMAND_MAX_CHARS:
-            command = f"{command}..."
+        command = _redacted_bash_command(name, raw_command, ellipsis=True)
         if command.strip():
             content.append("\n")
             content.append("$ ", style=STYLE_DIM)

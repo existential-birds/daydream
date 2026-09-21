@@ -3268,7 +3268,7 @@ def test_worktree_lock_mtime_fails_closed_when_exact_worktree_disappears(
     wt.rename(retained)
 
     with pytest.raises(GitError, match="Git directory"):
-        git_ops.worktree_lock_mtime(repo, wt)
+        git_ops.worktree_lock_mtime(wt)
 
     assert retained.is_dir()
     assert (retained / ".git").is_file()
@@ -3282,7 +3282,7 @@ def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path) ->
     locked.mkdir()
 
     with pytest.raises(GitError, match="lock metadata is unsafe"):
-        git_ops.worktree_lock_mtime(repo, wt)
+        git_ops.worktree_lock_mtime(wt)
 
     assert wt.is_dir()
     assert locked.is_dir()
@@ -3297,14 +3297,14 @@ def test_worktree_remove_unlocked_unlocks_before_removing(tmp_path: Path) -> Non
     # Locked worktree: removal must unlock first, then remove.
     locked_wt = repo / "wt-locked"
     git_ops.worktree_add(repo, locked_wt, "main", detach=True, lock_reason="run-A")
-    assert git_ops.worktree_lock_mtime(repo, locked_wt) is not None
+    assert git_ops.worktree_lock_mtime(locked_wt) is not None
     git_ops.worktree_remove_unlocked(repo, locked_wt)
     assert not locked_wt.exists()
 
     # Unlocked worktree: the unlock attempt fails harmlessly, removal proceeds.
     unlocked_wt = repo / "wt-unlocked"
     git_ops.worktree_add(repo, unlocked_wt, "main", detach=True)
-    assert git_ops.worktree_lock_mtime(repo, unlocked_wt) is None
+    assert git_ops.worktree_lock_mtime(unlocked_wt) is None
     git_ops.worktree_remove_unlocked(repo, unlocked_wt)
     assert not unlocked_wt.exists()
 
@@ -3321,7 +3321,7 @@ def test_worktree_add_with_lock_reason_arms_lock_atomically(
     git_ops.worktree_add(repo, wt, "main", detach=True, lock_reason="run-A")
 
     # locked marker present with the reason; no separate lock call needed
-    assert git_ops.worktree_lock_mtime(repo, wt) is not None
+    assert git_ops.worktree_lock_mtime(wt) is not None
     git_dir = Path(_git(repo, "rev-parse", "--git-common-dir").strip())
     if not git_dir.is_absolute():
         git_dir = repo / git_dir

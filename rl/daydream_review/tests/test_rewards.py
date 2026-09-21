@@ -1670,27 +1670,6 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
     ]
 
 
-# There is deliberately no real-path "trusted diff.external" attack test for
-# the --quiet oracle probes: on the pinned git (2.43.0) ``git diff --quiet``
-# never invokes diff.external or textconv, so the forgery it would stage cannot
-# fire and the test would be vacuous. The flags' presence on both probes is
-# pinned by the argv-contract tests below; the genuine repo-configurable-helper
-# surface is the non-quiet candidate path, covered by
-# test_verify_checkout_repo_helper_ignored.
-
-
-# --- oracle / candidate-diff working-tree equivalence (issue #725 pin) ---
-#
-# Round 2 of the issue-#725 review found that the acceptance oracle
-# (``_fixes_applied``) and the load-bearing candidate-diff derivation
-# (``candidate_diff_cmd``) share ``DAYDREAM_EXCLUDE`` but encode their
-# working-tree semantics independently: convergence is exact today, but only
-# by docstring reasoning, and a future edit to either side silently re-opens
-# the drift class of issue #725 (oracle accepts a state whose candidate diff
-# is empty, or vice versa). These tests are the executable form of that
-# reasoning: over every canonical repo state a rollout can produce, the
-# oracle's verdict and the derived diff's emptiness must agree.
-
 @pytest.mark.parametrize(
     ("stage_kwargs", "expected"),
     [

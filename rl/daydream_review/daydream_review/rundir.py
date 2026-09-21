@@ -78,25 +78,12 @@ def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     The candidate diff is the load-bearing contract the seal binds and the
     verifier re-applies, so it must be derived identically everywhere it is
     needed (seal production, seal verification, and the verify-checkout
-    construction). Single-sourcing the command keeps those sites from drifting.
+    construction).
 
     The one-revision form (``git diff <flags> <head_sha>``) compares the
     current tracked tree — committed, staged, and unstaged — against the
     baked ``head_sha``, excluding untracked files. This matches the working-
     tree semantics ``_fixes_applied`` uses to accept a fix.
-
-    The ``--no-ext-diff --no-textconv`` flags harden the derivation against a
-    repository-configured external diff helper or text conversion driver: the
-    supervisor runs as root, while a repo-local ``diff.external`` / textconv
-    runs under the repo's own (untrusted) identity, so neither may execute
-    during the load-bearing diff.
-
-    ``DAYDREAM_EXCLUDE`` (``:(exclude).daydream``) restricts the diff to the
-    candidate product only: daydream's own tracked artifacts under
-    ``.daydream/`` are never a fix signal, and this is the same exclusion the
-    fix-acceptance oracle ``_fixes_applied`` applies to both of its probes, so
-    the oracle and the load-bearing diff fully agree about what counts as the
-    candidate diff.
     """
     return [
         "git", "-C", repo, "diff",
@@ -118,10 +105,7 @@ def candidate_quiet_diff_cmd(
 
     The ``--quiet`` companion of :func:`candidate_diff_cmd`, used by the two
     non-regression oracle probes (``_fixes_applied`` and
-    ``_protected_test_paths_unchanged``). Single-sourced here alongside
-    ``candidate_diff_cmd`` and ``GIT_DIFF_HARDENING_FLAGS`` so a third
-    hardening flag or a quiet-form change is edited in exactly one place
-    instead of drifting across the seal deriv site and both probes.
+    ``_protected_test_paths_unchanged``).
 
     ``include_head`` selects the committed-tree form (``<head_sha> HEAD --
     <pathspecs>``, used by ``_fixes_applied``) versus the working-tree form

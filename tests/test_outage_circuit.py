@@ -18,16 +18,16 @@ def test_the_circuit_opens_at_the_threshold_and_admits_exactly_one_probe() -> No
         # Only the third consecutive failure crosses the threshold and opens.
         assert circuit.record_failure(instant) is (instant == 2.0)
 
-    assert circuit.state(2.0) == "open"
+    assert circuit.state() == "open"
     assert circuit.admit_retry(5.0).allowed is False  # open, before the interval
     assert circuit.admit_retry(32.0).allowed is True  # half-open: one probe
     assert circuit.admit_retry(32.0).allowed is False  # the probe is already out
     # The failed probe re-opens the circuit for a full interval.
     assert circuit.record_failure(33.0) is True
-    assert circuit.state(33.0) == "open" and circuit.admit_retry(40.0).allowed is False
+    assert circuit.state() == "open" and circuit.admit_retry(40.0).allowed is False
     assert circuit.admit_retry(64.0).allowed is True  # next interval, next probe
     circuit.record_success()
-    assert circuit.state(64.0) == "closed"
+    assert circuit.state() == "closed"
 
 
 def test_state_is_a_pure_read_that_never_transitions() -> None:
@@ -36,11 +36,11 @@ def test_state_is_a_pure_read_that_never_transitions() -> None:
     assert circuit.record_failure(0.0) is True
 
     # Reading well past the probe interval must not open the half-open door.
-    assert circuit.state(1_000.0) == "open"
-    assert circuit.state(1_000.0) == "open"
+    assert circuit.state() == "open"
+    assert circuit.state() == "open"
     # The first admission is what transitions, and it grants exactly one probe.
     assert circuit.admit_retry(1_000.0).allowed is True
-    assert circuit.state(1_000.0) == "half_open"
+    assert circuit.state() == "half_open"
     assert circuit.admit_retry(1_000.0).allowed is False
 
 
@@ -55,5 +55,5 @@ def test_a_success_resets_the_consecutive_failure_count() -> None:
 
     # Two failures before the success were forgotten, so this is only the first
     # consecutive failure and the circuit stays closed.
-    assert circuit.state(2.0) == "closed"
+    assert circuit.state() == "closed"
     assert circuit.admit_retry(2.0).allowed is True

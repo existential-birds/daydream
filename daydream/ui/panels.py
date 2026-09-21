@@ -149,14 +149,6 @@ class LiveToolPanel:
     with the actual result content.
 
     In quiet mode, renders the tool header only and skips result display.
-
-    Usage:
-        panel = LiveToolPanel(console, "Bash", {"command": "ls"})
-        panel.start()
-        # ... tool executes ...
-        panel.set_result("file1.txt\nfile2.txt", is_error=False)
-        panel.finish()
-
     """
 
     def __init__(
@@ -180,7 +172,6 @@ class LiveToolPanel:
         self._label = label
         self._result: str | None = None
         self._is_error: bool = False
-        self._live: Live | None = None
         self._spinner = CrazySpinner(num_spinners=3)
         self._quiet_mode = quiet_mode
         self._frame = 0  # Animation frame counter for Edit surgery visualization
@@ -386,35 +377,10 @@ class LiveToolPanel:
             padding=(0, 1),
         )
 
-    def __rich__(self) -> Panel:
-        """Return renderable for Rich Live refresh."""
-        return self._render_panel()
-
-    def start(self) -> None:
-        """Start Live context and show tool call with animated throbber."""
-        self._console.print()
-
-        self._live = Live(
-            self,
-            console=self._console,
-            refresh_per_second=10,
-            transient=False,
-        )
-        self._live.start()
-
     def set_result(self, content: str, is_error: bool = False) -> None:
         """Store result and update the display."""
         self._result = content
         self._is_error = is_error
-
-        if self._live is not None:
-            self._live.update(self._render_panel())
-
-    def finish(self) -> None:
-        """Stop Live context. Final panel state persists on screen."""
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
 
 
 class _ActivePanelsGroup:
@@ -450,7 +416,6 @@ class LiveToolPanelRegistry:
         panel = registry.create("tool-123", "Bash", {"command": "ls"})
         # ... tool executes ...
         panel.set_result("file1.txt", is_error=False)
-        panel.finish()
         registry.remove("tool-123")
 
     """
