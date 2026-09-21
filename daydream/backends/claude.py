@@ -805,6 +805,15 @@ def _build_audit_root_guard(
     return _guard
 
 
+async def _finalization_guard(
+    input_data: Any, tool_use_id: Any, context: Any,
+) -> HookJSONOutput:
+    """Deny investigation while preserving the SDK schema serialization tool."""
+    if isinstance(input_data, dict) and input_data.get("tool_name") == "StructuredOutput":
+        return {}
+    return _read_only_deny("finalization allows only structured output serialization")
+
+
 async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
     """PreToolUse hook enforcing the read-only guard contract.
 
@@ -930,6 +939,7 @@ class ClaudeBackend:
     Translates Claude SDK message types into the unified AgentEvent stream.
     """
 
+    supports_finalization = True
 
     def __init__(
         self,
@@ -986,6 +996,7 @@ class ClaudeBackend:
         max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
+        finalization: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt and yield unified events.
 
@@ -1004,6 +1015,9 @@ class ClaudeBackend:
                 not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
                 — under ``bypassPermissions`` ``allowed_tools`` does not restrict
                 the toolset — so the tool list is left unchanged.
+            finalization: Use low effort and remove native investigative tools.
+                Existing guards remain active; StructuredOutput serialization
+                stays permitted. Controls apply only to this invocation.
             persist_session: When True, the final ``ResultEvent`` mints a
                 ``ContinuationToken`` carrying ``ResultMessage.session_id`` so a
                 later call can resume this conversation. False suppresses the
@@ -1032,6 +1046,7 @@ class ClaudeBackend:
                 raise ClaudeAgentError("audit isolation does not allow agents")
             persist_session = False
 
+        effort = _claude_effort("low") if finalization else self.reasoning_effort
         output_format = (
             {"type": "json_schema", "schema": output_schema}
             if output_schema
@@ -1069,7 +1084,7 @@ class ClaudeBackend:
                 max_buffer_size=10 * 1024 * 1024,
                 max_turns=max_turns,
                 extra_args={"no-session-persistence": None},
-                effort=self.reasoning_effort,
+                effort=effort,
                 env=_audit_cli_env(
                     audit_root, base_environment=base_environment
                 ),
@@ -1105,7 +1120,7 @@ class ClaudeBackend:
                 max_turns=max_turns,
                 extra_args={"no-session-persistence": None} if not persist_session else {},
                 # None leaves the CLI's ambient default; the SDK omits --effort.
-                effort=self.reasoning_effort,
+                effort=effort,
                 env=sdk_environment,
                 hooks={
                     "PreToolUse": [
@@ -1115,6 +1130,20 @@ class ClaudeBackend:
                         )
                     ]
                 },
+            )
+
+        if finalization:
+            # `allowed_tools=[]` is a permission preapproval list, not tool
+            # removal under bypassPermissions. SDK tools=[] emits --tools "";
+            # the strict empty MCP config excludes externally configured tools.
+            # Keep existing guards and allow only the native schema serializer.
+            options.tools = []
+            options.allowed_tools = []
+            options.mcp_servers = {}
+            options.strict_mcp_config = True
+            assert options.hooks is not None
+            options.hooks.setdefault("PreToolUse", []).append(
+                HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[_finalization_guard])
             )
 
         # Resume the prior conversation when the caller threaded a claude-minted
@@ -1164,16 +1193,18 @@ class ClaudeBackend:
             prompt=prompt,
             model_name=self.model,
             session_id=options.resume,
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=effort,
             output_schema=output_schema,
             config=ClaudeRequestConfig(
+                finalization=finalization,
+                tools_count=len(options.tools) if isinstance(options.tools, list) else None,
                 max_turns=max_turns,
                 read_only=read_only,
                 persist_session=persist_session,
                 continuation_mode="resume" if resume_applied else "fresh",
                 model_mode="multi_or_dynamic" if agents_nonempty else "single",
                 permission_mode="bypassPermissions",
-                allowed_tools_count=len(allowed_tools) if allowed_tools else None,
+                allowed_tools_count=len(allowed_tools) if finalization or allowed_tools else None,
                 allowed_tools_present=bool(allowed_tools),
                 audit_tools_count=audit_tools_count,
                 audit_tools_present=audit_tools_present,

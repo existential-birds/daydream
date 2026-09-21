@@ -5366,8 +5366,7 @@ async def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
         return real_select(backend, cwd, candidates, read_only=read_only)
 
     monkeypatch.setattr(phases_module, "select_advisory_inputs", _spy)
-    # A capture (and therefore shared sizing) only happens inside a real
-    # artifact session; the no-session path returns the full mapping verbatim.
+    # Both session and standalone review calls use the shared sizing policy.
     async with _private_session(tmp_path, work, "budgeted-exploration-inputs"):
         sized = phases_module._budgeted_exploration_inputs(
             exploration, backend=SimpleNamespace(model="fake"), cwd=repo

@@ -49,6 +49,7 @@ from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
+from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import (
     FailureClass,
     RetryRecoveryBudget,
@@ -58,7 +59,7 @@ from daydream.retry_policy import (
     undeclared_retry_allowance_message,
 )
 from daydream.review_budget import ReviewLimits, review_deadline
-from daydream.review_evidence import ReviewEvidence
+from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import (
     RunContext,
     bind_run_context,
@@ -713,6 +714,7 @@ async def run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
+    finalization_context: FinalizationContext | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
@@ -739,19 +741,17 @@ async def run_agent(
         if shared is not None:
             bounds.append(shared)
         hard_deadline = min(bounds)
-        deadline = min(started + review_limits.investigation_s, hard_deadline - review_limits.finalization_s)
+        deadline = max(
+            started, min(started + review_limits.investigation_s, hard_deadline - review_limits.finalization_s),
+        )
+        investigation_allowance = max(0.0, deadline - started)
         tool_call_budget = min(tool_call_budget, review_limits.tool_calls) if tool_call_budget is not None else (
             review_limits.tool_calls
         )
         prompt += (
-            f"\n\nInvestigation allowance: at most {review_limits.investigation_s:g} seconds and "
-            f"{tool_call_budget} tool calls. Reuse supplied context. Prioritize assigned changed behavior; "
-            "follow dependencies only to resolve a concrete candidate. Batch independent reads. "
-            "Stop when candidates are confirmed or disproved and return the required output. "
-            "Do not repeat an unsuccessful search or investigate upstream releases without a concrete "
-            "changed contract that requires it. Leave unresolved hypotheses out of findings."
+            f"\n\nInvestigation allowance: at most {investigation_allowance:g} seconds and "
+            f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
         )
-    base_prompt = prompt
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
@@ -780,13 +780,20 @@ async def run_agent(
                 result = (evidence.checkpoint, token, reason)
             elif hard_deadline is not None and clock.monotonic() < hard_deadline:
                 try:
-                    final_prompt = evidence.finalization_prompt(base_prompt, partial)
-                    if sanctioned_inputs is not None:
-                        final_prompt = sanctioned_inputs.render_prompt(final_prompt)
+                    captured = (
+                        sanctioned_inputs.finalization_text(
+                            backend, cwd, read_only,
+                            input_priority=finalization_context.input_priority if finalization_context else (),
+                        )
+                        if sanctioned_inputs is not None else ""
+                    )
+                    final_prompt = evidence.finalization_prompt(
+                        finalization_context or FinalizationContext(task=phase.value), captured,
+                    )
                     finalized, _, final_reason = await _run_agent(
                         backend, cwd, final_prompt, phase=phase,
                         output_schema=output_schema, progress_callback=progress_callback,
-                        max_turns=1, read_only=read_only, persist_session=persist_session,
+                        read_only=read_only, persist_session=persist_session, finalization=True,
                         deadline=min(hard_deadline, clock.monotonic() + review_limits.finalization_s),
                         tool_call_budget=0,
                         retry_recovery_allowance_s=retry_recovery_allowance_s,
@@ -829,6 +836,7 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
+    finalization: bool = False,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -1085,6 +1093,8 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
+                    if finalization and getattr(backend, "supports_finalization", False):
+                        execute_kwargs["finalization"] = True
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
                     event_iter = backend.execute(

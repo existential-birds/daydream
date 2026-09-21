@@ -43,6 +43,7 @@ from daydream.phases import (
 )
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.review_budget import ReviewBudgetExceeded, ReviewLimits, record_review_budget_stop, review_budget_path
+from daydream.review_evidence import FinalizationContext
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -778,10 +779,9 @@ async def _run_uncovered_sweep(
     if isinstance(sweep_exploration, Path):
         sweep_inputs["exploration-summary"] = sweep_exploration / "summary.md"
         sweep_inputs["exploration-affected-files"] = sweep_exploration / "affected_files.md"
-    sanctioned_inputs = (
-        prepare_sanctioned_inputs(parse_backend, ctx.work.repo, sweep_inputs, read_only=False)
-        if ctx.artifacts is not None
-        else None
+    sanctioned_inputs = prepare_sanctioned_inputs(
+        parse_backend, ctx.work.repo,
+        {label: path for label, path in sweep_inputs.items() if path.is_file()}, read_only=False,
     )
     async with dispatch_scope(
         recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors
@@ -818,6 +818,14 @@ async def _run_uncovered_sweep(
                                     phase=DaydreamPhase.DEEP,
                                     output_schema=UNCOVERED_SWEEP_SCHEMA,
                                     review_limits=ReviewLimits(90, 30, 10),
+                                    finalization_context=FinalizationContext(
+                                        task="Finalize uncovered-file review",
+                                        input_priority=("intent",),
+                                        assigned_files=(file,),
+                                        output_semantics="Return only grounded issues for the assigned file. "
+                                        "An empty issues array is valid; unfinished work is not clean coverage.",
+                                        supplied_context=(("diff", diff_block_for_file(full_diff, file) or ""),),
+                                    ),
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                                     sanctioned_inputs=sanctioned_inputs,

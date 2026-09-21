@@ -22,11 +22,16 @@ from daydream.backends import (
     _MAX_ORDERED_IDENTITY_ENTRIES,
     _MAX_PROVIDER_NAME_CHARS,
     AgentEvent,
+    ClaudeRequestConfig,
+    CodexRequestConfig,
     CostEvent,
     DiagnosticEvent,
+    EffectiveRequestConfig,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
+    OspreyRequestConfig,
+    PiRequestConfig,
     ReasoningChoicePart,
     RequestEvent,
     ResultEvent,
@@ -445,6 +450,18 @@ class AttemptObserver:
                 code = policy.text(event.code)
                 self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
         elif isinstance(event, RequestEvent):
+            # Only the closed, validated native config types are admitted.
+            # Custom subclasses may carry arbitrary data, so do not serialize
+            # them or any raw SDK options/environment into telemetry.
+            if type(event.config) in (
+                EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig,
+                PiRequestConfig, OspreyRequestConfig,
+            ):
+                self.scope.attrs({
+                    f"daydream.request.config.{key}": value
+                    for key, value in asdict(event.config).items()
+                    if value is not None
+                })
             self.scope.attrs(
                 {
                     "gen_ai.request.model": event.model_name,

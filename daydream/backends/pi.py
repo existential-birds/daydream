@@ -194,6 +194,14 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
+_PI_FINALIZATION_PREAMBLE = """\
+Serialize the completed task using only the supplied context and completed evidence.
+Return exactly the requested output format. Tools are disabled. Do not investigate,
+research, test, or infer missing evidence. An empty findings result is successful
+when no defect is substantiated; preserve truthful incomplete coverage.
+"""
+
+
 _PI_DEFAULT_RETRY_ATTEMPTS = 20
 _PI_DEFAULT_RETRY_BASE_DELAY = 10.0
 _PI_DEFAULT_RETRY_MAX_DELAY = 120.0
@@ -441,6 +449,7 @@ class PiBackend:
     so trajectory recording (ATIF v1.7) works identically to Claude/Codex.
     """
 
+    supports_finalization = True
     concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
     def __init__(
@@ -504,6 +513,7 @@ class PiBackend:
         max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
+        finalization: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via the Pi CLI and yield unified events.
 
@@ -520,6 +530,10 @@ class PiBackend:
                 gap; the argument is accepted for protocol parity only.
             read_only: When True, restricts Pi's tools to the read-only subset
                 (``read,find,ls,grep``) so the agent cannot write/edit/bash.
+            finalization: Disable tools with ``--no-tools``, replace the system
+                preamble with serialization guidance, and cap thinking at low
+                while preserving explicitly lower settings. max_turns remains
+                unsupported; the caller must enforce its absolute deadline.
             persist_session: When False, pass ``--no-session`` and return no
                 continuation. The default preserves resumable sessions.
 
@@ -618,6 +632,8 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_THINKING")
         )
+        if finalization:
+            thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
         if provider:
             args.extend(["--provider", provider])
         if thinking:
@@ -639,9 +655,15 @@ class PiBackend:
         # Pi's built-in system prompt is minimal; append the daydream preamble
         # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
-        args.extend(["--append-system-prompt", _PI_SYSTEM_PREAMBLE])
+        system_prompt = _PI_FINALIZATION_PREAMBLE if finalization else _PI_SYSTEM_PREAMBLE
+        args.extend([
+            "--system-prompt" if finalization else "--append-system-prompt",
+            system_prompt,
+        ])
 
-        if read_only:
+        if finalization:
+            args.append("--no-tools")
+        elif read_only:
             args.extend(["--tools", _PI_READ_ONLY_TOOLS])
 
         resume_id: str | None = None
@@ -723,19 +745,23 @@ class PiBackend:
         # appendix (schema_emulated=True whenever a schema was supplied).
         yield RequestEvent(
             prompt=full_prompt,
-            system_prompt=_PI_SYSTEM_PREAMBLE,
+            system_prompt=system_prompt,
             model_name=self.model,
             provider_name=provider,
             session_id=effective_session_id,
             reasoning_effort=thinking,
             output_schema=output_schema,
             config=PiRequestConfig(
+                finalization=finalization,
                 read_only=read_only,
                 persist_session=persist_session,
                 continuation_mode="resume" if resume_id is not None else "fresh",
                 model_mode="single",
-                selected_tools_count=len(_PI_READ_ONLY_TOOLS.split(",")) if read_only else None,
-                selected_tools_present=read_only,
+                selected_tools_count=(
+                    0 if finalization else len(_PI_READ_ONLY_TOOLS.split(",")) if read_only else None
+                ),
+                selected_tools_present=read_only and not finalization,
+                no_tools=finalization,
                 no_skills=True,
                 schema_emulated=output_schema is not None,
             ),

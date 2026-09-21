@@ -249,7 +249,7 @@ def build_default_profile() -> ReviewProfile:
             "daydream.prompts.exploration_subagents.build_pattern_scanner_prompt",
             (
                 "You are the **pattern-scanner** specialist. Detect codebase conventions\n"
-                "and read guideline files relevant to the changes below."
+                "and read guideline files relevant to the changes below. Report conventions, not defects."
             ),
         ),
         "exploration.dependency_trace": _exploration(
@@ -258,7 +258,7 @@ def build_default_profile() -> ReviewProfile:
                 "You are the **dependency-tracer** specialist. Extend the affected-files\n"
                 "list beyond the static-resolved imports by grepping for call sites and\n"
                 "reading the implementations. For every import or call edge you confirm,\n"
-                "emit a Dependency record."
+                "emit a Dependency record. Stop when relevant edges are mapped; do not audit their correctness."
             ),
         ),
         "exploration.test_mapping": _exploration(
@@ -267,7 +267,8 @@ def build_default_profile() -> ReviewProfile:
                 "You are the **test-mapper** specialist. Locate test files for each modified\n"
                 "source file using conventional path mapping (tests/test_X.py, *.test.ts,\n"
                 "*_test.go, tests/<crate>_test.rs). Emit a FileInfo with role=\"test\" for\n"
-                "each test file you find, and set source_file to the source file it covers."
+                "each test file you find, and set source_file to the source file it covers. "
+                "Map coverage locations; do not conduct a test-quality review."
             ),
         ),
         "intent": Strategy(

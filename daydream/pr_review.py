@@ -549,6 +549,9 @@ def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
     Both PR lookup modes request the head repository and owner. An explicitly
     null repository (for example a deleted fork) permits base-repository link
     fallback; missing or malformed requested metadata is a schema failure.
+    Older gh versions emit an exactly empty ``nameWithOwner``: like an absent
+    field, it permits reconstruction from validated owner/name components.
+    Populated identity fields must agree (ignoring GitHub's case differences).
     """
     if "headRepository" not in row or "headRepositoryOwner" not in row:
         raise GitError("invalid PR row: missing requested head repository metadata")
@@ -565,21 +568,29 @@ def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
         return None
     if not isinstance(head_repo, dict):
         raise GitError("invalid PR row: headRepository must be an object or null")
+    repo_name = head_repo.get("name")
+    if "name" in head_repo and (
+        not isinstance(repo_name, str)
+        or git_ops.split_owner_repo(f"owner/{repo_name}") is None
+    ):
+        raise GitError("invalid PR row: malformed head repository name")
     if "nameWithOwner" in head_repo:
         name_with_owner = head_repo["nameWithOwner"]
         if not isinstance(name_with_owner, str):
-            raise GitError("invalid PR row: malformed head repository slug")
-        slug = git_ops.split_owner_repo(name_with_owner)
-        if slug is None:
-            raise GitError("invalid PR row: malformed head repository slug")
-        return name_with_owner
-    if owner_login is not None and isinstance(head_repo.get("name"), str):
-        candidate_slug = f"{owner_login}/{head_repo['name']}"
-        parsed_slug = git_ops.split_owner_repo(candidate_slug)
-        if parsed_slug is None:
-            raise GitError("invalid PR row: malformed head repository slug")
-        return candidate_slug
-    raise GitError("invalid PR row: incomplete head repository metadata")
+            raise GitError("invalid PR row: head repository nameWithOwner must be a string")
+        if name_with_owner != "":
+            slug = git_ops.split_owner_repo(name_with_owner)
+            if slug is None:
+                raise GitError("invalid PR row: malformed head repository slug")
+            if (
+                (owner_login is not None and slug[0].casefold() != owner_login.casefold())
+                or (isinstance(repo_name, str) and slug[1].casefold() != repo_name.casefold())
+            ):
+                raise GitError("invalid PR row: contradictory head repository identity")
+            return name_with_owner
+    if owner_login is not None and isinstance(repo_name, str):
+        return f"{owner_login}/{repo_name}"
+    raise GitError("invalid PR row: unavailable head repository slug requires owner and name")
 
 
 def _pr_info_from_row(

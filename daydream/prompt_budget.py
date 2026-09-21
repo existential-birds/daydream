@@ -6,7 +6,7 @@ import codecs
 import hashlib
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -103,6 +103,45 @@ class PreparedSanctionedInputs:
         if prompt.endswith(rendered):
             return prompt
         return f"{prompt}\n\n{rendered}"
+
+    def finalization_text(
+        self, backend: object, cwd: Path, read_only: bool, *, input_priority: tuple[str, ...] = (),
+    ) -> str:
+        """Capture bounded bytes for tool-less output through the same boundary.
+
+        Exact-path captures ordinarily retain only identity/hash, not text. Read
+        their bounded prefixes while hashing and validating the entire admitted
+        input, then compare the original identity before exposing any bytes.
+        """
+        self.revalidate(backend, cwd, read_only)
+        blocks: list[str] = []
+        remaining = 24000
+        aggregate = 0
+        priorities = {label: index for index, label in enumerate(input_priority)}
+        inputs = sorted(self.inputs, key=lambda item: priorities.get(item.label, len(priorities)))
+        for item in inputs:
+            if remaining <= 0:
+                blocks.append("[remaining sanctioned inputs omitted; coverage incomplete]")
+                break
+            limit = min(remaining, 12000)
+            current = _capture_input(item.label, item.path, self.transport, aggregate, text_budget=limit)
+            aggregate += current.size
+            if replace(current, text=item.text) != item:
+                raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before finalization")
+            text = current.text or ""
+            block = f"Input {item.label!r} (sha256={item.sha256}):\n{text}"
+            remaining -= len(block.encode("utf-8"))
+            blocks.append(block)
+            if len(text.encode("utf-8")) < item.size:
+                blocks.append("[input truncated; missing bytes do not establish coverage]")
+        rendered = truncate_utf8_to_budget("\n\n".join(blocks), 24000, "[sanctioned context truncated]")
+        if self.transport is SanctionedInputTransport.INLINE and self.inputs:
+            for item in self.inputs:
+                rendered = rendered.replace(str(item.path), f"sanctioned input '{item.label}'")
+            common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
+            if common_parent and common_parent != os.path.sep:
+                rendered = rendered.replace(common_parent, "sanctioned artifact storage")
+        return rendered
 
     def revalidate(self, backend: object, cwd: Path, read_only: bool) -> None:
         """Fail closed if call identity or any captured file changed."""
@@ -215,7 +254,7 @@ def _transport_allowance(transport: SanctionedInputTransport, aggregate: int) ->
 
 
 def _capture_input(
-    label: str, path: Path, transport: SanctionedInputTransport, aggregate: int
+    label: str, path: Path, transport: SanctionedInputTransport, aggregate: int, *, text_budget: int | None = None
 ) -> PreparedSanctionedInput:
     """Capture one no-follow file within the transport's remaining allowance.
 
@@ -239,7 +278,9 @@ def _capture_input(
             raise SanctionedInputUnavailable(f"sanctioned input {label!r} changed while being opened")
         digest = hashlib.sha256()
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
-        chunks: list[bytes] | None = [] if transport is SanctionedInputTransport.INLINE else None
+        keep_text = transport is SanctionedInputTransport.INLINE or text_budget is not None
+        chunks: list[bytes] | None = [] if keep_text else None
+        retained = 0
         total = 0
         while chunk := os.read(fd, min(65_536, max_bytes + 1 - total)):
             total += len(chunk)
@@ -250,7 +291,9 @@ def _capture_input(
             digest.update(chunk)
             decoder.decode(chunk, final=False)
             if chunks is not None:
-                chunks.append(chunk)
+                prefix = chunk if text_budget is None else chunk[:max(text_budget - retained, 0)]
+                chunks.append(prefix)
+                retained += len(prefix)
         decoder.decode(b"", final=True)
         after = os.fstat(fd)
     except SanctionedInputUnavailable:
@@ -269,7 +312,10 @@ def _capture_input(
     return PreparedSanctionedInput(
         label=label,
         path=lexical,
-        text=payload.decode("utf-8") if payload is not None else None,
+        text=(
+            payload.decode("utf-8", errors="ignore" if text_budget is not None else "strict")
+            if payload is not None else None
+        ),
         sha256=digest.hexdigest(),
         device=before.st_dev,
         inode=before.st_ino,

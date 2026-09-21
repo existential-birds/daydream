@@ -592,6 +592,51 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     assert not dump_dir.exists()
 
 
+async def test_failed_findings_export_retains_requested_diagnostics(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+    fake_gh: FakeGh,
+) -> None:
+    """A post-merge metadata failure still publishes the existing diagnostic bundle."""
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    def invalid_pr(*_args: Any, **_kwargs: Any) -> None:
+        raise git_ops.GitError("invalid PR row: malformed head repository slug")
+
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", invalid_pr)
+    diagnostics = tmp_path / "diagnostics"
+    trajectory = diagnostics / "trajectory.json"
+    bundle = diagnostics / "bundle"
+    findings = tmp_path / "findings.json"
+    exit_code = await run(RunConfig(
+        target=str(multi_stack_target),
+        output_mode="review",
+        non_interactive=True,
+        cleanup=False,
+        pr_number=7,
+        findings_out=str(findings),
+        trajectory_path=trajectory,
+        dump_artifacts=str(bundle),
+    ))
+
+    assert exit_code == 1
+    assert not findings.exists()
+    exported = json.loads(trajectory.read_text())
+    bundled = json.loads((bundle / "trajectory.json").read_text())
+    assert exported["trajectory_id"] == bundled["trajectory_id"]
+    assert exported["steps"]
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
+    assert (bundle / "diff.patch").is_file()
+    assert (bundle / "evaluation.json").is_file()
+    assert fake_gh.calls("POST") == []
+    assert (bundle / "manifest.json").read_bytes() == (_only_archived_run(archive_dir) / "manifest.json").read_bytes()
+
+
 
 
 def _commit_scanned_file(target: Path, name: str, body: str) -> None:

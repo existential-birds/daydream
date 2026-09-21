@@ -828,6 +828,90 @@ def test_find_pr_by_number_assembles_pr_info(
     )
 
 
+@pytest.mark.parametrize("lookup", ["branch", "number"])
+@pytest.mark.parametrize("include_empty_slug", [False, True])
+def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, tmp_path: Path,
+    lookup: str, include_empty_slug: bool,
+) -> None:
+    """Both gh lookup routes preserve validated head identity through export."""
+    from daydream.findings import load_findings_artifact
+    from daydream.runner import RunConfig, _emit_findings_from_items
+
+    row, base, head = _local_pr_row(git_repo)
+    row["headRepository"] = {"id": "R_fixture", "name": "shelfspace-mono"}
+    if include_empty_slug:
+        row["headRepository"]["nameWithOwner"] = ""
+    row["headRepositoryOwner"] = {"login": "shelfspace-app"}
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda *_a, **_k: ("o", "r"))
+    info = (
+        pr_review.find_open_pr(git_repo)
+        if lookup == "branch" else pr_review.find_pr_by_number(git_repo, 7)
+    )
+    assert info is not None
+    assert (info.head_repo, info.base_sha, info.head_sha) == ("shelfspace-app/shelfspace-mono", base, head)
+
+    output = tmp_path / "findings.json"
+    config = RunConfig(findings_out=str(output), pr_number=7 if lookup == "number" else None)
+    assert _emit_findings_from_items(
+        git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
+    ) == 0
+    artifact = load_findings_artifact(
+        output, expected_repo="o/r", expected_pr_number=7, expected_head_sha=head,
+    )
+    assert artifact.findings == []
+
+    # Compatibility fallback must not allow export with an unavailable PR head.
+    output.unlink()
+    row["headRefOid"] = "f" * 40
+    assert _emit_findings_from_items(
+        git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
+    ) == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("value", [None, False, 7, " ", "fork/r/extra", "fork/", "/r"])
+def test_head_slug_fallback_does_not_mask_invalid_present_value(value: Any) -> None:
+    row = {
+        "headRepository": {"name": "r", "nameWithOwner": value},
+        "headRepositoryOwner": {"login": "fork"},
+    }
+    with pytest.raises(GitError, match="invalid PR row"):
+        pr_review._head_repo_slug_from_row(row)
+
+
+@pytest.mark.parametrize("component", ["name", "login"])
+@pytest.mark.parametrize("value", [None, False, 7, "", " ", "a/b", "a\nb"])
+def test_head_slug_fallback_rejects_invalid_components(component: str, value: Any) -> None:
+    row = {
+        "headRepository": {"name": "r", "nameWithOwner": ""},
+        "headRepositoryOwner": {"login": "fork"},
+    }
+    row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
+    with pytest.raises(GitError, match="invalid PR row"):
+        pr_review._head_repo_slug_from_row(row)
+
+
+@pytest.mark.parametrize("slug", ["other/r", "fork/other"])
+def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
+    with pytest.raises(GitError, match="contradictory head repository identity") as error:
+        pr_review._head_repo_slug_from_row({
+            "headRepository": {"name": "r", "nameWithOwner": slug, "id": "private-value"},
+            "headRepositoryOwner": {"login": "fork"},
+        })
+    assert "private-value" not in str(error.value)
+    assert slug not in str(error.value)
+
+
+def test_head_slug_allows_case_differences() -> None:
+    assert pr_review._head_repo_slug_from_row({
+        "headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
+        "headRepositoryOwner": {"login": "fork"},
+    }) == "FORK/widgets"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
