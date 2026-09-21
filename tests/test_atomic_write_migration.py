@@ -395,8 +395,7 @@ class TestCandidateKnobs:
         assert content == json.dumps(artifact).encode("utf-8")
         assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
 
-    def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path,
-                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path) -> None:
         # Isolate the destination so the autouse archive_dir fixture's tmp_path/archive
         # does not pollute the "no temp survives" observation.
         out = tmp_path / "out"

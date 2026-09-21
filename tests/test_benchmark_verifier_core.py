@@ -500,14 +500,13 @@ def test_locationless_gold_set_accepts_canonical_id() -> None:
     assert len(gs) == 1 and gs[0].path is None
 
 
-def test_locationless_candidate_accepted() -> None:
-    f = parse_candidate_finding(_cand(path=None, start_line=None, end_line=None))
+@pytest.mark.parametrize("parse,make", [
+    (parse_candidate_finding, _cand),
+    (parse_gold_finding, _gold),
+])
+def test_locationless_finding_accepted(parse: Any, make: Any) -> None:
+    f = parse(make(path=None, start_line=None, end_line=None))
     assert f.path is None and f.start_line is None and f.end_line is None
-
-
-def test_locationless_gold_accepted() -> None:
-    g = parse_gold_finding(_gold(path=None, start_line=None, end_line=None))
-    assert g.path is None and g.start_line is None and g.end_line is None
 
 
 @pytest.mark.parametrize("partial", [

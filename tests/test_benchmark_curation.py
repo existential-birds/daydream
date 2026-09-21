@@ -25,39 +25,9 @@ from daydream.benchmark.storage import (
 )
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
-from tests.test_benchmark_import_prs import _seed_manifest
+from tests.test_benchmark_import_prs import _PR_HEADER, _seed_preflight
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-
-_PR_HEADER = {
-    "number": 101,
-    "url": "https://github.com/o/r/pull/101",
-    "title": "Fix cache",
-    "state": "open",
-    "base": {"ref": "main", "sha": "b" * 40},
-    "head": {"ref": "feature/cache", "sha": "a" * 40},
-    "merged_at": None,
-    "closed_at": None,
-    "created_at": "2026-01-01T00:00:00Z",
-    "updated_at": "2026-01-01T00:00:00Z",
-    "user": {"login": "alice", "type": "User"},
-}
-
-
-def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) -> None:
-    """Seed an unresolved workspace + canned preflight/REST data for pr 101."""
-    _seed_manifest(ws)
-    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE",
-               "defaultBranchRef": {"name": "main"}},
-    )
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", pull_header)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
 
 
 def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[str, str, str]:

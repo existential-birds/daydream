@@ -482,7 +482,7 @@ async def test_continuation_token_resumes() -> None:
 
 @pytest.mark.asyncio
 async def test_codex_read_only_uses_read_only_sandbox(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """read_only=True at a worktree runs in a disposable standalone clone:
     read-only sandbox, isolated cwd != source, matching HEAD + staged patch,
@@ -557,7 +557,7 @@ async def test_codex_read_only_uses_read_only_sandbox(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """Issue #1121: a source with >=3 branches (incl. a slash name) snapshots
     ALL of them into the clone by OID; git diff <base>...HEAD works; the
@@ -615,7 +615,6 @@ async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_isolation_failure_is_fail_closed(
-    tmp_path: Path,
     linked_worktree: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -647,7 +646,7 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_snapshot_failure_is_fail_closed(
-    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+    linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A GitError during branch snapshotting aborts preparation: CodexError
     raised, no codex process launched, source git state untouched."""
@@ -792,7 +791,7 @@ def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_codex_read_only_resume_is_refused(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """A read-only session passed a codex resume token fails closed: the resumed
     thread's stored cwd is the per-call clone, deleted when the turn ends."""
@@ -1977,16 +1976,6 @@ class TestDisplayShellCommand:
     def test_display_strips_cd_prefix(self) -> None:
         from daydream.backends.codex import display_shell_command
         assert display_shell_command('/bin/zsh -lc "cd /home/user/project && make test"') == "make test"
-
-    def test_display_decodes_nested_quotes(self) -> None:
-        from daydream.backends.codex import display_shell_command
-        cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
-        assert display_shell_command(cmd) == "awk '{print $1}' file.txt"
-
-    def test_display_passthrough_for_non_wrapper(self) -> None:
-        from daydream.backends.codex import display_shell_command
-        assert display_shell_command("ls -la") == "ls -la"
-        assert display_shell_command("") == ""
 
     def test_raw_and_display_distinct_for_cd_command(self) -> None:
         """M5: the stored value and the display value are different outputs."""

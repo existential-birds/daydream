@@ -186,7 +186,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert any("Run the project's test suite" in step["message"] for step in test_steps)
     assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
 
-    # AC1: eval ran by default -> all four metrics non-null.
     metrics = manifest["metrics"]
     assert metrics["grounding_rate"] is not None
     assert metrics["total_findings"] is not None
@@ -203,7 +202,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert len(merge_events) == 2
     assert {event["session_id"] for event in merge_events} == {manifest["session_id"]}
 
-    # AC3: recommended.patch archived and distinct from diff.patch.
     recommended = run_dir / "recommended.patch"
     diff = run_dir / "diff.patch"
     assert recommended.is_file()
@@ -653,7 +651,6 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     assert query_runs(archive_dir)
     assert (multi_stack_target / ".review-output.md").is_file()
 
-    # The advisory is reported and value-free (M11): path and category only.
     out = "".join(capfd.readouterr())
     assert "diff.patch" in out
     assert "env_var" in out

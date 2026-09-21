@@ -113,29 +113,21 @@ def _direction(body: str) -> str:
     return "ambiguous"
 
 
-def _login(reply: dict[str, Any]) -> str:
+def _user_str(reply: dict[str, Any], key: str) -> str:
     user = reply.get("user")
     if not isinstance(user, dict):
         return ""
-    login = user.get("login")
-    return login if isinstance(login, str) else ""
-
-
-def _user_type(reply: dict[str, Any]) -> str:
-    user = reply.get("user")
-    if not isinstance(user, dict):
-        return ""
-    utype = user.get("type")
-    return utype if isinstance(utype, str) else ""
+    value = user.get(key)
+    return value if isinstance(value, str) else ""
 
 
 def _identity_gates_pass(reply: dict[str, Any]) -> bool:
     """Bot / daydream-agent / empty-login gates, independent of association."""
     if reply.get("is_self_reply"):
         return False
-    if _user_type(reply) == "Bot":
+    if _user_str(reply, "type") == "Bot":
         return False
-    login = _login(reply)
+    login = _user_str(reply, "login")
     if not login or login.lower() in _DAYDREAM_AGENT_LOGINS:
         return False
     if login.lower().endswith("[bot]"):
@@ -158,7 +150,7 @@ def is_qualifying_author(
         return False
     if not _identity_gates_pass(reply):
         return False
-    login = _login(reply)
+    login = _user_str(reply, "login")
     assoc = reply.get("author_association")
     if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
         return True

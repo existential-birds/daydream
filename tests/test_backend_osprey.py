@@ -679,7 +679,7 @@ def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_output_schema_is_temp_file_forwarded_and_cleaned(tmp_path: Path) -> None:
+async def test_output_schema_is_temp_file_forwarded_and_cleaned() -> None:
     lines, _ = _stream()
     _, spawner = await _collect(
         OspreyBackend(osprey_binary="fake"), lines, output_schema={"type": "object"}

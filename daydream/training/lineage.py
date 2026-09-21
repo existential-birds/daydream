@@ -19,6 +19,8 @@ import json
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
+from daydream.training.corpus import _trajectory_set_hash
+
 __all__ = ["LOCKED_FIELDS", "ResumeAborted", "RunIdentity", "stage_digests", "validate_resume"]
 
 
@@ -119,12 +121,6 @@ def _content_hash(payload: Any) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _split_digest(records: list[dict[str, Any]]) -> str:
-    """Digest of the record set's split identity (session ids), corpus-style."""
-    session_ids = [r.get("session_id", "") for r in records]
-    return hashlib.sha256("\n".join(sorted(session_ids)).encode("utf-8")).hexdigest()
-
-
 def _lineage_digest(records: list[dict[str, Any]]) -> str:
     """Digest over the record lineage fields each record carries through (M16).
 
@@ -150,7 +146,7 @@ def stage_digests(stage_outputs: dict[str, dict[str, Any]]) -> dict[str, dict[st
     for stage, outputs in stage_outputs.items():
         records = list(outputs.get("records", []))
         digests[stage] = {
-            "split_digest": _split_digest(records),
+            "split_digest": _trajectory_set_hash([r.get("session_id", "") for r in records]),
             "lineage_digest": _lineage_digest(records),
         }
     return digests
