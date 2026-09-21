@@ -1840,7 +1840,6 @@ def _finalize_minimal_run(
         ),
     )
     identity = ManifestRunIdentity(
-        flow_name=None,
         skill="python",
         model=None,
         backend="claude",

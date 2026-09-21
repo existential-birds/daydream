@@ -38,8 +38,7 @@ def test_manifest_loader_preserves_absent_cases_default(tmp_path: Path) -> None:
 
     loaded = load_benchmark_manifest(root, canonicalize_case_order=True)
 
-    assert "cases" not in loaded.raw
-    assert loaded.model.cases == []
+    assert loaded.cases == []
 
 
 def test_manifest_loader_canonicalizes_copy_without_mutating_manifest(tmp_path: Path) -> None:
@@ -60,11 +59,7 @@ def test_manifest_loader_canonicalizes_copy_without_mutating_manifest(tmp_path: 
 
     assert manifest_path.read_bytes() == original_bytes
     assert yaml.safe_load(manifest_path.read_text())["cases"] == [first, second]
-    assert [row["case_id"] for row in loaded.raw["cases"]] == [second["case_id"], first["case_id"]]
-    assert [row.case_id for row in loaded.model.cases] == [second["case_id"], first["case_id"]]
-    loaded.raw["cases"][0]["case_id"] = "changed-in-memory"
-    assert manifest_path.read_bytes() == original_bytes
-    assert loaded.model.cases[0].case_id == second["case_id"]
+    assert [row.case_id for row in loaded.cases] == [second["case_id"], first["case_id"]]
 
 
 @pytest.mark.parametrize("kind", ["missing", "directory", "invalid-encoding", "unhashable-key"])

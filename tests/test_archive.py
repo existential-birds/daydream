@@ -223,7 +223,6 @@ def _strict_archive(
 def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
     """Build the public, already-resolved identity supplied by the runner."""
     identity = ManifestRunIdentity(
-        flow_name=None,
         skill="python",
         model=None,
         backend="claude",

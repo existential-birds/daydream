@@ -1563,31 +1563,6 @@ def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
     assert entry["verbosity"] == pytest.approx(1.0)
 
 
-def test_quality_erosion_counts_comprehension_filters_toward_cc(tmp_path: Path) -> None:
-    """A comprehension's generators and filters are real branch paths.
-
-    A function whose only decision points live inside a comprehension must
-    cross the CC>10 erosion threshold; previously they were invisible.
-    """
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(xs):\n"
-                "    return [x for x in xs "
-                + " ".join(f"if x != {i}" for i in range(10))
-                + "]\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["high_cc_functions"] == 1
-    assert entry["erosion"] == 1.0
-
-
 def test_quality_erosion_ignores_wildcard_match_case(tmp_path: Path) -> None:
     """``case _:`` matches any value and adds no decision path."""
     ws = _quality_workspace(
@@ -1776,29 +1751,6 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(
     assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
 
 
-def test_quality_erosion_generator_expression_filters_count_toward_cc(
-    tmp_path: Path,
-) -> None:
-    """Generator-expression filters are real branch paths, like list comprehensions."""
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(xs):\n"
-                "    return (x for x in xs "
-                + _TEN_COMPREHENSION_FILTERS
-                + ")\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["high_cc_functions"] == 1
-    assert entry["erosion"] == 1.0
-
-
 @pytest.mark.parametrize(
     ("comprehension", "label"),
     [
@@ -1811,7 +1763,12 @@ def test_quality_erosion_generator_expression_filters_count_toward_cc(
 def test_quality_erosion_comprehension_types_cc_parity(
     tmp_path: Path, comprehension: str, label: str
 ) -> None:
-    """List/set/dict/generator comprehensions count generators + filters identically."""
+    """List/set/dict/generator comprehensions count generators + filters identically.
+
+    A comprehension's generators and filters are real branch paths: a function
+    whose only decision points live inside one must cross the CC>10 erosion
+    threshold, which previously they were invisible to.
+    """
     ws = _quality_workspace(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
 
     result = analyze_quality(ws / ".daydream")
