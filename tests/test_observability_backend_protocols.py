@@ -991,34 +991,30 @@ async def test_grpc_outage_fails_open_and_review_completes(
 # Step 3 lifecycle matrix: real-runner retry with a failed billed attempt
 
 
-class _PiRetryFixture:
-    """Pi error-turn stream: a retryable 429 overload with a real billed attempt."""
-
-    def __init__(self, canary: str) -> None:
-        self.failed = [
-            json.dumps({"type": "session", "sessionId": "pi_ses_retry"}),
-            json.dumps({"type": "agent_start"}),
-            json.dumps({"type": "turn_start"}),
-            json.dumps(
-                {
-                    "type": "message_end",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "turn_end",
-                    "message": {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": "partial"}],
-                        "stopReason": "error",
-                        "errorMessage": "429 too many requests",
-                        "usage": {"input": 500, "output": 20, "cacheRead": 0, "cost": {"total": 0.003}},
-                    },
-                }
-            ),
-            json.dumps({"type": "agent_end", "messages": []}),
-        ]
+_PI_RETRY_FAILED_LINES = [
+    json.dumps({"type": "session", "sessionId": "pi_ses_retry"}),
+    json.dumps({"type": "agent_start"}),
+    json.dumps({"type": "turn_start"}),
+    json.dumps(
+        {
+            "type": "message_end",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
+        }
+    ),
+    json.dumps(
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "partial"}],
+                "stopReason": "error",
+                "errorMessage": "429 too many requests",
+                "usage": {"input": 500, "output": 20, "cacheRead": 0, "cost": {"total": 0.003}},
+            },
+        }
+    ),
+    json.dumps({"type": "agent_end", "messages": []}),
+]
 
 
 async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
@@ -1038,7 +1034,6 @@ async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
     surfaces to the caller.
     """
     _flow(ext_dir)
-    fixture = _PiRetryFixture(_CANARIES["pi"])
     # Pin zero retries: the retryable 429 would otherwise re-spawn the real
     # backend (DAYDREAM_PI_RETRY_ATTEMPTS defaults to 20); the retry-split is
     # proven at the runner seam in failure_integration, this leg proves the
@@ -1046,7 +1041,7 @@ async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
     backend = PiBackend()
     backend.retry_attempts = 0
     install_backend(backend)
-    install_fake_cli_process(monkeypatch, "pi", lines=fixture.failed)
+    install_fake_cli_process(monkeypatch, "pi", lines=_PI_RETRY_FAILED_LINES)
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
         with pytest.raises(Exception, match="429 too many requests"):

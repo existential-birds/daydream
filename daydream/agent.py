@@ -76,7 +76,7 @@ from daydream.ui import (
     print_thinking,
     print_warning,
 )
-from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG
+from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG, _redacted_bash_command
 
 _logger = logging.getLogger(__name__)
 
@@ -613,10 +613,8 @@ def _summarize_input(input_data: dict[str, Any], name: str) -> str:
             # surface shows the cd-stripped display variant. Codex-only
             # ('shell'): Claude/Pi Bash commands never pass through the Codex
             # wrapper, so their operator-authored cd prefix must render.
-            if key == "command" and name == "shell":
-                from daydream.backends.codex import display_shell_command
-
-                value = display_shell_command(value)
+            if key == "command":
+                return _redacted_bash_command(name, value)
             return redact_structured_text(value)[:_BASH_COMMAND_MAX_CHARS]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
@@ -1172,7 +1170,6 @@ async def _run_agent(
                                             panel = tool_registry.get(event.id)
                                             if panel:
                                                 panel.set_result(event.output, event.is_error)
-                                                panel.finish()
                                                 tool_registry.remove(event.id)
 
                                     if inv is not None:
