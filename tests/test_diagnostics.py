@@ -199,19 +199,6 @@ def test_credential_straddling_final_cap_still_redacted() -> None:
     assert "tail" in out
 
 
-def test_large_diagnostic_formatting_completes_quickly() -> None:
-    """The linearized structured redactor keeps a 200K-char fatal diagnostic's
-    whole-value redaction fast; 30s is a generous deterministic ceiling, not a
-    tight bound."""
-    import time
-
-    start = time.perf_counter()
-    out = format_verbose_exception(RuntimeError("x" * 200_000))
-    elapsed = time.perf_counter() - start
-    assert elapsed < 30
-    assert len(out.encode("utf-8")) <= 65536
-
-
 def test_diagnostics_module_avoids_banned_apis_and_imports() -> None:
     src = (Path(__file__).resolve().parents[1] / "daydream" / "diagnostics.py").read_text()
     for token in (

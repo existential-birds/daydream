@@ -9,7 +9,6 @@ Exports:
     upsert_run: Insert or replace a run from a Manifest.
     update_labels: Update outcome labels for a session (supports prefix matching).
     query_runs: Query runs with optional WHERE clause.
-    count_runs: Count rows matching an optional WHERE clause.
     append_label_observation: Append a row to the immutable bitemporal
         label_observations history (``observed_at`` transaction time,
         ``valid_at`` valid time, reward columns, plus ``reviewer_logins`` and
@@ -18,20 +17,11 @@ Exports:
     latest_label_observation: Return the highest-precedence (human-first, then
         recency) label_observations row for a session, optionally constrained by
         an ``as_of`` cutoff timestamp.
-    bulk_latest_label_observations: Return the highest-precedence (human-first,
-        then recency) label_observations row for each session in a collection —
-        single round-trip alternative to calling ``latest_label_observation`` in
-        a loop.
-    delete_runs: Delete ``runs`` rows whose ``session_id`` matches any member of
-        a collection (exact match, parameterized ``IN``); return the ``int``
-        count of rows deleted. ``label_observations`` is untouched.
     reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
         runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
         outcome prior (C4).
     label_observation_history: Return the full label_observations history for
         a session in chronological order.
-    label_count_summary: Return label counts for all runs in a single aggregate
-        query (replaces N+1 per-session lookups).
     canonical_utc_iso: Convert an ISO-8601 timestamp to the canonical UTC
         spelling this index stores and compares (``+00:00`` suffix).
     normalize_as_of: Validate and canonicalize a user-supplied ``as_of`` pin
@@ -70,10 +60,8 @@ spelling is ``datetime.isoformat()`` in UTC — ``YYYY-MM-DDTHH:MM:SS[.ffffff]+0
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 import warnings
-from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -94,7 +82,6 @@ from daydream.archive._schema import (
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.manifest import Manifest
-from daydream.trajectory import RUNS_DIRNAME
 
 # Re-export for callers (including tests) that import these names from this module.
 __all__ = [
@@ -104,15 +91,10 @@ __all__ = [
     "upsert_run",
     "update_labels",
     "query_runs",
-    "count_runs",
     "append_label_observation",
     "latest_label_observation",
-    "bulk_latest_label_observations",
-    "delete_runs",
     "reviewer_set_penalty_prior",
     "label_observation_history",
-    "label_count_summary",
-    "pr_attached_label_coverage",
     "set_run_pr_link",
     "canonical_utc_iso",
     "normalize_as_of",
@@ -657,124 +639,6 @@ def latest_label_observation(
         conn.close()
 
 
-def bulk_latest_label_observations(
-    archive_dir: Path,
-    session_ids: list[str],
-    *,
-    as_of: str | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Return the highest-precedence (human-first, then most recent) label observation for each session.
-
-    Human-sourced observations win over automated ones regardless of timing;
-    ties broken by recency. Fetches all matching rows in a single SQL query
-    instead of one query per session, eliminating the N+1 pattern when building
-    a corpus.
-
-    When ``as_of`` is provided, only observations whose ``observed_at <= as_of``
-    are considered — the same temporal constraint applied by
-    :func:`latest_label_observation`.
-
-    Args:
-        as_of: Optional ISO 8601 cutoff timestamp in the canonical UTC
-            spelling (see :func:`normalize_as_of` — the entry boundary
-            normalizes once; this lexical cutoff assumes canonical input).
-
-    Returns:
-        Mapping of ``session_id`` → row dict for every session that has at
-        least one qualifying observation.  Sessions with no observation are
-        absent from the returned dict (callers should treat them as ``None``).
-    """
-    if not session_ids:
-        return {}
-    placeholders = ",".join("?" * len(session_ids))
-    cutoff = "\n                      AND observed_at <= ?" if as_of is not None else ""
-    params = [*session_ids, as_of] if as_of is not None else list(session_ids)
-    conn = _get_connection(archive_dir)
-    try:
-        cursor = conn.execute(
-            f"""
-                SELECT *
-                FROM (
-                    SELECT *,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY session_id
-                               ORDER BY {_PRECEDENCE_ORDER}
-                           ) AS _rn
-                    FROM label_observations
-                    WHERE session_id IN ({placeholders}){cutoff}
-                )
-                WHERE _rn = 1
-                """,
-            params,
-        )
-        return {row["session_id"]: dict(row) for row in cursor.fetchall()}
-    finally:
-        conn.close()
-
-
-def delete_runs(archive_dir: Path, session_ids: Iterable[object]) -> int:
-    """Destructively prune ``runs`` rows for the given session ids.
-
-    Deletes rows from the ``runs`` table and removes the on-disk bundle
-    directory each row points at (``archive_path``); the append-only
-    ``label_observations`` history is never touched, so label provenance
-    survives hydration reruns that prune rejected sessions.
-
-    The bundle removal matters for consistency: ``rebuild_index`` re-upserts
-    every directory under ``runs/``, so an index-only deletion would be
-    silently resurrected by the next filesystem-driven hydrate/sanitize
-    pass.  Only bundles located inside ``<archive_dir>/runs/`` are removed;
-    rows pointing elsewhere are pruned from the index but their directories
-    are left untouched.
-
-    Every member is coerced via ``str()`` during normalization, so ints,
-    UUIDs, and Path-like objects are accepted.
-
-    Session ids missing from the index are silent no-ops. The deletion runs as
-    a single ``DELETE ... WHERE session_id IN (?, ...)`` statement, which is
-    bounded by SQLite's host-parameter limit; per-stage run counts sit far
-    below that limit, so no chunking is performed today.
-
-    Returns:
-        The number of rows deleted (``0`` when ``session_ids`` is empty —
-        the database is never opened in that case).
-    """
-    ids = [str(item) for item in session_ids]
-    if not ids:
-        return 0
-    placeholders = ",".join("?" * len(ids))
-    conn = _get_connection(archive_dir)
-    try:
-        cursor = conn.execute(
-            f"DELETE FROM runs WHERE session_id IN ({placeholders})",
-            ids,
-        )
-        deleted = int(cursor.rowcount)
-        conn.commit()
-        _remove_bundles(archive_dir, ids)
-        return deleted
-    finally:
-        conn.close()
-
-
-def _remove_bundles(archive_dir: Path, ids: list[str]) -> None:
-    """Remove on-disk bundles for deleted sessions so rebuild cannot resurrect them.
-
-    Mirrors the sibling hydrate/sanitize contract where ``rebuild_index``
-    reflects the on-disk ``runs/`` tree: a surviving bundle directory would
-    be re-upserted by the next filesystem-driven pass.  Only bare session-id
-    directories under ``<archive_dir>/runs/`` are removed; anything else
-    (including traversal-shaped ids or archive paths outside ``runs/``) is
-    left untouched.
-    """
-    runs_root = (archive_dir / RUNS_DIRNAME).resolve()
-    for sid in ids:
-        if not sid or Path(sid).name != sid:
-            continue
-        bundle = runs_root / sid
-        if bundle.is_dir():
-            shutil.rmtree(bundle, ignore_errors=True)
-
 
 def reviewer_set_penalty_prior(
     archive_dir: Path,
@@ -1003,145 +867,3 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ())
         conn.close()
 
 
-def pr_attached_label_coverage(
-    archive_dir: Path,
-    *,
-    as_of: str | None = None,
-) -> dict[str, float | int]:
-    """Return the fraction of PR-attached runs with a decisive automated label.
-
-    "PR-attached" means the run carries a ``pr_number`` (``pr_number IS NOT
-    NULL``). A run is "decisive" when its winning label — under the same
-    human-first, then-recency precedence projection used by
-    :func:`bulk_latest_label_observations` — is one of ``"accepted"``,
-    ``"contested"``, or ``"rejected"``. Runs whose winning label is
-    ``"unknown"`` (or that have no qualifying observation at all) are not
-    decisive.
-
-    This is a pure read; it never writes. An archive with zero PR-attached runs
-    yields ``coverage`` ``0.0`` rather than raising ``ZeroDivisionError``.
-
-    Args:
-        as_of: Optional ISO 8601 cutoff; threaded through to
-            :func:`bulk_latest_label_observations` so only observations whose
-            ``observed_at <= as_of`` are considered (reproducible pinning).
-
-    Returns:
-        ``{"pr_attached": N, "decisive": M, "coverage": M / N,
-        "malformed_labels": K}`` with ``coverage`` as ``0.0`` when ``N == 0``.
-    """
-    rows = query_runs(archive_dir, where="pr_number IS NOT NULL")
-    pr_attached = len(rows)
-    if pr_attached == 0:
-        return {"pr_attached": 0, "decisive": 0, "coverage": 0.0, "malformed_labels": 0}
-
-    session_ids = [row["session_id"] for row in rows]
-    winners = bulk_latest_label_observations(archive_dir, session_ids, as_of=as_of)
-
-    decisive_labels = {"accepted", "contested", "rejected"}
-    decisive = 0
-    malformed = 0
-    for session_id in session_ids:
-        observation = winners.get(session_id)
-        if observation is None:
-            continue
-        try:
-            labels = json.loads(observation["labels"])
-        except (json.JSONDecodeError, TypeError):
-            malformed += 1
-            continue
-        if not isinstance(labels, list):
-            malformed += 1
-            continue
-        if labels and str(labels[0]) in decisive_labels:
-            decisive += 1
-
-    return {
-        "pr_attached": pr_attached,
-        "decisive": decisive,
-        "coverage": decisive / pr_attached,
-        "malformed_labels": malformed,
-    }
-
-
-def label_count_summary(
-    archive_dir: Path,
-    as_of: str | None = None,
-) -> dict[str, int]:
-    """Return label counts for all runs in a single aggregate query.
-
-    For each run in ``runs``, finds the highest-precedence (human-first, then
-    most recent) ``label_observations`` row whose ``observed_at <= as_of`` (or
-    overall when ``as_of`` is ``None``), extracts the first label, and tallies
-    counts.  Runs with no qualifying observation are counted under
-    ``"unlabeled"``.
-
-    This replaces the N+1 pattern of calling
-    :func:`latest_label_observation` once per run.
-
-    Args:
-        as_of: Optional ISO 8601 cutoff timestamp. When ``None``, the
-            most recent observation for each session is used regardless of
-            ``observed_at``.
-
-    Returns:
-        Dict mapping label string → count.  Always includes at least one key
-        when the archive is non-empty.
-    """
-    cutoff = "   WHERE observed_at <= ?" if as_of is not None else ""
-    params: tuple[Any, ...] = (as_of,) if as_of is not None else ()
-    best_sql = (
-        f"SELECT session_id, labels FROM ("
-        f"  SELECT session_id, labels, "
-        f"         ROW_NUMBER() OVER ("
-        f"             PARTITION BY session_id "
-        f"             ORDER BY {_PRECEDENCE_ORDER}"
-        f"         ) AS _rn "
-        f"  FROM label_observations{cutoff}"
-        f") WHERE _rn = 1"
-    )
-    conn = _get_connection(archive_dir)
-    try:
-        cursor = conn.execute(
-            f"SELECT best.labels "  # noqa: S608
-            f"FROM runs r "
-            f"LEFT JOIN ({best_sql}) best ON r.session_id = best.session_id",
-            params,
-        )
-        counts: dict[str, int] = {}
-        for (labels_raw,) in cursor.fetchall():
-            label = "unlabeled"
-            if labels_raw:
-                try:
-                    parsed = json.loads(labels_raw) if isinstance(labels_raw, str) else labels_raw
-                    if isinstance(parsed, list) and parsed and parsed[0]:
-                        label = str(parsed[0])
-                except (json.JSONDecodeError, TypeError) as exc:
-                    warnings.warn(
-                        f"Invalid labels payload {labels_raw!r}: {exc}",
-                        stacklevel=2,
-                    )
-            counts[label] = counts.get(label, 0) + 1
-        return counts
-    finally:
-        conn.close()
-
-
-def count_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ()) -> int:
-    """Return the number of runs matching an optional WHERE clause.
-
-    Uses ``SELECT COUNT(*)`` so no rows are materialised.
-
-    Args:
-        where: Optional SQL WHERE clause (without the ``WHERE`` keyword).
-        params: Parameter tuple to bind to the WHERE clause placeholders.
-    """
-    conn = _get_connection(archive_dir)
-    try:
-        sql = "SELECT COUNT(*) FROM runs"
-        if where:
-            sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
-        cursor = conn.execute(sql, params)
-        return int(cursor.fetchone()[0])
-    finally:
-        conn.close()

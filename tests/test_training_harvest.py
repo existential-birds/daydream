@@ -18,7 +18,6 @@ from daydream.archive.index import (
     append_label_observation,
     label_observation_history,
     latest_label_observation,
-    pr_attached_label_coverage,
     query_runs,
     upsert_run,
 )
@@ -46,7 +45,7 @@ from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.harvest_services import HarvestTestServices
-from tests.harness.trajectory import diff_adding, make_manifest
+from tests.harness.trajectory import diff_adding
 
 
 def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path:
@@ -1938,26 +1937,6 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(
     assert result == cached_repo
 
 
-# pr_attached_label_coverage
-
-
-def test_pr_coverage_helper_counts_decisive(tmp_path: Path) -> None:
-    for i, label in [(1, "accepted"), (2, "rejected"), (3, "unknown")]:
-        upsert_run(tmp_path, make_manifest(session_id=f"p{i}", pr_number=i, pr_repo="o/r"))
-        append_label_observation(
-            tmp_path,
-            f"p{i}",
-            labels=[label],
-            pr_state=None,
-            labeler_version="auto",
-            evidence_sha=f"s{i}",
-            source="auto",
-        )
-    upsert_run(tmp_path, make_manifest(session_id="local1"))  # no pr_number — excluded
-    cov = pr_attached_label_coverage(tmp_path)
-    assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
-
-
 async def test_harvest_propagates_transient_giterror_for_retry(
     tmp_path: Path,
     archive_dir: Any,
@@ -2111,12 +2090,6 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
         # No resolvable clone -> "unknown", NOT the false-negative "rejected" #166 eliminates.
         assert json.loads(query_runs(archive_dir, "session_id = ?", (sid,))[0]["outcome_labels"]) == []
 
-    # Coverage stays honest at 8/10: 8 merged decisive, 2 degraded "unknown"
-    # non-decisive — the 80% bar holds without a bogus "rejected".
-    cov = pr_attached_label_coverage(archive_dir)
-    assert cov["pr_attached"] == 10  # every row stays PR-attached and annotated
-    assert cov["decisive"] == 8  # only the 8 merged rows are decisive; "unknown" is not
-    assert cov["coverage"] == 0.8
 
 
 def _raise_git_error_with_url(*args: object, **kwargs: object) -> None:
