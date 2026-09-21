@@ -715,12 +715,21 @@ async def run_agent(
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
     finalization_context: FinalizationContext | None = None,
+    tools_disabled: bool = False,
+    review_system_instructions: str | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
     """
+    if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
+        raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
+    if review_system_instructions is not None:
+        if not tools_disabled:
+            raise ValueError("review_system_instructions requires tools_disabled=True")
+        if not getattr(backend, "supports_review_instructions", False):
+            raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
     if sanctioned_inputs is not None:
         # Callers may already have rendered this suffix. Move it after the
         # host's budget/finalization instructions without duplicating inputs.
@@ -729,7 +738,7 @@ async def run_agent(
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
     evidence = ReviewEvidence(output_schema) if review_limits is not None else None
-    review_instructions: str | None = None
+    review_instructions = review_system_instructions
     hard_deadline = deadline
     if review_limits is not None:
         started = clock.monotonic()
@@ -749,11 +758,14 @@ async def run_agent(
         tool_call_budget = min(tool_call_budget, review_limits.tool_calls) if tool_call_budget is not None else (
             review_limits.tool_calls
         )
-        review_instructions = (
+        budget_instructions = (
             f"Investigation allowance: at most {investigation_allowance:g} seconds and "
             f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
         )
-        prompt += "\n\n" + review_instructions
+        prompt += "\n\n" + budget_instructions
+        review_instructions = "\n\n".join(
+            item for item in (review_system_instructions, budget_instructions) if item
+        )
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
@@ -772,6 +784,7 @@ async def run_agent(
             run_context=context,
             review_evidence=evidence,
             review_instructions=review_instructions,
+            tools_disabled=tools_disabled,
         )
         if evidence is not None and review_limits is not None and result[2] in {
             "wall_budget_exceeded", "tool_call_budget_exceeded",
@@ -841,6 +854,7 @@ async def _run_agent(
     review_evidence: ReviewEvidence | None = None,
     review_instructions: str | None = None,
     finalization: bool = False,
+    tools_disabled: bool = False,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -1099,6 +1113,8 @@ async def _run_agent(
                     }
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
+                    if tools_disabled and getattr(backend, "supports_tools_disabled", False):
+                        execute_kwargs["tools_disabled"] = True
                     if review_instructions and getattr(backend, "supports_review_instructions", False):
                         execute_kwargs["review_instructions"] = review_instructions
                     if not persist_session:
