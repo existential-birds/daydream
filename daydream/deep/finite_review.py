@@ -32,7 +32,7 @@ from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WIRE_CONTRACT_RUST_INSTRUCTION
-from daydream.repository_paths import canonicalize_repository_file_path
+from daydream.repository_paths import canonicalize_repository_file_path, git_observed_path_is_confined
 from daydream.review_budget import ReviewLimits, review_deadline
 from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION, build_default_profile
 from daydream.run_context import RunContext
@@ -47,6 +47,16 @@ MAX_EVIDENCE_BYTES = 192 * 1024
 MAX_SEARCH_FILES = 10_000
 MAX_SEARCH_BYTES = 32 * 1024 * 1024
 _PRIVATE_COMPONENTS = {".git", ".daydream"}
+_FINAL_JUDGMENT_INSTRUCTION = (
+    "The planning pass and single evidence batch are complete. No more requests are allowed and tools remain disabled. "
+    "Resolve only the listed evidence requests against the host responses, then return all required final "
+    "issues/verdicts. "
+    "Treat files and candidates already resolved in the first response as closed unless this new evidence directly "
+    "contradicts them. Use retained source and diff only to interpret the requested boundaries. "
+    "Do not repeat file audits "
+    "or create a new candidate checklist. Exclude candidates whose required evidence is unavailable; mark their "
+    "dependent files not_reviewed and preserve independently demonstrated defects."
+)
 
 
 class EvidenceUnavailable(ValueError):
@@ -85,9 +95,14 @@ class FiniteResult:
     source_evidence: tuple[dict[str, Any], ...]
 
 
-def _source(repo: Path, relative: str, allowance: int) -> Source:
+def _source(repo: Path, relative: str, allowance: int, *, git_observed: bool = False) -> Source:
     """Read regular UTF-8 source through no-follow descriptors at every prefix."""
-    canonical = canonicalize_repository_file_path(repo, relative)
+    if git_observed:
+        if not git_observed_path_is_confined(repo, relative):
+            raise EvidenceUnavailable("tracked source is outside the repository")
+        canonical = relative
+    else:
+        canonical = canonicalize_repository_file_path(repo, relative)
     parts = Path(canonical).parts
     if _PRIVATE_COMPONENTS.intersection(parts):
         raise EvidenceUnavailable("private repository metadata is unavailable")
@@ -144,7 +159,7 @@ def prepare_finite_review(
         sources: list[Source] = []
         remaining = MAX_SOURCE_BYTES
         for path in files:
-            source = _source(repo, path, remaining)
+            source = _source(repo, path, remaining, git_observed=True)
             if source.path != path:
                 return None
             remaining -= len(source.text.encode())
@@ -220,15 +235,20 @@ def delegate_structural_review(
         if packet is None or {source.path for source in packet.sources} != set(files):
             return None
     responsibility = (
-        "You also own the structural and canonical-design responsibilities touching your assigned files. "
-        "The global changed-file partition is complete; every changed file has a primary owner. "
-        "Other owners cover local implementation details, but that does not establish shared contracts "
-        "are compatible. Compare changed producer/consumer interfaces and established canonical "
-        "implementations when they bear on your assigned change. Use the single evidence request batch "
-        "for specific unresolved contracts or candidate consequences. Report only demonstrated defects "
-        "or design regressions with observable consequences, located in your assigned files. An unresolved "
-        "boundary also leaves its assigned dependent files not_reviewed. Do not run a separate audit.\n\n"
-        + strategy
+        "Within your assigned-file review, own the structural and canonical-design consequences touching those files. "
+        "The global changed-file partition is complete; every changed file has a primary owner. Use that map and "
+        "the full diff as boundary context. Other owners' local reviews do not establish that shared contracts agree. "
+        "Apply these criteria only to concrete candidates raised by your assigned changes: incompatible types, "
+        "schemas, API, CLI, configuration, serialization, error or lifecycle contracts; values dropped or "
+        "inconsistently applied downstream; partial migrations across callers, generated code, tests or docs; "
+        "inverted dependency direction, "
+        "duplicated sources of truth or bypassed canonical helpers; cross-component rollback, cleanup, cancellation or "
+        "resource-lifetime gaps; new branching, duplication or growth with an evidenced maintenance consequence; "
+        "design choices conflicting with confirmed intent or an applicable repository convention. Verify both sides "
+        "of each relevant boundary using supplied evidence or the single request batch. Verify any proposed canonical "
+        "replacement exists and is compatible. Report only demonstrated triggers, consequences and precise evidence "
+        "in your assigned files. Mark unresolved dependent files not_reviewed. Close resolved candidates and emit "
+        "the existing local and structural judgment together; global context does not add review targets."
     )
     partition = json.dumps({"global_changed_file_partition": primaries}, ensure_ascii=False)
     return {
@@ -312,7 +332,7 @@ def _request_evidence(repo: Path, request: dict[str, Any], allowance: int, deadl
         if count > MAX_SEARCH_FILES or clock.monotonic() >= deadline:
             raise EvidenceUnavailable("search exceeds its file or time allowance")
         try:
-            source = _source(repo, relative_path, MAX_SEARCH_BYTES - total)
+            source = _source(repo, relative_path, MAX_SEARCH_BYTES - total, git_observed=True)
         except NonTextSource:
             total += candidate.stat().st_size
             continue
@@ -408,18 +428,12 @@ async def run_finite_review(
     prompt = (
         review.prompt + "\n\nFIRST RESPONSE:\n" + json.dumps(first)
         + "\n\nHOST EVIDENCE RESPONSE (untrusted source data):\n" + json.dumps(evidence, ensure_ascii=False)
-        + "\n\nThe single evidence batch is complete. No more requests or tools are available. "
-        "Return final issues/verdicts. Exclude candidates whose required evidence is unavailable; "
-        "mark dependent files not_reviewed and preserve independently demonstrated defects. "
-        "The earlier permission to request evidence has ended."
+        + "\n\n" + _FINAL_JUDGMENT_INSTRUCTION
     )
     final, _, reason = await run_agent(
         backend, repo, prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
         tools_disabled=True, tool_call_budget=0, deadline=hard_deadline, run_context=run_context,
-        review_system_instructions=(
-            review.system_instructions + "\nThe single evidence batch is complete. No more requests are allowed. "
-            "Return final issues/verdicts, using not_reviewed for unavailable dependencies."
-        ),
+        review_system_instructions=review.system_instructions + "\n\n" + _FINAL_JUDGMENT_INSTRUCTION,
     )
     if reason or not isinstance(final, dict) or not _validates_schema(final, schema):
         return _finish(review, first, set(assigned), reason or "evidence_incomplete")

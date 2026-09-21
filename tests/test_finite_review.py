@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream.backends import AgentEvent, ResultEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep import finite_review as finite
 from daydream.deep.detection import StackAssignment
@@ -20,31 +18,8 @@ from daydream.review_budget import review_deadline_scope
 from daydream.review_profile import build_default_profile
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.fake_clock import FakeClock
+from tests.harness.finite_backend import PacketBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
-
-
-class PacketBackend(PiBackend):
-    """Exercise run_agent and its recorder without launching a model process."""
-
-    def __init__(self, responses: list[dict[str, Any]], clock: FakeClock | None = None,
-                 durations: tuple[float, ...] = ()) -> None:
-        super().__init__(model="fixture-model", reasoning_effort="high")
-        self.responses = responses
-        self.calls: list[dict[str, Any]] = []
-        self.clock = clock
-        self.durations = durations
-
-    async def execute(self, cwd: Path, prompt: str, output_schema: Any = None,
-                      continuation: Any = None, agents: Any = None, max_turns: int | None = None,
-                      read_only: bool = True, persist_session: bool = True,
-                      finalization: bool = False, review_instructions: str | None = None,
-                      tools_disabled: bool = False) -> AsyncGenerator[AgentEvent, None]:
-        index = len(self.calls)
-        self.calls.append({"cwd": cwd, "prompt": prompt, "schema": output_schema,
-                           "tools_disabled": tools_disabled, "review_instructions": review_instructions})
-        if self.clock is not None and index < len(self.durations):
-            self.clock.advance(self.durations[index])
-        yield ResultEvent(structured_output=self.responses[min(index, len(self.responses) - 1)], continuation=None)
 
 
 def _verdict(path: str = "app.py", verdict: str = "clean") -> dict[str, Any]:
@@ -128,9 +103,9 @@ async def test_evidence_batch_deduplicates_and_retains_proven_findings(
     original = finite._source
     read_paths: list[str] = []
 
-    def read(*args: Any) -> finite.Source:
+    def read(*args: Any, **kwargs: Any) -> finite.Source:
         read_paths.append(args[1])
-        return original(*args)
+        return original(*args, **kwargs)
 
     monkeypatch.setattr(finite, "_source", read)
     result = await finite.run_finite_review(backend, repo, review, schema=PER_STACK_RECORD_SCHEMA,
@@ -141,6 +116,8 @@ async def test_evidence_batch_deduplicates_and_retains_proven_findings(
     assert len(backend.calls) == 2
     assert "def helper()" in backend.calls[1]["prompt"]
     assert "No more requests are allowed" in backend.calls[1]["review_instructions"]
+    assert "Resolve only the listed evidence requests" in backend.calls[1]["review_instructions"]
+    assert "already resolved in the first response as closed" in backend.calls[1]["prompt"]
     assert all(call["tools_disabled"] for call in backend.calls)
 
 
@@ -217,7 +194,7 @@ async def test_literal_search_is_tracked_confined_and_not_a_regex(tmp_path: Path
                                            run_context=_context())
     assert result.reason is None
     evidence = backend.calls[1]["prompt"].split("HOST EVIDENCE RESPONSE (untrusted source data):\n")[1]
-    evidence = json.loads(evidence.split("\n\nThe single evidence batch")[0])
+    evidence = json.JSONDecoder().raw_decode(evidence)[0]
     assert evidence[0]["evidence"]["matches"] == [{"path": "helper.py", "line": 1, "text": "needle[0] = True"}]
     assert "PRIVATE_UNTRACKED_CANARY" not in backend.calls[1]["prompt"]
 

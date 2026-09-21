@@ -91,6 +91,8 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         assert all(path in packet.prompt for path in files)
         assert "canonical" in packet.system_instructions
         assert "shared contracts" in packet.system_instructions
+        assert "Review the repository-wide interactions" not in packet.system_instructions
+        assert "global context does not add review targets" in packet.system_instructions
     saved = json.loads(delegation.read_text())
     assert saved["primary_scopes"] == {"python": ["api.py"], "react": ["web.ts"]}
     assert saved["structural_files"] == files
