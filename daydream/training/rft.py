@@ -27,7 +27,6 @@ the record id — never skipped silently.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import random
 import re
@@ -36,6 +35,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from daydream.training.reward import RewardBreakdown, ScoringInputs, score_trajectory
+from daydream.training.stacks import _sha256_file
 
 __all__ = ["RftConfig", "RftWinner", "RftResult", "run_rft", "validate_full_sha"]
 
@@ -248,10 +248,6 @@ def _passes(spec: Mapping[str, float], breakdown: RewardBreakdown) -> bool:
     return True
 
 
-def _inputs_digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _fixed(value: Any) -> Any:
     """Fixed float formatting so JSON serialization is byte-stable."""
     if isinstance(value, float):
@@ -292,7 +288,7 @@ def run_rft(config: RftConfig) -> RftResult:
 
     winners.sort(key=lambda w: (w.record_id, w.candidate_index))
 
-    inputs_sha256 = _inputs_digest(inputs_path)
+    inputs_sha256 = _sha256_file(inputs_path)
     payload: dict[str, Any] = {
         "header": {
             "model_id": config.model_id,

@@ -104,7 +104,6 @@ def test_invalid_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 )
 def test_phase_backend_override_via_config_file(global_backend: Any, overrides: Any, phase: Any, expected: Any) -> None:
     """Resolve phase-specific backends ahead of the global configured backend."""
-    # Per-phase backend overrides moved to the config file (Task 8); resolver still honours them.
     fc = DaydreamFileConfig(backend=global_backend, phases=overrides)
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
     assert _resolved_backend_name(config, phase) == expected
@@ -597,8 +596,6 @@ def test_print_issues_table_renders() -> None:
     assert "Missing test" in output
 
 
-# Per-phase model overrides — config-file path (cli-verb-redesign Task 8)
-
 
 @pytest.mark.parametrize(
     "phase,value",
@@ -624,8 +621,6 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path: Path) -> None:
     assert config.test_model is None
     assert config.exploration_model is None
 
-
-# Per-phase model/backend flags removed (cli-verb-redesign Task 8 — config-only)
 
 
 @pytest.mark.parametrize(
@@ -659,8 +654,6 @@ def test_per_phase_flag_rejected_with_config_pointer(
     assert flag in err
     assert f"[tool.daydream.phases.{phase}]" in err
 
-
-# Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
 
 
 def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
@@ -942,8 +935,6 @@ def test_signal_flushes_all_runner_recorders(
         "api /user",
     ]
 
-
-# corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
 
 
 def test_harvest_parser_accepts_repo_clone_root() -> None:

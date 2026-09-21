@@ -1449,8 +1449,6 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
     calls = []
 
     class FakeProc:
-        def __init__(self) -> None:
-            self.args_seen = None
         # returncode 0, stdout = one JSON line with the verdict in "result"
         rc = 0
         stdout = json.dumps({

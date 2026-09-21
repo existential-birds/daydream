@@ -1,61 +1,9 @@
 """Reward reducer for code-review trajectories.
 
-This module scores a *single* run across both intrinsic (capture-time)
-axes and the posterior false-positive axis derived from maintainer
-accept/reject outcomes. It implements the reducer described in the
-corpus-pipeline plan (Task 3), including the posterior axis introduced
-alongside it; #88 owns empirical calibration of the defaults, behind
-this same interface plus a :data:`REWARD_VERSION` bump.
-
-Formula (golden-locked; full justification + citations in
-``.beagle/concepts/corpus-pipeline-architecture/research/reward-formula-recommendation.md``):
-
-Axes and their rules:
-
-All weights and ramp parameters live on :class:`RewardWeights`; scoring under
-:data:`DEFAULT_WEIGHTS` reproduces the golden-locked formula. The default
-values cited below are :class:`RewardWeights` fields.
-
-* **correctness** — mean over per-finding verifier verdicts mapped by
-  :attr:`RewardWeights.verdict_map` (``consistent → 1.0``,
-  ``uncertain → 0.5``, ``contradicts → 0.0``). A positive credit axis.
-  Default weight :attr:`RewardWeights.w_correctness` ``= 0.6``
-  (correctness-dominant). Source: arXiv:2509.15557 ``+1/0/−1`` ternary,
-  rescaled to ``[0, 1]``.
-* **grounding** — ``grounding_rate ∈ [0, 1]`` passed through unchanged. A
-  positive credit axis. Default weight :attr:`RewardWeights.w_grounding`
-  ``= 0.4`` (secondary guardrail). Source: HalluJudge reference-free
-  grounding (F1 0.85).
-* **format_valid** — a *dominating* gate, not an additive term. When
-  ``False`` the composite floors to ``0.0`` regardless of every other axis.
-  This gate is an internal design choice; it is in the spirit of the
-  DeepSeek-R1 (arXiv:2501.12948) minimal rule-based accuracy+format reward,
-  which pairs a correctness signal with a format signal. (It is *not*
-  attributable to arXiv:2509.15557, which is a subtractive composite — see
-  the ``false_positive_penalty`` note below.)
-* **length** — a bounded saturating ramp over the char-count proxy:
-  ``len_norm = clip((length − len_tau) / len_scale, 0, 1)`` subtracted after
-  the credit mean with weight :attr:`RewardWeights.w_len` ``= 0.2`` (strictly
-  smaller than every credit weight, so verbosity can shave but never
-  dominate). Source: A-DLP / Leash bounded length penalty.
-* **false_positive_penalty** — the posterior axis, derived from the
-  maintainer accept/reject outcome (``rejected → 1.0``, ``contested → 0.5``,
-  ``accepted → 0.0`` via :attr:`RewardWeights.fp_penalty_map`). The reported
-  ``posterior_cost`` is the *calibrated surprise* ``abs(observed − prior)``
-  on the ``[0, 1]`` penalty scale: the absolute deviation from the reviewers'
-  mean observed penalty (``outcome_prior``) is penalized in both directions,
-  so a harsh-but-correct reviewer's below-prior acceptance is visible alongside
-  a chronic false-positive rejecter's above-prior rejection. An uncalibrated
-  prior falls back to the ``0.5`` maximum-entropy midpoint. It is a *sibling* of the composite, carried on
-  :class:`PosteriorBreakdown`, and is **never** subtracted inside the composite
-  (C5: Safe-RLHF documents a safety-compensation pathology for fixed-weight
-  subtractive scalarization of constraint-style signals — arXiv:2509.15557 is a
-  subtractive composite, not a gate, and does not establish a "penalty < credit"
-  rule). :attr:`RewardWeights.w_fp` is **not** applied here — it survives as a
-  documented training-time combination weight (pending recalibration #114). The
-  posterior is present only when a mapped maintainer label is supplied; absent
-  at capture time and for ``"unknown"``/unmapped labels — then the result is a
-  plain :class:`RewardBreakdown` with no posterior fields.
+Scores a *single* run across intrinsic (capture-time) credit/penalty axes and
+the posterior false-positive axis derived from maintainer accept/reject
+outcomes. All weights, ramps, and label maps live on :class:`RewardWeights`;
+scoring under :data:`DEFAULT_WEIGHTS` reproduces the golden-locked formula.
 
 Composite = ``round(clip(credit − w_len·len_norm, 0, 1), 4)`` — a pure
 intrinsic score. ``credit`` is the weighted mean over the *present* credit
@@ -63,21 +11,16 @@ axes only, renormalized so present weights sum to one
 (``w_i' = w_i / Σ_present w_j``). A missing/empty/unparseable signal makes
 that axis ``None`` and ``axes_present[axis] = False`` — never impute ``0.0``
 for a missing axis, never raise. If no credit axis is present while
-``format_valid`` is ``True``, the composite is ``None`` (uncomputable).
+``format_valid`` is ``True``, the composite is ``None`` (uncomputable). The
+posterior is a *sibling* of the composite, carried on
+:class:`PosteriorBreakdown`, and is **never** subtracted inside it.
 
-Changing any default weight is a deliberate golden-update: it requires
-re-pinning the golden test values *and* bumping :data:`REWARD_VERSION`. So does
-redefining the *meaning* of an input label without touching a weight: the stamp
-identifies the label semantics as much as the algebra, so a redefined
-``grounding_rate`` (see :data:`REWARD_VERSION`) is just as much a version event
-as a reweighting.
-
-:data:`REWARD_VERSION` fully identifies the formula *only* under
-:data:`DEFAULT_WEIGHTS`. Passing a custom :class:`RewardWeights` is an
-analysis-time override (e.g. sensitivity sweeps); its output is **not** the
-canonical corpus reward and must not be stored as such — only scores produced
-under :data:`DEFAULT_WEIGHTS` carry the meaning stamped by
-:data:`REWARD_VERSION`.
+Changing any default weight — or redefining the meaning of an input label —
+is a deliberate golden-update: re-pin the golden test values *and* bump
+:data:`REWARD_VERSION`. :data:`REWARD_VERSION` fully identifies the formula
+*only* under :data:`DEFAULT_WEIGHTS`; a custom :class:`RewardWeights` is an
+analysis-time override whose output must never be stored as the canonical
+corpus reward.
 """
 
 from __future__ import annotations
