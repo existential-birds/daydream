@@ -190,7 +190,7 @@ def _load_workspace_allowlist(workspace: Path) -> list[str]:
     a malformed or missing manifest raises the project's existing workspace
     error (``WorkspaceCorrupt``) — never a silent default.
     """
-    manifest = load_benchmark_manifest(workspace).model
+    manifest = load_benchmark_manifest(workspace)
     return list(manifest.privacy.judge_allowed_hosts)
 
 

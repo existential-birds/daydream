@@ -1513,18 +1513,13 @@ async def test_write_partial_writes_partial_file_with_partial_flag(
         assert atif_validate(partial, validate_images=False) is True
 
 
-def test_write_partial_no_op_when_steps_empty(tmp_path: Path) -> None:
+async def test_write_partial_no_op_when_steps_empty(tmp_path: Path) -> None:
     """write_partial skips disk write when steps list is empty (matches _write)."""
-    recorder = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
-    )
-    recorder.write_partial()
-    partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-    assert not partial_path.exists()
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        recorder.write_partial()
+        partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
+        assert not partial_path.exists()
 
 
 async def test_write_partial_is_idempotent(tmp_path: Path) -> None:

@@ -3317,8 +3317,6 @@ class TrajectoryRecorder:
     _trajectory_id: str = ""
     _run_started_at: str = ""
     _run_ended_at: str = ""
-    _partial_state_digest: str = ""
-    _partial_cutoff_at: str = ""
     _signal_registry: _SignalFlushRegistry | None = field(default=None, init=False, repr=False, compare=False)
 
     async def __aenter__(self) -> "TrajectoryRecorder":
@@ -3947,78 +3945,15 @@ class TrajectoryRecorder:
         snapshot.sort(key=lambda s: s.step_id)
         return snapshot
 
-    def _partial_cutoff_for(self, snapshot_steps: list[Step]) -> str:
-        """Reuse a cutoff only while the recorder's serializable state is unchanged."""
-        digest = _digest_partial_state(self, snapshot_steps)
-        self._partial_state_digest, self._partial_cutoff_at = _reuse_or_advance_partial_cutoff(
-            state_digest=digest,
-            previous_digest=self._partial_state_digest,
-            previous_cutoff=self._partial_cutoff_at,
-        )
-        return self._partial_cutoff_at
-
-    def _write_partial_self(self) -> bool:
-        """Write only this recorder's in-flight state to ``partial_document_path(self.path)``.
-
-        Per D-07 the partial trajectory lives at a sibling path with the
-        ``PARTIAL_SUFFIX`` appended to the full filename (e.g.
-        ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
-        ``partial=true`` so consumers can detect incomplete runs without
-        path-string parsing. Steps from any in-flight Invocation are
-        included so SIGINT mid-``run_agent()`` does not lose work; empty
-        trajectories are skipped (matches ``_write``).
-
-        Returns ``True`` only when a nonempty snapshot was written. Disk-write
-        failures degrade with the established warning and return ``False``.
-        """
-        snapshot_steps = self._snapshot_in_flight_steps()
-        if not snapshot_steps:
-            return False
-        try:
-            document = self._prepare_document(
-                status="partial",
-                cutoff_at=self._partial_cutoff_for(snapshot_steps),
-            )
-            if document is None:
-                return False
-            try:
-                self._write_document(document, "partial")
-            except Exception as exc:  # noqa: BLE001 - capture still receives prepared bytes
-                print_warning(
-                    _console,
-                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-                )
-            if self.on_write is not None:
-                snapshot = RunWriteSnapshot(
-                    status="partial",
-                    cutoff_at=self._partial_cutoff_at,
-                    root_trajectory_id=self.trajectory_id,
-                    documents=(document,),
-                )
-                try:
-                    self.on_write(self, snapshot)
-                except Exception:  # noqa: BLE001 - archive failure never blocks shutdown
-                    pass
-            return True
-        except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
-            print_warning(
-                _console,
-                f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-            )
-            return False
-
     def write_partial(self) -> None:
-        """Write this recorder's partial and cascade to its parent on success.
+        """Flush every active recorder owned by this run (idempotent, never raises).
 
-        This compatibility-preserving public path remains idempotent and safe
-        for ordinary synchronous callers. Signal handling uses the run registry's
-        self-only primitive so a parent shared by several live children is written
-        exactly once.
+        Signal handling goes through the run registry so a root shared by
+        several live children is written exactly once. Calling this on a
+        recorder that was never entered is a no-op.
         """
         if self._signal_registry is not None:
             self._signal_registry.flush_active()
-        elif self._write_partial_self() and self.parent is not None:
-            self.parent.write_partial()
 
 
 class _ForkCM:

@@ -654,7 +654,6 @@ def capture_manifest_run_identity(
             per_stack_model = configured_model or DEFAULT_PI_MODEL
     profile = config.review_profile
     return ManifestRunIdentity(
-        flow_name=config.flow_name,
         skill=config.stack,
         model=None,
         backend=_default_backend_name(config),
