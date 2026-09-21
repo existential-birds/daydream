@@ -2734,7 +2734,16 @@ def main(argv: list[str] | None = None) -> None:
             if verb == "improve"
             else _parse_args(argv)
         )
-        exit_code = anyio.run(run, config)
+        try:
+            exit_code = anyio.run(run, config)
+        except BaseExceptionGroup as exc:
+            # A signal delivered inside a task-group body can be wrapped by
+            # AnyIO. Preserve the ordinary interrupt path without hiding an
+            # unrelated failure accompanying the interruption.
+            interrupts, remainder = exc.split(KeyboardInterrupt)
+            if interrupts is not None and remainder is None:
+                raise KeyboardInterrupt from None
+            raise
         sys.exit(exit_code)
     except KeyboardInterrupt:
         panel = get_shutdown_panel()

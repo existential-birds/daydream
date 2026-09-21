@@ -1266,6 +1266,15 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     archive_dir: Path,
 ) -> None:
     """runner.run -> archive -> evaluation preserves all unsafe evidence."""
+    from daydream.review_budget import ReviewLimits
+
+    # This telemetry fixture deliberately needs 326 events to keep its write
+    # ratio below 5%. Give that fixture sufficient investigation allowance;
+    # the production default's truncation is covered by review-runtime tests.
+    def telemetry_limits(*args: Any, **kwargs: Any) -> ReviewLimits:
+        return replace(ReviewLimits(*args, **kwargs), tool_calls=400)
+
+    monkeypatch.setattr("daydream.phases.ReviewLimits", telemetry_limits)
     _install_codex_evidence_backend(
         multi_stack_target,
         monkeypatch,

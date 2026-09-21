@@ -46,6 +46,7 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
+    REVIEW_WALL_BUDGET_S,
     TEST_WALL_BUDGET_S,
 )
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
@@ -82,6 +83,12 @@ from daydream.repository_paths import (
 )
 from daydream.repository_paths import (
     path_is_confined,
+)
+from daydream.review_budget import (
+    ReviewBudgetExceeded,
+    ReviewLimits,
+    clear_review_budget_stop,
+    record_review_budget_stop,
 )
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
@@ -1164,7 +1171,9 @@ class CrossStackMergeError(ValueError):
         stack_context: list[str],
         *,
         message: str | None = None,
+        budget_reason: str | None = None,
     ) -> None:
+        self.budget_reason = budget_reason
         self.response_shape = response_shape
         self.stack_context = stack_context
         super().__init__(
@@ -1524,6 +1533,17 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
             f"\n{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
             f"Pre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
             "for the structural/import file map before fixing."
+        )
+    from daydream.prompt_budget import inline_context_file
+
+    summary = inline_context_file(exploration_dir / "summary.md")
+    affected = inline_context_file(exploration_dir / "affected_files.md")
+    if summary is not None and affected is not None:
+        return (
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            "Shared exploration context (complete captured artifacts; do not re-read these files):\n"
+            + json.dumps({"summary": summary, "affected_files": affected}, ensure_ascii=False)
+            + "\nAssigned source files still require same-review reads; this context does not establish clean coverage."
         )
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
@@ -4056,14 +4076,15 @@ async def phase_understand_intent(
 
         output, _, budget_reason = await run_agent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
+            review_limits=ReviewLimits(120, 60, 12),
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            wall_budget_s=REVIEW_WALL_BUDGET_S,
             read_only=True,
             sanctioned_inputs=sanctioned_inputs,
             run_context=run_context,
         )
         if budget_reason is not None:
-            raise RuntimeError(f"Intent analysis hit its budget: {budget_reason}")
+            raise ReviewBudgetExceeded("Intent analysis", budget_reason, output)
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
@@ -4197,25 +4218,22 @@ async def phase_alternative_review(
         prompt,
         output_schema=ALTERNATIVE_REVIEW_SCHEMA,
         phase=DaydreamPhase.ALTERNATIVES,
+        review_limits=ReviewLimits(300, 90, 24),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        wall_budget_s=REVIEW_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )
 
-    # A budget-truncated wonder pass is a run failure, not an empty lens: the
-    # findings it would have produced are silently missing, and every
-    # downstream stage would treat [] as "nothing to see".
     if budget_reason:
-        raise RuntimeError(f"Alternative review hit its budget: {budget_reason}")
+        raise ReviewBudgetExceeded("Alternatives", budget_reason, result)
 
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
         if not isinstance(issues, list):
             issues = []
     else:
-        # Only genuinely unusable model output degrades to an empty lens; the
-        # budget case above already failed the run.
+        # Budget stops are handled by the orchestrator as incomplete coverage.
         if not run_context.policy.quiet:
             print_warning(console, f"TTT review returned unexpected result type: {type(result).__name__}")
         issues = []
@@ -4328,6 +4346,7 @@ async def phase_per_stack_reviews(
         async with anyio.create_task_group() as tg:
             for stack in stacks:
                 output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+                per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
                 inline_diff = (
                     _diff_blocks_for_files(diff_text, stack.files)
                     if diff_text is not None
@@ -4427,8 +4446,9 @@ async def phase_per_stack_reviews(
                                     task_prompt,
                                     phase=DaydreamPhase.DEEP,
                                     output_schema=PER_STACK_RECORD_SCHEMA,
+                                    review_limits=ReviewLimits(),
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                                    wall_budget_s=REVIEW_WALL_BUDGET_S,
                                     sanctioned_inputs=task_inputs,
                                     run_context=run_context,
                                 )
@@ -4441,7 +4461,10 @@ async def phase_per_stack_reviews(
                             # "Uncovered stacks" instead of silently shipping
                             # a partial review as a complete one.
                             failures[stack_name] = f"budget exhausted: {budget_reason}"
-                            return
+                            from daydream.agent import _validates_schema
+
+                            if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                                return
                         if not isinstance(structured, dict):
                             failures[stack_name] = "no structured output produced"
                             return
@@ -4480,14 +4503,21 @@ async def phase_per_stack_reviews(
                         # self-describing when debugging.
                         stamp_record_uids(issues, stack_name)
                         declared_verdicts = structured.get("verdicts")
-                        declared = declared_verdicts if isinstance(declared_verdicts, list) else []
+                        declared = (
+                            declared_verdicts if isinstance(declared_verdicts, list) and not budget_reason else []
+                        )
                         # Persist the records file with the DECLARED verdicts for
                         # now; final verdict reconciliation happens in
                         # ``_step_per_stack_parse`` AFTER the fan-out completes and
                         # every review fork is finalized on disk (issue #745).
                         per_stack_records_path(deep_dir_path, stack_name).write_text(
-                            json.dumps({"issues": issues, "verdicts": declared}, indent=2)
+                            json.dumps({"issues": issues, "verdicts": declared,
+                                        **({"incomplete": True} if budget_reason else {})}, indent=2)
                         )
+                        task_output.write_text("# Review\n\n" + "\n".join(
+                            f"- {issue.get('file', '')}:{issue.get('line', '')} {issue.get('description', '')}"
+                            for issue in issues
+                        ))
                         results[stack_name] = task_output
 
                 tg.start_soon(_task)
@@ -4597,17 +4627,24 @@ async def phase_supervise_review(
          "alternatives": alternatives_path},
         exploration_dir=exploration_dir,
     )
-    result, _, _ = await run_agent(
+    result, _, budget_reason = await run_agent(
         backend,
         work.repo,
         prompt,
         output_schema=SUPERVISE_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        review_limits=ReviewLimits(120, 60, 12, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )
+    if budget_reason:
+        record_review_budget_stop(dd, "Supervisor", budget_reason)
+        print_warning(console, "Supervisor budget exhausted; continuing with incomplete adjudication.")
+        return {}
+    clear_review_budget_stop(dd, "Supervisor")
+
     if not isinstance(result, dict) or not isinstance(result.get("verdicts"), list):
         raise ValueError(f"Supervisor returned no verdicts list (got {type(result).__name__})")
 
@@ -4707,17 +4744,24 @@ async def phase_arbiter_review(
          "alternatives": alternatives_path},
         exploration_dir=exploration_dir,
     )
-    result, continuation, _ = await run_agent(
+    result, continuation, budget_reason = await run_agent(
         backend,
         work.repo,
         prompt,
         output_schema=ARBITER_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        review_limits=ReviewLimits(120, 60, 16, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )
+
+    if budget_reason:
+        record_review_budget_stop(dd, "Arbiter", budget_reason)
+        print_warning(console, "Arbiter budget exhausted; continuing with incomplete adjudication.")
+        return ({}, None)
+    clear_review_budget_stop(dd, "Arbiter")
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
@@ -4792,17 +4836,24 @@ async def phase_suppression_review(
          "alternatives": alternatives_path},
         exploration_dir=exploration_dir,
     )
-    result, _, _ = await run_agent(
+    result, _, budget_reason = await run_agent(
         backend,
         work.repo,
         prompt,
         output_schema=SUPPRESSION_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        review_limits=ReviewLimits(120, 60, 12, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )
+
+    if budget_reason:
+        record_review_budget_stop(dd, "Suppression", budget_reason)
+        print_warning(console, "Suppression budget exhausted; continuing with incomplete adjudication.")
+        return {}
+    clear_review_budget_stop(dd, "Suppression")
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Suppression returned no findings list (got {type(result).__name__})")
@@ -5361,15 +5412,16 @@ async def phase_cross_stack_merge(
     sanctioned_inputs = _prepare_existing_phase_inputs(backend, work, merge_inputs, exploration_dir=exploration_dir)
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
-    result, _, _ = await run_agent(
+    result, _, budget_reason = await run_agent(
         backend,
         work.repo,
         prompt,
         output_schema=MERGED_ITEMS_SCHEMA,
         phase=DaydreamPhase.MERGE,
         continuation=continuation,
+        review_limits=ReviewLimits(180, 60, 16, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        wall_budget_s=REVIEW_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )
@@ -5387,7 +5439,7 @@ async def phase_cross_stack_merge(
         item_list = result["items"]
     elif isinstance(result, list):
         item_list = result
-    if item_list is None:
+    if item_list is None or budget_reason is not None:
         # ``stack_name_from_records_source`` owns the ``stack-<name>-records.json``
         # naming convention (it is the same parse the uid minting depends on), so
         # derive the error context through it rather than re-implementing the
@@ -5398,7 +5450,9 @@ async def phase_cross_stack_merge(
         raise CrossStackMergeError(
             type(result).__name__,
             stack_context,
-            message=f"Cross-stack merge returned no item list (got {type(result).__name__})",
+            message=(f"Cross-stack merge budget exhausted: {budget_reason}" if budget_reason
+                     else f"Cross-stack merge returned no item list (got {type(result).__name__})"),
+            budget_reason=budget_reason,
         )
     agent_items: list[dict[str, Any]] = item_list
 

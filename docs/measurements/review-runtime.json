@@ -1,0 +1,180 @@
+{
+  "baseline": "ebd15ca95666dd2545c70fb290991abc2e52a735",
+  "candidate": "fix/review-budget-exhaustion runtime changes",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "provider": "openrouter",
+  "date": "2026-09-21",
+  "fixture": "scripts/measure_review_runtime.py (two seeded defects in batch.py)",
+  "limitations": [
+    "Two sequential pairs on a small synthetic single-stack fixture, not the Shelfspace PR.",
+    "Generation intervals include provider/transport time, not pure inference. Tool intervals are host-observed.",
+    "The first candidate run preceded addition of the host-managed output-path hint; the second includes it.",
+    "Read counts are observed; verdict line counts are model-declared. No claim of broad production recall or latency significance."
+  ],
+  "runs": [
+    {
+      "run": "before",
+      "elapsed_s": 85.08,
+      "tool_calls": 8,
+      "tool_interval_sum_s": 0.035,
+      "generation_intervals": 4,
+      "generation_interval_sum_s": 76.287,
+      "stop_reason": null,
+      "issues": [
+        {
+          "id": 1,
+          "description": "`mean([])` now raises ZeroDivisionError instead of returning 0, violating the documented empty-batch contract.",
+          "file": "batch.py",
+          "line": 4,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "README.md contract states 'Empty batches must return 0.' The diff removed the `if not values: return 0` guard from `mean` (batch.py:4), and no other file handles the empty case. This is a correctness regression directly contradicting the stated intent ('preserving behavior').",
+          "evidence": "README.md: 'Empty batches must return 0.' batch.py:4 now reads `return sum(values) / len(values)` with no empty guard; `mean([])` raises ZeroDivisionError."
+        },
+        {
+          "id": 2,
+          "description": "`can_access` weakened from `and` to `or`, granting access to non-admins in a tenant and to admins of other tenants \u2014 breaking tenant isolation.",
+          "file": "batch.py",
+          "line": 7,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "README.md contract states 'Only administrators in the document's tenant may access it.' The diff changed `return role == \"admin\" and tenant_id == document_tenant` to `return role == \"admin\" or tenant_id == document_tenant`. No callers/guards elsewhere (repo-wide grep for can_access found only the definition). Trust boundary: caller-supplied role/tenant_id now bypasses tenant isolation.",
+          "evidence": "batch.py:7: `return role == \"admin\" or tenant_id == document_tenant`. README.md: 'Only administrators in the document's tenant may access it.' Trigger `can_access(\"user\",\"t1\",\"t1\")` -> True (non-admin access); `can_access(\"admin\",\"t1\",\"t2\")` -> True (cross-tenant access)."
+        }
+      ],
+      "declared_verdicts": [
+        {
+          "path": "batch.py",
+          "lines_read": 8,
+          "verdict": "has_findings",
+          "n_findings": 2
+        }
+      ]
+    },
+    {
+      "run": "after",
+      "elapsed_s": 40.077,
+      "tool_calls": 4,
+      "tool_interval_sum_s": 0.049,
+      "generation_intervals": 3,
+      "generation_interval_sum_s": 34.299,
+      "stop_reason": null,
+      "issues": [
+        {
+          "id": 1,
+          "description": "`mean(values)` no longer guards against an empty batch and divides by zero, violating the README contract \"Empty batches must return 0.\" Calling `mean([])` now raises `ZeroDivisionError` instead of returning 0.",
+          "file": "batch.py",
+          "line": 4,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "README.md explicitly states \"Empty batches must return 0.\" The diff removed the `if not values: return 0` guard from `mean` (batch.py:3-4), leaving `sum([])/len([])` -> ZeroDivisionError. This is a direct contract regression in the assigned file.",
+          "evidence": "batch.py:4 `return sum(values) / len(values)`; README.md: \"Empty batches must return 0.\" Triggering input: `mean([])` raises ZeroDivisionError."
+        },
+        {
+          "id": 2,
+          "description": "`can_access` was changed from `and` to `or`, so it authorizes any role within the same tenant and also authorizes admins from other tenants, violating the README contract \"Only administrators in the document's tenant may access it.\"",
+          "file": "batch.py",
+          "line": 7,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "README.md states \"Only administrators in the document's tenant may access it.\" The diff changed `role == \"admin\" and tenant_id == document_tenant` to `role == \"admin\" or tenant_id == document_tenant` (batch.py:7). Both clauses are wrong: e.g. `can_access(\"viewer\", \"t1\", \"t1\")` returns True (non-admin same tenant) and `can_access(\"admin\", \"t1\", \"t2\")` returns True (cross-tenant admin). This is an authorization/trust-boundary regression.",
+          "evidence": "batch.py:7 `return role == \"admin\" or tenant_id == document_tenant`; README.md: \"Only administrators in the document's tenant may access it.\" Triggering inputs: can_access('viewer','t1','t1') -> True; can_access('admin','t1','t2') -> True."
+        }
+      ],
+      "declared_verdicts": [
+        {
+          "path": "batch.py",
+          "lines_read": 7,
+          "verdict": "has_findings",
+          "n_findings": 2
+        }
+      ]
+    },
+    {
+      "run": "before2",
+      "elapsed_s": 26.642,
+      "tool_calls": 9,
+      "tool_interval_sum_s": 0.081,
+      "generation_intervals": 5,
+      "generation_interval_sum_s": 17.925,
+      "stop_reason": null,
+      "issues": [
+        {
+          "id": 1,
+          "description": "mean([]) now raises ZeroDivisionError instead of returning 0, violating the README empty-batch contract.",
+          "file": "batch.py",
+          "line": 4,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "README.md:1 contract states \"Empty batches must return 0.\" The diff removed the `if not values: return 0` guard so an empty list reaches `sum(values) / len(values)` and divides by zero. No callers/tests exist in-repo (affected_files.md: no dependencies), so the public function itself is the regression.",
+          "evidence": "batch.py:4 `return sum(values) / len(values)` with no empty guard; README.md:1 \"Empty batches must return 0.\" Trigger: mean([]) -> ZeroDivisionError."
+        },
+        {
+          "id": 2,
+          "description": "can_access changed from `and` to `or`, allowing non-admins in the same tenant and admins across tenants (tenant isolation breach).",
+          "file": "batch.py",
+          "line": 7,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "README.md:1 contract states \"Only administrators in the document's tenant may access it\" \u2014 a conjunction. The diff changed the operator to `or`, so `can_access('user','tenant-a','tenant-a')` and `can_access('admin','tenant-a','tenant-b')` both return True. This is the function that enforces the trust boundary for document access.",
+          "evidence": "batch.py:7 `return role == \"admin\" or tenant_id == document_tenant`; README.md:1 requires admin AND same tenant. Trigger inputs: ('user','tenant-a','tenant-a') -> True; ('admin','tenant-a','tenant-b') -> True."
+        }
+      ],
+      "declared_verdicts": [
+        {
+          "path": "batch.py",
+          "lines_read": 7,
+          "verdict": "has_findings",
+          "n_findings": 2
+        }
+      ]
+    },
+    {
+      "run": "after2",
+      "elapsed_s": 57.862,
+      "tool_calls": 4,
+      "tool_interval_sum_s": 0.021,
+      "generation_intervals": 3,
+      "generation_interval_sum_s": 50.512,
+      "stop_reason": null,
+      "issues": [
+        {
+          "id": 1,
+          "description": "`mean([])` now raises ZeroDivisionError because the empty-input guard was removed; README requires empty batches to return 0.",
+          "file": "batch.py",
+          "line": 4,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "The diff explicitly deletes `if not values: return 0` from `mean`. README.md (the repository contract) states \"Empty batches must return 0.\" With the guard gone, `sum([])/len([])` divides by zero, breaking the documented batch-statistics contract on the empty-batch path.",
+          "evidence": "batch.py:3-4 reads: `def mean(values):\\n    return sum(values) / len(values)`. README.md: \"Empty batches must return 0. Only administrators in the document's tenant may access it.\" Trigger: `mean([])` -> `ZeroDivisionError: division by zero`."
+        },
+        {
+          "id": 2,
+          "description": "`can_access` now grants access with `or`, so an admin outside the tenant OR any non-admin inside the tenant is allowed; this breaks tenant isolation.",
+          "file": "batch.py",
+          "line": 7,
+          "severity": "high",
+          "confidence": "HIGH",
+          "rationale": "The diff changes `return role == \"admin\" and tenant_id == document_tenant` to `... or ...`. README.md defines the trust boundary: \"Only administrators in the document's tenant may access it.\" The `or` grants access to (a) any admin regardless of tenant and (b) any role that matches the tenant, enabling cross-tenant admin access and unauthorized non-admin access within a tenant.",
+          "evidence": "batch.py:6-7 reads: `def can_access(role, tenant_id, document_tenant):\\n    return role == \"admin\" or tenant_id == document_tenant`. Triggers: `can_access(\"admin\", \"t1\", \"t2\")` -> True (cross-tenant admin), `can_access(\"viewer\", \"t1\", \"t1\")` -> True (non-admin same tenant). README.md: \"Only administrators in the document's tenant may access it.\""
+        }
+      ],
+      "declared_verdicts": [
+        {
+          "path": "batch.py",
+          "lines_read": 7,
+          "verdict": "has_findings",
+          "n_findings": 2
+        }
+      ]
+    }
+  ],
+  "deterministic_runaway": {
+    "before_virtual_seconds": 2000,
+    "after_virtual_seconds": 490,
+    "before_reads": 200,
+    "after_reads": 48,
+    "finding_preserved": true,
+    "after_incomplete": true
+  }
+}

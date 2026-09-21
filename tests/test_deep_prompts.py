@@ -194,7 +194,8 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
     assert "Do NOT review files from other stacks" not in prompt
     # M12: no skill token may appear in the native structural prompt.
     assert "/beagle-" not in prompt and "beagle" not in prompt.lower()
-    assert str(tmp_path / "out.md") in prompt
+    assert "Return only the JSON object" in prompt
+    assert "Do not write review files" in prompt
 
 
 def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> None:

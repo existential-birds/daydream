@@ -432,6 +432,22 @@ def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
     return sum(sizes) + max(len(sizes) - 1, 0)
 
 
+def inline_context_file(path: Path, budget_bytes: int = 4096) -> str | None:
+    """Inline a whole small shared artifact; fall back to its pointer otherwise.
+
+    These are host-selected context artifacts, never source-read receipts. A
+    bounded read avoids allocating large files before deciding to use a pointer.
+    """
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(budget_bytes + 1)
+        if len(raw) <= budget_bytes:
+            return raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
+    return None
+
+
 def truncate_utf8_to_budget(text: str, budget_bytes: int, marker: str = "") -> str:
     """Byte-exact prefix of ``text`` that, with ``marker``, fits ``budget_bytes``.
 

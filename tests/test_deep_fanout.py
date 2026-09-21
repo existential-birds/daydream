@@ -68,6 +68,32 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     return diff, intent, alts
 
 
+async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
+    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.deep.artifacts import per_stack_records_path
+
+    issue = {"id": 1, "file": "api.py", "line": 2, "description": "empty input divides by zero",
+             "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
+
+    async def checkpoint(*args: Any, **kwargs: Any) -> Any:
+        return {"issues": [issue], "verdicts": [
+            {"path": "api.py", "lines_read": 10, "verdict": "clean", "n_findings": 0},
+        ]}, None, "wall_budget_exceeded"
+
+    monkeypatch.setattr("daydream.phases.run_agent", checkpoint)
+    diff, intent, alts = _mk_context_files(tmp_path)
+    _, failures = await phase_per_stack_reviews(
+        _review_backend(), make_work(tmp_path), _mk_stacks()[:1], diff_path=diff,
+        intent_path=intent, alternatives_path=alts, allow_standalone=True,
+    )
+    assert "python" in failures
+    saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
+    assert saved["issues"][0]["description"] == issue["description"]
+    assert saved["incomplete"] is True
+    assert saved["verdicts"] == []
+
+
 def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
     steps = [
         step

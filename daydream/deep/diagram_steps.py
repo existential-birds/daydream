@@ -58,6 +58,7 @@ from daydream.prompt_budget import (
     truncate_utf8_to_budget,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.review_budget import review_deadline
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -482,6 +483,7 @@ async def _diagram_turn(
                 continuation=continuation,
                 read_only=True,
                 wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                deadline=review_deadline(discovery=False),
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=ctx.run_context,

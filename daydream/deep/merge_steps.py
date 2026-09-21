@@ -40,6 +40,12 @@ from daydream.phases import (
     phase_supervise_review,
     phase_suppression_review,
 )
+from daydream.review_budget import (
+    clear_review_budget_stop,
+    record_review_budget_stop,
+    render_review_warnings,
+    review_warnings,
+)
 from daydream.supervision import RuleBasedSupervisor, apply_findings_verdicts, revise_finding_fields
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, get_current_recorder, phase_scope
 from daydream.ui import print_error, print_info, print_stage_progress, print_warning
@@ -291,17 +297,20 @@ def _rewrite_stack_records(
         # regardless so every worker -- merge resume, the coverage evidence
         # path -- reads the same shape whether or not arbitration fired.
         verdicts: list[Any] = []
+        incomplete = False
         if dest_path.is_file():
             try:
                 existing = json.loads(dest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 existing = None
             if isinstance(existing, dict):
+                incomplete = existing.get("incomplete") is True
                 existing_verdicts = existing.get("verdicts", [])
                 if isinstance(existing_verdicts, list):
                     verdicts = existing_verdicts
         dest_path.write_text(
-            json.dumps({"issues": stack_records, "verdicts": verdicts}, indent=2)
+            json.dumps({"issues": stack_records, "verdicts": verdicts,
+                        **({"incomplete": True} if incomplete else {})}, indent=2)
         )
 
 
@@ -646,6 +655,8 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     aborting the run: the completed stacks' verdicts are consolidated into a
     partial ``merged-items.json`` + failure record, and the run stops resumably
     (``Stop(1)``) so a relaunch picks up without re-reviewing completed stacks.
+    Budget exhaustion uses the same salvage but continues to publish the partial
+    report successfully, with explicit incomplete-coverage diagnostics.
     """
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
@@ -697,14 +708,20 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 allow_standalone=ctx.allow_standalone_artifacts,
             )
         except CrossStackMergeError as exc:
-            phase.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
+            phase.finish(
+                LifecycleStatus.PARTIAL if exc.budget_reason else LifecycleStatus.FAILED,
+                LifecycleReasonCode.DOMAIN_FAILURE,
+            )
+            if exc.budget_reason:
+                record_review_budget_stop(dd, "Cross-stack merge", exc.budget_reason)
             _salvage_merge_failure(ctx, exc)
-            return Stop(1)
+            return None if exc.budget_reason else Stop(1)
         # Issue #361: a successful re-merge supersedes any stale salvage record, so
         # the structured ``MERGE_FAILURE_KEY`` entry is cleared here -- otherwise a
         # later ``--start-at merge``/``fix`` resume still warns 'merged results are
         # PARTIAL' even though the cross-stack merge has since succeeded.
         _clear_merge_failure(dd)
+        clear_review_budget_stop(dd, "Cross-stack merge")
     return None
 
 
@@ -726,12 +743,11 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     """
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
-    print_error(
-        console,
-        "Cross-stack merge failed",
-        f"{exc}; consolidating surviving per-stack records into a partial report. "
-        "Relaunch with --start-at fix to resume.",
-    )
+    message = f"{exc}; consolidating surviving per-stack records into a partial report."
+    if exc.budget_reason:
+        print_warning(console, message + " Continuing to review publication.")
+    else:
+        print_error(console, "Cross-stack merge failed", message + " Relaunch with --start-at fix to resume.")
 
     # Build the partial canonical report from the surviving records via the
     # single-stack write helper (recoverability comes from the ``__merge__``
@@ -824,6 +840,12 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     # section is appended here, once the report exists, to both the canonical
     # report and its deep-dir copy.
     _append_coverage_section(dd, merged_report, merged_report_path(dd))
+
+    warning = render_review_warnings(review_warnings(dd))
+    if warning:
+        for report in (merged_report, merged_report_path(dd)):
+            if report.exists() and warning not in report.read_text():
+                report.write_text(warning + "\n\n" + report.read_text())
 
     deep_state.merged_report = merged_report
     deep_state.items_file = items_file
@@ -958,6 +980,7 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
             ctx.config,
             findings_items,
             run_info=run_info.markdown,
+            review_warnings=review_warnings(deep_state.dd),
             renderers=resolve_review_renderers(ctx.registry),
             diagrams=diagrams,
             auth=ctx.github_execution.auth,
@@ -995,6 +1018,9 @@ async def _step_supervise(ctx: FlowContext) -> None:
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
 
     report = render_report(kept)
+    warning = render_review_warnings(review_warnings(deep_state.dd))
+    if warning:
+        report = warning + "\n\n" + report
     held_section = render_held_section(held)
     if held_section:
         report = report.rstrip() + "\n\n" + held_section + "\n"
@@ -1030,11 +1056,14 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         print_warning(console, run_info.diagnostic)
 
     items_file: Path = deep_state.items_file
-    pr_kwargs = (
+    pr_kwargs: dict[str, Any] = (
         {"pr_number": ctx.config.pr_number}
         if ctx.config.pr_number is not None
         else {}
     )
+    warnings = review_warnings(deep_state.dd)
+    if warnings:
+        pr_kwargs["review_warnings"] = warnings
     outcome = await post_review_to_pr_from_report(
         ctx.work.repo,
         items_file,

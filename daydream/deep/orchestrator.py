@@ -66,6 +66,7 @@ from daydream.extensions.api import FlowStep
 from daydream.flows.engine import BackendFactory, FlowContext, run_flow
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import PushReceipt
+from daydream.review_budget import review_deadline_scope
 from daydream.review_profile import Pipeline
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import DaydreamRunFlow
@@ -927,7 +928,8 @@ async def _run_review_spine(
         # subsequent --start-at resumes can find the artifacts they need.
         #
         # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
-        exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
+        with review_deadline_scope(ctx.pipeline().review_wall_budget_s):
+            exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code

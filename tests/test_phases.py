@@ -2066,8 +2066,10 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     assert failures == {}
     assert STRUCTURE_STACK_NAME in results
     structural_prompt = next(p for p in backend.prompts if "structural" in p)
-    assert str(exploration_dir / "summary.md") in structural_prompt
-    assert str(exploration_dir / "affected_files.md") in structural_prompt
+    assert "# Exploration Summary" in structural_prompt
+    assert "# Affected Files" in structural_prompt
+    assert "api/main.py" in structural_prompt
+    assert "do not re-read these files" in structural_prompt
 
 
 @pytest.mark.asyncio

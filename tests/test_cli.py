@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.atif import validate as atif_validate
@@ -934,6 +935,32 @@ def test_signal_flushes_all_runner_recorders(
         "repo view --json nameWithOwner -q .nameWithOwner",
         "api /user",
     ]
+
+
+def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from daydream import cli
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])])
+
+    monkeypatch.setattr(anyio, "run", interrupted)
+    with pytest.raises(SystemExit) as caught:
+        cli.main([str(tmp_path), "--non-interactive"])
+    assert caught.value.code == 130
+
+
+def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from daydream import cli
+
+    failure = BaseExceptionGroup("task group", [KeyboardInterrupt(), RuntimeError("sibling failed")])
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(anyio, "run", interrupted)
+    with pytest.raises(BaseExceptionGroup) as caught:
+        cli.main([str(tmp_path), "--non-interactive"])
+    assert caught.value is failure
 
 
 

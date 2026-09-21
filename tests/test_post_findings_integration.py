@@ -1399,3 +1399,25 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
         assert secret not in message
     finally:
         payload_path.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("has_finding", [False, True])
+def test_partial_review_posts_warning_without_approval_or_resolving_prior_findings(
+    fake_gh: FakeGh, tmp_path: Path, has_finding: bool,
+) -> None:
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_OLD"], viewer_did_author=True,
+    )
+    findings = [_finding("b" * 64, path="a.py", line=1, placement="inline", title="Survivor", severity="low")]
+    artifact = _write_artifact(tmp_path / "findings.json", findings if has_finding else [])
+    data = json.loads(artifact.read_text())
+    data["review_warnings"] = ["Alternatives: wall_budget_exceeded"]
+    artifact.write_text(json.dumps(data))
+    assert cli_main(_post_argv(artifact) + ["--approve-on-clean"]) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert "incomplete" in posts[0].payload["body"].lower()
+    assert "Alternatives: wall_budget_exceeded" in posts[0].payload["body"]
+    assert len(posts[0].payload["comments"]) == int(has_finding)
+    assert not any("minimizeComment" in call.payload.get("query", "") for call in fake_gh.calls("POST", "graphql"))
