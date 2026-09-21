@@ -472,7 +472,7 @@ response deadline; the second call does not receive a fresh investigation budget
 
 Eligibility requires a diff no larger than 64 KiB, at most ten assigned files,
 and complete assigned text no larger than 192 KiB. Missing, deleted, binary,
-unsafe or oversized source packets fall back to the existing reviewer. Custom
+unsafe, schema-incompatible or oversized source packets fall back to the existing reviewer. Custom
 review strategies retain their existing path. Large packets travel through Pi's
 standard input to avoid operating-system argument-size limits.
 

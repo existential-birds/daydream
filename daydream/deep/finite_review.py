@@ -159,7 +159,7 @@ def prepare_finite_review(
         sources: list[Source] = []
         remaining = MAX_SOURCE_BYTES
         for path in files:
-            source = _source(repo, path, remaining, git_observed=True)
+            source = _source(repo, path, remaining)
             if source.path != path:
                 return None
             remaining -= len(source.text.encode())
