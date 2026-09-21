@@ -459,6 +459,28 @@ The fix-phase anti-degradation quality gate prevents a fix from degrading a file
 
 The gate is fail-open. A flagged file surfaces as a warning plus a manifest record. It never aborts a run. Daydream clamps the thresholds to finite non-negative numbers. An invalid value degrades to the named default.
 
+### Review budgets
+
+Intent analysis, alternatives, per-stack review, and cross-stack merge each have a
+60-minute wall-clock limit. Fix turns retain their 30-minute limit. These are
+per-agent limits, not an overall workflow deadline.
+
+When a review agent exhausts its time or tool-call budget, Daydream continues with
+completed reviewers' findings and marks the report **Review incomplete**. If the
+merge agent times out, the host consolidates surviving stack records. Incomplete
+reviews still produce a `--findings-out` artifact and exit successfully; the poster
+publishes a comment even when there are no findings. It never approves an
+incomplete review or resolves prior findings absent from that partial result.
+Optional arbiter, suppression, and supervisor budget stops also mark the review
+incomplete and preserve each stage's existing missing-verdict policy. Ordinary
+backend errors and malformed merge responses retain their failure behavior.
+
+The findings artifact carries optional `review_warnings`. Update both the analyze
+and posting jobs to the same Daydream revision. Allow enough CI job time for the
+serial phases and artifact upload: a 60-minute job timeout can kill the process
+before its 60-minute review agent limit is handled. An external job cancellation
+cannot use the graceful budget-exhaustion path.
+
 ### Retry recovery
 
 A retry may spend only the recovery budget it was given, never the invocation's useful-work time. The allowance is a **cumulative retry-overhead budget**, measured in seconds. It is **additional to the invocation deadline** (the per-turn wall budget), it starts at the **first retryable failure** of an invocation, and it then charges every backoff sleep plus the backend time of every retry against itself. A spent allowance re-raises the current failure without dispatching again. Because it only bounds retry overhead, it **never caps** an otherwise healthy invocation: a 300 s allowance does not shorten a healthy 1800 s fix turn, since no retryable failure ever activates it. The retry decides its delay from a server `Retry-After` hint when one is present (numeric seconds only), otherwise from full jitter whose per-failure cap is the smaller of the configured maximum delay and the remaining allowance/deadline — so the allowance is **clamped** by the invocation deadline and by the fix file-group budget rather than re-basing either one.

@@ -76,14 +76,14 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     assert "alternatives" in phases, phases
 
 
-async def test_budget_truncated_wonder_fails_loudly(
+async def test_budget_truncated_wonder_keeps_review_results(
     multi_stack_target: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """A budget-truncated wonder pass fails the run instead of degrading to []."""
+    """A budget stop preserves completed stack findings and finishes the review."""
     from daydream.runner import run
 
     silence(monkeypatch)
@@ -93,13 +93,15 @@ async def test_budget_truncated_wonder_fails_loudly(
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
-        with pytest.raises(RuntimeError, match="budget"):
-            await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        assert await run(make_config(
+            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="review",
+        )) == 0
 
     run_root = multi_stack_target / ".daydream"
     assert any("budget" in str(v) for v in _scan_trajectory_extra(run_root, traj, "stop_reason"))
     alts = run_root / "deep" / "alternatives.json"
-    assert not alts.exists() or json.loads(alts.read_text()) != []
+    assert json.loads(alts.read_text()) == []
+    assert "incomplete" in (multi_stack_target / ".review-output.md").read_text().lower()
 
 
 class _WonderRendezvousStub(StubBackend):

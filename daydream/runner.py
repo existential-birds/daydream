@@ -1341,6 +1341,7 @@ def _emit_findings_from_items(
     items: list[dict[str, Any]],
     *,
     diagrams: dict[str, Any] | None = None,
+    review_warnings: tuple[str, ...] = (),
     run_info: str,
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
@@ -1351,7 +1352,7 @@ def _emit_findings_from_items(
     parsed = pr_review.parsed_issues_from_items(items)
     return _write_findings_for_parsed(
         target_dir, config, parsed, diagrams=diagrams, auth=auth,
-        run_info=run_info, renderers=renderers,
+        run_info=run_info, renderers=renderers, review_warnings=review_warnings,
     )
 
 
@@ -1362,6 +1363,7 @@ def _write_findings_for_parsed(
     *,
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
+    review_warnings: tuple[str, ...] = (),
     run_info: str,
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
@@ -1401,6 +1403,7 @@ def _write_findings_for_parsed(
         pr,
         parsed,
         run_info=run_info,
+        review_warnings=review_warnings,
         renderers=renderers,
         kind=kind,
         diagrams=diagrams,

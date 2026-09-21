@@ -53,6 +53,7 @@ from daydream.extensions import (
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
 from daydream.pr_comment_renderer import render_run_info
 from daydream.repository_paths import valid_repository_file_path
+from daydream.review_budget import render_review_warnings
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import model_facing_levels, normalize_severity
 from daydream.ui import print_error, print_info, print_success, print_warning
@@ -325,6 +326,7 @@ async def post_review_to_pr_from_report(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -372,7 +374,7 @@ async def post_review_to_pr_from_report(
         )
         return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
-    if not issues and not approve_on_clean and not (diagram_blocks and diagram_blocks.strip()):
+    if not issues and not approve_on_clean and not review_warnings and not (diagram_blocks and diagram_blocks.strip()):
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
     return await _post(
@@ -385,6 +387,7 @@ async def post_review_to_pr_from_report(
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
         diagram_blocks=diagram_blocks,
+        review_warnings=review_warnings,
         run_context=run_context,
         auth=auth,
     )
@@ -1342,6 +1345,7 @@ class ClassifiedReviewPlan:
     run_info: str
     renderers: ReviewRenderers
     diagram_blocks: str | None
+    review_warnings: tuple[str, ...] = ()
 
     @classmethod
     def from_classified(
@@ -1353,6 +1357,7 @@ class ClassifiedReviewPlan:
         run_info: str,
         renderers: ReviewRenderers,
         diagram_blocks: str | None = None,
+        review_warnings: tuple[str, ...] = (),
     ) -> ClassifiedReviewPlan:
         """Snapshot a mutable classified review after the caller authorizes it."""
         return cls(
@@ -1372,6 +1377,7 @@ class ClassifiedReviewPlan:
             run_info=run_info,
             renderers=renderers,
             diagram_blocks=diagram_blocks,
+            review_warnings=review_warnings,
         )
 
 
@@ -1620,6 +1626,7 @@ def _build_payload_for_event(
     run_info: str,
     renderers: ReviewRenderers,
     diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
 ) -> ReviewPayload:
     """Render a final review payload for a caller-authorized event.
 
@@ -1694,6 +1701,8 @@ def _build_payload_for_event(
     summary_body = _render_summary(summary_ctx, renderers)
 
     body_chunks: list[str] = []
+    if review_warnings:
+        body_chunks.append(render_review_warnings(review_warnings))
     if approved:
         body_chunks.append("✅ **Deep review passed with no high/medium findings.**")
     body_chunks.append(summary_body)
@@ -1783,6 +1792,7 @@ def post_classified_review(
         run_info=plan.run_info,
         renderers=plan.renderers,
         diagram_blocks=plan.diagram_blocks,
+        review_warnings=plan.review_warnings,
     )
     review_result = transport.post_review(plan.pr, review_payload)
     posted_review = review_result.review_url is not None
@@ -1847,6 +1857,7 @@ async def _post(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -1863,6 +1874,7 @@ async def _post(
     if (
         classified.is_empty()
         and not approve_on_clean
+        and not review_warnings
         and not (diagram_blocks and diagram_blocks.strip())
     ):
         print_info(
@@ -1877,7 +1889,7 @@ async def _post(
         f"{len(classified.file_level)} file-level, "
         f"{len(classified.body_only)} folded into body"
     )
-    clean = _is_clean_review(classified, approve_on_clean)
+    clean = not review_warnings and _is_clean_review(classified, approve_on_clean)
     event_note = " — will post event: APPROVE" if clean else ""
     print_info(console, f"PR #{pr.number}: {summary}{event_note}")
 
@@ -1901,6 +1913,7 @@ async def _post(
         run_info=run_info,
         renderers=renderers,
         diagram_blocks=diagram_blocks,
+        review_warnings=review_warnings,
     )
     result = post_classified_review(
         plan,
@@ -2746,7 +2759,7 @@ def post_findings_from_artifact(
         return 1
 
     plan = partition([f.fingerprint for f in artifact.findings], prior)
-    if plan.stale:
+    if plan.stale and not artifact.review_warnings:
         resolved, failed = resolve_threads(target_dir, plan.stale, auth=auth)
         print_info(console, f"Stale findings minimized: {resolved} succeeded, {failed} failed.")
 
@@ -2772,7 +2785,7 @@ def post_findings_from_artifact(
     # without this a new low-only batch could post APPROVE over the bot's own
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
-    can_approve = approve_on_clean and not any(
+    can_approve = approve_on_clean and not artifact.review_warnings and not any(
         _finding_blocks_approval(
             finding.severity,
             finding.location_distrust,
@@ -2782,7 +2795,7 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve and diagram_blocks is None:
+    if classified.is_empty() and not can_approve and diagram_blocks is None and not artifact.review_warnings:
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
@@ -2798,6 +2811,7 @@ def post_findings_from_artifact(
         ),
         renderers=renderers,
         diagram_blocks=diagram_blocks,
+        review_warnings=artifact.review_warnings,
     )
     result = post_classified_review(
         submission_plan,

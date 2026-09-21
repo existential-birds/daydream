@@ -1293,6 +1293,27 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     assert captured["plan"].diagram_blocks == blocks
 
 
+@pytest.mark.asyncio
+async def test_incomplete_live_review_posts_even_without_findings_and_cannot_approve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
+) -> None:
+    merged = tmp_path / "merged-items.json"
+    merged.write_text(json.dumps({"items": []}))
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
+    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
+    warnings = ("Alternatives: wall_budget_exceeded",)
+    status = await pr_review.post_review_to_pr_from_report(
+        tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+        post=True, approve_on_clean=True, review_warnings=warnings,
+        renderers=BUILTIN_RENDERERS, run_info="test run",
+    )
+    assert status == pr_review.PostStatus.POSTED
+    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
+    assert captured["plan"].review_warnings == warnings
+
+
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
     """Write *path* under *repo*, commit it, and return the new HEAD SHA."""
     file_path = repo / path

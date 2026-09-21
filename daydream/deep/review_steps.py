@@ -42,6 +42,7 @@ from daydream.phases import (
     phase_understand_intent,
 )
 from daydream.prompt_budget import prepare_sanctioned_inputs
+from daydream.review_budget import ReviewBudgetExceeded, record_review_budget_stop, review_budget_path
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -254,19 +255,30 @@ async def _step_intent(ctx: FlowContext) -> None:
     # the intent phase, so downstream reviewers can include the precedence rule.
     # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
     deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
-    async with phase_scope(DaydreamPhase.INTENT):
-        deep_state.intent_summary = await phase_understand_intent(
-            ctx.backend_for("intent"),
-            work,
-            deep_state.diff_path,
-            deep_state.log,
-            deep_state.branch,
-            exploration_dir=deep_state.exploration_dir,
-            pr_description=pr_description,
-            diff_text=_ttt_diff_text(ctx),
-            strategy=ctx.strategy("intent"),
-            run_context=ctx.run_context,
-        )
+    review_budget_path(deep_state.dd).unlink(missing_ok=True)
+    async with phase_scope(DaydreamPhase.INTENT) as phase:
+        try:
+            deep_state.intent_summary = await phase_understand_intent(
+                ctx.backend_for("intent"),
+                work,
+                deep_state.diff_path,
+                deep_state.log,
+                deep_state.branch,
+                exploration_dir=deep_state.exploration_dir,
+                pr_description=pr_description,
+                diff_text=_ttt_diff_text(ctx),
+                strategy=ctx.strategy("intent"),
+                run_context=ctx.run_context,
+            )
+        except ReviewBudgetExceeded as exc:
+            phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
+            record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
+            print_warning(console, f"{exc}; continuing with incomplete intent context.")
+            deep_state.intent_summary = (
+                "Intent analysis did not finish within its budget. Infer intent from the diff.\n"
+                f"PR description: {pr_description or '(unavailable)'}\n"
+                f"Branch: {deep_state.branch}\nCommit log:\n{deep_state.log}"
+            )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
     intent_p = _intent_path(deep_state.dd)
@@ -284,17 +296,23 @@ async def _wonder(ctx: FlowContext) -> None:
         alt_issues: list[dict[str, Any]] = []
         print_dim(console, "Skipping alternatives -- trivial diff")
     else:
-        async with phase_scope(DaydreamPhase.ALTERNATIVES):
-            alt_issues = await phase_alternative_review(
-                ctx.backend_for("wonder"),
-                ctx.work,
-                deep_state.diff_path,
-                intent_summary,
-                exploration_dir=deep_state.exploration_dir,
-                diff_text=_ttt_diff_text(ctx),
-                strategy=ctx.strategy("alternatives"),
-                run_context=ctx.run_context,
-            )
+        async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
+            try:
+                alt_issues = await phase_alternative_review(
+                    ctx.backend_for("wonder"),
+                    ctx.work,
+                    deep_state.diff_path,
+                    intent_summary,
+                    exploration_dir=deep_state.exploration_dir,
+                    diff_text=_ttt_diff_text(ctx),
+                    strategy=ctx.strategy("alternatives"),
+                    run_context=ctx.run_context,
+                )
+            except ReviewBudgetExceeded as exc:
+                phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
+                record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
+                print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
+                alt_issues = []
 
     alts_p = _alternatives_path(deep_state.dd)
     alts_p.write_text(json.dumps(alt_issues, indent=2))
