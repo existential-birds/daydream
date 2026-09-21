@@ -990,11 +990,6 @@ def build_resolution_map(
     return cmap
 
 
-# ---------------------------------------------------------------------------
-# Content-addressed dedupe + collision quarantine + import ledger (Task 8)
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class DedupeResult:
     """Outcome of one :func:`dedupe_admitted` pass over ``stage/runs/`` (M7/M8/M9)."""
@@ -1718,10 +1713,6 @@ def build_import_ledger(
     return ledger
 
 
-# ---------------------------------------------------------------------------
-# Publication: additive batches + remote resume ledger (Task 9)
-# ---------------------------------------------------------------------------
-
 _UPLOAD_ATTEMPTS = 6
 _UPLOAD_BASE_DELAY_S = 2.0
 _UPLOAD_MAX_DELAY_S = 120.0
@@ -2241,11 +2232,6 @@ class HfHubClient:
                 redact_text(f"atomic commit returned invalid commit OID for {self._repo_id}")
             )
         return oid
-
-
-# ---------------------------------------------------------------------------
-# Finalization + verify-before-success cycle (Task 10, M18/M19/M20)
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)

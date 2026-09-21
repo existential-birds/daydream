@@ -45,10 +45,6 @@ REASON_CODE_IMPORT_DECISIVE_PER_FINDING = "import_decisive_per_finding"
 REASON_CODE_IMPORT_RUN_LEVEL_ONLY = "import_run_level_only"
 REASON_CODE_IMPORT_UNREDACTABLE_METADATA = "import_unredactable_metadata"
 
-# ---------------------------------------------------------------------------
-# Curation-id derivation (Task 3)
-# ---------------------------------------------------------------------------
-
 CURATION_ID_RE = re.compile(r"cur-[0-9a-f]{16}")
 
 
