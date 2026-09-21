@@ -435,7 +435,25 @@ retain incomplete-review warnings; resume preserves prior alternatives and the
 structural design responsibility. This removes a duplicated investigation without
 raising limits or dropping design review.
 
-Existing wall/tool limits, finalization reserves and honest incomplete-coverage warnings remain in force.
+An isolated replay of the same head/base with Pi 0.86.1 and the same OpenRouter
+model confirmed that removing advisory stages alone was insufficient: all three
+primary reviewers still reached their wall limits. Their effective user prompts
+contained the stopping rules, but Pi's system addendum retained unconditional
+search-first advice and a fixed, inaccurate tool allowance. The model repeatedly
+reopened dismissed candidates and speculated about planted bugs. This is direct
+evidence of non-convergence, not proof that prompt priority was its only cause.
+Pi now receives the computed investigation allowance and stopping contract in
+its system addendum for bounded review calls, including repository-scoped search
+and explicit closure of resolved candidates. The fixed tool-count hint and
+unconditional search-first instruction are removed. Fix calls and explicit
+reasoning-effort settings retain their existing behavior.
+
+That replay nevertheless completed publication with exit status zero: findings,
+trajectory and diagnostic bundle were written, the scan reported zero blocking
+matches and one advisory diff match, and incomplete-review warnings survived.
+
+Existing wall/tool limits, finalization reserves and honest incomplete-coverage
+warnings remain in force.
 Prompt and routing tests establish these contracts; they do not by themselves
 establish model convergence or equivalent recall. Evidence retention remains
 bounded, and this change does not promise that every review completes before a

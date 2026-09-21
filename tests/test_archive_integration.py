@@ -31,6 +31,7 @@ from daydream.trajectory import (
     now_iso,
 )
 from tests.harness.config import TARGET_HUB_KEY_CONFIG
+from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
 
@@ -66,7 +67,10 @@ async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
     target = shard_many_python_target
     backend = _SecretFailureBackend(target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
-    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True)) == 0
+    assert await run(RunConfig(
+        target=str(target), cleanup=False, non_interactive=True,
+        review_profile=independent_exploration_profile(),
+    )) == 0
     assert backend.failures == 1
     roots = list((target / ".daydream/runs").glob("*/trajectory.json"))
     assert len(roots) == 1

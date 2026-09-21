@@ -729,6 +729,7 @@ async def run_agent(
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
     evidence = ReviewEvidence(output_schema) if review_limits is not None else None
+    review_instructions: str | None = None
     hard_deadline = deadline
     if review_limits is not None:
         started = clock.monotonic()
@@ -748,10 +749,11 @@ async def run_agent(
         tool_call_budget = min(tool_call_budget, review_limits.tool_calls) if tool_call_budget is not None else (
             review_limits.tool_calls
         )
-        prompt += (
-            f"\n\nInvestigation allowance: at most {investigation_allowance:g} seconds and "
+        review_instructions = (
+            f"Investigation allowance: at most {investigation_allowance:g} seconds and "
             f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
         )
+        prompt += "\n\n" + review_instructions
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
@@ -769,6 +771,7 @@ async def run_agent(
             sanctioned_inputs=sanctioned_inputs,
             run_context=context,
             review_evidence=evidence,
+            review_instructions=review_instructions,
         )
         if evidence is not None and review_limits is not None and result[2] in {
             "wall_budget_exceeded", "tool_call_budget_exceeded",
@@ -836,6 +839,7 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
+    review_instructions: str | None = None,
     finalization: bool = False,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
@@ -1095,6 +1099,8 @@ async def _run_agent(
                     }
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
+                    if review_instructions and getattr(backend, "supports_review_instructions", False):
+                        execute_kwargs["review_instructions"] = review_instructions
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
                     event_iter = backend.execute(

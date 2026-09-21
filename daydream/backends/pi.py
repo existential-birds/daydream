@@ -166,12 +166,12 @@ def _configured_pi_model(
 # every turn.
 _PI_SYSTEM_PREAMBLE = """\
 You are an efficient coding agent operating under a strict tool-call budget.
-You have a LIMITED number of tool calls per turn (typically 50). Every call is
-precious — make each one count.
+Honor the invocation's time and tool allowance. Each call must resolve a
+specific unanswered question; the allowance is a ceiling, not a target.
 
 WORK STRATEGY:
-- Search before you read. Use grep/find/ls to map relevant locations before
-  opening any file. Prefer one targeted grep over three sequential reads.
+- Use supplied exact file paths and diff context directly. When a location is
+  unknown, use targeted grep/find/ls to locate it before opening files.
 - Batch related reads. Don't read files one at a time in a loop when a single
   grep would surface every relevant location.
 - Read the diff first. If a diff file or git output is in your context, start
@@ -450,6 +450,7 @@ class PiBackend:
     """
 
     supports_finalization = True
+    supports_review_instructions = True
     concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
     def __init__(
@@ -514,6 +515,7 @@ class PiBackend:
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
+        review_instructions: str | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via the Pi CLI and yield unified events.
 
@@ -656,6 +658,19 @@ class PiBackend:
         # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
         system_prompt = _PI_FINALIZATION_PREAMBLE if finalization else _PI_SYSTEM_PREAMBLE
+        if review_instructions and not finalization:
+            system_prompt += (
+                "\n\nBOUNDED REPOSITORY REVIEW:\n" + review_instructions
+                + "\nKeep searches repository-scoped to the working directory and assigned "
+                "files or their directly relevant dependencies. Do not search filesystem "
+                "roots, host caches, or unrelated repositories. Use explicitly supplied "
+                "review artifacts at their exact paths. Do not assume a planted defect "
+                "or hidden evaluation requirement. Once a candidate is resolved, do not reopen it without new "
+                "contradictory evidence. After covering the assigned changes and resolving "
+                "concrete candidates, emit the requested result immediately; an empty "
+                "findings result is valid. Do not spend remaining time reconsidering "
+                "closed candidates or searching for a reason to avoid an empty result."
+            )
         args.extend([
             "--system-prompt" if finalization else "--append-system-prompt",
             system_prompt,

@@ -32,7 +32,7 @@ from daydream.trajectory import (
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
-from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
 
@@ -616,7 +616,7 @@ async def test_complete_overlapping_deep_run_timing_completeness(
 
     assert await run(RunConfig(
         target=str(target), cleanup=False, non_interactive=True,
-        review_profile=independent_alternatives_profile(),
+        review_profile=independent_exploration_profile(independent_alternatives_profile()),
     )) == 0
     assert backend.finished == {"wonder", "review"}
     assert not any("Fix this issue" in call["prompt"] for call in backend.calls)
@@ -746,6 +746,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 cleanup=False,
                 output_mode="loop",
                 run_eval=True,
+                review_profile=independent_exploration_profile(),
                 pr_number=no_ci_remote.pr_number,
                 pr_repo=no_ci_remote.base_repository,
             )

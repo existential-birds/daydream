@@ -21,3 +21,16 @@ def independent_alternatives_profile() -> ResolvedProfile:
         strategies["alternatives"], content=strategies["alternatives"].content + "\nCustom independent design policy.",
     )
     return ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")
+
+
+def independent_exploration_profile(
+    resolved: ResolvedProfile | None = None,
+) -> ResolvedProfile:
+    """Request model exploration when testing specialist dispatch and lifecycle."""
+    profile = resolved.profile if resolved is not None else build_default_profile()
+    strategies = dict(profile.strategies)
+    key = "exploration.dependency_trace"
+    strategies[key] = replace(
+        strategies[key], content=strategies[key].content + "\nCustom dependency exploration policy.",
+    )
+    return ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")

@@ -623,10 +623,11 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     # Issue #745: the pre-merge parse-<stack> stage was removed (reviewers emit
     # records directly), so "parse" is no longer a resolved deep phase.
-    expected_phases = {"intent", "wonder", "per_stack_review", "merge", "fix", "test", "verify"}
+    expected_phases = {"intent", "per_stack_review", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
+    assert "wonder" not in captured  # The default design lens shares per_stack_review.
 
 
 def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch) -> None:
