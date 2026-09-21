@@ -51,8 +51,8 @@ from daydream.backends.pi import (
     _pi_retryable_for,
     _render_tool_result,
     _schema_instruction,
-    parse_pi_retry_hint,
 )
+from daydream.retry_policy import parse_message_retry_hint
 from tests.harness.fake_cli_process import BlockingStdout, ImmediateStdout, LimitAwareStdout, blocking_cli_process
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.stub_backend import force_interactive as _force_interactive
@@ -1275,11 +1275,10 @@ def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
         "503 Service Unavailable; retry-after: 30",
         retryable=_pi_retryable_for(category="SERVER_ERROR", message="503 Service Unavailable; retry-after: 30"),
         category=_pi_error_category("503 Service Unavailable; retry-after: 30"),
-        retry_after=parse_pi_retry_hint("503 Service Unavailable; retry-after: 30"),
+        retry_after=parse_message_retry_hint("503 Service Unavailable; retry-after: 30"),
     )
 
     assert error.retry_after == 30.0
-    assert parse_pi_retry_hint("no hint here") is None
 
 
 @pytest.mark.parametrize(

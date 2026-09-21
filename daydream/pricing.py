@@ -6,26 +6,9 @@ renderer to synthesize cost from token counts when a backend (notably Codex)
 does not surface USD cost directly. Anthropic-backed runs use cost values
 already supplied by the Claude SDK and do not pass through this module.
 
-Reverses project decision D-16 ("no synthesis of cost from token prices").
-Refs #65.
-
-Pricing source: OpenAI pricing snapshot, May 2026 (per 1M tokens). Cached-input
-prices for `gpt-5.5-pro`, `gpt-5-codex`, and `gpt-5.3-codex` were not
-published in USD on https://openai.com/api/pricing/ or
-https://developers.openai.com/codex/pricing at build time; those entries fall
-back to the input-token price as a conservative upper bound (slight overcount,
-transparent). `glm-5.2` is priced from the z.ai published rates; the `pi`
-backend reports $0 for it, so its cost is always synthesized here.
-
-The `gpt-5.6-{sol,terra,luna}` rates are from
-https://developers.openai.com/api/docs/pricing (July 2026). Bare `gpt-5.6` is an
-alias routing to `gpt-5.6-sol` and carries the same rate — lookup is exact-match,
-so the alias needs its own entry. Requests over 272K input tokens use the
-published long-context tier for the whole request. `claude-sonnet-5` uses the
-introductory $2/$0.20/$10 rate through 2026-08-31 and the standard
-$3/$0.30/$15 rate from 2026-09-01; archived usage is resolved by its recorded
-timestamp, while provider-reported costs are already persisted verbatim.
-Entries are never removed: archived trajectories still reference retired model ids.
+Lookup is exact-match, so aliases (e.g. bare `gpt-5.6`) need their own entry,
+and archived usage is resolved by its recorded timestamp. Entries are never
+removed: archived trajectories still reference retired model ids.
 
 Exports:
     ModelPrice: dataclass holding input/cached_input/output USD per 1M tokens.

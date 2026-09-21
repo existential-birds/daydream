@@ -996,7 +996,7 @@ class CaseDocument(BaseModel):
     @model_validator(mode="after")
     def _case_id_matches(self) -> "CaseDocument":
         pr_number = self.pull_request.number
-        head = snapshot_head_sha(self.snapshot)
+        head = self.snapshot.original_head_sha
         if head is None:
             raise ValueError("snapshot carries no head SHA to derive case_id")
         expected = case_id_for(pr_number, head)
@@ -1041,13 +1041,6 @@ class CaseDocument(BaseModel):
         if requested is not None and requested != self.pull_request.base.sha:
             raise ValueError("snapshot requested_base_sha must match pull_request.base.sha")
         return self
-
-
-def snapshot_head_sha(
-    snapshot: "SnapshotReady | SnapshotUnreplayable | SnapshotImported",
-) -> str | None:
-    """The 40-hex head SHA of a snapshot, or None when unknown (unreplayable)."""
-    return snapshot.original_head_sha
 
 
 def derive_gold_status(curation: Curation) -> str | None:

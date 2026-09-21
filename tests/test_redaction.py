@@ -642,23 +642,17 @@ def test_redactor_scrubs_indented_and_embedded_headers() -> None:
     "apiKey:\n  nested: opaque-test-only-sentinel",
     '{\n  "apiKey": {\n    "nested": "opaque-test-only-sentinel"\n  }\n}',
     '{"apiKey": {"nested": "opaque-test-only-sentinel"}}',
-])
-def test_redactor_scrubs_multi_line_block_values(text: str) -> None:
-    """Block-style YAML and pretty-printed JSON under a sensitive key are consumed
-    wholesale instead of passing through the line-scoped scan unredacted."""
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-
-
-@pytest.mark.parametrize("text", [
     "text: apiKey: opaque-test-only-sentinel",
     "config: token=opaque-test-only-sentinel",
     '{"description": "use token=opaque-test-only-sentinel here"}',
+    "1apiKey=x",
+    "2token= y",
+    "123secret: z",
+    "1AUTHORIZATION = opaque-test-only-sentinel",
+    '1apiKey: "opaque-test-only-sentinel"',
+    "1apiKey:\n  nested: opaque-test-only-sentinel\n",
 ])
-def test_redactor_scrubs_pairs_nested_inside_non_sensitive_values(text: str) -> None:
-    """A sensitive pair embedded in a non-sensitive pair's value is re-scanned
-    and redacted rather than skipped when the outer pair is consumed."""
+def test_redactor_scrubs_sensitive_key_shapes(text: str) -> None:
     out = redact_structured_text(text)
     assert "opaque-test-only-sentinel" not in out
     assert "[REDACTED_CREDENTIAL]" in out
@@ -816,23 +810,6 @@ def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
     assert "opaque-test-only-sentinel" not in out3
     assert "[REDACTED" in out3
     assert out3.startswith("foo" + seps + "x")
-
-
-@pytest.mark.parametrize("text", [
-    "1apiKey=x",
-    "2token= y",
-    "123secret: z",
-    "1AUTHORIZATION = opaque-test-only-sentinel",
-    '1apiKey: "opaque-test-only-sentinel"',
-    "1apiKey:\n  nested: opaque-test-only-sentinel\n",
-])
-def test_redactor_scrubs_digit_prefixed_sensitive_key_runs(text: str) -> None:
-    """A key run that starts with continuation chars (digits) still gets its
-    sensitive key redacted: the old leftmost-match engine anchored at the
-    first key-START char inside the run (issue #1236 Task 2b Gap 1)."""
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
 
 
 @pytest.mark.parametrize("text", [

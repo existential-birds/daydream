@@ -1809,6 +1809,14 @@ def test_diagram_marker_round_trip() -> None:
     assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
 
 
+def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
+    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
+        calls.append(("minimize", node_id))
+        return True
+
+    return minimize
+
+
 def test_diagram_replacement_post_failure_keeps_prior_comment(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1821,13 +1829,9 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
         lambda *_a, **_k: [PriorDiagramComment("IC_prior", ("sequence",))],
     )
 
-    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
-        calls.append(("minimize", node_id))
-        return True
-
     monkeypatch.setattr(
         "daydream.reconcile.minimize_comment",
-        minimize,
+        _record_minimize(calls),
     )
 
     def fail_post(*_args: Any, **_kwargs: Any) -> Any:
@@ -1862,13 +1866,9 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
         ],
     )
 
-    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
-        calls.append(("minimize", node_id))
-        return True
-
     monkeypatch.setattr(
         "daydream.reconcile.minimize_comment",
-        minimize,
+        _record_minimize(calls),
     )
 
     def post(*_args: Any, **_kwargs: Any) -> dict[str, str]:

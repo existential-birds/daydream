@@ -76,9 +76,8 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, f
     ws = tmp_path / "ws"
     ws.mkdir()
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    assert gi._run_gh_preflight_status(ws).returncode == 0
     assert gi._run_gh_api_user(ws) == {"login": "octocat", "type": "User"}
-    refs = gi._git_ls_remote(ws, "https://github.com/o/r.git")
+    refs = git_ops.git_ls_remote(ws, "https://github.com/o/r.git")
     assert "refs/heads/head" in refs
     ls = fake_gh.command_calls("git ls-remote")[-1]
     joined = " ".join(ls.argv)

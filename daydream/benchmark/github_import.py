@@ -22,7 +22,6 @@ import hashlib
 import json
 import re
 import shutil
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,11 +38,6 @@ from daydream.benchmark.schema import EXTRACTION_VERSION
 from daydream.pr_review import FINDING_MARKER_RE
 
 
-def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
-    """Run ``gh auth status --hostname github.com`` (exit code is the contract)."""
-    return git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"], auth=git_ops.INHERIT_GITHUB_AUTH)
-
-
 def _run_gh_api_user(root: Path) -> dict[str, Any]:
     """Return the authenticated GitHub user record from ``gh api user``."""
     proc = git_ops._run_gh(root, ["api", "user"], auth=git_ops.INHERIT_GITHUB_AUTH)
@@ -53,11 +47,6 @@ def _run_gh_api_user(root: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise git_ops.GitError("gh api user returned a non-object payload")
     return data
-
-
-def _git_ls_remote(root: Path, url: str) -> str:
-    """Run an authenticated ``git ls-remote <url>`` and return the refs text."""
-    return git_ops.git_ls_remote(root, url)
 
 
 class PreflightError(Exception):
@@ -160,7 +149,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     if shutil.which("git") is None or shutil.which("gh") is None:
         raise PreflightError("missing_binary", "git and gh binaries must be reachable")
 
-    status = _run_gh_preflight_status(root)
+    status = git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"], auth=git_ops.INHERIT_GITHUB_AUTH)
     if status.returncode != 0:
         raise PreflightError("not_authenticated", "gh is not authenticated to github.com")
 
@@ -193,7 +182,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
         )
 
     try:
-        _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
+        git_ops.git_ls_remote(root, f"https://github.com/{repo_slug}.git")
     except git_ops.GitError as exc:
         raise PreflightError("git_preflight_failed", str(exc)) from exc
 

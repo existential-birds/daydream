@@ -99,7 +99,6 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
     forked: list[dict[str, Any]] = []
     runs_dir = daydream_dir / RUNS_DIRNAME
 
-    # --- Resolve the run directory ------------------------------------------
     run_dir: Path | None = None
     if session_id:
         # Exact match first, then prefix match on run directory names
@@ -121,7 +120,6 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
             # latest is runs/<session_id>/trajectory.json — parent is the run dir
             run_dir = latest.parent
 
-    # --- Resolve the main and forked trajectories ---------------------------
     if run_dir:
         for path in _run_dir_trajectory_paths(run_dir):
             data = json.loads(path.read_text())
@@ -1270,19 +1268,8 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     dict_items = [item for item in items if isinstance(item, dict)]
     records = dict_items[:_DUPLICATION_INPUT_CAP]
     input_truncated = len(dict_items) > _DUPLICATION_INPUT_CAP
-    # ``RecordDuplicatePair`` carries no back-reference to the item it was built
-    # from, and none of the fields it does carry is a reliable key: ``id`` is
-    # unique only when ``normalize_items`` wrote the artifact (this analyzer
-    # reads whatever a run left on disk, legacy shapes included), and
-    # ``(id, file, description)`` collides worst on the near-identical rows this
-    # axis reports. So the mapping is made exact instead of inferred: ``sources``
-    # is copied verbatim onto ``record_a_source``/``record_b_source`` and is
-    # never otherwise inspected by ``build_record_dedup_candidates``, which makes
-    # it the one channel that can round-trip an index. It is also absent from
-    # that function's sort key -- ``(a_id, b_id, a_uid, b_uid)`` -- so routing
-    # the index through it leaves pair ordering, and therefore every metric and
-    # the ``top`` selection, bit-for-bit unchanged. ``lens`` is read back off the
-    # mapped item, which is where it came from in the first place.
+    # ``sources`` round-trips the item index; ``build_record_dedup_candidates``
+    # never inspects it, so pair ordering is unchanged.
     sources = [str(index) for index in range(len(records))]
     pairs = build_record_dedup_candidates(records, sources, threshold=0.0)
 

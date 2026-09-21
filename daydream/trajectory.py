@@ -1812,18 +1812,6 @@ def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
     return extra
 
 
-#
-# Provider generation drafts stay UNENDED until billing ownership resolves.
-# Immutable provider choice + timing seal at ``message_end`` before tools;
-# each draft ends exactly once at its sealed historical end after late usage.
-# Bounds: 512 drafts / 10 MiB retained choice bytes; overflow drains with
-# structural/unbilled-or-none diagnostics, never invented usage. No age limit
-# rejects the 395.332-second case; terminal/cancel paths drain. Native
-# timestamps are non-bool bounded int ms converted exactly to ns;
-# missing/invalid/reversed evidence falls back explicitly — no clamping, no
-# fake RFC3339. Billing owner closes before export to one of
-# ``unresolved | generation_children | structural_attempt | none`` (decision 5).
-
 MAX_PENDING_GENERATION_DRAFTS = 512
 MAX_RETAINED_CHOICE_BYTES = 10 * 1024 * 1024
 _MAX_NATIVE_UNIX_MS = (2**63 - 1) // 1_000_000

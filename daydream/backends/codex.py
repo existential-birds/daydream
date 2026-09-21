@@ -20,7 +20,6 @@ import threading
 import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -68,11 +67,6 @@ _NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
 _TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
 
 _logger = logging.getLogger(__name__)
-
-
-def _codex_process_exit_message(non_json_lines: list[str], returncode: int) -> str:
-    """Bind codex's captured diagnostics into the shared PROCESS_EXIT message."""
-    return process_exit_message(display="Codex", returncode=returncode, lines=non_json_lines)
 
 
 def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
@@ -1238,7 +1232,7 @@ class CodexBackend:
                 returncode,
                 error_type=CodexError,
                 category="PROCESS_EXIT",
-                build_message=partial(_codex_process_exit_message, non_json_lines),
+                build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=non_json_lines),
             )
             if _pending_result is not None:
                 yield _pending_result
