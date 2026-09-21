@@ -1643,28 +1643,6 @@ def _read_git_blob(repo: Path, oid: str) -> bytes:
     return proc.stdout
 
 
-def _index_mode_for_path(repo: Path, path: str) -> int | None:
-    proc = _run_git(
-        repo,
-        ["ls-files", "--stage", "-z", "--", _literal_pathspec(path)],
-        capture_bytes=True,
-    )
-    if proc.returncode != 0:
-        raise GitError(f"git ls-files --stage failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
-    records = [record for record in proc.stdout.split(b"\0") if record]
-    if not records:
-        return None
-    if len(records) != 1:
-        raise GitError("index contains unresolved entries for a captured path")
-    metadata, separator, raw_path = records[0].partition(b"\t")
-    if not separator or os.fsdecode(raw_path) != path:
-        raise GitError("git returned an unexpected index path")
-    mode, _oid, stage = metadata.decode("ascii").split(" ")
-    if stage != "0":
-        raise GitError("index contains an unresolved entry")
-    return int(mode, 8)
-
-
 def _snapshot_worktree_path(
     repo: Path,
     path: str,
@@ -1672,7 +1650,7 @@ def _snapshot_worktree_path(
     allow_leaf_symlink: bool,
 ) -> GitPathState:
     _require_git_path_confined(repo, path, allow_leaf_symlink=allow_leaf_symlink)
-    mode_from_index = _index_mode_for_path(repo, path)
+    mode_from_index = _snapshot_git_tree_paths(repo, ["ls-files", "--stage"], [path])[0].mode
     absolute_bytes = os.fsencode(repo) + b"/" + os.fsencode(path)
     try:
         metadata = os.lstat(absolute_bytes)

@@ -622,6 +622,16 @@ def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str])
     return state
 
 
+def _base_repo(tmp_path: Path, name: str) -> Path:
+    """Init ``tmp_path/name`` with a single committed ``a.py`` base file."""
+    repo = tmp_path / name
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    return repo
+
+
 def _remote_identity_context(
     tmp_path: Path,
     fake_gh: Any,
@@ -633,11 +643,7 @@ def _remote_identity_context(
 ) -> tuple[Any, str]:
     from daydream import git_ops
 
-    repo = tmp_path / "remote-identity"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "remote-identity")
     _git(repo, "checkout", "-b", "feature")
     (repo / "a.py").write_text("A = 2\n")
     _git(repo, "add", "a.py")
@@ -673,11 +679,7 @@ def _remote_identity_context(
 def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
     from daydream.deep.fix_steps import capture_retained_tree
 
-    repo = tmp_path / "finalization"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "finalization")
     items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": []}]
     ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
     state = _direct_fix_state(ctx, items, {"a.py"})

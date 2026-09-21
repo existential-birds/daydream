@@ -51,6 +51,7 @@ from daydream.trajectory import (
 )
 from tests.harness.trajectory import (
     make_recorder,
+    observe_metrics_and_result,
     observe_text_and_result,
     read_trajectory,
 )
@@ -579,29 +580,15 @@ async def test_final_metrics_totals_match_per_step_sum(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="step-one-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=0.001,
-                )
+            observe_metrics_and_result(
+                inv, "step-one-text", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=0.001,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.invocation(phase=DaydreamPhase.FIX) as inv2:
-            inv2.observe(TextEvent(text="step-two-text"))
-            inv2.observe(
-                MetricsEvent(
-                    message_id="m-2",
-                    prompt_tokens=200,
-                    completion_tokens=40,
-                    cached_tokens=20,
-                    cost_usd=0.002,
-                )
+            observe_metrics_and_result(
+                inv2, "step-two-text", message_id="m-2", prompt_tokens=200,
+                completion_tokens=40, cached_tokens=20, cost_usd=0.002,
             )
-            inv2.observe(ResultEvent(structured_output=None, continuation=None))
 
     traj = read_trajectory(recorder.path)
     fm = traj["final_metrics"]
@@ -1257,30 +1244,16 @@ async def test_parent_metrics_include_children(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-parent",
-                    prompt_tokens=100,
-                    completion_tokens=10,
-                    cached_tokens=5,
-                    cost_usd=0.001,
-                )
+            observe_metrics_and_result(
+                inv, "parent-text", message_id="m-parent", prompt_tokens=100,
+                completion_tokens=10, cached_tokens=5, cost_usd=0.001,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("fix-0") as child:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                inv.observe(TextEvent(text="child-text"))
-                inv.observe(
-                    MetricsEvent(
-                        message_id="m-child",
-                        prompt_tokens=200,
-                        completion_tokens=20,
-                        cached_tokens=10,
-                        cost_usd=0.002,
-                    )
+                observe_metrics_and_result(
+                    inv, "child-text", message_id="m-child", prompt_tokens=200,
+                    completion_tokens=20, cached_tokens=10, cost_usd=0.002,
                 )
-                inv.observe(ResultEvent(structured_output=None, continuation=None))
 
     parent_traj = read_trajectory(recorder.path)
     child_traj = read_trajectory(child.path)
@@ -2287,30 +2260,16 @@ async def test_fork_totals_fold_into_parent(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=1.0,
-                )
+            observe_metrics_and_result(
+                inv, "parent-text", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("deep-python") as child:
             async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
-                cinv.observe(TextEvent(text="child-text"))
-                cinv.observe(
-                    MetricsEvent(
-                        message_id="m-2",
-                        prompt_tokens=40,
-                        completion_tokens=8,
-                        cached_tokens=4,
-                        cost_usd=0.5,
-                    )
+                observe_metrics_and_result(
+                    cinv, "child-text", message_id="m-2", prompt_tokens=40,
+                    completion_tokens=8, cached_tokens=4, cost_usd=0.5,
                 )
-                cinv.observe(ResultEvent(structured_output=None, continuation=None))
 
     parent = read_trajectory(recorder.path)["final_metrics"]
     assert parent["total_prompt_tokens"] == 140
@@ -2333,17 +2292,10 @@ async def test_empty_fork_folds_nothing_into_parent(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=1.0,
-                )
+            observe_metrics_and_result(
+                inv, "parent-text", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("empty-child"):
             pass
 
@@ -2357,43 +2309,22 @@ async def test_nested_fork_totals_reach_the_root(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="root"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=10,
-                    completion_tokens=1,
-                    cached_tokens=0,
-                    cost_usd=0.1,
-                )
+            observe_metrics_and_result(
+                inv, "root", message_id="m-1", prompt_tokens=10,
+                completion_tokens=1, cached_tokens=0, cost_usd=0.1,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("outer") as outer:
             async with outer.invocation(phase=DaydreamPhase.DEEP) as oinv:
-                oinv.observe(TextEvent(text="outer"))
-                oinv.observe(
-                    MetricsEvent(
-                        message_id="m-2",
-                        prompt_tokens=20,
-                        completion_tokens=2,
-                        cached_tokens=0,
-                        cost_usd=0.2,
-                    )
+                observe_metrics_and_result(
+                    oinv, "outer", message_id="m-2", prompt_tokens=20,
+                    completion_tokens=2, cached_tokens=0, cost_usd=0.2,
                 )
-                oinv.observe(ResultEvent(structured_output=None, continuation=None))
             async with outer.fork("inner") as inner:
                 async with inner.invocation(phase=DaydreamPhase.DEEP) as iinv:
-                    iinv.observe(TextEvent(text="inner"))
-                    iinv.observe(
-                        MetricsEvent(
-                            message_id="m-3",
-                            prompt_tokens=30,
-                            completion_tokens=3,
-                            cached_tokens=0,
-                            cost_usd=0.3,
-                        )
+                    observe_metrics_and_result(
+                        iinv, "inner", message_id="m-3", prompt_tokens=30,
+                        completion_tokens=3, cached_tokens=0, cost_usd=0.3,
                     )
-                    iinv.observe(ResultEvent(structured_output=None, continuation=None))
 
     root = read_trajectory(recorder.path)["final_metrics"]
     assert root["total_prompt_tokens"] == 60
@@ -2415,30 +2346,16 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=1.0,
-                )
+            observe_metrics_and_result(
+                inv, "parent", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("deep-python") as child:
             async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
-                cinv.observe(TextEvent(text="child"))
-                cinv.observe(
-                    MetricsEvent(
-                        message_id="m-2",
-                        prompt_tokens=40,
-                        completion_tokens=8,
-                        cached_tokens=4,
-                        cost_usd=0.5,
-                    )
+                observe_metrics_and_result(
+                    cinv, "child", message_id="m-2", prompt_tokens=40,
+                    completion_tokens=8, cached_tokens=4, cost_usd=0.5,
                 )
-                cinv.observe(ResultEvent(structured_output=None, continuation=None))
 
     costs = analyze_costs(load_trajectories(daydream_dir, session))
     assert costs["total_cost_usd"] == pytest.approx(1.5)  # not 2.0 (root 1.5 + fork 0.5)

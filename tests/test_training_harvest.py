@@ -193,6 +193,39 @@ def _services(config: HarvestConfig, *, github: Callable[..., Any]) -> HarvestTe
     return HarvestTestServices(make_harvest_services(config), github=github)
 
 
+def _pr_row(run_dir: Path, session_id: str, *, pr_number: int = 7) -> dict[str, Any]:
+    """The PR-shaped harvested row shared by the annotation/valid-at tests."""
+    return {
+        "session_id": session_id,
+        "pr_repo": "o/r",
+        "pr_number": pr_number,
+        "head_sha": "h",
+        "base_branch": "main",
+        "archive_path": str(run_dir),
+        "grounding_rate": 1.0,
+        "changed_files": "[]",
+    }
+
+
+def _local_row(run_dir: Path, session_id: str, *, grounding_rate: float | None) -> dict[str, Any]:
+    """The PR-less local-branch row shared by the shallow/local annotation tests."""
+    return {
+        "session_id": session_id,
+        "pr_repo": None,
+        "pr_number": None,
+        "branch": "feat",
+        "head_sha": "h",
+        "archive_path": str(run_dir),
+        "grounding_rate": grounding_rate,
+        "changed_files": "[]",
+    }
+
+
+def _write_recommended_patch(run_dir: Path) -> None:
+    """Write the guarded-line recommended patch used by the orphan-run tests."""
+    (run_dir / "recommended.patch").write_text(diff_adding("guarded = True"))
+
+
 def _acquire_annotation(
     raw: dict[str, Any],
     *,
@@ -225,9 +258,7 @@ def _acquire_annotation(
 def test_build_annotation_pr_row_labels_from_decisive_reply_evidence(tmp_path: Path) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s1")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -283,9 +314,7 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
     (run_dir / "findings.json").write_text(
         json.dumps({"findings": [{"fingerprint": fp_a}, {"fingerprint": fp_b}]})
     )
-    row = {"session_id": "s_pf", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_pf")
     ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged_per_finding("2026-02-01T00:00:00+00:00", fp_a, fp_b),
                            repo_clone=tmp_path)
@@ -298,9 +327,7 @@ def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
     one qualifying question. Run label contested; per-finding exact (M22 final case)."""
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A, _FP_B, _FP_C)
-    row = {"session_id": "s_626", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_626")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -368,9 +395,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
     # (false_positive_penalty / posterior_cost), not a deduction from the stored
     # composite, which stays pure intrinsic.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej", pr_number=9)
 
     # Intrinsic-only baseline: same inputs scored with no posterior.
     intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
@@ -398,9 +423,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     # "alice" makes the DB query run, but the fresh archive yields the empty-pool
     # path (None, 0), so the reducer applies the 0.5 default prior.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej_prod", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej_prod", pr_number=9)
     _write_findings(run_dir, _FP_A)
     payload = _acquire_annotation(
         row,
@@ -436,9 +459,7 @@ def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> No
     """
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s_fork_auth", "pr_repo": "o/r", "pr_number": 13, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_fork_auth", pr_number=13)
     reply_created = "2026-08-02T10:00:00Z"
     comments = [
         {
@@ -489,9 +510,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
     """
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s_review_auth", "pr_repo": "o/r", "pr_number": 14, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_review_auth", pr_number=14)
     comments = [
         {
             "id": 1,
@@ -528,9 +547,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()           # no deep/ → shallow
-    row = {"session_id": "s2", "pr_repo": None, "pr_number": None, "branch": "feat",
-           "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": None,
-           "changed_files": "[]"}
+    row = _local_row(run_dir, "s2", grounding_rate=None)
     ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                            repo_clone=tmp_path)
     assert ann.valid_at is None                               # collapses to observed_at on write
@@ -574,16 +591,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
     )
 
     run_dir = _seed_deep_bronze(tmp_path / "current_run", verdict="consistent", grounding=1.0)
-    row = {
-        "session_id": "s_rej_populated",
-        "pr_repo": "o/r",
-        "pr_number": 9,
-        "head_sha": "h",
-        "base_branch": "main",
-        "archive_path": str(run_dir),
-        "grounding_rate": 1.0,
-        "changed_files": "[]",
-    }
+    row = _pr_row(run_dir, "s_rej_populated", pr_number=9)
     _write_findings(run_dir, _FP_A)
     payload = _acquire_annotation(
         row,
@@ -611,9 +619,7 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
     tmp_path: Path,
 ) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej", pr_number=9)
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(
@@ -643,9 +649,7 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(
     tmp_path: Path,
 ) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej", pr_number=9)
     _write_findings(run_dir, _FP_A)
     rb = json.loads(
         _acquire_annotation(
@@ -676,9 +680,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
     from daydream.training.labeler_signals import LocalCommitAppliedSignal
 
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_local", "pr_repo": None, "pr_number": None, "branch": "feat",
-           "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _local_row(run_dir, "s_local", grounding_rate=1.0)
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(
         row,
@@ -707,9 +709,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights(is_default=True))
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_custom", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_custom", pr_number=9)
     with pytest.raises((AssertionError, RuntimeError), match="canonical"):
         _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                          gh_api=_fake_gh(merged=False), repo_clone=tmp_path)
@@ -1281,15 +1281,7 @@ async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
         branch="feat/squash-me",
         source_path=clone,
     )
-    (run_dir / "recommended.patch").write_text(
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        "+guarded = True\n"
-    )
+    _write_recommended_patch(run_dir)
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
@@ -1359,15 +1351,7 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(
         source_path=clone,
     )
     # The recommended patch adds a line; a later commit on the branch lands it.
-    (run_dir / "recommended.patch").write_text(
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        "+guarded = True\n"
-    )
+    _write_recommended_patch(run_dir)
     (clone / "app.py").write_text("existing\nguarded = True\n")
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
@@ -1490,9 +1474,7 @@ def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
     """valid_at = qualifying reply timestamp, not merged_at (M12/M22)."""
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s-val", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s-val")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -1510,9 +1492,7 @@ def test_valid_at_override_respected(tmp_path: Path) -> None:
     """An explicit override beats derived evidence time (M12)."""
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s-val-ovr", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s-val-ovr")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -1599,15 +1579,7 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
         branch="feat/local-tier",
         source_path=clone,
     )
-    (run_dir / "recommended.patch").write_text(
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        "+guarded = True\n"
-    )
+    _write_recommended_patch(run_dir)
     (clone / "app.py").write_text("existing\nguarded = True\n")
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")

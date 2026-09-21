@@ -114,6 +114,30 @@ def observe_text_and_result(inv: Invocation, text: str = "output") -> None:
     inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 
+def observe_metrics_and_result(
+    inv: Invocation,
+    text: str,
+    *,
+    message_id: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int | None,
+    cost_usd: float | None,
+) -> None:
+    """Observe a TextEvent + MetricsEvent + ResultEvent to produce one agent step."""
+    inv.observe(TextEvent(text=text))
+    inv.observe(
+        MetricsEvent(
+            message_id=message_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            cost_usd=cost_usd,
+        )
+    )
+    inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+
 def make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
     """Build a minimal indexed manifest.
 

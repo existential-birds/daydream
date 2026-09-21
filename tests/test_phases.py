@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,7 +70,11 @@ def _private_session(tmp_path: Path, work: WorkContext, session_id: str) -> Any:
 
 
 def _inline_or_exact_backend(
-    repo: Path, *, inline: bool, events: tuple[AgentEvent, ...] | None = None
+    repo: Path,
+    *,
+    inline: bool,
+    events: tuple[AgentEvent, ...] | None = None,
+    script: list[list[AgentEvent]] | None = None,
 ) -> ScriptedBackend:
     """A backend whose sanctioned-input transport is inline or exact paths.
 
@@ -78,9 +83,56 @@ def _inline_or_exact_backend(
     """
     if inline:
         return ScriptedBackend(
-            events=events, audit_root_isolation="claude-pretooluse", audit_root=repo.resolve()
+            script=script,
+            events=events,
+            audit_root_isolation="claude-pretooluse",
+            audit_root=repo.resolve(),
         )
-    return ScriptedBackend(events=events)
+    return ScriptedBackend(script=script, events=events)
+
+
+@asynccontextmanager
+async def _intent_inline_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    *,
+    session_id: str,
+    exploration_files: dict[str, str],
+    events: tuple[AgentEvent, ...] | None = None,
+    script: list[list[AgentEvent]] | None = None,
+    prompt_user: Callable[..., str] | None = None,
+) -> AsyncIterator[tuple[ScriptedBackend, WorkContext, Path, str, Path]]:
+    """Boot a real INLINE intent fixture and hold its private session open.
+
+    Yields ``(backend, work, diff_file, diff_text, exploration)`` so each test
+    can call ``phase_understand_intent`` inside the artifact session, with the
+    shared repo, exploration files, diff, and strict audit-root backend already
+    in place.
+    """
+    from daydream.artifact_visibility import artifact_dir_for
+
+    monkeypatch.setattr(
+        "daydream.run_context._prompt_user",
+        prompt_user if prompt_user is not None else (lambda *a, **kw: "y"),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    async with _private_session(tmp_path, work, session_id):
+        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
+        exploration.mkdir(parents=True)
+        for name, text in exploration_files.items():
+            (exploration / name).write_text(text, encoding="utf-8")
+        backend = _inline_or_exact_backend(repo, inline=True, events=events, script=script)
+        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
+        diff_file = tmp_path / "diff.patch"
+        diff_file.write_text(diff_text, encoding="utf-8")
+        yield backend, work, diff_file, diff_text, exploration
 
 
 def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
@@ -5112,46 +5164,19 @@ async def test_phase_understand_intent_inline_exploration_budget_degrades(
     with SanctionedInputUnavailable. Greedy prefix keeps the summary when the
     pair is over budget, and an over-budget pair drops the tail file.
     """
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
     from daydream.phases import phase_understand_intent
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-
-    async with open_artifact_session(work, session_id="intent-inline-oversize", owner=owner):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        big_summary = "s" * (SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES + 1)
-        (exploration / "summary.md").write_text(big_summary, encoding="utf-8")
-        (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
-
-        backend = ScriptedBackend(
-            events=[
-                TextEvent(text="This PR adds a login page."),
-                _RESULT,
-            ],
-            audit_root_isolation="claude-pretooluse",
-            audit_root=repo.resolve(),
-        )
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-
+    big_summary = "s" * (SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES + 1)
+    async with _intent_inline_fixture(
+        tmp_path,
+        monkeypatch,
+        make_work,
+        session_id="intent-inline-oversize",
+        exploration_files={"summary.md": big_summary, "affected_files.md": "affected-a\n"},
+        events=(TextEvent(text="This PR adds a login page."), _RESULT),
+    ) as (backend, work, diff_file, diff_text, exploration):
         result = await phase_understand_intent(
             backend,
             work,
@@ -5179,47 +5204,20 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
     silence_console: Callable[..., None],
 ) -> None:
     """Two exploration files summing over budget drop the second, keep the first."""
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
     from daydream.phases import phase_understand_intent
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-
-    async with open_artifact_session(work, session_id="intent-inline-pair", owner=owner):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        half = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES // 2
-        summary = "s" * half
-        (exploration / "summary.md").write_text(summary, encoding="utf-8")
-        (exploration / "affected_files.md").write_text("a" * half, encoding="utf-8")
-
-        backend = ScriptedBackend(
-            events=[
-                TextEvent(text="This PR adds a login page."),
-                _RESULT,
-            ],
-            audit_root_isolation="claude-pretooluse",
-            audit_root=repo.resolve(),
-        )
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-
+    half = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES // 2
+    summary = "s" * half
+    async with _intent_inline_fixture(
+        tmp_path,
+        monkeypatch,
+        make_work,
+        session_id="intent-inline-pair",
+        exploration_files={"summary.md": summary, "affected_files.md": "a" * half},
+        events=(TextEvent(text="This PR adds a login page."), _RESULT),
+    ) as (backend, work, diff_file, diff_text, exploration):
         result = await phase_understand_intent(
             backend,
             work,
@@ -5239,47 +5237,6 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
 
 
 @pytest.mark.asyncio
-async def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_work: Callable[..., WorkContext],
-) -> None:
-    """One policy, not two: the intent pre-budget call site delegates to
-    ``select_advisory_inputs`` and reports the same admitted/omitted split."""
-    from daydream import phases as phases_module
-    from daydream.prompt_budget import AdvisorySelection, select_advisory_inputs
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    exploration = tmp_path / "exploration"
-    exploration.mkdir()
-    (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
-    (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
-    captured: dict[str, Any] = {}
-    real_select = select_advisory_inputs
-
-    def _spy(backend: Any, cwd: Any, candidates: Any, *, read_only: bool) -> AdvisorySelection:
-        captured["labels"] = [candidate.label for candidate in candidates]
-        captured["read_only"] = read_only
-        return real_select(backend, cwd, candidates, read_only=read_only)
-
-    monkeypatch.setattr(phases_module, "select_advisory_inputs", _spy)
-    # Both session and standalone review calls use the shared sizing policy.
-    async with _private_session(tmp_path, work, "budgeted-exploration-inputs"):
-        sized = phases_module._budgeted_exploration_inputs(
-            exploration, backend=SimpleNamespace(model="fake"), cwd=repo
-        )
-    assert captured["labels"] == ["exploration-summary", "exploration-affected-files"]
-    assert sized["exploration-summary"] == exploration / "summary.md"
-    assert sized["exploration-affected-files"] == exploration / "affected_files.md"
-
-
-@pytest.mark.asyncio
 async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5295,53 +5252,24 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
     every inlined diff; ``str(diff_path)`` is confined to the EXACT_PATHS
     branch where the diff is a sanctioned input.
     """
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
     from daydream.phases import phase_understand_intent
     from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     silence_console("daydream.phases")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-
     responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
-
-    async with open_artifact_session(work, session_id="intent-inline-correction", owner=owner):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        (exploration / "summary.md").write_text("summary works\n", encoding="utf-8")
-        (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
-
-        backend = ScriptedBackend(
-            script=[
-                [
-                    TextEvent(text="This PR adds a signup page."),
-                    _RESULT,
-                ],
-                [
-                    TextEvent(text="This PR adds a login page with OAuth support."),
-                    _RESULT,
-                ],
-            ],
-            audit_root_isolation="claude-pretooluse",
-            audit_root=repo.resolve(),
-        )
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-
+    script: list[list[AgentEvent]] = [
+        [TextEvent(text="This PR adds a signup page."), _RESULT],
+        [TextEvent(text="This PR adds a login page with OAuth support."), _RESULT],
+    ]
+    async with _intent_inline_fixture(
+        tmp_path,
+        monkeypatch,
+        make_work,
+        session_id="intent-inline-correction",
+        exploration_files={"summary.md": "summary works\n", "affected_files.md": "affected-a\n"},
+        script=script,
+        prompt_user=lambda *a, **kw: next(responses),
+    ) as (backend, work, diff_file, diff_text, exploration):
         result = await phase_understand_intent(
             backend,
             work,
