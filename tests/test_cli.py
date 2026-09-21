@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.atif import validate as atif_validate
@@ -942,7 +943,7 @@ def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyP
     def interrupted(*args: Any, **kwargs: Any) -> Any:
         raise BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])])
 
-    monkeypatch.setattr(cli.anyio, "run", interrupted)
+    monkeypatch.setattr(anyio, "run", interrupted)
     with pytest.raises(SystemExit) as caught:
         cli.main([str(tmp_path), "--non-interactive"])
     assert caught.value.code == 130
@@ -956,7 +957,7 @@ def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest
     def interrupted(*args: Any, **kwargs: Any) -> Any:
         raise failure
 
-    monkeypatch.setattr(cli.anyio, "run", interrupted)
+    monkeypatch.setattr(anyio, "run", interrupted)
     with pytest.raises(BaseExceptionGroup) as caught:
         cli.main([str(tmp_path), "--non-interactive"])
     assert caught.value is failure
