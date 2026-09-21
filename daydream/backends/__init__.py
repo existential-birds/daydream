@@ -578,6 +578,7 @@ class EffectiveRequestConfig(_AdmissionBase):
     unsafe backend value before ever constructing.
     """
 
+    finalization: bool | None = field(default=None, kw_only=True)
     temperature: float | None = None
     max_turns: int | None = None
     read_only: bool | None = None
@@ -586,6 +587,7 @@ class EffectiveRequestConfig(_AdmissionBase):
     model_mode: Literal["single", "multi_or_dynamic"] | None = None
 
     def _validate(self) -> None:
+        _require_bool(self.finalization, "finalization")
         _require_finite_float(self.temperature, "temperature")
         _require_nonnegative_int(self.max_turns, "max_turns")
         _require_bool(self.read_only, "read_only")
@@ -604,6 +606,7 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     """
 
     permission_mode: Literal["bypassPermissions"] | None = None
+    tools_count: int | None = field(default=None, kw_only=True)
     allowed_tools_count: int | None = None
     allowed_tools_present: bool | None = None
     audit_tools_count: int | None = None
@@ -616,6 +619,7 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     def _validate(self) -> None:
         super()._validate()
         _require_literal(self.permission_mode, ("bypassPermissions",), "permission_mode")
+        _require_nonnegative_int(self.tools_count, "tools_count")
         _require_nonnegative_int(self.allowed_tools_count, "allowed_tools_count")
         _require_bool(self.allowed_tools_present, "allowed_tools_present")
         _require_nonnegative_int(self.audit_tools_count, "audit_tools_count")
@@ -649,6 +653,7 @@ class PiRequestConfig(EffectiveRequestConfig):
 
     selected_tools_count: int | None = None
     selected_tools_present: bool | None = None
+    no_tools: bool | None = field(default=None, kw_only=True)
     no_skills: bool | None = None
     schema_emulated: bool | None = None
 
@@ -656,6 +661,7 @@ class PiRequestConfig(EffectiveRequestConfig):
         super()._validate()
         _require_nonnegative_int(self.selected_tools_count, "selected_tools_count")
         _require_bool(self.selected_tools_present, "selected_tools_present")
+        _require_bool(self.no_tools, "no_tools")
         _require_bool(self.no_skills, "no_skills")
         _require_bool(self.schema_emulated, "schema_emulated")
 
@@ -1230,6 +1236,13 @@ class Backend(Protocol):
     Callers must compare the capability to :data:`AUDIT_ROOT_ISOLATION` and
     the bound root by canonical identity; missing or different values fail
     closed.
+
+    Optional extension: ``supports_finalization = True`` declares support for
+    an invocation-local ``execute(finalization=True)`` keyword. Callers must
+    gate that keyword on the capability; Osprey and custom backends keep their
+    existing interface. Supported adapters lower reasoning and apply only
+    their native supported tool controls without mutating shared settings.
+    Codex still needs the host zero-tool guard; its sandbox permits reads.
 
     Optional extension: backends may expose ``reasoning_effort``, the per-phase
     reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``

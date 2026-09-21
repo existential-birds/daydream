@@ -34,6 +34,7 @@ from daydream.prompts.exploration_subagents import (
     build_test_mapper_prompt,
 )
 from daydream.review_budget import ReviewLimits
+from daydream.review_evidence import FinalizationContext
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -267,6 +268,13 @@ async def pre_scan(
                     phase=DaydreamPhase.EXPLORATION,
                     read_only=True,
                     review_limits=ReviewLimits(120, 30, 16),
+                    finalization_context=FinalizationContext(
+                        task=f"Finalize exploration mapping: {name}",
+                        assigned_files=tuple(f.path for f in static_files),
+                        output_semantics="Return only the requested conventions, dependency edges, or test mappings "
+                        "in the schema. Do not review defects. Omit unconfirmed mappings; empty arrays are valid.",
+                        supplied_context=(("change diff", diff_text),),
+                    ),
                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                     run_context=run_context,

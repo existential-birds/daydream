@@ -1,6 +1,6 @@
 """Bounded review investigation retains evidence without claiming completion."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -266,7 +266,7 @@ def test_merge_prompt_retains_validated_records_from_incomplete_stacks(tmp_path:
     assert "validated partial records" in prompt
 
 
-async def test_pre_rendered_inputs_remain_single_tail_block_during_finalization(tmp_path: Path) -> None:
+async def test_pre_rendered_inputs_become_captured_bytes_during_finalization(tmp_path: Path) -> None:
     from daydream.prompt_budget import prepare_sanctioned_inputs
 
     artifact = tmp_path / "intent.md"
@@ -282,6 +282,195 @@ async def test_pre_rendered_inputs_remain_single_tail_block_during_finalization(
         progress_callback=lambda _: None,
     )
     assert result[0] == FINDINGS
-    for prompt in backend.prompts:
-        assert prompt.count("Sanctioned phase inputs") == 1
-        assert prompt.endswith(f"- intent: {artifact}")
+    assert backend.prompts[0].count("Sanctioned phase inputs") == 1
+    assert backend.prompts[0].endswith(f"- intent: {artifact}")
+    assert "captured" in backend.prompts[1]
+    assert "read only these exact files" not in backend.prompts[1]
+    assert str(artifact) not in backend.prompts[1]
+
+
+@pytest.mark.parametrize("schema", [None, SCHEMA])
+async def test_finalization_contract_excludes_discovery_and_supports_output_kinds(
+    tmp_path: Path, schema: dict[str, Any] | None,
+) -> None:
+    from daydream.review_evidence import FinalizationContext
+
+    backend = ScriptedBackend(script=[
+        [TextEvent(text="SPECULATIVE_NOTE"), ToolStartEvent(id="extra", name="read", input={})],
+        [ResultEvent(structured_output={"findings": []}, continuation=None)] if schema else
+        [TextEvent(text="Incomplete exploration: supplied map covers src.py only.")],
+    ])
+    result = await run_agent(
+        backend, tmp_path, "DISCOVERY_STRATEGY: run tests, search upstream, read every file",
+        phase=DaydreamPhase.DEEP, output_schema=schema,
+        finalization_context=FinalizationContext(
+            task="Produce the requested map" if schema is None else "Review assigned code",
+            assigned_files=("src.py",), output_semantics="Only the assigned deliverable",
+            supplied_context=(("diff", "+ return 1"),),
+        ),
+        review_limits=ReviewLimits(10, 2, 0), progress_callback=lambda _: None,
+    )
+    assert result[2] == "tool_call_budget_exceeded"
+    prompt = backend.last_prompt
+    assert "DISCOVERY_STRATEGY" not in prompt
+    assert "Investigation allowance" not in prompt
+    assert "SPECULATIVE_NOTE" not in prompt
+    assert "+ return 1" in prompt
+    assert "src.py" in prompt
+    assert ("plain-text deliverable" if schema is None else '"additionalProperties": false') in prompt
+    assert backend.max_turns[-1] is None
+
+
+async def test_time_shorter_than_reserve_only_dispatches_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock().install(monkeypatch)
+    backend = ScriptedBackend(events=[ResultEvent(structured_output={"findings": []}, continuation=None)])
+    result = await run_agent(
+        backend, tmp_path, "FRESH_INVESTIGATION", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
+        deadline=clock.monotonic() + 1, review_limits=ReviewLimits(10, 2, 5),
+        progress_callback=lambda _: None,
+    )
+    assert result == ({"findings": []}, None, "wall_budget_exceeded")
+    assert backend.call_count == 1
+    assert "FRESH_INVESTIGATION" not in backend.last_prompt
+    assert "INVESTIGATION HAS ENDED" in backend.last_prompt
+
+
+async def test_displayed_allowance_is_clamped_to_absolute_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock().install(monkeypatch)
+    backend = ScriptedBackend(events=[ResultEvent(structured_output={"findings": []}, continuation=None)])
+    await run_agent(
+        backend, tmp_path, "Review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
+        deadline=clock.monotonic() + 5, review_limits=ReviewLimits(10, 2, 5),
+        progress_callback=lambda _: None,
+    )
+    assert "at most 3 seconds and 5 tool calls" in backend.last_prompt
+
+
+def test_evidence_retention_is_bounded_deduplicated_and_preserves_associations() -> None:
+    from daydream.review_evidence import FinalizationContext, ReviewEvidence
+
+    evidence = ReviewEvidence(SCHEMA)
+    for n in range(500):
+        evidence.observe(ToolStartEvent(id=str(n), name="read", input={"path": "src.py"}))
+        evidence.observe(ToolResultEvent(id=str(n), output="FOUNDATIONAL_SOURCE", is_error=False))
+    assert len(evidence.blocks) == 1
+    for n in range(1000):
+        evidence.observe(ToolStartEvent(id=str(n), name="search", input={"query": str(n)}))
+        evidence.observe(ToolResultEvent(id=str(n), output="x" * 15000, is_error=True))
+    evidence.observe(ToolStartEvent(id="pending", name="read", input={"path": "unread.py"}))
+    prompt = evidence.finalization_prompt(FinalizationContext(task="Review", supplied_context=(("diff", "DIFF"),)))
+    assert "FOUNDATIONAL_SOURCE" in prompt
+    assert '"path": "src.py"' in prompt
+    assert "error=False" in prompt and "error=True" in prompt
+    assert "[tool output truncated]" in prompt
+    assert "DIFF" in prompt
+    assert "unread.py" not in prompt
+    assert "unmatched tool starts=1" in prompt
+    assert evidence.omitted > 0
+    assert evidence.retained_bytes <= 48000
+    assert len(prompt.encode()) < 51000
+
+
+def test_exact_path_finalization_capture_is_bounded_and_rejects_changed_identity(tmp_path: Path) -> None:
+    from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
+
+    diff = tmp_path / "diff.patch"
+    diff.write_text("DIFF_BYTES\n" + "é" * 16000)
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(backend, tmp_path, {"diff": diff}, read_only=True)
+    assert prepared.inputs[0].text is None
+    text = prepared.finalization_text(backend, tmp_path, True)
+    assert "DIFF_BYTES" in text
+    assert "input truncated" in text
+    assert len(text.encode()) <= 24000
+    with pytest.raises(SanctionedInputUnavailable, match="backend changed"):
+        prepared.finalization_text(ScriptedBackend(), tmp_path, True)
+    with pytest.raises(SanctionedInputUnavailable, match="call mode changed"):
+        prepared.finalization_text(backend, tmp_path, False)
+    diff.write_text("replacement")
+    with pytest.raises(SanctionedInputUnavailable, match="changed"):
+        prepared.finalization_text(backend, tmp_path, True)
+
+
+async def test_finalization_control_is_invocation_local_with_shared_backend(tmp_path: Path) -> None:
+    class ControlledBackend(ScriptedBackend):
+        supports_finalization = True
+        reasoning_effort = "high"
+
+        async def execute(self, *args: Any, finalization: bool = False, **kwargs: Any) -> AsyncGenerator[AgentEvent]:
+            flags.append((args[1], finalization))
+            if finalization:
+                finalizer_started.set()
+                await sibling_finished.wait()
+                yield ResultEvent(structured_output={"findings": []}, continuation=None)
+            elif args[1] == "sibling":
+                await finalizer_started.wait()
+                sibling_finished.set()
+                yield TextEvent(text="ok")
+            else:
+                yield ToolStartEvent(id="extra", name="read", input={})
+
+    flags: list[tuple[str, bool]] = []
+    finalizer_started = anyio.Event()
+    sibling_finished = anyio.Event()
+    backend = ControlledBackend(reasoning_effort="high")
+
+    async def sibling() -> None:
+        await run_agent(backend, tmp_path, "sibling", phase=DaydreamPhase.DEEP, progress_callback=lambda _: None)
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(sibling)
+            result = await run_agent(
+                backend, tmp_path, "review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
+                review_limits=ReviewLimits(10, 1, 0), progress_callback=lambda _: None,
+            )
+    assert result == ({"findings": []}, None, "tool_call_budget_exceeded")
+    assert backend.reasoning_effort == "high"
+    assert sum(finalization for _, finalization in flags) == 1
+    assert ("sibling", False) in flags
+
+
+def test_finalization_preserves_native_tool_failure_and_truncation_metadata() -> None:
+    from daydream.review_evidence import FinalizationContext, ReviewEvidence
+
+    evidence = ReviewEvidence(SCHEMA)
+    evidence.observe(ToolStartEvent(id="read", name="read", input={"path": "src.py"}))
+    evidence.observe(ToolResultEvent(
+        id="read", output="short partial output", is_error=False,
+        exit_code=137, status="cancelled", cancelled=True, truncated=True,
+    ))
+    prompt = evidence.finalization_prompt(FinalizationContext(task="Review"))
+    assert '"exit_code": 137' in prompt
+    assert '"status": "cancelled"' in prompt
+    assert '"cancelled": true' in prompt
+    assert '"truncated": true' in prompt
+    assert "clipped=True" in prompt
+
+
+def test_explicit_capture_priority_retains_task_inputs_before_large_advisories(tmp_path: Path) -> None:
+    from daydream.prompt_budget import prepare_sanctioned_inputs
+
+    paths = {}
+    for label, text in {
+        "alternatives": "A" * 12000,
+        "dedup-candidates": "B" * 12000,
+        "diff": "REQUIRED_DIFF",
+        "stack-records-000": "REQUIRED_MERGE_RECORDS",
+    }.items():
+        paths[label] = tmp_path / label
+        paths[label].write_text(text)
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(backend, tmp_path, paths, read_only=False)
+    text = prepared.finalization_text(
+        backend, tmp_path, False, input_priority=("diff", "stack-records-000"),
+    )
+    assert "REQUIRED_DIFF" in text
+    assert "REQUIRED_MERGE_RECORDS" in text
+    assert text.index("REQUIRED_MERGE_RECORDS") < text.index("Input 'alternatives'")
+    assert len(text.encode()) <= 24000
+    assert "truncated" in text

@@ -1,9 +1,10 @@
 # Review runtime: incident, changes, and measurements
 
-This change keeps the partial-review fix from `ebd15ca9` and bounds the work
-that precedes publication. It also removes repeated context reads and conflicting
-output instructions. Increasing a reviewer's timeout from 30 to 60 minutes did
-not address the underlying work expansion or fit a 60-minute Actions job.
+The runtime bounds introduced in PR #1282 preserve partial reviews and reserve
+time for publication. This follow-up makes finalization a separate serialization
+task, retains its required evidence, and fixes compatible GitHub metadata handling.
+It does not increase the timeouts. The incidents below distinguish observed
+behavior from hypotheses; prompt wiring alone does not prove model convergence.
 
 ## Incident baseline
 
@@ -39,7 +40,47 @@ These are observed activities; their individual contribution to elapsed time is
 unknown. Log panels interleave agents and lack correlated request/result timing.
 We cannot assign the 30 minutes to inference, tools, retries, or provider queueing.
 
-## Architectural causes
+## Follow-up incident: September 21, 2026
+
+[Shelfspace run 35621233648, PR 2826](https://github.com/shelfspace-app/shelfspace-mono/actions/runs/35621233648/job/106404625753?pr=2826)
+installed Daydream `6ef81035674eb099594b535cbe8ed61ee86b6ee0` (merged PR #1282).
+Local logs were available as `/tmp/daydream-run-35621233648.log` and
+`/tmp/daydream-review-35621233648.log`.
+
+Confirmed from those logs and the installed revision:
+
+- Review and merge finished in roughly 14½ minutes. Neither the 45-minute global
+  model budget nor the 60-minute Actions timeout was exhausted.
+- Exploration reached tool limits. Alternatives and all three review stacks
+  reached investigation limits. Generic/react finalizers also timed out.
+- The structural finalizer returned zero findings after **14,157 completion
+  tokens**. Reviewers repeatedly reopened disproved candidates and explicitly
+  speculated about a planted bug or an expected evaluation finding.
+- Finalization reused the discovery prompt, its original allowance and fresh-read
+  instructions. Pi ignored `max_turns`; the host zero-tool guard stopped tool
+  events but did not remove Pi's native tools. Shared backend mutation would
+  also have affected concurrent sibling calls, so it is not a valid remedy.
+- Merge succeeded. Findings export then failed with
+  `invalid PR row: malformed head repository slug`.
+
+The production prompt's SlopCodeBench framing could have encouraged benchmark
+assumptions, but that causal connection is **not proven**. The framing has been
+removed; concrete consequence and repository-convention requirements remain.
+
+GitHub CLI versions affected by [the upstream projection bug](https://github.com/cli/cli/commit/5ed8cf0faa80caff3eeb2edc6d32ef539e477a48)
+could return `nameWithOwner: ""` while providing valid repository `name` and owner
+`login`. The fix shipped in [gh v2.89.0](https://github.com/cli/cli/releases/tag/v2.89.0).
+Daydream now treats absent/exactly empty slugs as unavailable and derives a
+validated owner/name pair. Null, wrong types, malformed nonempty slugs and invalid
+fallback components still fail. Contradictory populated identities fail closed;
+case-only differences agree. Deleted-fork fallback and reviewed-head validation
+remain in place. Errors distinguish missing, malformed and contradictory metadata
+without logging whole API responses. Both PR lookup paths and findings export
+have regressions using the affected response shape. The incident runner's gh
+version was not captured, so this exact explanation for its export failure
+remains a hypothesis.
+
+## Original runtime causes
 
 - Pi accepts `max_turns` but does not enforce it. Exploration's nominal turn
   limit therefore did not bound Pi's work. The host tool budget was unlimited.
@@ -106,20 +147,63 @@ review_wall_budget_s = 2700
 The deadline is included in the profile digest. Zero permits deterministic
 publication of an explicitly incomplete review without dispatching model work.
 
-At an investigation cutoff, the host first retains an already complete,
+At an investigation cutoff, the first fallback is an already complete,
 schema-valid response or the latest schema-valid assistant-turn checkpoint.
-Otherwise it gives the same backend a fresh finalization request containing the
-original inputs and a bounded capsule of completed tool evidence. That request
-gets no investigative tool allowance and cannot exceed its reserved time or the
-shared deadline. A tool-start limit is an event-level stop, not a pre-execution
-security boundary. Existing backend access restrictions remain authoritative.
+Otherwise a fresh invocation receives a **standalone finalization contract**:
+explicit caller task/output semantics, assigned files, schema (or plain-text
+semantics), authoritative supplied context and completed source evidence.
+Discovery strategies, stale allowances, fresh-read demands, research/test
+instructions and speculative notes are not copied into it. Every review-limited
+phase supplies this contract, including exploration and plain-text intent.
 
-The evidence capsule retains at most 48 KB of completed tool blocks and 12 KB of
-unfinished notes. Long individual outputs are marked truncated. Failed retry
-attempts cannot contribute evidence/checkpoints to later attempts. Input capture
-is revalidated before finalization; capture failures still propagate. Finalized
-partial results require full schema validation, not merely a salvageable shape.
-Closing a budget-stopped stream does not call backend-wide cancellation.
+The request keeps the original incomplete/budget-stop reason. Its deadline is
+clamped to remaining absolute time; investigation displays its actual clamped
+allowance. If time is shorter than the reserve, no investigative invocation is
+dispatched. If no time remains, no model invocation starts. Retries consume the
+same deadlines and clear failed-attempt evidence. Closing a stopped invocation
+does not cancel unrelated siblings sharing the backend.
+
+Finalization controls are invocation-local, with effective reasoning and typed
+native options recorded in request events and exported span attributes:
+
+| Backend | Finalization controls | Verification / limit |
+|---|---|---|
+| Pi | `--no-tools`, replacement serialization system prompt, thinking capped at `low` | Installed 0.85.1 help confirms built-in and extension tools are removed. `max_turns` is unsupported; the absolute deadline bounds generation. |
+| Claude | `tools=[]` → native `--tools ''`, strict empty MCP configuration, existing guards plus serializer-only guard, `low` effort | SDK 0.2.152 and its bundled CLI 2.1.259 completed a local protocol fixture with only `StructuredOutput` available. `allowed_tools=[]` alone is insufficient under bypass permissions. |
+| Codex | Invocation-local `-c model_reasoning_effort=...` capped at `low`; host zero-tool guard retained | Installed 0.155.1 supports the override. No native tool-disable control is claimed; read-only sandbox access still permits tools. |
+| Osprey/custom | Existing execution interface plus host deadline/zero-tool guard | Native finalization controls are unsupported unless the backend explicitly advertises the optional capability. |
+
+Explicitly lower supported settings are preserved (`off`/`minimal` for Pi,
+`none`/`minimal` for Codex; Claude's lowest supported effort is `low`). Opaque native
+ambient reasoning defaults are not introspected. The host tool guard is an
+event-level stop, not a pre-execution security boundary. A real-provider Claude
+smoke was blocked by expired OAuth; the local protocol test establishes native
+schema/tool compatibility, not model convergence or provider behavior.
+
+The evidence capsule reserves up to 24 KB for declared task/context, 24 KB for
+captured sanctioned inputs (12 KB per input), and 48 KB for completed tool
+results. Callers prioritize structural diff/intent, adjudication targets and
+merge records before advisory artifacts. Exact-path inputs originally contain
+paths and identity, not text: bounded bytes are read through the existing
+no-follow, UTF-8-validating capture boundary, with full input identity/hash checks
+and call-mode/backend revalidation. Standalone phase calls use the same boundary.
+No arbitrary path is extracted from prompt prose.
+
+Completed tool blocks preserve call/result association, errors, exit status,
+cancellation and native/host truncation. Identical reads deduplicate; later
+searches cannot evict already retained foundational evidence. Unique late results
+can still be omitted once the bound fills, with explicit omission markers. Pending
+starts and retained block counts are bounded too. Missing evidence cannot establish
+clean coverage. Partial JSON, reasoning and unverified notes never become findings.
+
+Shared stopping guidance applies after both default and custom strategies: no
+defect is guaranteed, a substantiated empty result succeeds, rejected candidates
+stay rejected unless new evidence changes their premise, and every tool invocation
+(including each parallel-batch member) counts. Exploration produces mappings rather
+than another review. Completed source evidence from the same logical review can
+satisfy finalizer grounding; a path or speculation cannot. Maintainability findings
+need concrete consequences or established conventions, with no arbitrary extraction
+threshold. Config-flow tracing guides investigation, not extra schema-breaking prose.
 
 The full hook suite also exposed a signal-handling race: an interrupt delivered
 inside an AnyIO task-group body can arrive at the CLI wrapped in an exception
@@ -195,30 +279,89 @@ visible; they do not establish equivalent recall. More representative isolated
 reviews and production trajectories are needed before tuning limits upward or
 claiming a broad quality or latency improvement.
 
-## Shelfspace rollout
+## Follow-up measurements
 
-Shelfspace still pins `8d94fdb1`, and its analyze job has a 60-minute timeout.
-Neither its workflow nor its existing uncommitted `--verbose` edit was changed.
-After this PR is reviewed and merged, pin analysis and posting/validation to the
-same new Daydream revision. Deploying only `ebd15ca9` leaves a single reviewer's
-60-minute allowance equal to the entire job limit and is insufficient.
+The extended [measurement script](../scripts/measure_review_runtime.py) uses
+isolated temporary repositories and never posts reviews. Alongside the original
+two-defect fixture, a nonempty pagination refactor preserves tenant filtering,
+archive exclusion, ordering, exclusive cursors and limits. The clean fixture's
+before/after implementations agreed on 864 combinations of ordering, tenant,
+cursor and limit. This fixture is larger than the two-function defect example,
+but is still a small synthetic review.
 
-Keep the analyze timeout at 60 minutes with the 45-minute model pipeline budget
-initially. The remaining 15 minutes cover checkout/install, host processing,
-bounded cleanup, final artifact export/upload, and variability. This is headroom,
-not a hard guarantee on every host operation. If runner setup regularly consumes
-that margin, lower the profile budget or increase the job timeout based on those
-measurements. Do not equate the per-agent timeout with the required job timeout.
+On September 21, baseline `6ef81035` and the candidate used Pi 0.85.1,
+OpenRouter `deepseek/deepseek-v4.1-flash`, explicit `high` investigation thinking
+and matching limits. Finalization's lower effort is part of the treatment. Each
+row is one matched pair; some independent requests overlapped, and provider
+queue/inference time cannot be separated. Values are **baseline → candidate**.
 
-For rollout diagnostics, add an external live trajectory and finalized bundle:
+| Regime / fixture | Elapsed seconds | Tool starts | Prompt tokens | Completion tokens | Result |
+|---|---:|---:|---:|---:|---|
+| Default / clean | 14.409 → 72.816 | 8 → 5 | 26,331 → 25,956 | 1,159 → 1,255 | Both valid complete empty results |
+| Default / two defects | 70.933 → 39.121 | 4 → 3 | 17,389 → 17,116 | 927 → 920 | Both retain 2/2 grounded defects, no extras |
+| Two-tool / clean | 42.274 → 28.554 | 2 → 2 | 11,641 → 11,442 | 315 → 428 | Both valid complete empty results |
+| Two-tool / two defects | 7.148 → 34.560 | 2 → 2 | 11,266 → 10,895 | 881 → 780 | Both retain 2/2 grounded defects, no extras |
+| Reserve only / clean | 20.169 → 7.419 | 0 → 0 | 5,733 → 1,992 | 393 → 808 | Both valid empty results with `not_reviewed` |
+| Reserve only / two defects | 60.045 → 38.946 | 0 → 0 | unavailable → 1,824 | unavailable → 1,109 | Baseline finalizer times out; candidate returns both diff-grounded defects |
 
-```sh
---trajectory "$RUNNER_TEMP/daydream-debug/trajectory.json" \
---dump-artifacts "$RUNNER_TEMP/daydream-debug/bundle"
-```
+Default limits were 480 s investigation / 120 s reserve / 48 tools; the two-tool
+runs used 120 s / 60 s / 2 tools. None hit a budget stop: both models often stopped
+within the tighter allowance. To exercise finalization independently, reserve-only
+runs supplied zero investigation time and 60 s finalization. All four retained
+`wall_budget_exceeded`. The candidate's two finalizers returned strict schema-valid
+results with effective `low` thinking and `no_tools=true`; the baseline completed
+one and timed out on one. No token metric was emitted for the timed-out baseline,
+so its usage is unknown, not zero.
 
-Upload that diagnostic directory in a separate `if: always()` artifact step,
-alongside the existing findings artifact. The current upload contains only
-`findings/findings.json` and cannot diagnose a failed run. Keep posting conditional
-on a valid findings artifact. A platform kill can still prevent later upload
-steps, which is another reason to leave job-level headroom.
+The reserve-only defect fixture supplies both changed functions and their contracts
+inline. Its returned findings cite that code, but no source tools ran and complete
+coverage is not established. Production clears incomplete stacks' declared verdicts
+and preserves warnings through merge/publication. Adjudication/sweep callers remain
+conservative: a budget stop can cause them to discard even a valid finalized result,
+retaining earlier findings and incomplete status instead of treating the phase as
+complete.
+
+These results show working output and bounded serialization on these fixtures.
+Latency is mixed, and the sample supports **no broad latency or recall improvement
+claim**. Prompt-string tests verify wiring, not convergence. See the
+[machine-readable follow-up measurements](measurements/review-runtime-followup.json)
+for limits, prompt digests, effective options, finalizer outcomes and adjudicated
+finding retention. The script now records source digests too; that field was added
+after this sample. Raw trajectories and fixtures remain in the listed `/tmp`
+directories, outside the repository.
+
+## Diagnostics lifecycle and later Shelfspace rollout
+
+Daydream already exposes `--trajectory PATH` and `--dump-artifacts DIRECTORY`.
+A regression now drives a failure during findings export after merge and verifies
+that the external trajectory and archived diagnostic bundle survive the nonzero
+CLI exit. No new exporter is introduced. One existing distinction matters: the
+manifest's `pipeline_status` can say `succeeded` when the pipeline completed but
+later findings export failed. Use CLI exit status and validated findings as the
+publication gates, not that manifest field alone. A process/platform kill can
+still prevent finalization or later upload steps.
+
+Shelfspace was not modified in this session; its PR #2826 must be rolled out
+separately after these Daydream changes become available. Pin analysis and
+posting/validation to the **same fixed Daydream revision**. Keep the 60-minute
+analyze timeout and 45-minute model budget initially; setup, cleanup and exports
+consume the remaining headroom, which is not an unconditional host-operation
+runtime guarantee.
+
+For that later rollout:
+
+1. Log `gh --version` before analysis so metadata compatibility is diagnosable.
+2. Export trajectory and bundle under a dedicated runner temporary directory:
+
+   ```sh
+   --trajectory "$RUNNER_TEMP/daydream-debug/trajectory.json" \
+   --dump-artifacts "$RUNNER_TEMP/daydream-debug/bundle"
+   ```
+
+3. Upload `daydream-debug/` in a separate artifact step with `if: always()`,
+   including when findings export fails. Preserve the existing findings artifact.
+4. Keep credentials, provider auth and runtime directories outside that upload.
+   Do not upload all of `$RUNNER_TEMP`, a home directory, or CLI credential state.
+5. Preserve strict findings schema/head validation and existing posting gates.
+   Diagnostics availability does not authorize posting, approval or resolving
+   absent prior findings from an incomplete review.

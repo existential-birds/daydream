@@ -79,8 +79,9 @@ CONFIG_FLOW_TRACE_INSTRUCTION = (
     "through layers):\n"
     "  1. Trace the full path of each plumbed field: config struct -> driver "
     "config -> request construction.\n"
-    "  2. Emit a one-line trace statement per field naming where it is parsed, "
-    "where it is forwarded, and where (if anywhere) it reaches the request.\n"
+    "  2. During investigation, identify where each field is parsed, forwarded, "
+    "and reaches the request. This is an investigation method, not extra output: "
+    "report only substantiated findings inside the required schema.\n"
     "  3. Flag silent drops -- a field parsed but never forwarded to the next "
     "layer.\n"
     "  4. Flag double-resolves -- the same value read twice at different points "
@@ -109,11 +110,12 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
     "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
-    "you are judging — file:line plus the cited code, read freshly in THIS turn, "
-    "not recalled. The source is the only truth; never infer a finding from the "
-    "branch name, cwd, or memory. A finding without a same-turn echo of its "
-    "target is INVALID.\n"
-    "  A `clean` verdict for a file also requires a same-turn read of that file: "
+    "you are judging — file:line plus the cited code from completed source reads "
+    "in this logical review. The source is the only truth; never infer a finding from the "
+    "branch name, cwd, or memory. A finding without completed source evidence of its "
+    "target is INVALID. Completed source excerpts supplied to finalization satisfy "
+    "this gate; paths and speculative notes do not.\n"
+    "  A `clean` verdict for a file also requires a completed read in this logical review: "
     "absent the read, mark the file `not reviewed`, never `clean`.\n"
     "  Gate 1 (anchor): read the full enclosing symbol/module, not just the diff "
     "hunk; state the file path and line range you are judging.\n"
@@ -158,30 +160,20 @@ TEST_QUALITY_RUBRIC_INSTRUCTION = (
 # instruction text for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``:
 # per-stack and structural reviewers run with cwd set to the reviewed repo, so a
 # bare skill-file read resolves against that repo and silently drops the rubric.
-# Targets the SlopCodeBench degradation patterns -- structural erosion, verbosity,
-# duplication -- in the code hunks, with severity calibrated so it flags
-# maintainability regressions without over-applying to legitimate structure.
+# Require a concrete consequence or an established repository convention;
+# function size alone is not a maintainability defect.
 ANTI_SLOP_RUBRIC_INSTRUCTION = (
-    "Apply the anti-slop rubric to every code hunk in the diff "
-    "(stated inline here -- no skill file read is required). It targets the "
-    "SlopCodeBench degradation patterns -- structural erosion, verbosity, "
-    "duplication:\n"
-    "  1. Flag complexity concentration: when a hunk adds logic to a function "
-    "that is already large/high-complexity (cyclomatic complexity > ~10, or > ~80 "
-    "lines), require extraction into focused callables -- especially when the "
-    "same pattern (flag pair, branch ladder, error guard) is repeated verbatim.\n"
-    "  2. Verbosity: flag redundant code -- identity comprehensions instead of "
-    "filter/map, empty-list guards inside loops, single-use intermediate "
-    "variables, casts to dodge type checking, trivial wrapper functions, "
-    "nested ladders.\n"
-    "  3. Duplication: flag the same hunk structure repeated (e.g. N flags x 2 "
-    "branches) that should be a loop/helper/template.\n"
-    "  4. Severity: maintainability findings are medium/low -- never high -- "
-    "under this rubric, full stop. The structural lens may flag real erosion, "
-    "but anti-slop findings never escalate to high.\n"
-    "  5. Scope: when erosion is pre-existing-and-growing, flag the growth, not "
-    "the whole function -- report only the newly introduced growth, scoped to "
-    "this diff's contribution."
+    "Apply the maintainability rubric to code changed by this diff "
+    "(stated inline here -- no skill file read is required):\n"
+    "  1. Report added complexity or duplication only when it creates a concrete "
+    "maintenance consequence or violates an established repository convention. "
+    "Explain that consequence or cite the convention and its applicable source.\n"
+    "  2. Check existing canonical helpers and surrounding ownership before "
+    "recommending extraction or reuse. Size, single-use variables, and wrappers "
+    "alone do not establish a defect.\n"
+    "  3. Maintainability-only findings are medium/low, never high.\n"
+    "  4. Report only newly introduced or worsened problems, scoped to this "
+    "diff's contribution. Omit subjective refactoring preferences."
 )
 
 

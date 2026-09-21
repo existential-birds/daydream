@@ -90,6 +90,7 @@ from daydream.review_budget import (
     clear_review_budget_stop,
     record_review_budget_stop,
 )
+from daydream.review_evidence import FinalizationContext
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.test_execution import (
@@ -146,13 +147,15 @@ def _prepare_existing_phase_inputs(
     *,
     exploration_dir: Path | None = None,
     read_only: bool = False,
+    capture_without_session: bool = False,
 ) -> PreparedSanctionedInputs | None:
     """Capture the named files that exist at this phase boundary.
 
     ``exploration_dir`` contributes the two shared pre-scan inputs every
-    reviewing phase sanctions, so no call site spells them out.
+    reviewing phase sanctions, so no call site spells them out. Bounded review
+    callers also capture standalone inputs for their tool-less finalization.
     """
-    if not artifact_session_active():
+    if not artifact_session_active() and not capture_without_session:
         return None
     captured = dict(inputs)
     if exploration_dir is not None:
@@ -193,12 +196,6 @@ def _budgeted_exploration_inputs(
     labels = tuple(_EXPLORATION_PHASE_INPUTS)
     if exploration_dir is None:
         return dict.fromkeys(labels)
-    if not artifact_session_active():
-        # No capture will happen without a session (see
-        # ``_prepare_existing_phase_inputs``), so resolve the transport only
-        # when the shared selector will actually size the inputs; otherwise a
-        # no-session run could hard-fail with SanctionedInputUnavailable.
-        return {label: exploration_dir / _EXPLORATION_PHASE_INPUTS[label] for label in labels}
     candidates = [
         AdvisoryCandidate(label, exploration_dir / _EXPLORATION_PHASE_INPUTS[label])
         for label in labels
@@ -4054,6 +4051,7 @@ async def phase_understand_intent(
                 read_only=True,
             ),
         },
+        capture_without_session=True,
         read_only=True,
     )
     prompt = get_registry().prompt("intent")(
@@ -4070,6 +4068,7 @@ async def phase_understand_intent(
         inline_exploration_summary=inline_exploration_summary,
     )
 
+    intent_correction = ""
     while True:
         console.print()
         print_info(console, "Agent is analyzing the changes...")
@@ -4077,6 +4076,16 @@ async def phase_understand_intent(
         output, _, budget_reason = await run_agent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
             review_limits=ReviewLimits(120, 60, 12),
+            finalization_context=FinalizationContext(
+                task="Describe the intent of the supplied change",
+                input_priority=("diff", "exploration-summary"),
+                output_semantics="Return concise plain text explaining the problem and proposed behavior. "
+                "State unresolved intent explicitly; do not produce a correctness review.",
+                supplied_context=(("branch", branch), ("commit log", log),
+                                  ("author description", pr_description or ""),
+                                  ("author correction", intent_correction),
+                                  ("diff", inline_diff or "")),
+            ),
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=REVIEW_WALL_BUDGET_S,
             read_only=True,
@@ -4120,6 +4129,7 @@ async def phase_understand_intent(
         if response.lower() in ("y", "yes"):
             return intent_text
 
+        intent_correction = response
         # User provided a correction — build new prompt with context. The
         # correction turn runs read-only too; whenever the diff was inlined
         # above, reuse that budgeted inline (the on-disk private path is not
@@ -4200,6 +4210,7 @@ async def phase_alternative_review(
                 read_only=False,
             ),
         },
+        capture_without_session=True,
     )
     prompt = get_registry().prompt("alternatives")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["alternatives"].content,
@@ -4219,6 +4230,14 @@ async def phase_alternative_review(
         output_schema=ALTERNATIVE_REVIEW_SCHEMA,
         phase=DaydreamPhase.ALTERNATIVES,
         review_limits=ReviewLimits(300, 90, 24),
+        finalization_context=FinalizationContext(
+            task="Finalize the assessment of implementation alternatives",
+            input_priority=("diff", "exploration-summary"),
+            output_semantics="Return issues only for substantiated design failures "
+            "or repository convention violations. "
+            "An empty issues array is valid.",
+            supplied_context=(("confirmed intent", intent_summary), ("diff", inline_diff or "")),
+        ),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=REVIEW_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -4356,6 +4375,7 @@ async def phase_per_stack_reviews(
                 stack_sanctioned_inputs = _prepare_existing_phase_inputs(
                     backend, work,
                     common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
+                    capture_without_session=True,
                     exploration_dir=exploration_dir,
                 )
                 pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
@@ -4427,6 +4447,17 @@ async def phase_per_stack_reviews(
                     task_prompt: str = prompt,
                     task_output: Path = output_path,
                     task_inputs: PreparedSanctionedInputs | None = stack_sanctioned_inputs,
+                    task_context: FinalizationContext = FinalizationContext(
+                        task=f"Finalize {stack.stack_name} review",
+                        input_priority=("diff", "intent"),
+                        assigned_files=tuple(stack.files),
+                        output_semantics="Return issues and file verdicts in the required schema. "
+                        "Use not_reviewed for unfinished files and an empty issues array "
+                        "when no defect is established.",
+                        supplied_context=(("diff", inline_diff or ""),
+                                          ("intent authority", AUTHORITATIVE_INTENT_BLOCK
+                                           if intent_authoritative else "Intent is advisory context.")),
+                    ),
                 ) -> None:
                     structured: Any = None
                     budget_reason: str | None = None
@@ -4447,6 +4478,7 @@ async def phase_per_stack_reviews(
                                     phase=DaydreamPhase.DEEP,
                                     output_schema=PER_STACK_RECORD_SCHEMA,
                                     review_limits=ReviewLimits(),
+                                    finalization_context=task_context,
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=REVIEW_WALL_BUDGET_S,
                                     sanctioned_inputs=task_inputs,
@@ -4625,6 +4657,7 @@ async def phase_supervise_review(
         backend, work,
         {"supervise-input": input_path, "diff": diff_path, "intent": intent_path,
          "alternatives": alternatives_path},
+        capture_without_session=True,
         exploration_dir=exploration_dir,
     )
     result, _, budget_reason = await run_agent(
@@ -4634,6 +4667,14 @@ async def phase_supervise_review(
         output_schema=SUPERVISE_SCHEMA,
         phase=DaydreamPhase.DEEP,
         review_limits=ReviewLimits(120, 60, 12, discovery=False),
+        finalization_context=FinalizationContext(
+            task="Finalize supervision of supplied canonical findings",
+            input_priority=("supervise-input", "diff", "intent"),
+            assigned_files=tuple(sorted({str(item["file"]) for item in items if "file" in item})),
+            output_semantics="Return verdicts only for supplied canonical integer ids. "
+            "Do not invent findings or claim unresolved adjudication complete.",
+            supplied_context=(("input findings (adjudication targets, not source evidence)", json.dumps(items)),),
+        ),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -4742,6 +4783,7 @@ async def phase_arbiter_review(
         backend, work,
         {"arbiter-input": input_path, "diff": diff_path, "intent": intent_path,
          "alternatives": alternatives_path},
+        capture_without_session=True,
         exploration_dir=exploration_dir,
     )
     result, continuation, budget_reason = await run_agent(
@@ -4751,6 +4793,16 @@ async def phase_arbiter_review(
         output_schema=ARBITER_SCHEMA,
         phase=DaydreamPhase.DEEP,
         review_limits=ReviewLimits(120, 60, 16, discovery=False),
+        finalization_context=FinalizationContext(
+            task="Finalize arbitration of supplied findings",
+            input_priority=("arbiter-input", "diff", "intent"),
+            assigned_files=tuple(sorted({str(item["file"]) for item in arbiter_input if "file" in item})),
+            output_semantics="Echo arb_id for each resolved input finding, preserving its identity. "
+            "Do not discover new findings. Unresolved inputs remain unadjudicated.",
+            supplied_context=(("adjudication targets (not source evidence)", json.dumps(arbiter_input)),
+                              ("intent authority", AUTHORITATIVE_INTENT_BLOCK
+                               if intent_authoritative else "Intent is advisory context.")),
+        ),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -4834,6 +4886,7 @@ async def phase_suppression_review(
         backend, work,
         {"suppression-input": input_path, "diff": diff_path, "intent": intent_path,
          "alternatives": alternatives_path},
+        capture_without_session=True,
         exploration_dir=exploration_dir,
     )
     result, _, budget_reason = await run_agent(
@@ -4843,6 +4896,14 @@ async def phase_suppression_review(
         output_schema=SUPPRESSION_SCHEMA,
         phase=DaydreamPhase.DEEP,
         review_limits=ReviewLimits(120, 60, 12, discovery=False),
+        finalization_context=FinalizationContext(
+            task="Finalize suppression decisions for supplied findings",
+            input_priority=("suppression-input", "diff", "intent"),
+            assigned_files=tuple(sorted({str(item["file"]) for item in suppression_input if "file" in item})),
+            output_semantics="Echo sup_id for resolved findings only. "
+            "Do not invent new findings or drop an unresolved finding as if disproved.",
+            supplied_context=(("adjudication targets (not source evidence)", json.dumps(suppression_input)),),
+        ),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -5409,7 +5470,9 @@ async def phase_cross_stack_merge(
             for index, path in enumerate(sorted(per_stack_records_paths))
         },
     }
-    sanctioned_inputs = _prepare_existing_phase_inputs(backend, work, merge_inputs, exploration_dir=exploration_dir)
+    sanctioned_inputs = _prepare_existing_phase_inputs(
+        backend, work, merge_inputs, exploration_dir=exploration_dir, capture_without_session=True,
+    )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
     result, _, budget_reason = await run_agent(
@@ -5420,6 +5483,17 @@ async def phase_cross_stack_merge(
         phase=DaydreamPhase.MERGE,
         continuation=continuation,
         review_limits=ReviewLimits(180, 60, 16, discovery=False),
+        finalization_context=FinalizationContext(
+            task="Merge completed review records",
+            input_priority=tuple(label for label in merge_inputs if label.startswith("stack-records-"))
+            + ("intent", "dedup-candidates"),
+            output_semantics="Return merged items in the required schema, preserving source finding identities and "
+            "grounded defects. Empty items is valid only if the supplied completed records establish no findings. "
+            "Do not infer clean coverage from absent, incomplete, or omitted records.",
+            supplied_context=(("failed stacks", json.dumps(failed_stacks or {})),
+                              ("intent authority", AUTHORITATIVE_INTENT_BLOCK
+                               if intent_authoritative else "Intent is advisory context.")),
+        ),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=REVIEW_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,

@@ -119,6 +119,10 @@ def _specialist_prompt(
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
+Complete only the requested repository mapping. Do not conduct another correctness
+review or search for defects. Stop when the requested conventions, dependencies,
+or test mappings are established; unresolved mappings may be omitted truthfully.
+
 {instructions_block}{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 
 <affected_files>

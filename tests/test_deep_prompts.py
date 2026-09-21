@@ -763,17 +763,12 @@ def test_per_stack_prompt_test_quality_rubric_follows_strategy(tmp_path: Path) -
 # Issue #314 — anti-slop review rubric (structural erosion + verbosity patterns)
 
 _ANTI_SLOP_ANCHORS = (
-    "complexity concentration",
-    "extraction into focused callables",
-    "identity comprehension",
-    "empty-list guards",
-    "single-use intermediate variables",
-    "casts to dodge type checking",
-    "trivial wrapper",
-    "nested ladders",
-    "same hunk structure repeated",
+    "concrete maintenance consequence",
+    "established repository convention",
+    "canonical helpers",
+    "Size, single-use variables, and wrappers alone do not establish a defect",
     "medium/low",
-    "pre-existing-and-growing",
+    "newly introduced or worsened",
 )
 
 
@@ -781,7 +776,7 @@ _ANTI_SLOP_ANCHORS = (
 def test_review_prompt_includes_anti_slop_rubric(tmp_path: Path, builder: str) -> None:
     """#314: both reviewers retain the complete maintainability rubric."""
     out = _review_prompt(builder, tmp_path)
-    assert "anti-slop rubric" in out
+    assert "maintainability rubric" in out
     _assert_anchors(out, _ANTI_SLOP_ANCHORS)
 
 
@@ -791,7 +786,7 @@ def test_review_prompt_includes_anti_slop_rubric(tmp_path: Path, builder: str) -
 def test_anti_slop_rubric_order(tmp_path: Path, builder: str, preceding: str) -> None:
     out = _review_prompt(builder, tmp_path)
     anchor = _default_strategy(preceding) if preceding.startswith("discovery.") else preceding
-    assert out.index("anti-slop rubric") > out.index(anchor)
+    assert out.index("maintainability rubric") > out.index(anchor)
 
 
 @pytest.mark.parametrize("builder", ["per_stack", "structural"])
@@ -801,8 +796,8 @@ def test_anti_slop_rubric_severity_and_scope(tmp_path: Path, builder: str) -> No
     assert "never high" in out
     assert "unless the erosion is pre-existing-and-growing" not in out
     assert "medium/low" in out
-    assert "pre-existing-and-growing" in out
-    assert "flag the growth, not the whole function" in out
+    assert "newly introduced or worsened" in out
+    assert "scoped to this diff's contribution" in out
 
 
 # =============================================================================
@@ -823,7 +818,7 @@ _CONFIG_TRACE_ANCHORS = (
     "config struct",
     "driver config",
     "request construction",
-    "one-line trace",
+    "investigation method, not extra output",
     "silent drops",
     "double-resolves",
     "TOCTOU",
