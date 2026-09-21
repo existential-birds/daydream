@@ -80,7 +80,7 @@ def clear_review_budget_stop(deep_dir: Path, phase: str) -> None:
 
 
 def review_warnings(deep_dir: Path) -> tuple[str, ...]:
-    """Collect budget-limited phases and stacks for reports and posting."""
+    """Collect incomplete phases and stacks for reports and posting."""
     from daydream.deep.artifacts import _load_failures, per_stack_failures_path
 
     path = review_budget_path(deep_dir)
@@ -89,7 +89,8 @@ def review_warnings(deep_dir: Path) -> tuple[str, ...]:
     warnings.extend(
         f"{stack}: {reason}"
         for stack, reason in sorted(_load_failures(per_stack_failures_path(deep_dir)).items())
-        if isinstance(reason, str) and reason.startswith("budget exhausted:")
+        if isinstance(reason, str)
+        and reason.startswith(("budget exhausted:", "evidence incomplete:"))
     )
     return tuple(warnings)
 

@@ -4298,6 +4298,12 @@ async def phase_per_stack_reviews(
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_records_path, per_stack_review_path
+    from daydream.deep.finite_review import (
+        FiniteReview,
+        delegate_structural_review,
+        prepare_finite_review,
+        run_finite_review,
+    )
     from daydream.deep.prompts import _diff_blocks_for_files
     from daydream.deep.records import stamp_record_uids
 
@@ -4337,11 +4343,11 @@ async def phase_per_stack_reviews(
     # frontier. The structural stack is never inlined (`:3276-3297`) so its
     # inline evidence is empty. Default False keeps the forensic path
     # byte-identical (no receipt file written).
+    receipts: dict[str, dict[str, list[str]]] = {}
     if write_coverage_receipts:
         from daydream.deep.coverage import write_coverage_receipts as _write_coverage_receipts
         from daydream.deep.prompts import inline_grounded_files as _inline_grounded_files
 
-        receipts: dict[str, dict[str, list[str]]] = {}
         for stack in stacks:
             if stack.stack_name == STRUCTURE_STACK_NAME:
                 inline_files: list[str] = []
@@ -4358,28 +4364,59 @@ async def phase_per_stack_reviews(
             }
         _write_coverage_receipts(deep_dir_path, receipts)
 
-    dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
+    prepared: dict[str, tuple[str | None, PreparedSanctionedInputs | None, FiniteReview | None]] = {}
+    for stack in stacks:
+        inline_diff = (
+            _diff_blocks_for_files(diff_text, stack.files)
+            if diff_text is not None and stack.stack_name != STRUCTURE_STACK_NAME else None
+        )
+        inputs = _prepare_existing_phase_inputs(
+            backend, work, common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
+            capture_without_session=True, exploration_dir=exploration_dir,
+        )
+        finite = prepare_finite_review(
+            backend, work.repo, stack_name=stack.stack_name, files=stack.files,
+            strategy=strategies[
+                "discovery.generic_fallback" if stack.stack_name == "generic" else "discovery.per_stack"
+            ], diff_path=diff_path, inputs=inputs, interactive=run_context.policy.interactive,
+            intent_authoritative=intent_authoritative, prior_commits=prior_commits,
+        )
+        prepared[stack.stack_name] = (inline_diff, inputs, finite)
+    scopes = {stack.stack_name: stack.files for stack in stacks}
+    delegated = delegate_structural_review(
+        {name: values[2] for name, values in prepared.items()}, scopes, strategies["discovery.structural"],
+    )
+    delegation_path = deep_dir_path / "structural-delegation.json"
+    delegation_path.unlink(missing_ok=True)
+    if delegated is not None:
+        print_dim(console, "Structural boundary and design checks are delegated to primary reviewers")
+        delegation = {
+            "structural_files": scopes[STRUCTURE_STACK_NAME],
+            "primary_scopes": {name: scopes[name] for name in delegated},
+            "status": "delegated; completion is recorded in each primary review",
+        }
+        delegation_path.write_text(json.dumps(delegation, indent=2))
+        per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME).write_text(json.dumps({
+            "issues": [], "verdicts": [], "delegated_to": list(delegated),
+        }))
+        structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
+        structural_output.write_text("# Structural review\n\nDelegated to primary reviewers: " + ", ".join(delegated))
+        results[STRUCTURE_STACK_NAME] = structural_output
+        for name, packet in delegated.items():
+            inline, inputs, _ = prepared[name]
+            prepared[name] = (inline, inputs, packet)
+    active_stacks = [stack for stack in stacks if delegated is None or stack.stack_name != STRUCTURE_STACK_NAME]
+    dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in active_stacks)
     async with dispatch_scope(
         recorder,
         phase=DaydreamPhase.DEEP,
         descriptors=dispatch_descriptors,
     ) as dispatch:
         async with anyio.create_task_group() as tg:
-            for stack in stacks:
+            for stack in active_stacks:
                 output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
                 per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
-                inline_diff = (
-                    _diff_blocks_for_files(diff_text, stack.files)
-                    if diff_text is not None
-                    and stack.stack_name != STRUCTURE_STACK_NAME
-                    else None
-                )
-                stack_sanctioned_inputs = _prepare_existing_phase_inputs(
-                    backend, work,
-                    common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
-                    capture_without_session=True,
-                    exploration_dir=exploration_dir,
-                )
+                inline_diff, stack_sanctioned_inputs, finite_review = prepared[stack.stack_name]
                 pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
                 if stack.stack_name == STRUCTURE_STACK_NAME:
                     # Structural is a first-class stack scope (not a skill): its
@@ -4449,6 +4486,7 @@ async def phase_per_stack_reviews(
                     task_prompt: str = prompt,
                     task_output: Path = output_path,
                     task_inputs: PreparedSanctionedInputs | None = stack_sanctioned_inputs,
+                    finite: FiniteReview | None = finite_review,
                     task_context: FinalizationContext = FinalizationContext(
                         task=f"Finalize {stack.stack_name} review",
                         input_priority=("diff", "intent"),
@@ -4463,6 +4501,8 @@ async def phase_per_stack_reviews(
                 ) -> None:
                     structured: Any = None
                     budget_reason: str | None = None
+                    evidence_incomplete = False
+                    source_evidence: tuple[dict[str, Any], ...] = ()
                     async with limiter:
                         try:
                             async with maybe_fork(
@@ -4473,22 +4513,40 @@ async def phase_per_stack_reviews(
                                 # no separate ``parse-<stack>`` fork. The fork is
                                 # finalized on exit so verdict reconciliation below
                                 # can read its completed reads from disk.
-                                structured, _, budget_reason = await run_agent(
-                                    backend,
-                                    work.repo,
-                                    task_prompt,
-                                    phase=DaydreamPhase.DEEP,
-                                    output_schema=PER_STACK_RECORD_SCHEMA,
-                                    review_limits=ReviewLimits(),
-                                    finalization_context=task_context,
-                                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                                    wall_budget_s=REVIEW_WALL_BUDGET_S,
-                                    sanctioned_inputs=task_inputs,
-                                    run_context=run_context,
-                                )
+                                if finite is not None:
+                                    outcome = await run_finite_review(
+                                        backend, work.repo, finite, schema=PER_STACK_RECORD_SCHEMA,
+                                        run_context=run_context,
+                                    )
+                                    structured = outcome.output
+                                    source_evidence = outcome.source_evidence
+                                    evidence_incomplete = outcome.reason == "evidence_incomplete"
+                                    budget_reason = None if evidence_incomplete else outcome.reason
+                                    if write_coverage_receipts:
+                                        receipts[stack_name]["source_packet_files"] = sorted(
+                                            outcome.source_packet_files,
+                                        )
+                                else:
+                                    structured, _, budget_reason = await run_agent(
+                                        backend,
+                                        work.repo,
+                                        task_prompt,
+                                        phase=DaydreamPhase.DEEP,
+                                        output_schema=PER_STACK_RECORD_SCHEMA,
+                                        review_limits=ReviewLimits(),
+                                        finalization_context=task_context,
+                                        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                                        wall_budget_s=REVIEW_WALL_BUDGET_S,
+                                        sanctioned_inputs=task_inputs,
+                                        run_context=run_context,
+                                    )
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             failures[stack_name] = f"{type(e).__name__}: {e}"
                             return
+                        if evidence_incomplete:
+                            failures[stack_name] = (
+                                "evidence incomplete: required context unavailable or review unfinished"
+                            )
                         if budget_reason:
                             # A truncated stack did not really pass: route it
                             # into failures so merge lists it under
@@ -4546,7 +4604,8 @@ async def phase_per_stack_reviews(
                         # every review fork is finalized on disk (issue #745).
                         per_stack_records_path(deep_dir_path, stack_name).write_text(
                             json.dumps({"issues": issues, "verdicts": declared,
-                                        **({"incomplete": True} if budget_reason else {})}, indent=2)
+                                        **({"incomplete": True} if budget_reason or evidence_incomplete else {}),
+                                        **({"source_evidence": source_evidence} if source_evidence else {})}, indent=2)
                         )
                         task_output.write_text("# Review\n\n" + "\n".join(
                             f"- {issue.get('file', '')}:{issue.get('line', '')} {issue.get('description', '')}"
@@ -4557,6 +4616,9 @@ async def phase_per_stack_reviews(
                 tg.start_soon(_task)
         if dispatch is not None and failures:
             finish_partial_or_failed(dispatch, results)
+
+    if write_coverage_receipts:
+        _write_coverage_receipts(deep_dir_path, receipts)
 
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))

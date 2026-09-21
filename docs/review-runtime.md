@@ -458,3 +458,60 @@ Prompt and routing tests establish these contracts; they do not by themselves
 establish model convergence or equivalent recall. Evidence retention remains
 bounded, and this change does not promise that every review completes before a
 limit.
+
+
+### Finite evidence protocol for modest Pi reviews
+
+Eligible unattended default Pi reviewers receive the complete diff and complete
+assigned source text before making a judgment. The model keeps its configured
+reasoning effort and has no executable tools. It can request one batch of up to
+eight specific file reads or literal searches to resolve concrete candidates.
+The host resolves those requests within the repository and supplies the results
+for one final judgment. Both calls share the existing investigation and final
+response deadline; the second call does not receive a fresh investigation budget.
+
+Eligibility requires a diff no larger than 64 KiB, at most ten assigned files,
+and complete assigned text no larger than 192 KiB. Missing, deleted, binary,
+unsafe or oversized source packets fall back to the existing reviewer. Custom
+review strategies retain their existing path. Large packets travel through Pi's
+standard input to avoid operating-system argument-size limits.
+
+For modest default intent analysis, the host supplies labeled author context,
+commit metadata and changed paths directly. It does not invent an intent summary
+or promote metadata to authoritative intent. Existing PR freshness checks remain
+in force; reviewers establish behavior from the diff and source.
+
+A host receipt credits supplied source only after a valid final file verdict.
+Unavailable requested evidence leaves dependent files incomplete, even when an
+independently proven finding survives for that file. Those incomplete warnings
+remain in reports and publication gates. Source hashes and line counts are
+preserved in diagnostics; source text itself remains in the live-redacted
+trajectory rather than a new unsanitized packet artifact.
+
+The prototype completed the incident's seven-file generic scope at high effort
+in 249 seconds with one model call and no tools. Small behavioral fixtures
+retained two local defects and a cross-file configuration defect; a clean fixture
+returned no findings, and an unavailable dependency produced an incomplete verdict
+without a speculative finding. These focused checks are evidence of feasibility,
+not a broad recall benchmark. Giving the standalone structural reviewer either
+all ten source files or the diff plus completed primary summaries still exceeded
+480 seconds without a terminal response. Zero tool calls in those attempts rule
+out tool loops, but do not distinguish internal reasoning from provider latency.
+
+
+When every primary reviewer qualifies for this protocol, their assigned-file
+union exactly covers the structural scope, and the structural policy and prompt
+builder are defaults, those reviewers also own structural checks involving their
+assigned files. Each receives the full change partition and the structural and
+canonical-design criteria. Cross-stack synthesis remains. An explicit delegation
+artifact records ownership; empty structural compatibility records do not claim
+file coverage. A failed owner leaves its delegated scope incomplete. Custom
+builders or policies, an uncovered structural file, or an ineligible primary
+retain the separate structural reviewer.
+
+Two additional high-effort fixtures checked this combined responsibility. One
+found a changed consumer's unit mismatch against a producer owned by another
+stack in 6.74 seconds. The other requested an unchanged canonical helper and
+identified divergent Unicode normalization in 82.03 seconds. Both finished with
+zero model tool calls. These examples test specific cross-file failure modes;
+they do not establish equivalent recall across arbitrary repositories.
