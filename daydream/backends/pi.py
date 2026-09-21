@@ -339,10 +339,6 @@ def _pi_error_category(message: str) -> str:
     return "UNKNOWN"
 
 
-def parse_pi_retry_hint(message: str) -> float | None:
-    return parse_message_retry_hint(message)
-
-
 class _PiFailureFacts(Exception):
     """Classifier probe carrying Pi's category + message and no opt-in flag."""
 
@@ -987,7 +983,7 @@ class PiBackend:
                             error_msg,
                             retryable=_pi_retryable_for(category=category, message=error_msg),
                             category=category,
-                            retry_after=parse_pi_retry_hint(error_msg),
+                            retry_after=parse_message_retry_hint(error_msg),
                         )
 
                 elif event_type == "agent_end":

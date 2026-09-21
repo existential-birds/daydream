@@ -743,17 +743,6 @@ class RequestEvent:
     Only exposed request data belongs here; backend-internal prompts and
     environment/configuration dictionaries are never inferred or copied.
     ``system_prompt`` contains only the system text explicitly sent by Daydream.
-
-    P18 Task 1 additions (all additive; older call sites stay valid):
-
-    ``config`` carries the closed typed Effective Configuration Admission
-    Contract dataclass (a frozen subclass of :class:`_AdmissionBase`), never a
-    free-form bag. ``*_source`` fields distinguish configured, host-generated
-    and native provenance for identity fields; ``None`` means the field's
-    provenance was not separately established. ``timestamp_source`` is
-    ``"native"`` only when the backend supplied the request timestamp from its
-    own protocol handshake (Osprey ``session_start``); every other backend is
-    ``"host_observed"``.
     """
 
     prompt: str
@@ -1022,14 +1011,6 @@ class TurnEndEvent:
             when the backend cannot supply one (Codex has no per-message
             id surface — D-04 correlator unused for Codex).
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
-        P18 Task 1 additions: where a backend exposes a per-turn finish
-        reason/model/provider on the boundary itself, it is carried here
-        with provenance; backends without such an exposure leave them
-        ``None`` (Pi fills ``model_name``/``provider_name`` from its
-        ``turn_end.message``; Claude leaves them unset and keeps its
-        existing ``ResultEvent``-level metadata). ``timestamp_source``
-        distinguishes a native protocol timestamp (``"native"``) from the
-        host yield time (``"host_observed"``).
     """
 
     message_id: str = ""
