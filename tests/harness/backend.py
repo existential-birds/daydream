@@ -10,8 +10,7 @@ order is not fixed still gets the right turn, and can hand a call to a
 per-call ``responder`` that returns a turn, streams its own async iterator, or
 declines (``None``) so the schema/script selection decides. Prompt-heuristic
 routing for the shallow review-fix-test loop stays
-``tests.harness.phase_backend.PhaseDispatchBackend``'s job, and phase-keyed
-replay of real driver output stays ``tests.harness.phase_replay``'s.
+``tests.harness.phase_backend.PhaseDispatchBackend``'s job.
 
 A *script* is a list of turns, one per ``execute`` call. A turn is a sequence of
 items, each either an ``AgentEvent`` to yield or a ``BaseException`` to raise at

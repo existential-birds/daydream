@@ -143,8 +143,9 @@ def test_redaction_precedes_head_tail_bound() -> None:
     assert out.rstrip().endswith("tail") or "tail" in out
 
 
-def test_large_diagnostics_capped_with_single_marker() -> None:
-    outer = RuntimeError("HEAD-SENTINEL " + "x" * 200_000)
+@pytest.mark.parametrize("char", ["x", "é", "漢", "😀"], ids=["ascii", "2-byte", "3-byte", "4-byte"])
+def test_large_diagnostics_capped_with_single_marker(char: str) -> None:
+    outer = RuntimeError("HEAD-SENTINEL " + char * 200_000)
     inner = git_ops.GitError("root cause tail: git reflog expired")
     outer.__cause__ = inner
     out = format_verbose_exception(outer)

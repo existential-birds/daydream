@@ -1524,13 +1524,8 @@ def admission_summary_buckets(
     return buckets
 
 
-def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
-    """Human admission summary derived from the built import ledger.
-
-    Imported sessions count as admitted; rejections count only when they
-    carry a license-gate reason code (ingest/fixture rejections were never
-    adjudicated by the license gate and are skipped).
-    """
+def _license_admission_entries(ledger: Mapping[str, Any]) -> list[tuple[str, str | None]]:
+    """Extract every license decision before callers read session manifests."""
     entries: list[tuple[str, str | None]] = [
         (str(item["session_id"]), None) for item in ledger.get("imported", [])
     ]
@@ -1538,7 +1533,17 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
         code = item.get("reason_code")
         if code in _LICENSE_REASON_CODES:
             entries.append((str(item["session_id"]), str(code)))
-    return admission_summary_buckets(entries)
+    return entries
+
+
+def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
+    """Human admission summary derived from the built import ledger.
+
+    Imported sessions count as admitted; rejections count only when they
+    carry a license-gate reason code (ingest/fixture rejections were never
+    adjudicated by the license gate and are skipped).
+    """
+    return admission_summary_buckets(_license_admission_entries(ledger))
 
 
 def license_admission_by_repo(
@@ -1558,13 +1563,7 @@ def license_admission_by_repo(
     and counts, never URLs or paths.
     """
     revision = str(ledger["pinned_revision"])
-    entries: list[tuple[str, str | None]] = [
-        (str(item["session_id"]), None) for item in ledger.get("imported", [])
-    ]
-    for item in ledger.get("rejections", []):
-        code = item.get("reason_code")
-        if code in _LICENSE_REASON_CODES:
-            entries.append((str(item["session_id"]), str(code)))
+    entries = _license_admission_entries(ledger)
     by_repo: dict[str, dict[str, int]] = {}
     for sid, code in entries:
         # Imported sessions still live under stage/runs/<sid> (checked first);
@@ -1572,12 +1571,7 @@ def license_admission_by_repo(
         slug, _evidence = _session_identity(
             stage, sid, revision, root="excluded", collision=False
         )
-        buckets = by_repo.setdefault(slug or "unresolved", {
-            "admitted": 0,
-            "c5_excluded": 0,
-            "c8_copyleft_unopted": 0,
-            "license_evidence_missing": 0,
-        })
+        buckets = by_repo.setdefault(slug or "unresolved", admission_summary_buckets([]))
         for bucket, count in admission_summary_buckets([(sid, code)]).items():
             buckets[bucket] += count
     return by_repo

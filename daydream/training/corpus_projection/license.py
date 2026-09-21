@@ -137,57 +137,29 @@ def resolve_repo_decision(
 
     canonical_slug = normalize_repo_slug(repo_slug)
     folded_slug = canonical_slug.casefold()
-    if folded_slug in {slug.casefold() for slug in load_exclusion_list()}:
-        return RepoDecision(
-            repo_slug=canonical_slug,
-            status="rejected",
-            reason_code=REASON_CODE_C5_EXCLUDED_REPO,
-            spdx_id=None,
-            policy_version=policy.policy_version,
-            evidence_ref=evidence_ref,
-        )
-
-    if not isinstance(repo_slug, str) or not canonical_slug:
-        return RepoDecision(
-            repo_slug=canonical_slug,
-            status="rejected",
-            reason_code=REASON_CODE_REPO_IDENTITY_MISSING,
-            spdx_id=None,
-            policy_version=policy.policy_version,
-            evidence_ref=evidence_ref,
-        )
-
     spdx_id: str | None = None
-    if isinstance(evidence, dict):
-        raw_spdx = evidence.get("spdx_id")
-        if isinstance(raw_spdx, str) and raw_spdx.strip():
-            spdx_id = raw_spdx.strip()
-    if spdx_id is None or spdx_id not in policy.spdx_decisions:
-        return RepoDecision(
-            repo_slug=canonical_slug,
-            status="rejected",
-            reason_code=REASON_CODE_LICENSE_EVIDENCE_MISSING,
-            spdx_id=spdx_id,
-            policy_version=policy.policy_version,
-            evidence_ref=evidence_ref,
-        )
-
-    decision = policy.spdx_decisions[spdx_id]
-    allowed = {slug.casefold() for slug in allow_copyleft}
-    if decision == "rejected" and folded_slug not in allowed:
-        return RepoDecision(
-            repo_slug=canonical_slug,
-            status="rejected",
-            reason_code=REASON_CODE_C8_COPYLEFT_UNOPTED,
-            spdx_id=spdx_id,
-            policy_version=policy.policy_version,
-            evidence_ref=evidence_ref,
-        )
+    reason_code: str | None = None
+    if folded_slug in {slug.casefold() for slug in load_exclusion_list()}:
+        reason_code = REASON_CODE_C5_EXCLUDED_REPO
+    elif not isinstance(repo_slug, str) or not canonical_slug:
+        reason_code = REASON_CODE_REPO_IDENTITY_MISSING
+    else:
+        if isinstance(evidence, dict):
+            raw_spdx = evidence.get("spdx_id")
+            if isinstance(raw_spdx, str) and raw_spdx.strip():
+                spdx_id = raw_spdx.strip()
+        if spdx_id is None or spdx_id not in policy.spdx_decisions:
+            reason_code = REASON_CODE_LICENSE_EVIDENCE_MISSING
+        else:
+            decision = policy.spdx_decisions[spdx_id]
+            allowed = {slug.casefold() for slug in allow_copyleft}
+            if decision == "rejected" and folded_slug not in allowed:
+                reason_code = REASON_CODE_C8_COPYLEFT_UNOPTED
 
     return RepoDecision(
         repo_slug=canonical_slug,
-        status="admitted",
-        reason_code=None,
+        status="admitted" if reason_code is None else "rejected",
+        reason_code=reason_code,
         spdx_id=spdx_id,
         policy_version=policy.policy_version,
         evidence_ref=evidence_ref,

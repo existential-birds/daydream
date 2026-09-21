@@ -201,6 +201,7 @@ def test_merge_contexts_dedups_dependencies() -> None:
     b = ExplorationContext(dependencies=[Dependency("a.py", "b.py", "imports")])
     merged = merge_contexts(a, b)
     assert len(merged.dependencies) == 1
+    assert merged.dependencies[0] is dep
 
 
 def test_merge_contexts_dedups_conventions_and_guidelines() -> None:
@@ -214,7 +215,8 @@ def test_merge_contexts_dedups_conventions_and_guidelines() -> None:
     )
     merged = merge_contexts(a, b)
     assert len(merged.conventions) == 1
-    assert len(merged.guidelines) == 2
+    assert merged.conventions[0] is a.conventions[0]
+    assert merged.guidelines == ["use type hints", "no print statements"]
 
 
 def test_merge_contexts_joins_raw_notes() -> None:

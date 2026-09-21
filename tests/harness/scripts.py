@@ -1,15 +1,8 @@
-"""Multi-phase canonical-script synthesis with structured-output support.
+"""Canonical-script synthesis with structured-output support.
 
-Extends the single-script synthesis in ``tests/contract/_loaders.py`` (reused,
-not copied) to:
-
-1. Render a ``{phase: script}`` map to per-phase native message streams
-   (``render_codex``), so the replay harness can serve each firing phase its
-   own fixture.
-2. Thread a script-level ``structured_output`` dict onto the final turn so the
-   real backend parser (or Claude ``ResultMessage``)
-   extracts it — the parity path for the PARSE phase's schema-constrained
-   return.
+Extends the single-script synthesis in ``tests/contract/_loaders.py`` to
+thread a script-level ``structured_output`` dict onto the final turn so the
+real backend parser extracts the PARSE phase's schema-constrained return.
 
 The structured-output path emits the final ``agent_message`` text as
 ``json.dumps(structured_output)`` for Codex (the real parser ``json.loads`` the
@@ -29,11 +22,8 @@ from unittest.mock import patch
 from daydream import cli
 from daydream.backends import AgentEvent
 from daydream.backends.codex import CodexBackend
-from daydream.trajectory import DaydreamPhase
 from tests.contract._loaders import _build_codex_jsonl
 from tests.harness.codex_replay import make_mock_process
-
-PhaseScripts = dict[DaydreamPhase, dict[str, Any]]
 
 
 def cli_main(argv: list[str]) -> int:
@@ -91,11 +81,6 @@ def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
             )
         return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))
-
-
-def render_codex(phase_scripts: PhaseScripts) -> dict[DaydreamPhase, list[str]]:
-    """Render a ``{phase: script}`` map to ``{phase: codex_jsonl_lines}``."""
-    return {phase: build_codex_jsonl_for_phase(script) for phase, script in phase_scripts.items()}
 
 
 async def drive_codex(
