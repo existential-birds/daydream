@@ -3622,7 +3622,7 @@ class ArtifactSession:
             if declared == from_value:
                 kind = self._projection_kind(route)
                 _validate_projection_ancestry(declared, expected_kind=kind)
-                to_value = getattr(route, to_attr)
+                to_value: Path | None = getattr(route, to_attr)
                 if to_value is None:
                     raise ArtifactVisibilityError(
                         "registered artifact destination has no writable path"
@@ -3637,8 +3637,8 @@ class ArtifactSession:
         for route in self._destinations:
             if route.label is not OutputLabel.PUBLIC_DAYDREAM:
                 continue
-            from_root = getattr(route, from_attr)
-            to_root = getattr(route, to_attr)
+            from_root: Path | None = getattr(route, from_attr)
+            to_root: Path | None = getattr(route, to_attr)
             if from_root is None or to_root is None:
                 raise ArtifactVisibilityError(
                     "registered artifact destination has no writable path"
