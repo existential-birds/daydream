@@ -143,6 +143,7 @@ class Pipeline:
     high-severity/contested; suppression opt-in off).
     """
 
+    review_wall_budget_s: int = 2700
     structural_enabled: bool = True
     uncovered_sweep_enabled: bool = True
     uncovered_sweep_max_files: int = 10
@@ -179,6 +180,7 @@ class ReviewProfile:
                 key: strategy.content for key, strategy in sorted(self.strategies.items())
             },
             "pipeline": {
+                "review_wall_budget_s": self.pipeline.review_wall_budget_s,
                 "structural_enabled": self.pipeline.structural_enabled,
                 "uncovered_sweep_enabled": self.pipeline.uncovered_sweep_enabled,
                 "uncovered_sweep_max_files": self.pipeline.uncovered_sweep_max_files,
@@ -275,7 +277,9 @@ def build_default_profile() -> ReviewProfile:
                 f"{INTENT_STRATEGY_JUDGMENT_MARKER}, already computed against the "
                 "repository's base branch — this run is not tied to a GitHub pull request, so "
                 "do not look up, list, or ask about pull requests. Do not invoke any skills or "
-                "slash commands. Present your understanding concisely — what problem is being "
+                "slash commands. Use the supplied PR description, diff, and shared context first; "
+                "read source only to resolve ambiguity about intent, not to conduct a correctness review. "
+                "Present your understanding concisely — what problem is being "
                 "solved and how — as plain text in your reply."
             ),
             source="copied: daydream.phases.build_intent_prompt",
@@ -286,11 +290,14 @@ def build_default_profile() -> ReviewProfile:
                 "{intent_summary}\n\n"
                 "Given this intent, explore the codebase and evaluate the implementation "
                 f"in the diff at {{diff_path}}. {ALTERNATIVES_STRATEGY_JUDGMENT_MARKER}"
-                "with evidence — correctness bugs, design decisions that will cause a real "
+                "with evidence. Focus on design choices that conflict with the confirmed intent or "
+                "an existing canonical implementation. Stack reviewers handle local correctness; "
+                "the structural pass handles cross-module contracts. Do not repeat their full audit. "
+                "Consider design decisions that will cause a real "
                 "failure, or violations of a Codebase Convention above. Do NOT list stylistic "
                 "preferences, speculative 'nice to have' opinions, or alternatives you cannot "
                 "tie to a concrete downside.\n\n"
-                "Return a numbered list of issues. For each issue, include: a sequential id "
+                "Return the required JSON object with an issues array. For each issue, include: a sequential id "
                 "number, a brief title, a description of the concrete problem and the evidence "
                 "for it, a severity level (high/medium/low), a concrete recommendation for how "
                 "to address it, and the relevant file paths.\n\n"
@@ -355,7 +362,9 @@ def build_default_profile() -> ReviewProfile:
                 "convention.\n"
                 "\n"
                 "For each candidate, read both sides of the boundary and trace the relevant "
-                "value, call, state transition, or resource lifetime end to end. Search for "
+                "value, call, state transition, or resource lifetime end to end. Do not repeat "
+                "the language reviewers’ file-by-file correctness audit or alternatives analysis. "
+                "Stop tracing a boundary when its contract agrees and no concrete candidate remains. Search for "
                 "repository evidence that disproves the concern. Verify that any "
                 "recommended canonical helper, contract, or layer actually exists and is "
                 "compatible before proposing reuse.\n"
@@ -632,6 +641,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         raise ProfileError("pipeline must be a table", source)
     _PIPELINE_KEYS = frozenset(
         {
+            "review_wall_budget_s",
             "structural_enabled",
             "uncovered_sweep_enabled",
             "uncovered_sweep_max_files",
@@ -734,6 +744,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         )
 
     return Pipeline(
+        review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
         uncovered_sweep_enabled=_bool(
             "uncovered_sweep_enabled", defaults.uncovered_sweep_enabled
@@ -921,5 +932,4 @@ def resolve_harbor_profile(
             profile=profile, source_kind="candidate", source_path=Path(raw)
         )
     return ResolvedProfile(profile=build_default_profile(), source_kind="default")
-
 

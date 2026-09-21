@@ -297,17 +297,20 @@ def _rewrite_stack_records(
         # regardless so every worker -- merge resume, the coverage evidence
         # path -- reads the same shape whether or not arbitration fired.
         verdicts: list[Any] = []
+        incomplete = False
         if dest_path.is_file():
             try:
                 existing = json.loads(dest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 existing = None
             if isinstance(existing, dict):
+                incomplete = existing.get("incomplete") is True
                 existing_verdicts = existing.get("verdicts", [])
                 if isinstance(existing_verdicts, list):
                     verdicts = existing_verdicts
         dest_path.write_text(
-            json.dumps({"issues": stack_records, "verdicts": verdicts}, indent=2)
+            json.dumps({"issues": stack_records, "verdicts": verdicts,
+                        **({"incomplete": True} if incomplete else {})}, indent=2)
         )
 
 

@@ -84,7 +84,12 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
-from daydream.review_budget import ReviewBudgetExceeded, clear_review_budget_stop, record_review_budget_stop
+from daydream.review_budget import (
+    ReviewBudgetExceeded,
+    ReviewLimits,
+    clear_review_budget_stop,
+    record_review_budget_stop,
+)
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.test_execution import (
@@ -1528,6 +1533,17 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
             f"\n{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
             f"Pre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
             "for the structural/import file map before fixing."
+        )
+    from daydream.prompt_budget import inline_context_file
+
+    summary = inline_context_file(exploration_dir / "summary.md")
+    affected = inline_context_file(exploration_dir / "affected_files.md")
+    if summary is not None and affected is not None:
+        return (
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            "Shared exploration context (complete captured artifacts; do not re-read these files):\n"
+            + json.dumps({"summary": summary, "affected_files": affected}, ensure_ascii=False)
+            + "\nAssigned source files still require same-review reads; this context does not establish clean coverage."
         )
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
@@ -4060,6 +4076,7 @@ async def phase_understand_intent(
 
         output, _, budget_reason = await run_agent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
+            review_limits=ReviewLimits(120, 60, 12),
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=REVIEW_WALL_BUDGET_S,
             read_only=True,
@@ -4067,7 +4084,7 @@ async def phase_understand_intent(
             run_context=run_context,
         )
         if budget_reason is not None:
-            raise ReviewBudgetExceeded("Intent analysis", budget_reason)
+            raise ReviewBudgetExceeded("Intent analysis", budget_reason, output)
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
@@ -4201,6 +4218,7 @@ async def phase_alternative_review(
         prompt,
         output_schema=ALTERNATIVE_REVIEW_SCHEMA,
         phase=DaydreamPhase.ALTERNATIVES,
+        review_limits=ReviewLimits(300, 90, 24),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=REVIEW_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -4208,7 +4226,7 @@ async def phase_alternative_review(
     )
 
     if budget_reason:
-        raise ReviewBudgetExceeded("Alternatives", budget_reason)
+        raise ReviewBudgetExceeded("Alternatives", budget_reason, result)
 
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
@@ -4328,6 +4346,7 @@ async def phase_per_stack_reviews(
         async with anyio.create_task_group() as tg:
             for stack in stacks:
                 output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+                per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
                 inline_diff = (
                     _diff_blocks_for_files(diff_text, stack.files)
                     if diff_text is not None
@@ -4427,6 +4446,7 @@ async def phase_per_stack_reviews(
                                     task_prompt,
                                     phase=DaydreamPhase.DEEP,
                                     output_schema=PER_STACK_RECORD_SCHEMA,
+                                    review_limits=ReviewLimits(),
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=REVIEW_WALL_BUDGET_S,
                                     sanctioned_inputs=task_inputs,
@@ -4441,7 +4461,10 @@ async def phase_per_stack_reviews(
                             # "Uncovered stacks" instead of silently shipping
                             # a partial review as a complete one.
                             failures[stack_name] = f"budget exhausted: {budget_reason}"
-                            return
+                            from daydream.agent import _validates_schema
+
+                            if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                                return
                         if not isinstance(structured, dict):
                             failures[stack_name] = "no structured output produced"
                             return
@@ -4480,14 +4503,21 @@ async def phase_per_stack_reviews(
                         # self-describing when debugging.
                         stamp_record_uids(issues, stack_name)
                         declared_verdicts = structured.get("verdicts")
-                        declared = declared_verdicts if isinstance(declared_verdicts, list) else []
+                        declared = (
+                            declared_verdicts if isinstance(declared_verdicts, list) and not budget_reason else []
+                        )
                         # Persist the records file with the DECLARED verdicts for
                         # now; final verdict reconciliation happens in
                         # ``_step_per_stack_parse`` AFTER the fan-out completes and
                         # every review fork is finalized on disk (issue #745).
                         per_stack_records_path(deep_dir_path, stack_name).write_text(
-                            json.dumps({"issues": issues, "verdicts": declared}, indent=2)
+                            json.dumps({"issues": issues, "verdicts": declared,
+                                        **({"incomplete": True} if budget_reason else {})}, indent=2)
                         )
+                        task_output.write_text("# Review\n\n" + "\n".join(
+                            f"- {issue.get('file', '')}:{issue.get('line', '')} {issue.get('description', '')}"
+                            for issue in issues
+                        ))
                         results[stack_name] = task_output
 
                 tg.start_soon(_task)
@@ -4603,6 +4633,7 @@ async def phase_supervise_review(
         prompt,
         output_schema=SUPERVISE_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        review_limits=ReviewLimits(120, 60, 12, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -4719,6 +4750,7 @@ async def phase_arbiter_review(
         prompt,
         output_schema=ARBITER_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        review_limits=ReviewLimits(120, 60, 16, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -4810,6 +4842,7 @@ async def phase_suppression_review(
         prompt,
         output_schema=SUPPRESSION_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        review_limits=ReviewLimits(120, 60, 12, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,
@@ -5386,6 +5419,7 @@ async def phase_cross_stack_merge(
         output_schema=MERGED_ITEMS_SCHEMA,
         phase=DaydreamPhase.MERGE,
         continuation=continuation,
+        review_limits=ReviewLimits(180, 60, 16, discovery=False),
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=REVIEW_WALL_BUDGET_S,
         sanctioned_inputs=sanctioned_inputs,

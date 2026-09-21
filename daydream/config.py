@@ -49,11 +49,11 @@ DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
 DEFAULT_WALL_BUDGET_S = 1800.0
 
-# Review agents need room for monorepo exploration. Exhaustion produces a
-# partial review; fix turns retain the shorter default above.
+# Outer review ceiling. ReviewLimits supplies earlier investigation/finalization
+# bounds; exhaustion produces a partial review. Fix turns retain the default above.
 REVIEW_WALL_BUDGET_S = 3600.0
 
-# Unlimited by default: a tool-call count is a poor proxy for a runaway turn, and
+# Unlimited outside bounded review stages: a tool-call count is a poor proxy for a runaway turn, and
 # 50 truncated legitimately exploratory phases (wonder/per-stack review) mid-pass,
 # failing the run. The wall budget above is the real bound on the time tail; every
 # call site still accepts an explicit ceiling.

@@ -26,14 +26,14 @@ def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
 
-async def test_tool_heavy_wonder_completes_under_default_budget(
+async def test_tool_heavy_wonder_is_bounded_and_publishes_incomplete_review(
     multi_stack_target: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """The default tool-call budget is unlimited, so a tool-heavy wonder pass lands."""
+    """A backend ignoring the finalization instruction cannot keep investigating."""
     from daydream.runner import run
 
     silence(monkeypatch)
@@ -46,8 +46,9 @@ async def test_tool_heavy_wonder_completes_under_default_budget(
 
     assert isinstance(exit_code, int)
     alts = json.loads((multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text())
-    assert [i["title"] for i in alts] == ["Inconsistent greeting wording"]
-    assert not any("tool_call_budget" in str(v)
+    assert alts == []
+    assert "Review incomplete" in (multi_stack_target / ".review-output.md").read_text()
+    assert any("tool_call_budget" in str(v)
                    for v in _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason"))
 
 

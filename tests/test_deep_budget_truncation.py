@@ -126,7 +126,7 @@ async def test_review_budget_stop_emits_partial_findings(
             if self.exhaust and fragments[phase] in prompt.lower():
                 for n in range(10):
                     if budget == "wall":
-                        fake.advance(4000)
+                        fake.advance(601)
                     yield ToolStartEvent(id=f"budget-{n}", name="Read", input={"file_path": "api.py"})
                     await anyio.sleep(0)
                 return
@@ -184,3 +184,64 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     assert await run(make_config(tiny_diff_target, pr_number=7, findings_out=str(out))) == 0
     artifact = json.loads(out.read_text())
     assert artifact["review_warnings"] == ["Alternatives: tool_call_budget_exceeded"]
+
+
+async def test_partial_checkpoint_survives_publication_and_merge_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
+) -> None:
+    from collections.abc import AsyncIterator
+    from typing import Any
+
+    from daydream.backends import AgentEvent, ToolStartEvent
+    from daydream.runner import run
+    from tests.harness.stub_backend import StubBackend
+    from tests.test_deep_orchestrator import _pin_findings_pr
+
+    class CheckpointBackend(StubBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+            if "you are reviewing the python stack" in prompt.lower():
+                for n in range(5):
+                    yield ToolStartEvent(id=f"extra-{n}", name="Read", input={"file_path": "api.py"})
+
+    silence(monkeypatch)
+    backend = CheckpointBackend(multi_stack_target)
+    backend.parse_severity = "high"
+    backend.merge_echo_records = True
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    _pin_findings_pr(monkeypatch, multi_stack_target)
+    out = multi_stack_target / "findings.json"
+    for start_at in (None, "merge"):
+        assert await run(make_config(
+            multi_stack_target, pr_number=7, findings_out=str(out), start_at=start_at,
+        )) == 0
+        saved = json.loads((multi_stack_target / ".daydream/deep/stack-python-records.json").read_text())
+        assert saved["issues"], "validated checkpoint must survive adjudication and resume"
+        assert saved["incomplete"] is True
+        published = json.loads(out.read_text())
+        assert published["findings"]
+        assert any("python" in warning for warning in published["review_warnings"])
+
+
+async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
+) -> None:
+    from daydream.runner import run
+    from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline
+
+    silence(monkeypatch)
+    backend = install_stub_backend(monkeypatch, multi_stack_target)
+    _pin_findings_pr(monkeypatch, multi_stack_target)
+    out = multi_stack_target / "findings.json"
+    assert await run(make_config(
+        multi_stack_target, pr_number=7, findings_out=str(out),
+        review_profile=_profile_with_pipeline(review_wall_budget_s=0),
+    )) == 0
+    assert not backend.calls
+    artifact = json.loads(out.read_text())
+    assert artifact["findings"] == []
+    assert artifact["review_warnings"]
+    assert "Review incomplete" in (multi_stack_target / ".review-output.md").read_text()

@@ -203,6 +203,21 @@ def _context_pointers(
     nothing else — for callers running concurrently with the wonder pass, whose
     ``alternatives.json`` does not exist yet.
     """
+    from daydream.prompt_budget import inline_context_file
+
+    captured_intent = inline_context_file(intent_path)
+    if captured_intent is not None:
+        head = (
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n"
+            "TTT intent summary (complete captured artifact; do not re-read intent.md):\n"
+            + json.dumps(captured_intent, ensure_ascii=False)
+        )
+        if intent_authoritative:
+            head += ("\nThis records the author's stated intent from the pull-request description.\n"
+                     f"{AUTHORITATIVE_INTENT_BLOCK}")
+        if include_alternatives:
+            head += f"\nTTT alternative-review findings are at {alternatives_path}."
+        return head
     alternatives_paragraph = (
         f"TTT alternative-review findings are at {alternatives_path}. Use them as a "
         f"starting point -- you may deepen, confirm, or dismiss each finding with "
@@ -236,8 +251,8 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
         f"You are reviewing the {stack_name} stack. Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
         f"parallel and will be merged afterwards.\n"
-        f"After the review, output ONE verdict line per assigned file, as: "
-        f"`<path>` | `<lines read>` | `clean | has_findings | not_reviewed`. "
+        f"Return ONE entry per assigned file in the JSON verdicts array with "
+        f"path, lines_read, verdict (clean | has_findings | not_reviewed), and n_findings. "
         f"A file you did not read in this same review must be marked "
         f"`not_reviewed`, never `clean`."
     )
@@ -626,7 +641,9 @@ def build_per_stack_prompt(
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
-    parts.append(f"Write your full review to {output_path}.")
+    parts.append(f"Host-managed review artifact: {output_path}. "
+                 "Return only the JSON object required by the output schema, with issues and verdicts. "
+                 "Do not write review files or return a separate markdown report; the host persists the result.")
     return "\n\n".join(parts)
 
 
@@ -694,7 +711,9 @@ def build_structural_prompt(
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
-    parts.append(f"Write your full review to {output_path}.")
+    parts.append(f"Host-managed review artifact: {output_path}. "
+                 "Return only the JSON object required by the output schema, with issues and verdicts. "
+                 "Do not write review files or return a separate markdown report; the host persists the result.")
     return "\n\n".join(parts)
 
 
@@ -1287,7 +1306,9 @@ def build_generic_fallback_prompt(
     parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
-    parts.append(f"Write your full review to {output_path}.")
+    parts.append(f"Host-managed review artifact: {output_path}. "
+                 "Return only the JSON object required by the output schema, with issues and verdicts. "
+                 "Do not write review files or return a separate markdown report; the host persists the result.")
     return "\n\n".join(parts)
 
 

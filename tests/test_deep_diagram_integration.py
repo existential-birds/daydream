@@ -31,6 +31,18 @@ from tests.harness.stub_backend import StubBackend, install_stub_backend, silenc
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
 
+
+async def test_expired_review_deadline_skips_optional_diagram_requests(
+    tmp_path: Path, review_run: Callable[..., Any],
+) -> None:
+    from tests.test_deep_orchestrator import _profile_with_pipeline
+
+    target = dr.build_cross_module_repo(tmp_path)
+    code, backend = await review_run(target, review_profile=_profile_with_pipeline(review_wall_budget_s=0))
+    assert code == 0
+    assert not backend.calls
+
+
 SEQUENCE_GOLDEN = """sequenceDiagram
     participant P1 as Client
     participant P2 as Core

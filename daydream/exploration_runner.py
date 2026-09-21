@@ -33,6 +33,7 @@ from daydream.prompts.exploration_subagents import (
     build_repo_survey_prompt,
     build_test_mapper_prompt,
 )
+from daydream.review_budget import ReviewLimits
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -261,14 +262,17 @@ async def pre_scan(
             recorder, f"explore-{name}", dispatch=dispatch,
         ):
             try:
-                structured, _, _ = await run_agent(
+                structured, _, budget_reason = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
                     phase=DaydreamPhase.EXPLORATION,
                     read_only=True,
+                    review_limits=ReviewLimits(120, 30, 16),
                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                     run_context=run_context,
                 )
+                if budget_reason:
+                    specialist_failed = True
                 if isinstance(structured, dict):
                     results[name] = structured
                 else:

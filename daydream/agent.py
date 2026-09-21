@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 from daydream import clock
-from daydream.artifact_visibility import artifact_session_active, assert_model_cwd_clean
+from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
     Backend,
@@ -57,6 +57,8 @@ from daydream.retry_policy import (
     parse_message_retry_hint,
     undeclared_retry_allowance_message,
 )
+from daydream.review_budget import ReviewLimits, review_deadline
+from daydream.review_evidence import ReviewEvidence
 from daydream.run_context import (
     RunContext,
     bind_run_context,
@@ -710,6 +712,7 @@ async def run_agent(
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
+    review_limits: ReviewLimits | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
@@ -719,6 +722,31 @@ async def run_agent(
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
     context = resolve_run_context(run_context)
+    evidence = ReviewEvidence(output_schema) if review_limits is not None else None
+    hard_deadline = deadline
+    if review_limits is not None:
+        started = clock.monotonic()
+        bounds = [started + review_limits.investigation_s + review_limits.finalization_s]
+        if deadline is not None:
+            bounds.append(deadline)
+        if wall_budget_s is not None:
+            bounds.append(started + wall_budget_s)
+        shared = review_deadline(discovery=review_limits.discovery)
+        if shared is not None:
+            bounds.append(shared)
+        hard_deadline = min(bounds)
+        deadline = min(started + review_limits.investigation_s, hard_deadline - review_limits.finalization_s)
+        tool_call_budget = min(tool_call_budget, review_limits.tool_calls) if tool_call_budget is not None else (
+            review_limits.tool_calls
+        )
+        prompt += (
+            f"\n\nInvestigation allowance: at most {review_limits.investigation_s:g} seconds and "
+            f"{tool_call_budget} tool calls. Reuse supplied context. Prioritize assigned changed behavior; "
+            "follow dependencies only to resolve a concrete candidate. Batch independent reads. "
+            "Stop when candidates are confirmed or disproved and return the required output. "
+            "Do not repeat an unsuccessful search or investigate upstream releases without a concrete "
+            "changed contract that requires it. Leave unresolved hypotheses out of findings."
+        )
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
     with bind_run_context(context), agent_scope(
         phase.value, backend=backend_name, model=backend.model
@@ -733,7 +761,38 @@ async def run_agent(
             validate_structured_output=validate_structured_output,
             sanctioned_inputs=sanctioned_inputs,
             run_context=context,
+            review_evidence=evidence,
         )
+        if evidence is not None and review_limits is not None and result[2] in {
+            "wall_budget_exceeded", "tool_call_budget_exceeded",
+        }:
+            partial, token, reason = result
+            if evidence.valid(partial):
+                result = (partial, token, reason)
+            elif evidence.checkpoint is not None:
+                result = (evidence.checkpoint, token, reason)
+            elif hard_deadline is not None and clock.monotonic() < hard_deadline:
+                try:
+                    finalized, _, final_reason = await _run_agent(
+                        backend, cwd, evidence.finalization_prompt(prompt, partial), phase=phase,
+                        output_schema=output_schema, progress_callback=progress_callback,
+                        max_turns=1, read_only=read_only, persist_session=persist_session,
+                        deadline=min(hard_deadline, clock.monotonic() + review_limits.finalization_s),
+                        tool_call_budget=0,
+                        retry_recovery_allowance_s=retry_recovery_allowance_s,
+                        sanctioned_inputs=sanctioned_inputs, run_context=context,
+                    )
+                    if final_reason is None and (
+                        evidence.valid(finalized) or (output_schema is None and isinstance(finalized, str))
+                    ):
+                        result = (finalized, None, reason)
+                except ArtifactVisibilityError:
+                    raise
+                except Exception:  # finalization must not erase the original incomplete result
+                    _logger.warning("Review finalization failed; retaining incomplete output")
+            # Budget-limited outputs use full validation, never shape-only salvage.
+            if output_schema is not None and not evidence.valid(result[0]):
+                result = ("", None, reason)
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
@@ -759,6 +818,7 @@ async def _run_agent(
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
+    review_evidence: ReviewEvidence | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -958,6 +1018,8 @@ async def _run_agent(
                 structured_result = None
                 result_continuation = None
                 tool_calls = 0
+                if review_evidence is not None:
+                    review_evidence.reset()
                 budget_reason: str | None = None
                 # Never dispatch an attempt once the deadline is spent: the
                 # ladder stops here with the reset state.
@@ -1060,6 +1122,8 @@ async def _run_agent(
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
+                                if review_evidence is not None:
+                                    review_evidence.observe(event)
                                 if use_callback and not isinstance(
                                     event, (TextEvent, DiagnosticEvent)
                                 ):
