@@ -899,6 +899,19 @@ def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branc
     return commit(repo, "advance head after plan fan-out")
 
 
+def _write_single_plan(
+    repo: Path,
+    assembled: dict[str, Any],
+    planned_at: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Write one assembled plan for ``repo`` through the production API."""
+    return _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=planned_at,
+    )
+
+
 def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_sha: str) -> None:
     result = _write_plans(
         repo / "daydream_plans",
@@ -1275,11 +1288,7 @@ def test_unselected_recon_commands_are_not_injected_into_plan(repo: Path, head_s
     )
     assembled = _assembled(repo, commands=commands)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert len(result["written"]) == 1
     # The same ref is used by the step, the named case, and a done criterion:
@@ -1608,11 +1617,7 @@ def test_planned_at_from_an_unrelated_root_is_rejected(repo: Path, head_sha: str
     )
     git(repo, "checkout", "--detach", unrelated_root)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert result["written"] == []
     assert "PLANNED_AT_NOT_ANCESTOR" in (
@@ -1719,11 +1724,7 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     assembled = _assembled(repo)
     new_head = _advance_head(repo)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert len(result["written"]) == 1
     landed = result["written"][0]["path"]
@@ -1868,11 +1869,7 @@ def test_reanchored_plan_survives_worktree_pruning(
     assembled = _assembled(repo)
     new_head = _advance_head(repo)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
     assert len(result["written"]) == 1
     landed = Path(result["written"][0]["path"])
     main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
@@ -1902,19 +1899,11 @@ def test_reanchored_finding_is_not_replanned_on_a_later_run(
     assembled = _assembled(repo)
     new_head = _advance_head(repo)
 
-    first = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    first = _write_single_plan(repo, assembled, head_sha)
     assert len(first["written"]) == 1  # re-anchored as written
 
     # a later run in the same repo (HEAD now == new_head) must skip the same finding
-    later = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=new_head,
-    )
+    later = _write_single_plan(repo, assembled, new_head)
     assert later["written"] == []
     assert len(later["skipped"]) == 1
 
@@ -2812,11 +2801,7 @@ def test_secret_literal_value_is_redacted_and_never_reaches_artifacts(
     )
 
     assembled = _assembled(repo, plan)
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert assembled["why_this_matters"]["problem"] == (
         "The bootstrap script hardcodes secret: <redacted> in cleartext."
@@ -2847,11 +2832,7 @@ def test_underscored_secret_key_name_is_redacted_in_quoted_source(
     )
 
     assembled = _assembled(repo)
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     excerpt = next(
         item
@@ -4455,11 +4436,7 @@ def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
     """Re-anchor one plan into a fresh worktree; return the repo-relative landing path."""
     assembled = _assembled(repo, _authored_plan(title="Fix N+1 catalog queries"))
     _advance_head(repo)
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
     assert len(result["written"]) == 1
     # The durable landing path is what survives into the index, so source it
     # from the sidecar rather than the (pruned) re-anchor worktree path.

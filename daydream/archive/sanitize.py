@@ -275,16 +275,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
     so a bulk caller can continue with the next bundle.
     """
     sanitized_dir = archive_dir / "sanitized"
-    manifest: dict[str, Any] = {}
-    manifest_path = run_dir / "manifest.json"
-    if manifest_path.exists():
-        try:
-            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                manifest = loaded
-        except ValueError:
-            manifest = {}
-    session_id = str(manifest.get("session_id") or run_dir.name)
+    session_id = _resolve_session_id(run_dir)
     derivative_dir = sanitized_dir / session_id
 
     try:

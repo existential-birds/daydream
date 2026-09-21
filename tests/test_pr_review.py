@@ -15,6 +15,7 @@ from daydream.findings import ArtifactFinding
 from daydream.git_ops import GitError
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
+    InlineReviewComment,
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
@@ -41,6 +42,12 @@ gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed
 
 SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
 BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summary)
+
+
+def _inline(path: str = "a.py", line: int = 10, body: str = "x") -> InlineReviewComment:
+    """One typed inline comment, the shape ``_ClassifiedIssues.inline`` holds."""
+    return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
+
 
 def _recording_fake_submit(
     captured: dict[str, pr_review.ClassifiedReviewPlan],
@@ -416,9 +423,9 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
 
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 1
-    assert result.inline[0]["path"] == "a.py"
-    assert result.inline[0]["line"] == 10
-    assert result.inline[0]["side"] == "RIGHT"
+    assert result.inline[0].path == "a.py"
+    assert result.inline[0].line == 10
+    assert result.inline[0].side == "RIGHT"
     assert len(result.inline_issues) == 1
     assert result.inline_issues[0].path == "a.py"
     body_paths = [i.path for i in result.body_only]
@@ -456,11 +463,11 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 2
     # conftest.py:89 snapped to hunk start 90
-    assert result.inline[0]["path"] == "conftest.py"
-    assert result.inline[0]["line"] == 90
+    assert result.inline[0].path == "conftest.py"
+    assert result.inline[0].line == 90
     # modernize-app.py:105 snapped to second hunk start 106
-    assert result.inline[1]["path"] == "scripts/modernize-app.py"
-    assert result.inline[1]["line"] == 106
+    assert result.inline[1].path == "scripts/modernize-app.py"
+    assert result.inline[1].line == 106
 
 
 def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> None:
@@ -552,7 +559,7 @@ def test_build_payload_blocks_forged_reviewed_commit_line(
 
 def test_build_payload_shape(pr: PRInfo) -> None:
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         body_only=[
             ParsedIssue(
                 path="b.py",
@@ -580,7 +587,7 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     )
     assert payload["commit_id"] == "head123"
     assert payload["event"] == "COMMENT"
-    assert payload["comments"] == classified.inline
+    assert payload["comments"][0]["path"] == "a.py"
 
     body = payload["body"]
     assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
@@ -620,7 +627,7 @@ def _classified_with_severity(
     severity: str, confidence: str, *, body_confidence: str | None = None,
 ) -> pr_review._ClassifiedIssues:
     return pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
                                confidence=body_confidence or confidence, severity=severity)],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b",
@@ -658,7 +665,7 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
 ) -> None:
     """A None-severity issue must not crash the clean computation."""
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
@@ -677,7 +684,7 @@ def test_build_payload_keeps_comment_when_off_vocabulary_severity(
     the approval (fail-closed) just like 'high'/'medium'.
     """
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[
             ParsedIssue(
                 path="a.py",
@@ -1127,7 +1134,7 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             body_only=[],
         ),
     )
@@ -1168,7 +1175,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             inline_issues=[
                 ParsedIssue(
                     path="a.py",
@@ -1212,7 +1219,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             body_only=[],
         ),
     )
@@ -1290,7 +1297,7 @@ async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, 
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             body_only=[],
         ),
     )
@@ -1573,16 +1580,16 @@ def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> No
 
     result = classify(git_repo, _pr_for(base, head), [issue])
 
-    assert [c["line"] for c in result.inline] == [12], (
+    assert [c.line for c in result.inline] == [12], (
         f"in-hunk citation was not posted on its own line; "
         f"file_level={[i.path for i in result.file_level]} "
         f"body_only={[i.path for i in result.body_only]}"
     )
-    assert result.inline[0]["path"] == "cache.yaml"
+    assert result.inline[0].path == "cache.yaml"
     assert not result.file_level
     assert not result.body_only
     # Nothing moved, so nothing is annotated.
-    assert "**Placement:**" not in result.inline[0]["body"]
+    assert "**Placement:**" not in result.inline[0].body
 
 
 def test_classify_annotates_relocated_line(git_repo: Path) -> None:
@@ -1602,10 +1609,10 @@ def test_classify_annotates_relocated_line(git_repo: Path) -> None:
 
     result = classify(git_repo, _pr_for(base, head), [issue])
 
-    assert [c["line"] for c in result.inline] == [17]
+    assert [c.line for c in result.inline] == [17]
     note = "**Placement:** posted on line 17; reviewer cited line 15."
     assert note in issue.body, "the relocation was not recorded on the finding"
-    assert note in result.inline[0]["body"], "the posted comment does not show the relocation"
+    assert note in result.inline[0].body, "the posted comment does not show the relocation"
     # Re-classifying the same objects must not stack duplicate notes.
     classify(git_repo, _pr_for(base, head), [issue])
     assert issue.body.count("**Placement:**") == 1
@@ -1737,7 +1744,7 @@ def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
     """R2.2: a judged-high finding demoted to low by location validation must
     still block APPROVE — demotion is visible, never approval-silencing."""
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[
             ParsedIssue(
                 path="a.py",
@@ -1761,7 +1768,7 @@ def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
     keeps the gate closed."""
     for before in ("low", None):
         classified = pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+            inline=[_inline()],
             inline_issues=[
                 ParsedIssue(
                     path="a.py",
@@ -1832,7 +1839,7 @@ def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> N
 def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
     # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 

@@ -112,6 +112,26 @@ def feature_branch_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def deep_target(tmp_path: Path) -> Path:
+    """Real git repo on a feature branch with one Python file changed.
+
+    Shared by the real-path deep review tests (``tests/test_runner.py``,
+    ``tests/test_deep_pr_comment_integration.py``) so both drive the identical
+    single-file deep path (tier ``"skip"``).
+    """
+    repo = tmp_path / "deep_repo"
+    _init_repo(repo)
+    (repo / "foo.py").write_text("def foo():\n    return 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "init")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "foo.py").write_text("def foo():\n    return 2\n")
+    _git(repo, "add", ".")
+    _commit(repo, "tweak foo")
+    return repo
+
+
+@pytest.fixture
 def linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
     """A main worktree + a linked worktree on a feature branch (issue #221).
 
