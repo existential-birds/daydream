@@ -74,18 +74,24 @@ def _archive_with_trajectory(archive_root: str, *, final_metrics: object) -> dic
     return {f"{session}/trajectory.json": json.dumps({"final_metrics": final_metrics}).encode()}
 
 
-class _ArchiveRuntime(FakeRuntime):
-    """A FakeRuntime whose `ls` of the archive reports one session dir."""
+class _SessionsListingRuntime(FakeRuntime):
+    """A FakeRuntime whose `ls` of the archive reports ``self.sessions``."""
 
-    def __init__(self, *, exit_code: int, sessions: list[str], files: dict[str, bytes] | None = None) -> None:
-        super().__init__(exit_code=exit_code, files=files)
-        self.sessions = sessions
+    sessions: list[str]
 
     async def run(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
         await super().run(argv, env)
         if argv[:2] == ["sh", "-c"] and argv[2].startswith("ls -1 "):
             return vf.ProgramResult(exit_code=0, stdout="\n".join(self.sessions), stderr="")
         return vf.ProgramResult(exit_code=0, stdout="", stderr="")
+
+
+class _ArchiveRuntime(_SessionsListingRuntime):
+    """A FakeRuntime whose `ls` of the archive reports one session dir."""
+
+    def __init__(self, *, exit_code: int, sessions: list[str], files: dict[str, bytes] | None = None) -> None:
+        super().__init__(exit_code=exit_code, files=files)
+        self.sessions = sessions
 
 
 @pytest.mark.parametrize("backend", sorted(STRATEGIES))
@@ -439,18 +445,12 @@ def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
         assert result.stdout.strip() != "0", "a failing wrapper must not run the payload as root"
 
 
-class _ArchivingDockerRuntime(_DockerLikeRuntime):
+class _ArchivingDockerRuntime(_SessionsListingRuntime, _DockerLikeRuntime):
     """A docker-shaped runtime whose `ls` of the archive reports one session dir."""
 
     def __init__(self, *, exit_code: int = 0) -> None:
         super().__init__(exit_code=exit_code)
         self.sessions = ["session-1"]
-
-    async def run(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
-        await super().run(argv, env)
-        if argv[:2] == ["sh", "-c"] and argv[2].startswith("ls -1 "):
-            return vf.ProgramResult(exit_code=0, stdout="\n".join(self.sessions), stderr="")
-        return vf.ProgramResult(exit_code=0, stdout="", stderr="")
 
 
 async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(

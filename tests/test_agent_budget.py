@@ -823,7 +823,7 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
 
     assert sum(b.call_count for b in backends) <= 3 + 1  # threshold + the one probe
     assert len(slept) <= 3
-    assert run_context.outage_circuit.state(fake.monotonic_value) in {"open", "half_open"}
+    assert run_context.outage_circuit.state() in {"open", "half_open"}
 
 
 async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_probe(
@@ -906,6 +906,6 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
 
 async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
     assert (
-        RunContext(InteractionPolicy(interactive=False)).outage_circuit.state(0.0)
+        RunContext(InteractionPolicy(interactive=False)).outage_circuit.state()
         == "closed"
     )

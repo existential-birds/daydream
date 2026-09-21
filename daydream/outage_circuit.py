@@ -98,7 +98,7 @@ class OutageCircuit:
             self._probe_outstanding = True
             return CircuitAdmission(True, CIRCUIT_HALF_OPEN)
 
-    def state(self, now: float) -> str:
-        """Return the observed state at *now* without transitioning it."""
+    def state(self) -> str:
+        """Return the observed state without transitioning it."""
         with self._lock:
             return self._state

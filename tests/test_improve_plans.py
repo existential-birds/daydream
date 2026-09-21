@@ -1976,7 +1976,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     assert session_a.commit(reservations_a[0], _selection(repo)).status == "written"
     worktree_a = repo / ".daydream" / "worktrees" / "run-A-reanchor"
     assert worktree_a.is_dir()
-    assert git_ops.worktree_lock_mtime(repo, worktree_a) is not None  # live lock
+    assert git_ops.worktree_lock_mtime(worktree_a) is not None  # live lock
 
     # Run B starts: its start-of-run prune runs while A is mid-write
     removed = prune_stale_reanchor_worktrees(repo)
@@ -1993,7 +1993,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(
         encoding="utf-8"
     )
-    assert git_ops.worktree_lock_mtime(repo, worktree_a) is None  # released
+    assert git_ops.worktree_lock_mtime(worktree_a) is None  # released
 
 
 def test_prune_named_reanchor_worktree_removes_valid_worktree(
@@ -4605,7 +4605,7 @@ def test_reanchored_failure_releases_worktree_lock(
     worktree = repo / ".daydream" / "worktrees" / "run-A-reanchor"
     assert not worktree.exists()  # removed (fix #2)
     with pytest.raises(git_ops.GitError, match="Git directory"):
-        git_ops.worktree_lock_mtime(repo, worktree)
+        git_ops.worktree_lock_mtime(worktree)
 
 def test_failed_reanchor_frees_worktree_for_later_finding(
     repo: Path,

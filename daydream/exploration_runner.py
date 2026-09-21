@@ -40,6 +40,7 @@ from daydream.trajectory import (
     LifecycleReasonCode,
     LifecycleStatus,
     dispatch_scope,
+    finish_partial_or_failed,
     get_current_recorder,
     maybe_fork,
 )
@@ -351,14 +352,7 @@ async def pre_scan(
                     LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
                 )
             elif specialist_failed:
-                dispatch.finish(
-                    LifecycleStatus.PARTIAL if results else LifecycleStatus.FAILED,
-                    (
-                        LifecycleReasonCode.SOME_CHILDREN_FAILED
-                        if results
-                        else LifecycleReasonCode.ALL_CHILDREN_FAILED
-                    ),
-                )
+                finish_partial_or_failed(dispatch, results)
 
     if not results:
         static_context.completed = not (specialist_failed or timeout_scope.cancel_called)

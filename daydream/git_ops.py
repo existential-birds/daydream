@@ -1389,6 +1389,18 @@ def staged_patch(repo: Path) -> bytes:
     return proc.stdout
 
 
+def _ordered_unique_names(lines: list[str]) -> list[str]:
+    """Return *lines* stripped, with blanks and later duplicates removed."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
     """Return repo-relative paths of files changed in the working tree.
 
@@ -1407,20 +1419,13 @@ def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) 
     Returns:
         De-duplicated list of repo-relative path strings.  Empty on error.
     """
-    names: list[str] = []
-    seen: set[str] = set()
     try:
         proc = _run_git(repo, ["diff", "--name-only", "HEAD"], timeout=10)
         tracked = proc.stdout.splitlines() if proc.returncode == 0 else []
     except GitError:
         tracked = []
     untracked = _filter_preexisting_untracked(list_untracked(repo), preexisting_untracked)
-    for line in [*tracked, *untracked]:
-        name = line.strip()
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return names
+    return _ordered_unique_names([*tracked, *untracked])
 
 
 def changed_files_against(
@@ -1444,16 +1449,9 @@ def changed_files_against(
     if untracked_proc.returncode != 0:
         raise GitError(f"git ls-files --others failed in {repo}: {untracked_proc.stderr.strip()}")
 
-    names: list[str] = []
-    seen: set[str] = set()
     untracked = [line.strip() for line in untracked_proc.stdout.splitlines() if line.strip()]
     untracked = _filter_preexisting_untracked(untracked, preexisting_untracked)
-    for line in [*proc.stdout.splitlines(), *untracked]:
-        name = line.strip()
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return names
+    return _ordered_unique_names([*proc.stdout.splitlines(), *untracked])
 
 
 def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
@@ -1581,6 +1579,19 @@ def _is_untracked_runtime_artifact(path: str) -> bool:
     return path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE
 
 
+def _list_untracked_z(repo: Path) -> list[str]:
+    """Return NUL-delimited untracked paths, raising on a git failure."""
+    proc = _run_git(
+        repo,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        timeout=10,
+        capture_bytes=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git ls-files --others -z failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    return _decode_nul_paths(proc.stdout)
+
+
 def changed_paths_z(
     repo: Path,
     ref: str,
@@ -1599,17 +1610,8 @@ def changed_paths_z(
         raise GitError(f"git diff --name-only -z {ref} failed in {repo}: {stderr.strip()}")
     paths = _decode_nul_paths(proc.stdout)
     if include_untracked:
-        others = _run_git(
-            repo,
-            ["ls-files", "--others", "--exclude-standard", "-z"],
-            timeout=10,
-            capture_bytes=True,
-        )
-        if others.returncode != 0:
-            stderr = os.fsdecode(others.stderr)
-            raise GitError(f"git ls-files --others -z failed in {repo}: {stderr.strip()}")
         paths.extend(
-            path for path in _decode_nul_paths(others.stdout)
+            path for path in _list_untracked_z(repo)
             if include_runtime_artifacts or not _is_untracked_runtime_artifact(path)
         )
     unique = dict.fromkeys(paths)
@@ -1730,15 +1732,7 @@ def snapshot_untracked_paths(
     repo: Path, *, include_runtime_artifacts: bool = True,
 ) -> dict[str, GitPathState]:
     """Capture actual untracked content/type/mode, optionally omitting runtime output."""
-    proc = _run_git(
-        repo,
-        ["ls-files", "--others", "--exclude-standard", "-z"],
-        timeout=10,
-        capture_bytes=True,
-    )
-    if proc.returncode != 0:
-        raise GitError(f"git ls-files --others -z failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
-    paths = _decode_nul_paths(proc.stdout)
+    paths = _list_untracked_z(repo)
     return {
         path: _snapshot_worktree_path(repo, path, allow_leaf_symlink=True)
         for path in paths
@@ -3118,7 +3112,7 @@ def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
     return None
 
 
-def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
+def worktree_lock_mtime(path: Path) -> float | None:
     """Return the lock-armed time of the worktree at *path*, or None if unlocked.
 
     Git names each linked worktree's administrative directory itself, so the
@@ -3476,21 +3470,13 @@ def gh_repo_view(
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[str, str] | None:
-    """Return the ``(owner, name)`` slug for the current repository.
-
-    Returns:
-        Tuple of ``(owner, name)``, or ``None`` when the call fails or the
-        slug cannot be parsed.
-    """
-    proc = _run_gh(
-        repo,
-        ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        auth=auth,
-        retries=_gh_retries(),
-    )
-    if proc.returncode != 0:
+    """Return the ``(owner, name)`` slug, or ``None`` when it cannot be read."""
+    try:
+        return gh_repo_view_required(repo, auth=auth)
+    except GitTimeoutError:
+        raise
+    except GitError:
         return None
-    return split_owner_repo(proc.stdout.strip())
 
 
 def gh_repo_view_required(

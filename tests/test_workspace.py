@@ -732,10 +732,10 @@ async def test_open_workspace_still_refuses_registered_worktree_when_lock_probe_
 
     real_lock_mtime = git_ops.worktree_lock_mtime
 
-    def flaky_lock_mtime(repo_arg: Path, path: Path) -> float | None:
+    def flaky_lock_mtime(path: Path) -> float | None:
         if path == embedded:
             raise git_ops.GitError(f"worktree lock metadata is unsafe for {path}")
-        return real_lock_mtime(repo_arg, path)
+        return real_lock_mtime(path)
 
     monkeypatch.setattr(git_ops, "worktree_lock_mtime", flaky_lock_mtime)
     _forbid_default_private_base(monkeypatch)

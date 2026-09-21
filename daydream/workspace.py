@@ -395,7 +395,7 @@ def _prune_stale_locked_worktrees(
     removed = 0
     for path in paths:
         try:
-            locked_at = git_ops.worktree_lock_mtime(repo, path)
+            locked_at = git_ops.worktree_lock_mtime(path)
             if locked_at is not None and time.time() - locked_at <= stale_after_s:
                 # Live worktree (lock age near zero): never unlock or remove
                 # it, so a concurrent run mid-write is not destroyed.
@@ -633,7 +633,7 @@ def _retire_legacy_operational_worktrees(
                     raise ArtifactVisibilityError(
                         "legacy operational worktree has different Git ownership"
                     )
-                locked_at = git_ops.worktree_lock_mtime(source, entry)
+                locked_at = git_ops.worktree_lock_mtime(entry)
             except ArtifactVisibilityError:
                 raise
             except git_ops.NotAWorktreeError as exc:

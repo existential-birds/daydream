@@ -93,10 +93,9 @@ from daydream.test_execution import (
 )
 from daydream.trajectory import (
     DaydreamPhase,
-    LifecycleReasonCode,
-    LifecycleStatus,
     TrajectoryRecorder,
     dispatch_scope,
+    finish_partial_or_failed,
     get_current_recorder,
     host_phase_scope,
     maybe_fork,
@@ -1749,6 +1748,38 @@ def _coerce_verdicts_payload(value: Any) -> dict[str, Any]:
     return {"verdicts": [entry for entry in raw if isinstance(entry, dict)]}
 
 
+def _json_or_none(value: Any) -> Any:
+    """Parse *value* as JSON when it is a string, else pass it through."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+async def _run_verifier(
+    backend: Backend,
+    work: WorkContext,
+    prompt: str,
+    schema: dict[str, Any],
+    run_context: RunContext,
+) -> Any:
+    """Run one read-only VERIFY turn and return its JSON-decoded result."""
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=schema,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        phase=DaydreamPhase.VERIFY,
+        read_only=True,
+        run_context=run_context,
+    )
+    return _json_or_none(result)
+
+
 @bind_resolved_run_context
 async def phase_verify_recommendations(
     backend: Backend,
@@ -1788,24 +1819,9 @@ async def phase_verify_recommendations(
         output_path=output_path,
     )
 
-    result, _, _ = await run_agent(
-        backend,
-        work.repo,
-        prompt,
-        output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
-        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=DEFAULT_WALL_BUDGET_S,
-        phase=DaydreamPhase.VERIFY,
-        read_only=True,
-        run_context=run_context,
+    candidate = await _run_verifier(
+        backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
     )
-
-    candidate: Any = result
-    if isinstance(result, str):
-        try:
-            candidate = json.loads(result)
-        except (json.JSONDecodeError, ValueError):
-            candidate = None
     payload = _coerce_verdicts_payload(candidate)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1877,24 +1893,9 @@ async def phase_fix_verify(
         round_number=round_number,
     )
 
-    result, _, _ = await run_agent(
-        backend,
-        work.repo,
-        prompt,
-        output_schema=FIX_VERIFY_VERDICTS_SCHEMA,
-        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=DEFAULT_WALL_BUDGET_S,
-        phase=DaydreamPhase.VERIFY,
-        read_only=True,
-        run_context=run_context,
+    candidate = await _run_verifier(
+        backend, work, prompt, FIX_VERIFY_VERDICTS_SCHEMA, run_context,
     )
-
-    candidate: Any = result
-    if isinstance(result, str):
-        try:
-            candidate = json.loads(result)
-        except (json.JSONDecodeError, ValueError):
-            candidate = None
     payload = _coerce_verdicts_payload(candidate)
     by_id: dict[int, dict[str, Any]] = {}
     for entry in payload["verdicts"]:
@@ -2810,18 +2811,7 @@ async def phase_fix_parallel(
 
                 tg.start_soon(_task)
         if dispatch is not None and failures:
-            dispatch.finish(
-                (
-                    LifecycleStatus.PARTIAL
-                    if successful_groups
-                    else LifecycleStatus.FAILED
-                ),
-                (
-                    LifecycleReasonCode.SOME_CHILDREN_FAILED
-                    if successful_groups
-                    else LifecycleReasonCode.ALL_CHILDREN_FAILED
-                ),
-            )
+            finish_partial_or_failed(dispatch, successful_groups)
 
     return failures
 
@@ -4502,14 +4492,7 @@ async def phase_per_stack_reviews(
 
                 tg.start_soon(_task)
         if dispatch is not None and failures:
-            dispatch.finish(
-                LifecycleStatus.PARTIAL if results else LifecycleStatus.FAILED,
-                (
-                    LifecycleReasonCode.SOME_CHILDREN_FAILED
-                    if results
-                    else LifecycleReasonCode.ALL_CHILDREN_FAILED
-                ),
-            )
+            finish_partial_or_failed(dispatch, results)
 
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))

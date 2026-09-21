@@ -935,7 +935,7 @@ async def _run_agent(
                         attempts=telemetry.retry_attempts,
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
-                        circuit_state=run_context.outage_circuit.state(now),
+                        circuit_state=run_context.outage_circuit.state(),
                         retry_recovery_spent_s=recovery.spent_s + pending,
                         partial_edit_handling="discarded",
                     )
@@ -1486,7 +1486,7 @@ async def _run_agent(
                         attempts=telemetry.attempts_dispatched,
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
-                        circuit_state=run_context.outage_circuit.state(clock.monotonic()),
+                        circuit_state=run_context.outage_circuit.state(),
                         retry_recovery_spent_s=recovery.spent_s,
                         partial_edit_handling=(
                             "discarded" if partials_discarded_by_deadline else "kept"
