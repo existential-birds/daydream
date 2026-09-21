@@ -629,31 +629,6 @@ The `.daydream/exploration/` cache is reused on an exact key match. The key excl
 
 **New to contributing? Read [CONTRIBUTING.md](CONTRIBUTING.md) — setup, commands, the required gate, and PR workflow.**
 
-```bash
-make install
-make hooks      # install git hooks
-make lint       # ruff linter
-make typecheck  # mypy
-make test       # pytest
-make deadcode   # vulture dead-code scan
-make coverage-report  # verify coverage.xml after make test
-make check-naming  # naming-convention check
-make actionlint # workflow YAML checks via Docker
-make rl-check   # standalone RL: lockcheck + ruff + mypy + pytest
-make check      # the required gate (rl-check is separate; run it when touching rl/)
-```
-
-`make install` runs `uv sync --all-extras`. This builds the virtualenv for the targets above. Like
-`uv sync`, it does not make a `daydream` command on your `PATH`. See [Quick start](#quick-start).
-
-`make hooks` installs two gates: a commit-time gate that runs ruff on the staged
-Python files, and the pre-push gate (the hook verifies commit signatures first,
-then delegates to `make check` — the quality-gate portion of that hook). A running Docker daemon
-is required for `make actionlint` (the workflow YAML checks run the pinned
-container); when no daemon is available that target is skipped with a note and
-exits 0, so `make check` still succeeds without a daemon (CI always runs
-actionlint).
-
 Editors that support [EditorConfig](https://editorconfig.org) pick up the root
 `.editorconfig` automatically (UTF-8, LF, final newline; 4-space Python, 2-space
 YAML, 4-space TOML, tabs in Makefiles, preserved Markdown hard breaks).

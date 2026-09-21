@@ -36,6 +36,7 @@ import daydream
 from daydream.atif import Step, Trajectory
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.timeutil import parse_iso_timestamp
+from daydream.trajectory import _GENERIC_MODEL_LABELS
 
 # Display labels for each phase key used in Step.extra['daydream_phase'].
 # Keys are the string values of daydream.trajectory.DaydreamPhase. Defined
@@ -66,15 +67,6 @@ _PHASE_LABELS: dict[str, str] = {
 }
 
 FALLBACK_NOTE = "*run details unavailable*"
-
-# Generic backend labels that pre-date a real SDK model id arriving on the
-# event stream. Defense-in-depth: trajectory.TrajectoryRecorder upgrades
-# these as soon as a MetricsEvent, CostEvent, or ResultEvent surfaces a real
-# id,
-# so a generic label here means the run never observed a real model name.
-_GENERIC_MODEL_LABELS: frozenset[str] = frozenset(
-    {"claude", "codex", "osprey", "unknown", ""}
-)
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -333,34 +325,11 @@ def _accumulate_metrics(
 ) -> None:
     """Add this step's token + cost contribution into the phase aggregate.
 
-    Token clamp (single source of truth): per the ATIF Metrics docstring,
-    ``cached_tokens`` is a SUBSET of ``prompt_tokens`` (not additive), and
-    all token counts are non-negative. We clamp once at the top so
-    aggregates and synthesized costs share the same clean values.
-
-    Cost rule (M5/M6/C5):
-
-    - If ``Metrics.cost_usd`` is present, use it verbatim — Claude SDK
-      surfaces real billed cost, no need to synthesize.
-    - Else if model is in :data:`daydream.pricing.MODEL_PRICES`, synthesize
-      cost from token counts via ``compute_cost_from_totals`` (which derives
-      the uncached input count from the clamped totals).
-    - Else mark ``phase.cost_unknown`` and remember the model name for the
-      footnote.
-
-    Per ATIF v1.7 (``Step.model_name`` field docs), an omitted step model
-    implies the root-level :attr:`Agent.model_name`. Callers thread that
-    value in via ``fallback_model`` so cost synthesis can land on the
-    intended model when the step itself doesn't carry an explicit id.
-
-    Args:
-        agg: Whole-run rollup; ``unknown_models`` is updated when a model
-            cannot be priced.
-        fallback_model: Model id to use when ``step.model_name`` is omitted
-            (the root-level :attr:`Agent.model_name`).
-        prices: Effective model price table (built-ins merged with user
-            overrides) passed to :func:`daydream.pricing.compute_cost_from_totals`
-            for cost synthesis.
+    ``cached_tokens`` is a subset of ``prompt_tokens`` and all counts are
+    non-negative, so clamp once at the top. Prefer ``Metrics.cost_usd``
+    verbatim; otherwise synthesize from ``prices`` when the model resolves
+    (``fallback_model`` supplies the root-level model when the step omits
+    it), else mark ``phase.cost_unknown``.
     """
     metrics = step.metrics
     if metrics is None:
