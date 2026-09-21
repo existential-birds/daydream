@@ -57,6 +57,18 @@ from tests.harness.trajectory import diff_adding
 from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
 
 
+def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
+    """The deep loop-mode config shared by the archive-capture tests."""
+    config: dict[str, Any] = {
+        "target": str(target),
+        "assume": "yes",
+        "output_mode": "loop",
+        "cleanup": False,
+    }
+    config.update(overrides)
+    return RunConfig(**config)
+
+
 class _ArchiveCaptureBackend(StubBackend):
     async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if prompt.startswith("The daydream changes are already staged"):
@@ -162,11 +174,8 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     head_before = git_ops.head_sha(multi_stack_target)
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
@@ -277,11 +286,8 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     stub.fix_edit_line = "# daydream mixed-case identity\n"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo="bAsE-uSeR/pRoJeCt",
         )
@@ -345,11 +351,8 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
@@ -377,12 +380,7 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     )
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
 
@@ -418,11 +416,8 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
@@ -455,12 +450,7 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     stub.fix_edit_line = "# daydream recommended change\n"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
 
@@ -550,11 +540,8 @@ async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -581,12 +568,7 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
     assert not dump_dir.exists()
@@ -680,11 +662,8 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -718,9 +697,7 @@ async def _assert_target_is_reusable(target: Path) -> None:
     directory hold either way, so this is what makes the refusal tests real
     guards rather than assertions that pass through the wedge.
     """
-    exit_code = await run(
-        RunConfig(target=str(target), assume="yes", output_mode="loop", cleanup=False)
-    )
+    exit_code = await run(_deep_run_config(target))
     assert exit_code == 0
 
 
@@ -746,11 +723,8 @@ async def test_dump_artifacts_refuses_token_canary_in_diff(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -796,11 +770,8 @@ async def test_dump_artifacts_refuses_multiline_pem_in_diff(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -844,11 +815,8 @@ async def test_dump_refusal_reports_the_archive_error_when_the_rollback_also_fai
     monkeypatch.setattr(artifact_visibility.ArtifactSession, "_restore_prior", refuse_restore)
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(tmp_path / "uploaded-artifacts"),
         )
     )
@@ -872,11 +840,8 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     stub.fix_edit_line = "# daydream recommended change\n"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             run_eval=False,
         )
     )
@@ -1174,12 +1139,7 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     stub.merge_items = [anchored, mis_anchored]
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
 
@@ -1327,12 +1287,7 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     )
 
     assert await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     ) == 0
 
     run_dir = _only_archived_run(archive_dir)
@@ -1399,12 +1354,7 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     )
 
     assert await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     ) == 0
 
     run_dir = _only_archived_run(archive_dir)
@@ -1466,10 +1416,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     backend = MalformedToolBackend(multi_stack_target)
     backend.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
-    assert await run(RunConfig(
-        target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
-        log_mode=True,
-    )) == 0
+    assert await run(_deep_run_config(multi_stack_target, log_mode=True)) == 0
 
     child = json.loads(_deep_python_trajectory(_only_archived_run(archive_dir)).read_text())
     calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
