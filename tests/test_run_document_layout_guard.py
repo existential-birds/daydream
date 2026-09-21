@@ -37,7 +37,6 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/archive/__init__.py",
     "daydream/archive/hydrate.py",
-    "daydream/archive/index.py",
     "daydream/archive/license_enrich.py",
     "daydream/archive/sanitize.py",
     "daydream/eval/analyzer.py",
