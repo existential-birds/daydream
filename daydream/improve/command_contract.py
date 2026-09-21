@@ -12,6 +12,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from daydream.output_schema import strict_object
 from daydream.repository_paths import (
     DIRECTORY_SCOPE_PATTERN,
     DIRECTORY_SCOPE_SCHEMA,
@@ -35,77 +36,52 @@ WORKING_DIRECTORY_SCHEMA: dict[str, Any] = {
     # so "/./foo" is not schema-legal.
     "pattern": rf"^(?:\.|(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}|/{REPOSITORY_FILE_PATH_SEGMENTS})$",
 }
-LINE_ANCHOR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["start_line", "end_line"],
-    "properties": {
-        "start_line": {"type": "integer", "minimum": 1},
-        "end_line": {"type": "integer", "minimum": 1},
+LINE_ANCHOR_SCHEMA: dict[str, Any] = strict_object({
+    "start_line": {"type": "integer", "minimum": 1},
+    "end_line": {"type": "integer", "minimum": 1},
+})
+EXPECTED_SUCCESS_SCHEMA: dict[str, Any] = strict_object({
+    "exit_code": {"type": "integer", "enum": [0]},
+    "observable_result": {
+        "type": "string",
+        "minLength": 15,
+        "maxLength": 500,
     },
-}
-EXPECTED_SUCCESS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["exit_code", "observable_result"],
-    "properties": {
-        "exit_code": {"type": "integer", "enum": [0]},
-        "observable_result": {
-            "type": "string",
-            "minLength": 15,
-            "maxLength": 500,
-        },
-    },
-}
+})
 
-WHOLE_REPOSITORY_SCOPE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["kind"],
-    "properties": {
-        "kind": {"type": "string", "enum": ["whole-repository"]},
+WHOLE_REPOSITORY_SCOPE_SCHEMA: dict[str, Any] = strict_object({
+    "kind": {"type": "string", "enum": ["whole-repository"]},
+})
+IN_SCOPE_PATHS_SCOPE_SCHEMA: dict[str, Any] = strict_object({
+    "kind": {"type": "string", "enum": ["in-scope-paths"]},
+    "paths": {
+        "type": "array",
+        "minItems": 1,
+        "items": DIRECTORY_SCOPE_SCHEMA,
     },
-}
-IN_SCOPE_PATHS_SCOPE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["kind", "paths"],
-    "properties": {
-        "kind": {"type": "string", "enum": ["in-scope-paths"]},
-        "paths": {
-            "type": "array",
-            "minItems": 1,
-            "items": DIRECTORY_SCOPE_SCHEMA,
-        },
-    },
-}
+})
 SCOPE_SCHEMA: dict[str, Any] = {
     "anyOf": [
         WHOLE_REPOSITORY_SCOPE_SCHEMA,
         IN_SCOPE_PATHS_SCOPE_SCHEMA,
     ],
 }
-APPLICABILITY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["scope", "preconditions", "rationale"],
-    "properties": {
-        "scope": SCOPE_SCHEMA,
-        "preconditions": {
-            "type": "array",
-            "items": {
-                "type": "string",
-                "minLength": 5,
-                "maxLength": 300,
-            },
-        },
-        "rationale": {
+APPLICABILITY_SCHEMA: dict[str, Any] = strict_object({
+    "scope": SCOPE_SCHEMA,
+    "preconditions": {
+        "type": "array",
+        "items": {
             "type": "string",
-            "minLength": 20,
-            "maxLength": 500,
+            "minLength": 5,
+            "maxLength": 300,
         },
     },
-}
+    "rationale": {
+        "type": "string",
+        "minLength": 20,
+        "maxLength": 500,
+    },
+})
 
 _EVIDENCE_PROPERTIES: dict[str, Any] = {
     "kind": {"type": "string", "enum": ["literal-command"]},
@@ -115,12 +91,7 @@ _EVIDENCE_PROPERTIES: dict[str, Any] = {
     # canonical source slice after resolving and bounds-checking the locator.
     "verbatim_excerpt": {"type": ["string", "null"]},
 }
-EVIDENCE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": list(_EVIDENCE_PROPERTIES),
-    "properties": _EVIDENCE_PROPERTIES,
-}
+EVIDENCE_SCHEMA: dict[str, Any] = strict_object(_EVIDENCE_PROPERTIES)
 
 HOST_EVIDENCE_KIND = "host-derived"
 # Make targets and manifest scripts are enumerated by the host, so their
@@ -149,36 +120,26 @@ _COMMAND_PROPERTIES: dict[str, Any] = {
     "expected_success": EXPECTED_SUCCESS_SCHEMA,
     "applicability": APPLICABILITY_SCHEMA,
 }
-COMMAND_REF_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["recon_command_id", "appended_args", "note"],
-    "properties": {
-        "recon_command_id": {"type": "string", "minLength": 3, "maxLength": 80},
-        # Focused argv suffix; null runs the recon command verbatim.
-        "appended_args": {"type": ["string", "null"], "maxLength": 400},
-        "note": {"type": ["string", "null"], "maxLength": 300},
-    },
-}
+COMMAND_REF_SCHEMA: dict[str, Any] = strict_object({
+    "recon_command_id": {"type": "string", "minLength": 3, "maxLength": 80},
+    # Focused argv suffix; null runs the recon command verbatim.
+    "appended_args": {"type": ["string", "null"], "maxLength": 400},
+    "note": {"type": ["string", "null"], "maxLength": 300},
+})
 _OPTIONAL_COMMAND_REF_SCHEMA: dict[str, Any] = {
     **COMMAND_REF_SCHEMA,
     "type": ["object", "null"],
 }
-RECON_COMMAND_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["id", *_COMMAND_PROPERTIES, "evidence"],
-    "properties": {
-        "id": {
-            "type": "string",
-            "minLength": 3,
-            "maxLength": 80,
-            "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
-        },
-        **_COMMAND_PROPERTIES,
-        "evidence": EVIDENCE_SCHEMA,
+RECON_COMMAND_SCHEMA: dict[str, Any] = strict_object({
+    "id": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 80,
+        "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
     },
-}
+    **_COMMAND_PROPERTIES,
+    "evidence": EVIDENCE_SCHEMA,
+})
 HOST_RECON_COMMAND_SCHEMA: dict[str, Any] = {
     **RECON_COMMAND_SCHEMA,
     "properties": {
