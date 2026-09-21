@@ -1458,17 +1458,8 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(
         {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
     )
     daydream_dir = ws / ".daydream"
-    run_dir = daydream_dir / "runs" / "quality-real"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.6",
-                "session_id": "quality-real",
-                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        daydream_dir, "quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",
     )
 
     result = analyze_session(daydream_dir, session_id="quality-real")
@@ -1496,17 +1487,8 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(
 ) -> None:
     """Frozen artifact inputs and post-fix source quality use distinct roots."""
     daydream_dir = tmp_path / "frozen" / ".daydream"
-    run_dir = daydream_dir / "runs" / "quality-split"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.6",
-                "session_id": "quality-split",
-                "agent": {"name": "daydream", "model_name": "test"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        daydream_dir, "quality-split", schema_version="ATIF-v1.6", model_name="test",
     )
     code_workspace = _quality_workspace(
         tmp_path,
@@ -2205,16 +2187,31 @@ def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None
     assert out["per_lens"]["per-stack"] == 0
 
 
-def seed_run_trajectory(dd: Path, session_id: str, *, total_cost_usd: float) -> None:
-    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with final metrics."""
+def seed_run_trajectory(
+    dd: Path,
+    session_id: str,
+    *,
+    total_cost_usd: float | None = None,
+    schema_version: str = "ATIF-v1.7",
+    model_name: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
+) -> None:
+    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with the requested fields."""
     run_dir = dd / "runs" / session_id
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(json.dumps({
+    run_dir.mkdir(parents=True, exist_ok=True)
+    agent: dict[str, Any] = {"name": "test"}
+    if model_name is not None:
+        agent["model_name"] = model_name
+    document: dict[str, Any] = {
+        "schema_version": schema_version,
         "session_id": session_id,
-        "final_metrics": {"total_cost_usd": total_cost_usd},
-        "agent": {"name": "test"},
+        "agent": agent,
+        "steps": [] if steps is None else steps,
         "extra": {},
-    }))
+    }
+    if total_cost_usd is not None:
+        document["final_metrics"] = {"total_cost_usd": total_cost_usd}
+    (run_dir / "trajectory.json").write_text(json.dumps(document))
 
 
 def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
@@ -2284,17 +2281,8 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
         {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
     )
     daydream_dir = ws / ".daydream"
-    run_dir = daydream_dir / "runs" / "quality-bad"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.6",
-                "session_id": "quality-bad",
-                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        daydream_dir, "quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",
     )
 
     result = analyze_session(daydream_dir, session_id="quality-bad")
@@ -3195,17 +3183,8 @@ def test_analyze_session_reports_location_and_shipped_duplication(
             _item(2, line=4, description=WORKED_B, lens="structural"),
         ],
     )
-    run_dir = dd / "runs" / "loc-session"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.7",
-                "session_id": "loc-session",
-                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        dd, "loc-session", schema_version="ATIF-v1.7", model_name="claude-sonnet-4-5",
     )
 
     result = analyze_session(dd, session_id="loc-session")
