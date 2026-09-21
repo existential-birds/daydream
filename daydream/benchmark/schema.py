@@ -78,6 +78,11 @@ def _rfc3339(value: str | datetime) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def rfc3339_now() -> str:
+    """Current UTC time as an RFC3339 string."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _hex64(value: str) -> str:
     """Require a lowercase 64-hex digest."""
     if not _HEX64.fullmatch(value):
@@ -85,15 +90,13 @@ def _hex64(value: str) -> str:
     return value
 
 
+def _hex64_or_empty(value: str) -> str:
+    return value if value == "" else _hex64(value)
+
+
 def _validate_sha40(v: str | None) -> str | None:
     if v is not None and not _HEX40.fullmatch(v):
         raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
-    return v
-
-
-def _validate_commit_sha40(v: str | None) -> str | None:
-    if v is not None and not _HEX40.fullmatch(v):
-        raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
     return v
 
 
@@ -110,8 +113,10 @@ def _validate_ts(v: str | datetime | None) -> datetime | None:
 
 
 Sha40 = Annotated[str, AfterValidator(_validate_sha40)]
+Sha64 = Annotated[str, AfterValidator(_hex64)]
+Sha64OrEmpty = Annotated[str, AfterValidator(_hex64_or_empty)]
 NullableSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
-CommitSha40 = Annotated[str | None, AfterValidator(_validate_commit_sha40)]
+CommitSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
 PositiveLine = Annotated[int | None, AfterValidator(_validate_positive_line)]
 Timestamp = Annotated[datetime, BeforeValidator(_validate_ts)]
 OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_validate_ts)]
@@ -383,17 +388,10 @@ class SnapshotReady(_SnapshotBase):
     original_head_sha: Sha40
     base_tree_sha: Sha40
     head_tree_sha: Sha40
-    diff_sha256: str
+    diff_sha256: Sha64
     bundle_file: str
-    bundle_sha256: str
+    bundle_sha256: Sha64
     error: None = None
-
-    @field_validator("diff_sha256", "bundle_sha256")
-    @classmethod
-    def _sha64(cls, v: str) -> str:
-        if not _HEX64.fullmatch(v):
-            raise ValueError(f"digest must be lowercase 64-hex, got {v!r}")
-        return v
 
 
 _SNAPSHOT_ERROR_REASON = Literal[
@@ -567,7 +565,7 @@ class EvidenceRecord(BaseModel):
     node_id: str
     author: _EvidenceAuthor
     body: str
-    body_sha256: str
+    body_sha256: Sha64
     created_at: Timestamp
     updated_at: Timestamp
     submitted_at: OptionalTimestamp = None
@@ -599,11 +597,6 @@ class EvidenceRecord(BaseModel):
         if not _SOURCE_ID_RE.fullmatch(v):
             raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
         return v
-
-    @field_validator("body_sha256")
-    @classmethod
-    def _sha64(cls, v: str) -> str:
-        return _hex64(v)
 
     @model_validator(mode="after")
     def _body_hash(self) -> "EvidenceRecord":
@@ -665,12 +658,7 @@ class _FetchInfo(BaseModel):
 
     fetched_at: str
     etag: str | None = None
-    payload_sha256: str
-
-    @field_validator("payload_sha256")
-    @classmethod
-    def _sha64(cls, v: str) -> str:
-        return _hex64(v)
+    payload_sha256: Sha64
 
 
 class _PrRef(BaseModel):
@@ -705,18 +693,11 @@ class PullRequestMeta(BaseModel):
     author: _EvidenceAuthor
     html_url: str = ""
     body: str = ""
-    title_sha256: str = ""
-    body_sha256: str = ""
+    title_sha256: Sha64OrEmpty = ""
+    body_sha256: Sha64OrEmpty = ""
     merged_at: OptionalTimestamp = None
     closed_at: OptionalTimestamp = None
     changed_files: list[str] | None = None
-
-    @field_validator("title_sha256", "body_sha256")
-    @classmethod
-    def _sha64(cls, v: str) -> str:
-        if v != "":
-            return _hex64(v)
-        return v
 
     @field_validator("changed_files", mode="before")
     @classmethod
@@ -749,12 +730,7 @@ class CaseSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     import_file: str
-    import_sha256: str
-
-    @field_validator("import_sha256")
-    @classmethod
-    def _sha64(cls, v: str) -> str:
-        return _hex64(v)
+    import_sha256: Sha64
 
 
 class ImportDocument(BaseModel):

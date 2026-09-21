@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -61,10 +60,6 @@ class InitError(Exception):
     """A workspace ``init`` refused or failed before the layout was complete."""
 
 
-def _rfc3339_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def _is_nonempty(root: Path) -> bool:
     """True if ``root`` holds real user content (ignore internal crash residue).
 
@@ -95,7 +90,7 @@ def _manifest_bytes(privacy: Privacy, source: Source, benchmark_id: str) -> byte
     doc = {
         "schema_version": 1,
         "benchmark_id": benchmark_id,
-        "created_at": _rfc3339_now(),
+        "created_at": schema.rfc3339_now(),
         "source": {
             "provider": source.provider,
             "hostname": source.hostname,

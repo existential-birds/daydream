@@ -199,7 +199,6 @@ def test_merge_prompt_emits_related_files_instruction() -> None:
         intent_path=Path("intent.md"),
         alternatives_path=Path("alt.md"),
         dedup_candidates_path=Path("dedup.json"),
-        output_path=Path("o.json"),
     )
     assert "related_files" in prompt
 
@@ -314,7 +313,7 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     assert len(merge_calls) == 1
 
 
-async def test_orchestrator_threads_structural_records_to_merge(
+async def test_orchestrator_partitions_structural_records_from_merge(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -346,10 +345,8 @@ async def test_orchestrator_threads_structural_records_to_merge(
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
-    # (1) The merge phase received structural_records_path; per_stack_records_paths
-    #     must NOT include the structural file (the host appends it separately).
-    assert captured_merge.get("structural_records_path") is not None
-    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
+    # (1) per_stack_records_paths must NOT include the structural file (the host
+    #     appends it separately).
     per_stack_paths = captured_merge["per_stack_records_paths"]
     assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
         f"structural records must be partitioned out: {per_stack_paths}"
@@ -369,7 +366,7 @@ async def test_orchestrator_threads_structural_records_to_merge(
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
 
-async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
+async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,8 +387,6 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
     assert exit_code == 0
 
     # Structural records file lives under the deep artifact dir.
-    assert captured_merge.get("structural_records_path") is not None
-    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
     per_stack_paths = captured_merge["per_stack_records_paths"]
     assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
         f"structural records must be partitioned out (fresh run): {per_stack_paths}"

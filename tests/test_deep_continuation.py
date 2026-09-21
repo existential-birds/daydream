@@ -91,7 +91,7 @@ def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
         strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",
-        dedup_candidates_path=tmp_path / "dedup.json", output_path=tmp_path / "out.md",
+        dedup_candidates_path=tmp_path / "dedup.json",
     )
     omitted = build_merge_prompt(**kwargs)
     explicit_false = build_merge_prompt(**kwargs, resumed_from_arbiter=False)

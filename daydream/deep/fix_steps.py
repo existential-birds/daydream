@@ -643,16 +643,9 @@ async def _evaluate_quality_gate(
                     "reason": "file missing from post-fix analyzer output (unparseable?)",
                 }
                 continue
-            # Issue #329 / #457: the pre-fix snapshot is scoped to the reviewed
-            # diff's ``*.py`` set, so a candidate the fix pass edited that was
-            # NOT in the reviewed diff -- a secondary edit that survived the
-            # residual net, e.g. a newly-created untracked ``*.py`` -- has no
-            # before baseline. A missing baseline must not read as a clean
-            # pass: the delta is unknowable, so record the file explicitly
-            # flagged with its reason instead of silently falling into the
-            # absolute-only fallback, which can miss the exact delta regression
-            # #329 added changed_after_fix for. Still fail-open: never raises,
-            # never stops the run.
+            # A missing pre-fix baseline (e.g. a secondary edit outside the
+            # reviewed diff) means the delta is unknowable: flag the file, never
+            # read it as a clean pass. Fail-open (issue #329 / #457).
             if before_entry is None and after_entry is not None:
                 per_file[rel] = {
                     "erosion_before": None,
@@ -1120,15 +1113,10 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 group_max_serial_items=_resolve_config_value(
                     config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS
                 ),
-                # One cumulative retry-overhead allowance per file group,
-                # resolved once here and forwarded unchanged into every fix
-                # call the group owns. Resolved by a direct file-config read
-                # rather than ``_resolve_config_value``: that helper
-                # substitutes the module default, but the allowance is
-                # tri-state. An unset key must stay undeclared (None) so
-                # ``run_agent`` applies the default without mistaking it for an
-                # operator's explicit value -- which would refuse a backend
-                # that deliberately disabled retries.
+                # One cumulative retry-overhead allowance per file group, read
+                # directly (not via ``_resolve_config_value``) because it is
+                # tri-state: unset must stay None so ``run_agent`` applies its
+                # default instead of reading it as an explicit disable.
                 retry_recovery_allowance_s=(
                     config.file_config.retry_recovery_allowance_s
                     if config.file_config is not None

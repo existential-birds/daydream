@@ -411,8 +411,8 @@ def test_aggregates_across_multiple_trajectory_files() -> None:
 def test_e2e_single_phase_claude_renders_full_block() -> None:
     """Single Claude review: rollup + 1-row table + footer, no footnote.
 
-    Covers M1, M2, M3, baseline single-phase (S2). Uses the Task 4 baseline
-    fixture verbatim — verifies it satisfies the e2e expectations.
+    Uses the baseline fixture verbatim — verifies it satisfies the e2e
+    expectations.
     """
     out = render_run_info_block([_SINGLE_PHASE])
     # Rollup block (Mode line dropped).
@@ -495,7 +495,7 @@ def test_e2e_codex_cached_tokens_show_in_rollup() -> None:
     """Codex run with cached_input_tokens > 0: rollup shows hit ratio + synth cost.
 
     Covers M8 (cache-hit ratio rendered) and exercises the codex pricing
-    path end-to-end through the renderer (sanity-check Task 2 fix).
+    path end-to-end through the renderer.
     20K input / 14K cached / 1K out on gpt-5.5 → 70% cache hit, synth cost
     $0.07 (uncached: 6K * $5/1M = $0.030; cached: 14K * $0.50/1M = $0.007;
     output: 1K * $30/1M = $0.030; total $0.067 → rounds to $0.07).

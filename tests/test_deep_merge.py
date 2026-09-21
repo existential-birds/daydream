@@ -20,7 +20,6 @@ def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
-        output_path=tmp_path / ".review-output.md",
     )
     assert "cross-stack" in prompt
     assert "spanning multiple stacks" in prompt
@@ -38,7 +37,6 @@ def test_merge_prompt_references_records_by_path(tmp_path: Path) -> None:
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
-        output_path=tmp_path / ".review-output.md",
     )
     for r in records:
         assert str(r) in prompt
@@ -52,7 +50,6 @@ def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "dedup-candidates.json",
-        output_path=tmp_path / ".review-output.md",
     )
     assert "dedup-candidates.json" in prompt or "candidate pair" in prompt
     assert (
@@ -131,7 +128,6 @@ def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
-        output_path=tmp_path / "o.md",
     )
     for r in records:
         assert str(r) in prompt
@@ -144,7 +140,6 @@ def test_merge_prompt_tags_alternatives_items_as_wonder(tmp_path: Path) -> None:
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
-        output_path=tmp_path / ".review-output.md",
     )
     assert '"wonder"' in prompt      # the lens value the agent must emit for alt items
     assert "alternatives" in prompt
@@ -169,7 +164,6 @@ def test_merge_prompt_demands_verbatim_source_uids(tmp_path: Path) -> None:
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
-        output_path=tmp_path / ".review-output.md",
     )
     assert "source_uids" in prompt
     assert "VERBATIM" in prompt

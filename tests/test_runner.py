@@ -304,7 +304,7 @@ def test_flow_context_exposes_typed_artifact_session_without_data_fallback(
     make_work: Callable[[Path], WorkContext],
     tmp_path: Path,
 ) -> None:
-    """Task 4 receives the host session explicitly, never through ctx.data."""
+    """The host session arrives explicitly, never through ctx.data."""
     from daydream.artifact_visibility import ArtifactSession
     from daydream.extensions import get_registry
 
@@ -828,8 +828,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
             panel.finish()
             set_shutdown_panel(None)
 
-        # Task 3 routes the recorder privately. Deep's pre-recorder sidecars
-        # remain Task 4 producer work, so only the public run directory is
+        # The recorder is routed privately; only the public run directory is
         # forbidden at this checkpoint.
         assert not (multi_stack_target / ".daydream" / "runs").exists()
         live_runs = [
@@ -941,7 +940,10 @@ _DISPATCH_TARGETS = (
     "_run_improve",
 )
 
-def _make_recording_dispatch(called: list[str]) -> Any:
+def _make_recording_dispatch(
+    called: list[str],
+    on_call: Callable[[str, Any, Any, RunContext], None] | None = None,
+) -> Any:
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
@@ -950,6 +952,8 @@ def _make_recording_dispatch(called: list[str]) -> Any:
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
+            if on_call is not None:
+                on_call(name, work, config, run_context)
             return 0
         return stub
     return _record
@@ -1005,17 +1009,10 @@ async def test_run_dispatches_to_expected_flow(
     """
     called: list[tuple[str, WorkContext, RunConfig]] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append((name, work, config))
-            return 0
+    def _capture(name: str, work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
+        called.append((name, work, config))
 
-        return stub
+    _record = _make_recording_dispatch([], _capture)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
@@ -1119,18 +1116,10 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
     called: list[str] = []
     head_shas: list[str] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append(name)
-            head_shas.append(work.head_sha)
-            return 0
+    def _capture(_name: str, work: Any, _config: RunConfig, _run_context: RunContext) -> None:
+        head_shas.append(work.head_sha)
 
-        return stub
+    _record = _make_recording_dispatch(called, _capture)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
@@ -1259,20 +1248,13 @@ async def test_review_run_does_not_mint_app_identity(
     async def post_forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("report-only --review must not post a PR review")
 
-    async def fake_review(
-        _work: WorkContext,
-        config: RunConfig,
-        _run_artifacts: Any = None,
-        *, run_context: RunContext, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
+    def _check_identity(_name: str, _work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
         assert config.identity == "operator"
-        return 0
 
+    _record = _make_recording_dispatch([], _check_identity)
     monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_review)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
 
     rc = await runner.run(make_config(tmp_path, output_mode="review", pr_repo="acme/widgets"))
 
@@ -1368,19 +1350,12 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     )
     seen: dict[str, Any] = {}
 
-    async def fake_deep(
-        work: WorkContext,
-        config: RunConfig,
-        _run_artifacts: Any = None,
-        *, run_context: RunContext, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
+    def _capture(_name: str, _work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
         seen["output_mode"] = config.output_mode
         seen["branch"] = config.branch
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_deep)
+    _record = _make_recording_dispatch([], _capture)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
 
     config = make_config(tmp_path, output_mode="comment", branch="feat/missing")
     exit_code = await runner.run(config)
@@ -1389,7 +1364,7 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     assert seen == {"output_mode": "comment", "branch": "feat/missing"}, seen
 
 
-# --- Per-phase model resolution tests (Task 2) -----------------------------
+# --- Per-phase model resolution tests --------------------------------------
 
 
 class TestResolveBackendPhaseModel:
@@ -1609,7 +1584,7 @@ async def test_improve_inherited_storage_override_stops_before_model(
     assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
 
 
-# --- Task 6: deep fix-cycle hero is followed by Model: dim line -------------
+# --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
 
 def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
@@ -1832,7 +1807,7 @@ async def test_fix_cycle_items_severity_ordered(
         )
 
 
-# --- Task 4: non_interactive threading -------------------------------------
+# --- non_interactive threading ----------------------------------------------
 
 
 def test_runconfig_defaults_non_interactive_false() -> None:
@@ -1863,16 +1838,11 @@ async def test_run_threads_non_interactive_into_runtime(
     previous = current_run_context()
     received: list[RunContext] = []
 
-    async def stub(
-        work: Any, config: Any, _run_artifacts: Any = None, *,
-        run_context: RunContext, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert current_run_context() is run_context
+    def _capture(_name: str, _work: Any, _config: Any, run_context: RunContext) -> None:
         received.append(run_context)
-        return 0
 
-    monkeypatch.setattr(dispatch_target, stub)
+    _record = _make_recording_dispatch([], _capture)
+    monkeypatch.setattr(dispatch_target, _record(dispatch_target))
     config = make_config(tmp_path, non_interactive=True, **config_kwargs)
 
     assert await runner.run(config) == 0

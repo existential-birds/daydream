@@ -26,8 +26,7 @@ def test_golden_baseline_arbiter_and_merge() -> None:
                              cwd=Path("/c"))
     m = build_merge_prompt(strategy=_default_strategy("merge"),
                            per_stack_records_paths=[Path("/ps")], intent_path=Path("/i"),
-                           alternatives_path=Path("/a"), dedup_candidates_path=Path("/dc"),
-                           output_path=Path("/o"))
+                           alternatives_path=Path("/a"), dedup_candidates_path=Path("/dc"))
     assert "adjudicating their work" in a      # strategy content present
     assert "/ps" in m and "/dc" in m           # envelope runtime data present
     assert "/in" in a and "/i" in m

@@ -3610,88 +3610,75 @@ class ArtifactSession:
         paired = () if trajectory is None else (trajectory.full, trajectory.partial)
         return (*paired, *self._destinations)
 
+    def _project_explicit_route(
+        self, declared: Path, from_attr: str, to_attr: str
+    ) -> Path | None:
+        for route in self._projection_routes():
+            if route.label is OutputLabel.PUBLIC_DAYDREAM:
+                continue
+            from_value = getattr(route, from_attr)
+            if from_value is None:
+                continue
+            if declared == from_value:
+                kind = self._projection_kind(route)
+                _validate_projection_ancestry(declared, expected_kind=kind)
+                to_value: Path | None = getattr(route, to_attr)
+                if to_value is None:
+                    raise ArtifactVisibilityError(
+                        "registered artifact destination has no writable path"
+                    )
+                _validate_projection_ancestry(to_value, expected_kind=kind)
+                return to_value
+        return None
+
+    def _project_public_subtree(
+        self, declared: Path, from_attr: str, to_attr: str
+    ) -> Path | None:
+        for route in self._destinations:
+            if route.label is not OutputLabel.PUBLIC_DAYDREAM:
+                continue
+            from_root: Path | None = getattr(route, from_attr)
+            to_root: Path | None = getattr(route, to_attr)
+            if from_root is None or to_root is None:
+                raise ArtifactVisibilityError(
+                    "registered artifact destination has no writable path"
+                )
+            if declared == from_root or from_root in declared.parents:
+                relative = declared.relative_to(from_root)
+                projected = to_root / relative
+                leaf_kind: Literal["directory", "either"] = (
+                    "directory" if not relative.parts else "either"
+                )
+                _validate_projection_ancestry(declared, expected_kind=leaf_kind)
+                _validate_projection_ancestry(projected, expected_kind=leaf_kind)
+                return projected
+        return None
+
     def durable_path_for(self, path: Path, *, repo: Path) -> Path:
         """Project one registered live write path to its durable destination."""
         self._route_repo(repo)
         declared = _projection_path(path)
-
-        # Exact explicit routes precede the public .daydream subtree. A custom
-        # trajectory may deliberately publish somewhere inside that subtree
-        # while writing at the session's canonical trajectory path.
-        for route in self._projection_routes():
-            if route.label is OutputLabel.PUBLIC_DAYDREAM or route.write_path is None:
-                continue
-            if declared == route.write_path:
-                kind = self._projection_kind(route)
-                _validate_projection_ancestry(declared, expected_kind=kind)
-                _validate_projection_ancestry(route.requested, expected_kind=kind)
-                return route.requested
-
-        for route in self._destinations:
-            if route.label is not OutputLabel.PUBLIC_DAYDREAM:
-                continue
-            live_root = route.write_path
-            if live_root is None:
-                raise ArtifactVisibilityError(
-                    "registered artifact destination has no writable path"
-                )
-            if declared == live_root or live_root in declared.parents:
-                relative = declared.relative_to(live_root)
-                durable = route.requested / relative
-                leaf_kind: Literal["directory", "either"] = (
-                    "directory" if not relative.parts else "either"
-                )
-                _validate_projection_ancestry(
-                    declared, expected_kind=leaf_kind
-                )
-                _validate_projection_ancestry(durable, expected_kind=leaf_kind)
-                return durable
-
-        raise ArtifactVisibilityError(
-            "path is not owned by a registered artifact destination"
-        )
+        projected = self._project_explicit_route(declared, "write_path", "requested")
+        if projected is None:
+            projected = self._project_public_subtree(declared, "write_path", "requested")
+        if projected is None:
+            raise ArtifactVisibilityError(
+                "path is not owned by a registered artifact destination"
+            )
+        return projected
 
     def live_path_for(self, path: Path, *, repo: Path) -> Path:
         """Project one registered durable destination to its live write path."""
         self._route_repo(repo)
         declared = _projection_path(path)
-
-        for route in self._projection_routes():
-            if route.label is OutputLabel.PUBLIC_DAYDREAM:
-                continue
-            if declared == route.requested:
-                kind = self._projection_kind(route)
-                _validate_projection_ancestry(declared, expected_kind=kind)
-                if route.write_path is None:
-                    raise ArtifactVisibilityError(
-                        "registered artifact destination has no writable path"
-                    )
-                _validate_projection_ancestry(route.write_path, expected_kind=kind)
-                return route.write_path
-
-        for route in self._destinations:
-            if route.label is not OutputLabel.PUBLIC_DAYDREAM:
-                continue
-            live_root = route.write_path
-            if live_root is None:
-                raise ArtifactVisibilityError(
-                    "registered artifact destination has no writable path"
-                )
-            if declared == route.requested or route.requested in declared.parents:
-                relative = declared.relative_to(route.requested)
-                live = live_root / relative
-                leaf_kind: Literal["directory", "either"] = (
-                    "directory" if not relative.parts else "either"
-                )
-                _validate_projection_ancestry(
-                    declared, expected_kind=leaf_kind
-                )
-                _validate_projection_ancestry(live, expected_kind=leaf_kind)
-                return live
-
-        raise ArtifactVisibilityError(
-            "path is not owned by a registered artifact destination"
-        )
+        projected = self._project_explicit_route(declared, "requested", "write_path")
+        if projected is None:
+            projected = self._project_public_subtree(declared, "requested", "write_path")
+        if projected is None:
+            raise ArtifactVisibilityError(
+                "path is not owned by a registered artifact destination"
+            )
+        return projected
 
     def _require_active(self) -> None:
         if self._state is not _SessionState.ACTIVE:
@@ -4701,15 +4688,12 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             detach_stage = transaction / "detach-stage"
             canonical = state_root / "canonical"
             canonical_manifest = state_root / "canonical-manifest.json"
-            # Canonical is itself the durable byte-identical copy the DETACH_REMOVING
-            # ordering needs, so stage one only when this workspace has none yet.
-            # Recovery tolerates the absent stage for exactly this reason. Session
-            # open is the one safe reconciliation point for a benign between-run
-            # public drift: the workspace lock excludes concurrent sessions and no
-            # artifact transaction is in flight, so the drift is adopted as the new
-            # canonical baseline BEFORE the detach transaction stages anything.
-            # Doing this after staging would leave the stale stage the recovery
-            # path validates against on a crash.
+            # Canonical is itself the durable copy the DETACH_REMOVING ordering
+            # needs, so stage one only when this workspace has none yet. Session
+            # open is the one safe reconciliation point for benign between-run
+            # public drift: the lock excludes concurrent sessions, so adopt it as
+            # the canonical baseline BEFORE staging (doing so after would leave a
+            # stale stage on a crash).
             canonical_present = canonical.exists()
             if canonical_present:
                 canonical_entries = _parse_manifest(canonical_manifest)
