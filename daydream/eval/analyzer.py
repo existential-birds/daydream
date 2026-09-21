@@ -691,16 +691,55 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _completed_source_packet_files(daydream_dir: Path) -> set[str]:
+    """Credit host source only with the same stack's assigned, final verdict."""
+    # Deep coverage imports this module for legacy artifact normalization.
+    from daydream.deep.artifacts import per_stack_records_path
+    from daydream.deep.coverage import coverage_receipt_path, resolve_per_stack_verdicts
+
+    deep_dir = daydream_dir / "deep"
+    try:
+        receipts = json.loads(coverage_receipt_path(deep_dir).read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(receipts, dict):
+        return set()
+    covered: set[str] = set()
+    for stack, receipt in receipts.items():
+        if not re.fullmatch(r"[\w-]+(?:#\d+)?", stack) or not isinstance(receipt, dict):
+            continue
+        assigned = receipt.get("assigned_files")
+        packet = receipt.get("source_packet_files")
+        if not isinstance(assigned, list) or not isinstance(packet, list):
+            continue
+        try:
+            records = json.loads(per_stack_records_path(deep_dir, stack).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(records, dict) or not isinstance(records.get("verdicts"), list):
+            continue
+        verdicts = resolve_per_stack_verdicts(
+            assigned_files=[path for path in assigned if isinstance(path, str)],
+            declared_verdicts=records["verdicts"],
+            completed_read_paths=set(), finding_files=set(),
+            source_packet_paths={path for path in packet if isinstance(path, str)},
+        )
+        covered.update(v["path"] for v in verdicts if v["verdict"] != "not_reviewed")
+    return covered
+
+
 def analyze_coverage(
     trajectories: dict[str, Any],
     daydream_dir: Path,
     *,
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
 ) -> dict[str, Any]:
-    """File review coverage: diff files vs repository reads, never run artifacts.
+    """File review coverage from repository reads and completed source packets.
 
     ``artifact_reads_rejected`` counts the artifact-shaped or lexically unsafe
-    read paths excluded before suffix matching.
+    read paths excluded before suffix matching. ``files_read_by_reviewers``
+    retains its tool-read meaning; ``files_reviewed`` also includes host sources
+    with an assigned, completed final verdict from the receiving stack.
     """
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
 
@@ -720,12 +759,16 @@ def analyze_coverage(
         roots=_artifact_path_roots(daydream_dir, artifact_provenance),
     )
 
-    covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
+    tool_covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
+    packet_covered = set(diff_files) & _completed_source_packet_files(daydream_dir)
+    covered = tool_covered | packet_covered
     uncovered = sorted(set(diff_files) - covered)
 
     return {
         "files_in_diff": len(diff_files),
-        "files_read_by_reviewers": len(covered),
+        "files_read_by_reviewers": len(tool_covered),
+        "files_reviewed": len(covered),
+        "source_packet_reviewed": len(packet_covered),
         "coverage_ratio": (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
         "uncovered_files": uncovered,
         "artifact_reads_rejected": len(rejected_reads),
