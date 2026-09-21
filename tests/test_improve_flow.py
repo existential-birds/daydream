@@ -1372,7 +1372,7 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
         "group-02",
         "group-03",
     }
-    coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
+    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     assert len(coverage["groups"]) == 3
     assert {entry["name"] for entry in coverage["partitions"]} == {
         *(f"svc{index:02d}" for index in range(12)),
@@ -1415,7 +1415,7 @@ async def test_partition_bound_splits_oversized_trees_via_config(
     assert len(audit_calls) == 11 * len(AUDIT_CATEGORIES)
     for call in audit_calls:
         assert sum(group_file_counts(call["prompt"])) <= 5
-    coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
+    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     assert {"frontend/src/alpha", "frontend/src/beta", "frontend/src/gamma"} <= {
         entry["name"] for entry in coverage["partitions"]
     }
@@ -1449,7 +1449,7 @@ async def test_group_ceiling_reports_full_and_partial_stack_coverage(
     # Only the largest group (the 24-file python service group) is audited.
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01"}
-    coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
+    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     not_audited = {entry["partition"]: entry for entry in coverage["not_audited"]}
     assert set(not_audited) == {"frontend"}
     assert not_audited["frontend"]["reason"] == "group-ceiling"
@@ -1484,7 +1484,7 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
     assert len(audit_calls) == 4  # quick also hunts tech-debt/code bloat
     for call in audit_calls:
         assert group_roots(call["prompt"]) == ["."]
-    coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
+    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     assert coverage["not_audited"] == []
     assert [entry["name"] for entry in coverage["partitions"]] == ["repository"]
 
@@ -1545,7 +1545,7 @@ async def test_small_repo_collapses_to_bounded_groups(
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
-    coverage = json.loads(improve_artifact(target, "coverage.json").read_text())
+    coverage = _load_improve_json(target, "coverage.json")
     assert [entry["name"] for entry in coverage["partitions"]] == ["residue"]
     assert len(coverage["groups"]) == 1
 
@@ -1619,7 +1619,7 @@ async def test_clean_full_coverage_reports_nothing_skipped(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    coverage = json.loads(improve_artifact(improve_monorepo_target, "coverage.json").read_text())
+    coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
     assert coverage["not_audited"] == []
     assert {entry["status"] for entry in coverage["groups"]} == {"audited"}
     section = _not_audited_section(
@@ -1647,7 +1647,7 @@ async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    audit = json.loads(improve_artifact(improve_monorepo_target, "audit-findings.json").read_text())
+    audit = _load_improve_json(improve_monorepo_target, "audit-findings.json")
     assert {finding["partition"] for finding in audit["findings"]} == {
         "billing",
         "web",
@@ -1698,7 +1698,7 @@ async def test_vet_batches_are_bounded_and_parallel(
     for call in vet_calls:
         payload = json.loads(call["prompt"].split("```json\n")[1].split("```")[0])
         assert len(payload) <= VET_BATCH_MAX_FINDINGS
-    vetted = json.loads(improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text())
+    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
     members = [member for package in vetted["findings"] for member in package.get("members", [package])]
     titles = {finding["title"] for finding in members}
     # Verdicts from every batch apply: the last batch's rejection is honored
@@ -1737,7 +1737,7 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     )
 
     assert code == 0
-    vetted = json.loads(improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text())
+    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
     members = [member for package in vetted["findings"] for member in package.get("members", [package])]
     titles = {finding["title"] for finding in members}
     # Only the failed batch's five findings drop; the other two batches keep theirs.
@@ -2077,7 +2077,7 @@ async def test_effort_and_focus_select_the_audited_categories_read_only(
         improve_focus=focus,
     )
     )
-    audited = json.loads(improve_artifact(improve_monorepo_target, "audit-findings.json").read_text())
+    audited = _load_improve_json(improve_monorepo_target, "audit-findings.json")
     assert sorted(audited["categories_run"]) == expected_categories
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert audit_calls and all(call["read_only"] for call in audit_calls)
@@ -2150,7 +2150,7 @@ async def test_capable_improve_stub_retains_commands_and_avoids_provider_overloa
         )
     )
 
-    recon = json.loads(improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8"))
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
     plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     console_output = capsys.readouterr().out
     observables = [
@@ -2240,7 +2240,7 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     # files, so the fan-out stays one serial agent per category.
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
-    coverage = json.loads(improve_artifact(improve_branch_target, "coverage.json").read_text())
+    coverage = _load_improve_json(improve_branch_target, "coverage.json")
     assert [entry["name"] for entry in coverage["partitions"]] == ["branch"]
     assert coverage["not_audited"] == []
     vetted = json.loads(
@@ -2839,7 +2839,7 @@ async def test_interactive_selection_honors_user_choice(
     )
     )
     assert code == 0
-    selected = json.loads(improve_artifact(improve_monorepo_target, "selected.json").read_text())
+    selected = _load_improve_json(improve_monorepo_target, "selected.json")
     assert len(selected["selected"]) == 1
     assert selected["mode"] == "interactive"
 
@@ -4427,7 +4427,7 @@ async def test_over_length_instruction_is_repaired_not_silently_truncated(
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     assert code == 1
-    diagnostics = json.loads(improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json").read_text())
+    diagnostics = _load_improve_json(improve_monorepo_target, "plan-write-diagnostics.json")
     errors = [error for attempt in diagnostics["attempts"] for error in attempt["errors"]]
     assert any(error["pointer"] == "/steps/0/changes/0/instruction" for error in errors), errors
     # The plan writer was asked again rather than a mangled plan being written.
