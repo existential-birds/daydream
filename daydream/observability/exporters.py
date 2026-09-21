@@ -107,14 +107,6 @@ def _snapshot_of(exporter: Any) -> dict[str, Any]:
     return cast(dict[str, Any], snapshot())
 
 
-class _PresetPolicy:
-    """Preset transport policy settings: no auth, redirects, or compression."""
-
-    trust_env = False
-    follow_redirects = False
-    compression = "none"
-
-
 def _preset_transport(
     endpoint: str,
     headers: dict[str, str],
@@ -123,6 +115,7 @@ def _preset_transport(
 
     Presets never consult generic OTLP environment settings, so the private
     credential-provider rejection applies only to the generic OTLP resolver.
+    Ambient authentication, redirects, and compression are disabled.
     """
     ledger = DeliveryLedger()
     try:
@@ -130,9 +123,9 @@ def _preset_transport(
             endpoint=endpoint,
             headers=tuple(headers.items()),
             timeout_s=_PRESET_TIMEOUT_SECONDS,
-            compression=cast(Literal["none", "gzip"], _PresetPolicy.compression),
-            trust_env=_PresetPolicy.trust_env,
-            follow_redirects=_PresetPolicy.follow_redirects,
+            compression="none",
+            trust_env=False,
+            follow_redirects=False,
             environ={},
             ledger=ledger,
         )

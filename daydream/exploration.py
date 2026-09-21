@@ -321,40 +321,24 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
                 winner, provenance="static", source_file=source or source_by_key.get(key, source),
             )
 
-    seen_conv: set[str] = set()
-    conventions: list[Convention] = []
+    conventions: dict[str, Convention] = {}
     for ctx in contexts:
         for c in ctx.conventions:
-            if c.name in seen_conv:
-                continue
-            seen_conv.add(c.name)
-            conventions.append(c)
+            conventions.setdefault(c.name, c)
 
-    seen_deps: set[tuple[str, str, str]] = set()
-    dependencies: list[Dependency] = []
+    dependencies: dict[tuple[str, str, str], Dependency] = {}
     for ctx in contexts:
         for d in ctx.dependencies:
-            key_d = (d.source, d.target, d.relationship)
-            if key_d in seen_deps:
-                continue
-            seen_deps.add(key_d)
-            dependencies.append(d)
+            dependencies.setdefault((d.source, d.target, d.relationship), d)
 
-    seen_guidelines: set[str] = set()
-    guidelines: list[str] = []
-    for ctx in contexts:
-        for g in ctx.guidelines:
-            if g in seen_guidelines:
-                continue
-            seen_guidelines.add(g)
-            guidelines.append(g)
+    guidelines = list(dict.fromkeys(g for ctx in contexts for g in ctx.guidelines))
 
     raw_notes = "\n\n".join(ctx.raw_notes for ctx in contexts if ctx.raw_notes)
 
     return ExplorationContext(
         affected_files=list(files_by_key.values()),
-        conventions=conventions,
-        dependencies=dependencies,
+        conventions=list(conventions.values()),
+        dependencies=list(dependencies.values()),
         guidelines=guidelines,
         raw_notes=raw_notes,
     )

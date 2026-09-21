@@ -31,7 +31,7 @@ from daydream.archive.hydrate_rules import (
 )
 from daydream.archive.index import append_label_observation
 from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
-from daydream.archive.sanitize import _sanitize_json_value
+from daydream.archive.sanitize import _sanitize_url_string
 from daydream.archive.scan import scan_run_dir
 from daydream.trajectory import redact_value
 
@@ -175,7 +175,7 @@ def _redact_json_blob(value: Any, *, field: str, session_id: str) -> Any:
         if isinstance(node, list):
             return [_walk(child) for child in node]
         if isinstance(node, str):
-            return redact_value(_redact_path_string(_sanitize_json_value(node)))
+            return redact_value(_redact_path_string(_sanitize_url_string(node)))
         return node
 
     redacted = _walk(value)
@@ -194,7 +194,7 @@ def redact_metadata_value(value: Any) -> Any:
     the observation rows do. Non-string values pass through unchanged.
     """
     if isinstance(value, str):
-        return redact_value(_redact_path_string(_sanitize_json_value(value)))
+        return redact_value(_redact_path_string(_sanitize_url_string(value)))
     return value
 
 
@@ -204,7 +204,7 @@ def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> d
     Every row's ``remote_url`` and ``source_path`` are rewritten through the
     sanitize module's URL authority plus absolute-path redaction, and the
     ``rubric_json``/``reward_json`` blobs are walked string-leaf by string-leaf
-    through ``sanitize._sanitize_json_value`` + ``redact_value`` (reuse, not
+    through ``sanitize._sanitize_url_string`` + ``redact_value`` (reuse, not
     reimplementation). The redacted payload is then serialized to
     ``scan_dir/payload.json`` and re-scanned with the fail-closed
     :func:`daydream.archive.scan.scan_run_dir`.

@@ -153,19 +153,19 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
     if git_result is not None:
         return git_result
 
-    result = Text()
-
     if is_error:
         # Highlight file paths in orange so they stand out against the red base.
-        pos = 0
-        for match in _FILE_PATH_PATTERN.finditer(line):
-            if match.start() > pos:
-                result.append(line[pos:match.start()], style=STYLE_RED)
-            result.append(match.group(1), style=Style(color=NEON_COLORS["orange"], bold=True))
-            pos = match.end()
-        if pos < len(line):
-            result.append(line[pos:], style=STYLE_RED)
-        return result
+        return render_segments(
+            line,
+            [
+                (match.start(), match.end(), match.group(1),
+                 Style(color=NEON_COLORS["orange"], bold=True))
+                for match in _FILE_PATH_PATTERN.finditer(line)
+            ],
+            STYLE_RED,
+        )
+
+    result = Text()
 
     # Check for line number prefix (e.g., "  42:" or "123|")
     line_num_match = _LINE_NUMBER_PATTERN.match(line)
@@ -176,51 +176,25 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
         result.append(sep, style=STYLE_PURPLE)
         line = line[line_num_match.end():]
 
-    segments: list[tuple[int, int, str, Style]] = []
-
-    for match in _FILE_PATH_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_CYAN))
-
-    for match in _ERROR_KEYWORDS.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_BOLD_RED))
-
-    for match in _SUCCESS_KEYWORDS.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_BOLD_GREEN))
-
-    for match in _WARNING_KEYWORDS.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_BOLD_YELLOW))
-
-    for match in _STRING_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(0),
-                        STYLE_ORANGE))
-
-    for match in _ARROW_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_BOLD_PINK))
-
-    for match in _BRACKET_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_PURPLE))
-
-    for match in _SHELL_VAR_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_YELLOW))
-
-    for match in _SHELL_PROMPT_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_CYAN))
-
-    for match in _PIPE_REDIRECT_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        STYLE_PINK))
-
-    for match in _COMMAND_PATTERN.finditer(line):
-        segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["orange"], bold=True)))
+    # Equal spans retain this priority through render_segments' stable sort.
+    patterns = (
+        (_FILE_PATH_PATTERN, STYLE_CYAN),
+        (_ERROR_KEYWORDS, STYLE_BOLD_RED),
+        (_SUCCESS_KEYWORDS, STYLE_BOLD_GREEN),
+        (_WARNING_KEYWORDS, STYLE_BOLD_YELLOW),
+        (_STRING_PATTERN, STYLE_ORANGE),
+        (_ARROW_PATTERN, STYLE_BOLD_PINK),
+        (_BRACKET_PATTERN, STYLE_PURPLE),
+        (_SHELL_VAR_PATTERN, STYLE_YELLOW),
+        (_SHELL_PROMPT_PATTERN, STYLE_CYAN),
+        (_PIPE_REDIRECT_PATTERN, STYLE_PINK),
+        (_COMMAND_PATTERN, Style(color=NEON_COLORS["orange"], bold=True)),
+    )
+    segments = [
+        (match.start(), match.end(), match.group(0), style)
+        for pattern, style in patterns
+        for match in pattern.finditer(line)
+    ]
 
     result.append_text(render_segments(line, segments, STYLE_FG))
     return result

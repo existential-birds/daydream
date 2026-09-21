@@ -1,14 +1,11 @@
-"""Tests for the phase-keyed replay context managers (the harness core).
+"""Real Codex parsing across successive agent phases under one recorder.
 
-The unit-level proof here is that the Codex subprocess ``side_effect`` keys on
-the firing phase read from the recorder active invocation stack: two phases
-fire under one open recorder, and each ``run_agent`` call observes ITS phase's
-fixture. The PARSE phase's structured-output ``id == 1`` (produced by the REAL
-backend parser) proves the keying — a mis-keyed factory would serve REVIEW's
-lines and the structured output would be absent.
+Only the external subprocess boundary is stubbed. The parse result must pass
+through the real backend parser and ``run_agent`` structured-output handling.
 """
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -16,17 +13,13 @@ from daydream.agent import run_agent
 from daydream.backends.codex import CodexBackend
 from daydream.phases import FEEDBACK_SCHEMA
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
-from tests.harness.phase_replay import codex_subprocess_for_phases
+from tests.harness.codex_replay import make_mock_process
+from tests.harness.scripts import build_codex_jsonl_for_phase
 
 
 @pytest.fixture
 def recorder(tmp_path: Path) -> Any:
-    """A real, un-entered ``TrajectoryRecorder`` (mirrors the accessor test).
-
-    The test enters it with ``async with`` so ``get_current_recorder()`` —
-    which the replay factory reads — returns this instance while the phase
-    invocations fire.
-    """
+    """A real recorder shared by the review and parse invocations."""
     return TrajectoryRecorder(
         path=tmp_path / "t.json",
         run_flow=DaydreamRunFlow.NORMAL,
@@ -36,7 +29,7 @@ def recorder(tmp_path: Path) -> Any:
     )
 
 
-async def test_side_effect_serves_per_phase(tmp_path: Path, recorder: Any) -> None:
+async def test_successive_agent_phases_preserve_structured_parse_output(tmp_path: Path, recorder: Any) -> None:
     rev_script = {"turns": [{"message_id": "r1", "text": "reviewed"}]}
     parse_script = {
         "turns": [{"message_id": "p1", "text": ""}],
@@ -53,12 +46,10 @@ async def test_side_effect_serves_per_phase(tmp_path: Path, recorder: Any) -> No
             ]
         },
     }
-    phase_scripts: dict[DaydreamPhase, dict[str, Any]] = {
-        DaydreamPhase.REVIEW: rev_script, DaydreamPhase.PARSE: parse_script,
-    }
+    processes = [make_mock_process(build_codex_jsonl_for_phase(script)) for script in (rev_script, parse_script)]
 
     async with recorder:
-        with codex_subprocess_for_phases(phase_scripts):
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=processes):
             await run_agent(
                 CodexBackend("m"), tmp_path, "go", phase=DaydreamPhase.REVIEW
             )
@@ -70,6 +61,5 @@ async def test_side_effect_serves_per_phase(tmp_path: Path, recorder: Any) -> No
                 phase=DaydreamPhase.PARSE,
             ))[0])
 
-    # PARSE fixture's structured output — proves the factory keyed on the
-    # firing phase, not REVIEW's (text-only) lines.
+    # The second invocation retains its parsed result after a text-only review.
     assert par["issues"][0]["id"] == 1

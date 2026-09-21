@@ -490,15 +490,7 @@ def _warn_removal_failed(path: Path, exc: GitError, *, kind: str = "worktree") -
 
 def _dedupe_ordered(entries: Iterable[str | Path]) -> list[Path]:
     """De-duplicate path-like *entries*, preserving first-occurrence order."""
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for rel in entries:
-        rel_path = Path(rel)
-        if rel_path in seen:
-            continue
-        seen.add(rel_path)
-        unique.append(rel_path)
-    return unique
+    return list(dict.fromkeys(Path(entry) for entry in entries))
 
 
 def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> None:

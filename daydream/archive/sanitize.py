@@ -109,20 +109,10 @@ def _sanitize_url_string(value: str) -> str:
     return value
 
 
-def _sanitize_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _sanitize_json_value(child) for key, child in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_json_value(child) for child in value]
-    if isinstance(value, str):
-        return _sanitize_url_string(value)
-    return value
-
-
 def _sanitize_json_document(doc: Any) -> Any:
     """Canonicalize URL leaves, then run every string leaf through the text pipeline.
 
-    ``_sanitize_json_value`` + :func:`redact_value` alone omit the three
+    URL canonicalization + :func:`redact_value` alone omit the three
     scan-local substitutions that only :func:`_sanitize_text` carries, so a
     JSON string leaf holding an SCP, token-only or query-credential shape — the
     shape a trajectory tool observation routinely has — was quarantined instead

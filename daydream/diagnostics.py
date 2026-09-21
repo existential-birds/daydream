@@ -69,30 +69,6 @@ def _neutralize_control(value: str) -> str:
     )
 
 
-def _valid_utf8(chunk: bytes) -> bool:
-    try:
-        chunk.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return True
-
-
-def _utf8_prefix(raw: bytes, budget: int) -> bytes:
-    """Longest UTF-8-valid prefix of *raw* whose byte length is <= *budget*."""
-    cut = raw[:budget]
-    while cut and not _valid_utf8(cut):
-        cut = cut[:-1]
-    return cut
-
-
-def _utf8_suffix(raw: bytes, budget: int) -> bytes:
-    """Longest UTF-8-valid suffix of *raw* whose byte length is <= *budget*."""
-    cut = raw[-budget:]
-    while cut and not _valid_utf8(cut):
-        cut = cut[1:]
-    return cut
-
-
 def _chain_members(exc: BaseException) -> list[BaseException]:
     """Return the cause chain newest-first, de-duplicated by identity.
 
@@ -161,8 +137,9 @@ def _assemble_diagnostic(value: str) -> str:
         return value
     marker = VERBOSE_DIAGNOSTIC_TRUNCATED
     head_budget = _MAX_DIAGNOSTIC_BYTES - _ROOT_CAUSE_TAIL_BYTES - len(marker)
-    head = _utf8_prefix(raw, head_budget).decode("utf-8")
-    tail = _utf8_suffix(raw, _ROOT_CAUSE_TAIL_BYTES).decode("utf-8")
+    # raw is valid UTF-8; only a code point split by either cut can be invalid.
+    head = raw[:head_budget].decode("utf-8", errors="ignore")
+    tail = raw[-_ROOT_CAUSE_TAIL_BYTES:].decode("utf-8", errors="ignore")
     assert len(head.encode("utf-8")) + len(tail.encode("utf-8")) + len(
         marker.encode("utf-8")
     ) <= _MAX_DIAGNOSTIC_BYTES

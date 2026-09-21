@@ -47,47 +47,20 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
     url_pattern = re.compile(r"https?://[^\s\])<>]+")
     file_path_pattern = re.compile(r"(?:^|[\s(])([./]?(?:[\w.-]+/)+[\w.-]+\.\w+)")
 
-    segments: list[tuple[int, int, str, Style]] = []
-
-    for match in code_pattern.finditer(text):
-        segments.append((
-            match.start(),
-            match.end(),
-            match.group(1),
-            Style(color=NEON_COLORS["orange"], bgcolor="#3a3a3a"),
-        ))
-
-    for match in bold_pattern.finditer(text):
-        segments.append((
-            match.start(),
-            match.end(),
-            match.group(1),
-            Style(color=NEON_COLORS["green"], bold=True),
-        ))
-
-    for match in italic_pattern.finditer(text):
-        segments.append((
-            match.start(),
-            match.end(),
-            match.group(1),
-            Style(color=NEON_COLORS["green"], italic=True),
-        ))
-
-    for match in url_pattern.finditer(text):
-        segments.append((
-            match.start(),
-            match.end(),
-            match.group(0),
-            Style(color=NEON_COLORS["cyan"], underline=True),
-        ))
-
-    for match in file_path_pattern.finditer(text):
-        segments.append((
-            match.start(1),
-            match.end(1),
-            match.group(1),
-            STYLE_CYAN,
-        ))
+    # Keep span and display groups separate: inline markup consumes its
+    # delimiters, while a path leaves its leading whitespace untouched.
+    patterns = (
+        (code_pattern, 0, 1, Style(color=NEON_COLORS["orange"], bgcolor="#3a3a3a")),
+        (bold_pattern, 0, 1, Style(color=NEON_COLORS["green"], bold=True)),
+        (italic_pattern, 0, 1, Style(color=NEON_COLORS["green"], italic=True)),
+        (url_pattern, 0, 0, Style(color=NEON_COLORS["cyan"], underline=True)),
+        (file_path_pattern, 1, 1, STYLE_CYAN),
+    )
+    segments = [
+        (match.start(span_group), match.end(span_group), match.group(text_group), style)
+        for pattern, span_group, text_group, style in patterns
+        for match in pattern.finditer(text)
+    ]
 
     return render_segments(text, segments, base_style)
 

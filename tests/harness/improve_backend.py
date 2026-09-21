@@ -1191,19 +1191,7 @@ def install_improve_stub(
         attempt_write=attempt_write,
         fanout_concurrency=fanout_concurrency,
     )
-    def _factory(*args: Any, **kwargs: Any) -> ImproveStubBackend:
-        audit_root = kwargs.get("audit_root")
-        stub.audit_root = audit_root
-        stub.audit_outward_symlinks = kwargs.get(
-            "audit_outward_symlinks", frozenset()
-        )
-        stub.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION if audit_root is not None else None
-        )
-        return stub
-
-    monkeypatch.setattr("daydream.runner.create_backend", _factory)
-    return stub
+    return install_capable_improve_backend(monkeypatch, stub)
 
 
 def install_capable_improve_backend(
