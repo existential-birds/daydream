@@ -84,8 +84,7 @@ RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
 # re-raises the current failure without dispatching again. Overridable via
 # ``[tool.daydream] retry_recovery_allowance_s`` (file config) or the ambient
 # ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var; ``0`` is the sanctioned
-# "no retry recovery" value. 300.0 is the issue's proposed value, NOT yet tuned
-# against outage data (no corpus is reachable from this host).
+# "no retry recovery" value.
 DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 
 # Per-file-group aggregate budget for the fix phase (issue #201). The
@@ -96,13 +95,6 @@ DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 # the group deadline into every fix turn, so a spent deadline aborts the call
 # itself (batched turns and the retry ladder included). Overridable via
 # ``[tool.daydream]``.
-#
-# Values validated against 139–484 archived runs in ~/.daydream/archive/runs:
-#   600s: pi fix calls run p90=623s / max=1731s, so 600s caps the 1837s/5-call
-#   pi runaway to 2 fixes and the #186 9-call group to 2, while a legit slow
-#   single-call group still rides its own 1800s per-call wall budget.
-#   6 items: >6 findings on one file is 3.5% of files, and the dropped tail is
-#   the lowest-severity findings (the group is severity-sorted).
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 

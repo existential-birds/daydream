@@ -248,8 +248,6 @@ class CompletedRun:
     task_rows: list[dict[str, object] | None] = field(default_factory=list)
     # Count-derived objective.
     objective: Objective | None = None
-    # The validated, contained job dir this run executed under.
-    job_dir: str = ""
 
 
 def read_completed_run(
@@ -305,7 +303,6 @@ def read_completed_run(
         identity=identity,
         task_rows=rows,
         objective=objective,
-        job_dir=job_dir,
     )
 
 

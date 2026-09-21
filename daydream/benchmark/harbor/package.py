@@ -62,7 +62,6 @@ class DockerNetworkPolicyCapability:
 
     supported: bool
     reason: str = ""
-    image_name: str | None = None
 
 
 def validate_wheel(wheel_path: Path, *, daydream_version: str) -> WheelInfo:
@@ -196,7 +195,6 @@ def docker_network_policy_capability() -> DockerNetworkPolicyCapability:
         return DockerNetworkPolicyCapability(
             supported=False,
             reason=f"Harbor Docker egress sidecar live probe failed: {str(exc)[:1000]}",
-            image_name=image_name,
         )
     if result.returncode != 0:
         return DockerNetworkPolicyCapability(
@@ -205,9 +203,8 @@ def docker_network_policy_capability() -> DockerNetworkPolicyCapability:
                 "Harbor Docker egress sidecar rejected its nftables rules: "
                 f"{_bounded_probe_error(result)}"
             ),
-            image_name=image_name,
         )
-    return DockerNetworkPolicyCapability(supported=True, image_name=image_name)
+    return DockerNetworkPolicyCapability(supported=True)
 
 
 def _read_packaged_resource(

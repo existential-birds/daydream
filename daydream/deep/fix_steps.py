@@ -40,7 +40,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.records import stamp_item_uids
 from daydream.deep.scope_issues import _resolve_changed_files, enforce_authorized_fix_footprint
-from daydream.deep.settings import _resolve_config_value
+from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
@@ -87,22 +87,6 @@ from daydream.workspace import WorkContext
 if TYPE_CHECKING:
     from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
     from daydream.runner import RunConfig
-
-
-def _scope_issue_filing(config: RunConfig) -> bool:
-    """Resolve the out-of-scope issue-filing opt-in (issue #1056).
-
-    Precedence: 1) ``RunConfig.scope_issue_filing``
-    (CLI tier), 2) ``DaydreamFileConfig.scope_issue_filing`` (file-config
-    scalar), 3) built-in default ``False`` (no out-of-scope GitHub issues are
-    filed unless a repo explicitly opts in).
-    """
-    if config.scope_issue_filing:
-        return True
-    file_config = config.file_config
-    if file_config is not None and file_config.scope_issue_filing:
-        return True
-    return False
 
 
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1000,7 +984,7 @@ def _strict_scope_and_scrub(
         preexisting_gitlinks=state.preexisting_gitlinks,
         phase=phase,
         round_number=round_number,
-        file_scope_issues=_scope_issue_filing(ctx.config),
+        file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
         auth=ctx.github_execution.auth,
     )
     scrub_smart_quotes_changed_files(
@@ -1029,7 +1013,7 @@ def _enforce_terminal_confinement(
             preexisting_gitlinks=state.preexisting_gitlinks,
             phase=phase,
             round_number=round_number,
-            file_scope_issues=_scope_issue_filing(ctx.config),
+            file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
             auth=ctx.github_execution.auth,
         )
         key = EvidenceKey(

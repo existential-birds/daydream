@@ -26,6 +26,14 @@ def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, d
     return default
 
 
+def _resolve_opt_in(config: RunConfig, attr: str) -> bool:
+    """Resolve a boolean opt-in by truthiness: ``RunConfig`` attr > file config > ``False``."""
+    if getattr(config, attr, False):
+        return True
+    file_config = config.file_config
+    return bool(file_config is not None and getattr(file_config, attr, False))
+
+
 def fresh_ttt(config: RunConfig) -> bool:
     """Whether fresh intent and alternatives run for this resume point."""
     return config.start_at not in ("per-stack", "merge", "fix")

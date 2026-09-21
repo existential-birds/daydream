@@ -1372,15 +1372,6 @@ async def _run_agent(
                         # attribute intact.
                         circuit_now = clock.monotonic()
                         admission = run_context.outage_circuit.admit_retry(circuit_now)
-                        # A freshly granted half-open probe is not a *failed*
-                        # probe: it has not dispatched yet. Counting it here
-                        # would re-open the circuit on the spot, clear the probe
-                        # token (so concurrent ladders could each fly their own
-                        # probe) and restart the probe interval -- the documented
-                        # "exactly one probe per interval" contract could then
-                        # never execute. The probe's real outcome is recorded when
-                        # its own attempt reports back; a suppressed ladder still
-                        # counts its failure, which is what re-opens the circuit.
                         opened_here = (
                             False
                             if admission.allowed
