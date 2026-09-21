@@ -168,7 +168,7 @@ def _finalize_strict_archive(
                 write_snapshot=snapshot, run_flow=recorder.run_flow,
             ),
             identity=ManifestRunIdentity(
-                        skill="python",
+                skill="python",
                 model=None,
                 backend="claude",
                 review_backend=None,

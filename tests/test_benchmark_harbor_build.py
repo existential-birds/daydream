@@ -798,9 +798,9 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
     """
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
+    from daydream.benchmark.manifest import load_benchmark_manifest
 
     ws, case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
-    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
     key = build.derive_task_key(case_id)
     case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
 
@@ -812,7 +812,7 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
 
     # determinism: the recomputed authoring digest matches the one frozen in the
     # compiled lock
-    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    manifest = load_benchmark_manifest(ws)
     case_docs = {case_id: case_doc}
     assert build._authoring_input_digest(case_docs, manifest) == lock["authoring_input_digest"]
     # sensitivity: requested_base_sha must fold into the payload -- a digest that
