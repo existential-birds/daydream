@@ -88,7 +88,7 @@ Emitted by `SpanScope`/`TraceSession` common attributes
 | `daydream.backend` | All, agent scope | actual backend kind | agent | string | – | 1 | Backend identity | Always | – | Span attribute | config/metadata | metadata | T5 | verified | Applicable |
 | `daydream.configured.model` | All, agent scope | configured model (not observed) | agent | string | – | 1 | Config | Always | – | Span attribute | metadata | `invocation_params` | `test_claude_real_backend_runner_trace_sdk_options_and_config` | verified | Applicable; configured ≠ observed. Aggregate rule: `model_mode=single` emits the standard request model; `multi_or_dynamic` (e.g. Claude with nonempty agents) keeps only the Daydream configured-model provenance and never claims one standard model |
 
-## Effective request configuration (Task 1 contract)
+## Effective request configuration
 
 Emitted from closed typed `EffectiveRequestConfig` facts only; every admitted
 parameter has exact bounds (`daydream/backends/*.py`, request events).
@@ -166,7 +166,7 @@ usage ever.
 | `daydream.duration_ms` / `daydream.duration_api_ms` | ResultEvent | exact terminal durations (whole invocation) | attempt | int | ms | 0..2 | Observed | Terminal only | – | Span attributes | metadata | metadata | T5 | verified | Conditional; per-message durations stay in message_usage |
 | `daydream.started_at` | invocation-scope MetricsEvent | exact request start timestamp | attempt | string | – | 0..1 | Observed | When supplied | – | Span attribute | metadata | metadata | T5 | verified | Conditional |
 
-## Owned OpenLLMetry compatibility (Task 3)
+## Owned OpenLLMetry compatibility
 
 Only Daydream-owned context; ambient Traceloop callbacks/metadata never leak;
 normal and notebook (IPython) environments share the same owned
@@ -178,7 +178,7 @@ BatchSpanProcessor path with zero global provider/instrumentor signals.
 | `traceloop.entity.input` / `.output` (attempt, content) | Request/Result | invocation prompt/system/schema + structured/final output | attempt | JSON | – | 0..1 | Observed | Full mode | FULL MODE ONLY | Span attribute | native inputs/outputs | native inputs/outputs | `test_runner_metadata_policy_preserves_structure_and_omits_content` | verified | Conditional; metadata mode absent |
 | `gen_ai.system_instructions` | supplied system parts | separate supplied invocation system parts | attempt | JSON (content) | – | 0..1 | Observed | Full mode | FULL MODE ONLY | Span attribute | native system (content) | native system (content) | T5 | verified | Conditional; never copied to generation children |
 
-## Destination-only compatibility (Task 4)
+## Destination-only compatibility
 
 | field name | source backend/event | source authority/provenance | owning span | type | unit | cardinality | derivation | completeness | capture/redaction | generic OTLP disposition | HoneyHive canonical destination | LangSmith native destination | offline test node | live evidence status | applicability and omission reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -196,7 +196,7 @@ BatchSpanProcessor path with zero global provider/instrumentor signals.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | queued/accepted/rejected/unverified counts + fixed dispositions | DeliveryLedger / exporter lifecycle | decoded bounded acknowledgments; `force_flush=True` is NOT acceptance | session-local | int + fixed codes | – | per destination | Transport lifecycle | Real lifecycle | no headers/body/endpoints/credentials | local receipt only | local receipt only | local receipt only | `test_observability_otlp_delivery.py` + T4A suite | verified (local) | Applicable; partial success never retried; UI/API proof separate |
 | OTLP HTTP canonical full-success ack | otlp_compat transport | HTTP 200 + complete empty body `b""` (any or no Content-Type) | – | status | – | 1 | Binding decision 8 | Full success only | – | transport verdict | – | – | T4A zero-byte ack tests | verified (local) | Applicable; undecodable non-empty bodies (incl. error-indicating or non-object JSON) and oversized/truncated reads are terminal/unverified; JSON object ack with a truthy top-level `success` and no error indication delivers with warning; partials never retried |
-| gRPC bridge ownership | otlp_compat `GrpcBridge` | the pinned 1.44 channel/stub bridge touches exactly `_client, _channel, _headers, _timeout, _shutdown, _initialize_channel_and_stub`; one owned `Export(...)` per retry | – | – | – | 1 | Task 0 frozen surface | – | – | transport | – | – | T4A gRPC guards | verified (local) | Applicable; no delegated exporter retry loops. gRPC RESOURCE_EXHAUSTED retries only with valid RetryInfo; a valid zero-byte HTTP success (`HTTP 200` + complete empty body, any or no content type) is distinct from a gRPC bridge ack; both are documented success paths |
+| gRPC bridge ownership | otlp_compat `GrpcBridge` | the pinned 1.44 channel/stub bridge touches exactly `_client, _channel, _headers, _timeout, _shutdown, _initialize_channel_and_stub`; one owned `Export(...)` per retry | – | – | – | 1 | Frozen 1.44 bridge surface | – | – | transport | – | – | T4A gRPC guards | verified (local) | Applicable; no delegated exporter retry loops. gRPC RESOURCE_EXHAUSTED retries only with valid RetryInfo; a valid zero-byte HTTP success (`HTTP 200` + complete empty body, any or no content type) is distinct from a gRPC bridge ack; both are documented success paths |
 | private credential-provider rejection | otlp_compat | OTel HTTP private requests.Session credential-provider path fails closed BEFORE client/send with one fixed sanitized diagnostic | – | – | – | 0..1 | Reviewed fixed behavior | – | fixed diagnostic only | transport | – | – | T4A pre-send rejection | verified (local) | Applicable; never an unsafe fallback |
 
 ## Explicit unavailable/inapplicable rows per backend
@@ -294,49 +294,7 @@ Both tools share one immutable monotonic deadline (`--deadline`), an owned
 `httpx.AsyncClient(trust_env=False, follow_redirects=False)` with no redirects,
 bounded bodies, fixed redacted timeout disposition and atomic result receipts,
 with deterministic response/client cleanup. API storage evidence is never UI
-evidence; `stored contract passed` is distinct from `UI not inspected`, and the
-UI limitation is documented in the acceptance ledger.
-
-## AC-01..AC-31 traceability appendix
-
-Validated against the Task 0 ledger (`P18-ac-ledger.md`); each row names its
-exact test node or the live readback disposition. "Pending" live evidence is
-owned by Task 7 native readback; every offline row is green in the current
-tree.
-
-| AC | Matrix/ledger binding | Evidence disposition |
-| --- | --- | --- |
-| AC-01 | This matrix (all rows above) plus registry-derived inventory | `test_observability_semconv_contract.py` (21 green) + this doc; live readback pending T7 |
-| AC-02 | manifest.json byte/hash pins + alias table above | `test_manifest_pins_expected_commit_and_files` green; no lock change |
-| AC-03 | agent identity rows; CLIENT/INTERNAL gate | `test_client_invoke_agent_requires_provider_name`; UI observation pending (T7, no connected browser) |
-| AC-04 | identity/association rows | `test_observability_backend_protocols.py` identity asserts (T5) |
-| AC-05 | redaction/ambient rows + privacy contact | `test_observability_runtime.py` ambient suite green; metadata wire leg in T5 |
-| AC-06 | owned compatibility rows; notebook parity | `test_notebook_mode_uses_same_owned_batch_path_and_metadata` + zero-global tests |
-| AC-07 | model/provider/response identity rows | protocol suite (`test_pi_replay...`, multi-model) green |
-| AC-08 | effective request config rows | `test_observability_config.py` + backend protocol suites green |
-| AC-09 | generation lifecycle rows (ordered choice parts) | trajectory lifecycle + T5 protocol tests green |
-| AC-10 | replay rows (exact 395.332s values) | `test_pi_replay_exact_native_timing_choice_and_billing_through_runner` green; native API survival pending T7 |
-| AC-11 | finish-reason rows | T5/trajectory stop-reason tests green |
-| AC-12 | structural input rows | schema validation tests green; native readback pending |
-| AC-13 | tool lifecycle rows | parallel/reused-ID tool tests green |
-| AC-14 | billing owner rows | `TestBillingOwnerResolution` (8) + T4 native-owner tests green |
-| AC-15 | usage/provenance/dedup rows | T2 ledger + T4 wire dedup tests green; native pending |
-| AC-16 | timestamp rows | native-ms validator + T2 `TestNativeTimingValidation` + T5 exact replay green |
-| AC-17 | resource rows | `test_observability_runtime.py` strict parser + wire checks green |
-| AC-18 | identity/parentage/kind rows | T4 wire fidelity tests green |
-| AC-19 | dropped-count rows | `test_destination_copies_preserve_dropped_attribute_counts` green; remaining bounds T4A |
-| AC-20 | delivery rows | T4A ack matrix green (local) |
-| AC-21 | deadline rows | T4A HTTPX/AnyIO deadline tests + this file's loopback peer tests green |
-| AC-22 | resolver/precedence rows | T4A factory tests green |
-| AC-23 | isolation/shutdown rows | T3 processor + T4A exactly-once tests green |
-| AC-24 | status/error rows | T2/T4/T5 failure matrix green |
-| AC-25 | agent-name rows | T4 standard-attribute tests green; UI pending |
-| AC-26 | HH matrix rows + readback tool | matrix/tooling green (this task); exact HH readback pending T7 |
-| AC-27 | project routing rows | T4 loopback project tests green; exact LS discovery pending |
-| AC-28 | LS matrix rows + readback tool | matrix/tooling green; exact LS native tree pending |
-| AC-29 | focused RED/GREEN rows | T2 29 tests + Task 6 readback/replay hermetic tests (this file) green |
-| AC-30 | replay/readback receipts | `scripts/replay_observability_acceptance.py` + `verify_observability_readback.py` hermetic green; live export pending T7 |
-| AC-31 | docs/matrix/ledger + gates | This doc + ledger rows; full `make check` + independent review + CI pending T7 |
+evidence; `stored contract passed` is distinct from `UI not inspected`.
 
 ## Limitations
 

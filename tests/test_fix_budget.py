@@ -7,10 +7,6 @@ Covers the two pieces the real-path enforcement tests (in
    semantics (which ceiling fires, in what order).
 2. The config-file parser — ``group_max_*`` overrides parse from
    ``[tool.daydream]`` and junk values degrade to ``None`` (default applies).
-
-The token axis was removed: it can only bound multi-call fallback groups (the
-same population ``wall`` + ``serial`` already govern), where output tokens are
-collinear with wall-time and call-count, so it added no independent signal.
 """
 
 from __future__ import annotations

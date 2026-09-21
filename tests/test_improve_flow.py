@@ -49,7 +49,7 @@ from daydream.runner import RunConfig, run
 from daydream.services import Service, enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_test_command_anchor
-from tests.deep_orchestrator.support import _scan_trajectory_extra
+from tests.deep_orchestrator.support import _forbidden_input, _scan_trajectory_extra
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
     bare_remote,
@@ -1128,12 +1128,6 @@ def _improve_observable_texts(repo: Path) -> list[str]:
 
 def _raise_enumeration_failure(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
     raise RuntimeError("unparseable repository manifest")
-
-
-def _forbidden_input(*_args: Any, **_kwargs: Any) -> str:
-    raise AssertionError(
-        "input() was called in non-interactive mode -- stdin must not be touched"
-    )
 
 
 @pytest.mark.anyio
