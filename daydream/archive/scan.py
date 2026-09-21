@@ -8,8 +8,7 @@ value or its surrounding content. Any scanner error is absorbed into a
 ``scan_error`` finding so a broken scan can never return clean (fail-closed).
 
 Redaction rule shapes are imported from :mod:`daydream.trajectory` (reuse, not
-copy); the pattern gaps unique to serialized bundles (token-only userinfo,
-scheme-less SCP userinfo, credential-bearing query params) are local additions.
+copy); URL shapes come from the same shared patterns used by live redaction.
 
 Rules are tiered by severity (issue #1170). A redactor needs recall — over-
 matching ``SORT_KEY = "created_at"`` costs one value in a log. A publication
@@ -26,13 +25,17 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from daydream.archive.git_safe import _CREDENTIAL_QUERY_KEYS
+from daydream.credential_patterns import (
+    _QUERY_CREDENTIAL_PATTERN,
+    _SCP_USERINFO_PATTERN,
+    _TOKEN_ONLY_USERINFO_PATTERN,
+    _URL_CREDENTIAL_PATTERN,
+)
 from daydream.trajectory import (
     _API_KEY_PATTERN,
     _ENV_VAR_PATTERN,
     _JWT_PATTERN,
     _PEM_KEY_PATTERN,
-    _URL_CREDENTIAL_PATTERN,
 )
 
 __all__ = ["SEVERITY_ADVISORY", "SEVERITY_BLOCKING", "Finding", "ScanResult", "scan_run_dir"]
@@ -42,29 +45,8 @@ SEVERITY_BLOCKING = "blocking"
 #: A rule whose match is only a name/template shape. Reported, never refused.
 SEVERITY_ADVISORY = "advisory"
 
-# Token-only userinfo: ``https://x-access-token@github.com/...`` — the
-# trajectory URL-credential rule only matches ``user:pass@``, so this closes
-# the single-token gap (matches the pinned inventory's x-access-token rows).
-_TOKEN_ONLY_USERINFO_PATTERN = re.compile(r"(https?://)[^@/\s]+@", re.IGNORECASE)
-# Scheme-less SCP userinfo: ``user:pass@host:path``. The trajectory URL rule
-# and the token-only rule above both anchor on ``https?://``, so this closes
-# the SCP gap that git_safe.classify_remote_url labels a credential (':' in
-# the pre-@ user group). A lone login user (git@host:path) is not a credential
-# and is intentionally not matched, matching git_safe's classification.
-_SCP_USERINFO_PATTERN = re.compile(
-    r"([^\s@/:]+:[^\s@/:]+@)([^/\s@:]+:)(?=[^\s])", re.IGNORECASE,
-)
-# Credential-like query params: ``?token=...`` / ``&access_token=...`` etc.
-# The key set comes from git_safe._CREDENTIAL_QUERY_KEYS (single source: a key
-# added there widens this scan gate automatically).
-_QUERY_CREDENTIAL_PATTERN = re.compile(
-    r"([?&])(" + "|".join(sorted(_CREDENTIAL_QUERY_KEYS)) + r")=[^&\s]+",
-    re.IGNORECASE,
-)
-
 # (pattern, category) pairs applied in order to every scanned text. The
-# trajectory rules are imported; the two local rules close the userinfo/query
-# gaps without touching the shared trajectory module.
+# shared URL rules cover the same shapes as the live trajectory redactor.
 #
 # Blocking tier: every rule here constrains the matched *value*, so a hit is a
 # credential (a known token prefix, key armor, a literal ``user:pass@``, a

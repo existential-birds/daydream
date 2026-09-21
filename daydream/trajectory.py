@@ -52,6 +52,12 @@ from daydream.atif import (
     ToolCall,
     Trajectory,
 )
+from daydream.credential_patterns import (
+    _QUERY_CREDENTIAL_PATTERN,
+    _SCP_USERINFO_PATTERN,
+    _TOKEN_ONLY_USERINFO_PATTERN,
+    _URL_CREDENTIAL_PATTERN,
+)
 from daydream.json_utils import atomic_write_json
 from daydream.timeutil import parse_iso_timestamp
 from daydream.ui import create_console, print_error, print_warning
@@ -200,7 +206,6 @@ class _CostDelta:
 # bare API-key (so `OPENAI_API_KEY=sk-1234` keeps its name per D-03); (3) structured
 # key-value redaction (_redact_structured_key_values), which skips existing
 # [REDACTED_*] markers so earlier stages' output is never clobbered.
-_URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
 _API_KEY_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|ghs_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
 )
@@ -246,8 +251,18 @@ _DIAGNOSTIC_REDACTION_FAILED = {
 _ENV_VAR_PATTERN = re.compile(
     r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)[^\S\n\r]*=[^\S\n\r]*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
 )
-_REDACTION_RULES: tuple[tuple[Any, str], ...] = (
+def _redact_url_userinfo(match: re.Match[str]) -> str:
+    """Preserve user/password marker shape when the wider token rule overlaps."""
+    userinfo = match.group(0)[len(match.group(1)) : -1]
+    masked = "[REDACTED_USER]:[REDACTED_API_KEY]" if ":" in userinfo else "[REDACTED_USER]"
+    return f"{match.group(1)}{masked}@"
+
+
+_REDACTION_RULES: tuple[tuple[Any, str | Callable[[re.Match[str]], str]], ...] = (
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
+    (_TOKEN_ONLY_USERINFO_PATTERN, _redact_url_userinfo),
+    (_SCP_USERINFO_PATTERN, r"[REDACTED_USER]:[REDACTED_API_KEY]@\2"),
+    (_QUERY_CREDENTIAL_PATTERN, r"\1\2=[REDACTED_CREDENTIAL]"),
     (_PEM_KEY_PATTERN, _PEM_KEY_REDACTED_MARKER),
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),

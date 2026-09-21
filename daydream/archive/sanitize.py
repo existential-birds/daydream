@@ -11,8 +11,8 @@ Transformation pipeline per file:
   (the sole URL authority); every string leaf then runs through the same text
   pipeline the non-JSON branch uses, and the whole document through
   :func:`daydream.trajectory.redact_value`.
-* Text files: :func:`daydream.trajectory.redact_text` plus the scanner's
-  extended userinfo/query-param substitutions.
+* Text files: :func:`daydream.trajectory.redact_text`, which shares URL
+  credential patterns with the publication scanner.
 
 Release gate: every derivative is re-scanned with
 :func:`daydream.archive.scan.scan_run_dir`; a derivative carrying a *blocking*
@@ -112,13 +112,8 @@ def _sanitize_url_string(value: str) -> str:
 def _sanitize_json_document(doc: Any) -> Any:
     """Canonicalize URL leaves, then run every string leaf through the text pipeline.
 
-    URL canonicalization + :func:`redact_value` alone omit the three
-    scan-local substitutions that only :func:`_sanitize_text` carries, so a
-    JSON string leaf holding an SCP, token-only or query-credential shape — the
-    shape a trajectory tool observation routinely has — was quarantined instead
-    of sanitized, deterministically on every pass (issue #1170). Routing leaves
-    through :func:`_sanitize_text` is what makes that function's docstring claim
-    ("a rule added there applies here too") true for the JSON branch as well.
+    Tool observations routinely embed URLs inside prose, so URL normalization
+    alone is insufficient. Text and JSON leaves use the same redaction rules.
     """
     if isinstance(doc, dict):
         return {key: _sanitize_json_document(child) for key, child in doc.items()}
@@ -130,19 +125,8 @@ def _sanitize_json_document(doc: Any) -> Any:
 
 
 def _sanitize_text(text: str) -> str:
-    """Redact one text file body, then re-check with the scanner's extra rules.
-
-    The scanner's two local gaps (token-only userinfo, credential query params)
-    are applied from scan.py's own patterns, so a rule added there applies here
-    too and the derivative passes the release scan (M16). JSON string leaves
-    route through here as well (:func:`_sanitize_json_document`), so the claim
-    holds for both branches.
-    """
-    text = redact_text(text)
-    text = scan._TOKEN_ONLY_USERINFO_PATTERN.sub(r"\1[REDACTED_USER]@", text)
-    text = scan._SCP_USERINFO_PATTERN.sub(r"[REDACTED_USER]@\2", text)
-    text = scan._QUERY_CREDENTIAL_PATTERN.sub(r"\1\2=[REDACTED_CREDENTIAL]", text)
-    return text
+    """Use the live redactor's shared credential rules for text and JSON leaves."""
+    return redact_text(text)
 
 
 def _sanitize_derivative(derivative_dir: Path) -> None:
