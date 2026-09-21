@@ -159,6 +159,15 @@ _SYMBOL_NAME_SCHEMA: dict[str, Any] = {
     "minLength": 1,
     "maxLength": 300,
 }
+_ROLE_STRING_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "minLength": 12,
+    "maxLength": 300,
+}
+_PATH_WITH_ROLE_SCHEMA: dict[str, Any] = strict_object({
+    "path": _REPOSITORY_FILE_PATH_SCHEMA,
+    "role": _ROLE_STRING_SCHEMA,
+})
 _STOP_CONDITION_BODY_PROPERTIES: dict[str, Any] = {
     "condition": {"type": "string", "minLength": 30, "maxLength": 800},
     "evidence_to_report": {"type": "string", "minLength": 20, "maxLength": 500},
@@ -191,25 +200,11 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = strict_object({
     "scope": strict_object({
         "existing_paths": {
             "type": "array",
-            "items": strict_object({
-                "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                "role": {
-                    "type": "string",
-                    "minLength": 12,
-                    "maxLength": 300,
-                },
-            }),
+            "items": _PATH_WITH_ROLE_SCHEMA,
         },
         "new_paths": {
             "type": "array",
-            "items": strict_object({
-                "path": _REPOSITORY_FILE_PATH_SCHEMA,
-                "role": {
-                    "type": "string",
-                    "minLength": 12,
-                    "maxLength": 300,
-                },
-            }),
+            "items": _PATH_WITH_ROLE_SCHEMA,
         },
         "out_of_scope_paths": {
             "type": "array",
@@ -242,11 +237,7 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = strict_object({
             "path": _REPOSITORY_FILE_PATH_SCHEMA,
             "start_line": {"type": "integer", "minimum": 1},
             "end_line": {"type": "integer", "minimum": 1},
-            "file_role": {
-                "type": "string",
-                "minLength": 12,
-                "maxLength": 300,
-            },
+            "file_role": _ROLE_STRING_SCHEMA,
         }),
     },
     "git_workflow": strict_object({

@@ -55,7 +55,7 @@ from daydream.improve.prompts import (
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
-from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
 
 
 @pytest.mark.parametrize(
@@ -893,6 +893,12 @@ def _write_plans(
     return session.finish()
 
 
+def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branch update.\n") -> str:
+    """Commit a README change on top of *repo* and return the new HEAD SHA."""
+    write_and_stage(repo, "README.md", text)
+    return commit(repo, "advance head after plan fan-out")
+
+
 def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_sha: str) -> None:
     result = _write_plans(
         repo / "daydream_plans",
@@ -1711,12 +1717,7 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     text also lands a durable copy in the main index so it survives pruning.
     """
     assembled = _assembled(repo)
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
     result = _write_plans(
         repo / "daydream_plans",
@@ -1773,9 +1774,7 @@ def test_reanchor_uses_supplied_private_workspace_owner(
     private_locations: Any,
     owner: Any,
 ) -> None:
-    (repo / "README.md").write_text("# changed after planning\n", encoding="utf-8")
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo, "# changed after planning\n")
     _forbid_default_private_base(monkeypatch)
 
     session = PlanWriteSession(
@@ -1828,12 +1827,7 @@ def test_reanchored_main_index_is_written_before_finish(
     the REANCHORED entry (and its fingerprint) as soon as the re-anchor
     lands, before finish() runs.
     """
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
 
     session = PlanWriteSession(
         repo / "daydream_plans",
@@ -1872,12 +1866,7 @@ def test_reanchored_plan_survives_worktree_pruning(
     deliverable was permanently deleted while the index kept a dead pointer.
     """
     assembled = _assembled(repo)
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
     result = _write_plans(
         repo / "daydream_plans",
@@ -1911,12 +1900,7 @@ def test_reanchored_finding_is_not_replanned_on_a_later_run(
     run in the same repo does not re-plan the same finding (no duplicate number).
     """
     assembled = _assembled(repo)
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
     first = _write_plans(
         repo / "daydream_plans",
@@ -1960,11 +1944,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     from daydream import git_ops
     from daydream.improve.plans import prune_stale_reanchor_worktrees
 
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
     # Run A: mid-write — worktree created + locked, session NOT finished yet
     session_a = PlanWriteSession(
@@ -4474,12 +4454,7 @@ def test_reanchored_plan_rows_returns_empty_when_none_reanchored(
 def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
     """Re-anchor one plan into a fresh worktree; return the repo-relative landing path."""
     assembled = _assembled(repo, _authored_plan(title="Fix N+1 catalog queries"))
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
     result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **assembled}],
@@ -4581,11 +4556,7 @@ def test_reanchored_failure_releases_worktree_lock(
     """Should-have #1: a graceful re-anchor write failure releases the lock."""
     from daydream import git_ops
 
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("render failure")
@@ -4617,11 +4588,7 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
     failing with PLAN_REANCHOR_FAILED."""
     from daydream.improve.plans import PlanWriteSession
 
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
 
     calls = {"n": 0}
 

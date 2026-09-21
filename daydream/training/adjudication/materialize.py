@@ -102,10 +102,11 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     for row in rows:
         session_id = str(row["session_id"])
         observations = _label_observations_readonly(index_root / "index.db", session_id)
+        conflicting = False
+        resolutions: list[dict[str, Any]] | None = None
+        session: dict[str, Any]
         if observations:
             winner, conflicting = _winning_observation(observations)
-            resolutions: list[dict[str, Any]] | None = None
-            session: dict[str, Any]
             rubric_raw = winner.get("rubric_json")
             if rubric_raw is not None:
                 try:
@@ -121,53 +122,28 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
                 per_finding = rubric.get("per_finding_resolutions")
                 if isinstance(per_finding, list) and per_finding:
                     resolutions = per_finding
-            if resolutions is None:
-                # NULL rubric_json (a human-sourced ``daydream label`` row --
-                # ``index.update_labels`` appends with no rubric) or a legacy
-                # labels-only row (pre-#1095 ``Rubric.to_dict`` emitted only
-                # ``per_finding_outcomes``) carries no per-finding semantics to
-                # materialize, and the import path (runbook step 3b) appends
-                # such rows verbatim — an imported archive therefore reaches
-                # this branch with observations present, and failing closed
-                # here would brick the session for every later
-                # preview/materialize/harvest. Serve the session from the
-                # sanitized per-run trajectory instead (the pre-#1095
-                # materialization source), exactly like a session with no
-                # observation rows at all; a session with no trajectory either
-                # has no materializable content at all and contributes no
-                # records (evidence-only rows, e.g. sessions an import admitted
-                # from a backup root outside the curation), never failing the
-                # whole stage over one such session.
-                resolutions = _trajectory_resolutions_readonly(index_root, session_id)
-                if resolutions is None:
-                    continue
-            session = {
-                "session_id": session_id,
-                "trajectory_id": session_id,
-                "segment_id": session_id,
-                "resolutions": resolutions,
-            }
-            if conflicting:
-                session["conflicting"] = True
-        else:
-            # Freshly hydrated staging archive: no label_observations history
-            # yet (canonical harvest appends the first rows, runbook step 5).
-            # Fall back to the sanitized per-run trajectory the hydration gate
-            # guarantees (_REQUIRED_SESSION_ARTIFACTS) -- the pre-#1095
-            # materialization source -- so the first preview pass over a new
-            # stage still works. Once any observation row exists for the
-            # session it wins; the two sources are never mixed. A session
-            # without either contributes no records (the one-session-fails-all
-            # blast radius is reserved for corrupt data, not absence).
+        # No materializable rubric resolutions (NULL rubric_json -- a
+        # human-sourced ``daydream label`` row, or a legacy labels-only row
+        # whose rubric_json carries no ``per_finding_resolutions``, both
+        # appended verbatim by the runbook step-3b import) or no observation
+        # rows at all (freshly hydrated stage, before canonical harvest appends
+        # the first rows): fall back to the sanitized per-run trajectory, the
+        # pre-#1095 materialization source. The two sources are never mixed. A
+        # session with neither has no materializable content (evidence-only
+        # rows, e.g. an import admitted from a backup root outside the curation)
+        # and contributes no records, never failing the whole stage.
+        if resolutions is None:
             resolutions = _trajectory_resolutions_readonly(index_root, session_id)
             if resolutions is None:
                 continue
-            session = {
-                "session_id": session_id,
-                "trajectory_id": session_id,
-                "segment_id": session_id,
-                "resolutions": resolutions,
-            }
+        session = {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "segment_id": session_id,
+            "resolutions": resolutions,
+        }
+        if conflicting:
+            session["conflicting"] = True
         sessions.append(session)
     downloads = index_root / "downloads"
     if not downloads.is_dir():

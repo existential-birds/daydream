@@ -224,6 +224,20 @@ def _mark_done(sanitized_dir: Path, session_id: str, derivative_digest: str) -> 
     )
 
 
+def _append_quarantine_audit(sanitized_dir: Path, run_dir: Path, session_id: str) -> None:
+    """Append the fail-closed audit record for a quarantined bundle."""
+    _append_jsonl(
+        sanitized_dir / _AUDIT_FILENAME,
+        {
+            "source": str(run_dir),
+            "session_id": session_id,
+            "derivative_digest": "",
+            "status": "quarantined",
+            "completed_at": _now_iso_utc(),
+        },
+    )
+
+
 def _quarantine_derivative(
     derivative_dir: Path, sanitized_dir: Path, archive_dir: Path, run_dir: Path, session_id: str
 ) -> None:
@@ -246,16 +260,7 @@ def _quarantine_derivative(
             quarantine_dir = quarantine_dir.with_name(f"{session_id}.{int(time.time())}")
         shutil.move(str(derivative_dir), str(quarantine_dir))
         (quarantine_dir / _DERIVATIVE_MARKER).write_text(_now_iso_utc(), encoding="utf-8")
-    _append_jsonl(
-        sanitized_dir / _AUDIT_FILENAME,
-        {
-            "source": str(run_dir),
-            "session_id": session_id,
-            "derivative_digest": "",
-            "status": "quarantined",
-            "completed_at": _now_iso_utc(),
-        },
-    )
+    _append_quarantine_audit(sanitized_dir, run_dir, session_id)
 
 
 def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
@@ -319,16 +324,8 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
     except Exception:
         if derivative_dir.exists():
             shutil.rmtree(derivative_dir, ignore_errors=True)
-        _append_jsonl(  # unexpected failure: record quarantine, re-raise for bulk loop
-            sanitized_dir / _AUDIT_FILENAME,
-            {
-                "source": str(run_dir),
-                "session_id": session_id,
-                "derivative_digest": "",
-                "status": "quarantined",
-                "completed_at": _now_iso_utc(),
-            },
-        )
+        # Unexpected failure: record quarantine, re-raise for the bulk loop.
+        _append_quarantine_audit(sanitized_dir, run_dir, session_id)
         raise
 
     _append_jsonl(

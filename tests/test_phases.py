@@ -1525,41 +1525,44 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(
     assert "File: src/nonexistent.py" in backend.prompts[0]
 
 
-@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.parametrize("entry_point", ["phase_fix", "phase_fix_batched", "phase_fix_parallel"])
+@pytest.mark.parametrize("bad_ref", ["traversal", "absolute", "symlink", "missing"])
 @pytest.mark.asyncio
-async def test_phase_fix_rejects_unconfined_finding_file(
+async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
-    path_kind: Any,
+    entry_point: str,
+    bad_ref: str,
 ) -> None:
-    """A finding file escaping the worktree raises ValueError and emits no prompt."""
-    from daydream.phases import phase_fix
+    """Every fix entry point rejects an unconfined or missing file reference.
+
+    The bad reference sits in the second item for the batched/parallel
+    entrypoints so their preflight loop actually runs past index 0; single
+    ``phase_fix`` receives it as its only item.
+    """
+    from daydream import phases
 
     silence_console("daydream.phases")
     backend = ScriptedBackend()
-    item = {"id": 1, "description": "Escape", "file": _unconfined_finding_file(tmp_path, path_kind), "line": 1}
+    bad: dict[str, Any] = {"id": 99, "description": "Escape", "line": 1}
+    if bad_ref != "missing":
+        bad["file"] = _unconfined_finding_file(tmp_path, bad_ref)
+    items = [
+        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
+        bad,
+    ]
+    work = make_work(tmp_path)
+    call: Any
+    if entry_point == "phase_fix":
+        call = phases.phase_fix(backend, work, bad, 1, 1)
+    elif entry_point == "phase_fix_batched":
+        call = phases.phase_fix_batched(backend, work, items, [1, 2], 2)
+    else:
+        call = phases.phase_fix_parallel(backend, work, items)
 
     with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
-    assert backend.prompts == []
-
-
-@pytest.mark.asyncio
-async def test_phase_fix_rejects_missing_file_reference(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """An item with no file reference is rejected, not silently delegated."""
-    from daydream.phases import phase_fix
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    item = {"id": 1, "description": "No file", "line": 3}
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
+        await call
     assert backend.prompts == []
 
 
@@ -1759,57 +1762,7 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
     assert "assumes single-threaded" in prompt
 
 
-@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
-@pytest.mark.asyncio
-async def test_phase_fix_batched_rejects_unconfined_finding_file(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-    path_kind: Any,
-) -> None:
-    """A single unconfined reference at any position rejects the whole batch.
 
-    The hostile value lives only in the second item so the batched preflight
-    loop ``for item in items[1:]`` actually runs past index 0 before raising.
-    """
-    from daydream.phases import phase_fix_batched
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    hostile = _unconfined_finding_file(tmp_path, path_kind)
-    items = [
-        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
-        {"id": 2, "description": "Escape", "file": hostile, "line": 2},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
-    assert backend.prompts == []
-
-
-@pytest.mark.asyncio
-async def test_phase_fix_batched_rejects_missing_file_reference(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """An item with no file reference rejects the whole batch, not just that item.
-
-    The missing ref lives in the second item so the batched preflight loop
-    ``for item in items[1:]`` actually runs past index 0 before raising.
-    """
-    from daydream.phases import phase_fix_batched
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    items = [
-        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
-        {"id": 2, "description": "No file", "line": 2},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
-    assert backend.prompts == []
 
 
 @pytest.mark.asyncio
@@ -1892,57 +1845,7 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(
     assert failures == {}
 
 
-@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
-@pytest.mark.asyncio
-async def test_phase_fix_parallel_rejects_unconfined_finding_file(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-    path_kind: Any,
-) -> None:
-    """A single unconfined reference at any position aborts the whole run.
 
-    The hostile value lives only in the second item so the parallel preflight
-    loop actually runs past index 0 before raising -- no dispatch happens.
-    """
-    from daydream.phases import phase_fix_parallel
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    hostile = _unconfined_finding_file(tmp_path, path_kind)
-    items = [
-        {"id": 1, "file": "src/ok.py"},
-        {"id": 2, "file": hostile},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_parallel(backend, make_work(tmp_path), items)
-    assert backend.prompts == []
-
-
-@pytest.mark.asyncio
-async def test_phase_fix_parallel_rejects_missing_file_reference(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """An item with no file reference aborts the whole run before any dispatch.
-
-    The missing ref lives in the second item so the parallel preflight loop
-    actually runs past index 0 before raising -- no grouping happens.
-    """
-    from daydream.phases import phase_fix_parallel
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    items = [
-        {"id": 1, "file": "src/ok.py"},
-        {"id": 2, "description": "No file"},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_parallel(backend, make_work(tmp_path), items)
-    assert backend.prompts == []
 
 
 @pytest.mark.asyncio
