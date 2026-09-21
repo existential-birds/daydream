@@ -2043,32 +2043,12 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
 
 def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
     """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
-    items = []
-    for i in range(high):
-        items.append({
-            "id": i,
-            "description": f"high-{i}",
-            "file": "a.py",
-            "line": i + 1,
-            "confidence": "HIGH",
-            "rationale": "r",
-            "evidence": "a.py:1",
-            "lens": "per-stack",
-            "severity": "high",
-        })
-    for i in range(med):
-        items.append({
-            "id": high + i,
-            "description": f"med-{i}",
-            "file": "b.py",
-            "line": i + 1,
-            "confidence": "MEDIUM",
-            "rationale": "r",
-            "evidence": "b.py:1",
-            "lens": "per-stack",
-            "severity": "medium",
-        })
-    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    items = [
+        _item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
+        for i in range(high)
+    ]
+    items += [_item(high + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(med)]
+    seed_merged_items(deep, items)
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
@@ -2117,20 +2097,12 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     deep = dd / "deep"
     deep.mkdir(parents=True)
     # 4 per-stack + 4 wonder = 8 shipped items.
-    items = []
-    for i in range(4):
-        items.append({
-            "id": i, "description": f"high-{i}", "file": "a.py", "line": i + 1,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
-            "lens": "per-stack", "severity": "high",
-        })
-    for i in range(4):
-        items.append({
-            "id": 4 + i, "description": f"wonder-{i}", "file": "w.py", "line": i + 1,
-            "confidence": "MEDIUM", "rationale": "r", "evidence": "w.py:1",
-            "lens": "wonder", "severity": "medium",
-        })
-    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    seed_shipped_items(deep, high=4, med=0)
+    shipped = json.loads((deep / "merged-items.json").read_text())["items"]
+    shipped += [
+        _item(4 + i, file="w.py", line=i + 1, description=f"wonder-{i}", lens="wonder") for i in range(4)
+    ]
+    seed_merged_items(deep, shipped)
     out = analyze_findings(dd)
     assert out["total"] == 8                     # wonder items are counted (issue #741)
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}

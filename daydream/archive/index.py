@@ -513,6 +513,24 @@ def append_label_observation(
         while True:
             observed_at = observed_dt.isoformat()
             valid_at_value = valid_at if valid_at is not None else observed_at
+            row_body = (
+                labels_json,
+                pr_state,
+                labeler_version,
+                evidence_sha,
+                rubric_json,
+                valid_at_value,
+                reward_version,
+                reward_json,
+                composite_reward,
+                reviewer_logins_json,
+                has_posterior_int,
+                source,
+                labeler_policy_version,
+                reply_classifier_version,
+                reply_evidence_digest,
+                legacy,
+            )
             try:
                 conn.execute(
                     "INSERT INTO label_observations "
@@ -520,26 +538,7 @@ def append_label_observation(
                     "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source, "
                     "labeler_policy_version, reply_classifier_version, reply_evidence_digest, legacy) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        session_id,
-                        observed_at,
-                        labels_json,
-                        pr_state,
-                        labeler_version,
-                        evidence_sha,
-                        rubric_json,
-                        valid_at_value,
-                        reward_version,
-                        reward_json,
-                        composite_reward,
-                        reviewer_logins_json,
-                        has_posterior_int,
-                        source,
-                        labeler_policy_version,
-                        reply_classifier_version,
-                        reply_evidence_digest,
-                        legacy,
-                    ),
+                    (session_id, observed_at, *row_body),
                 )
                 break
             except sqlite3.IntegrityError:
@@ -557,24 +556,7 @@ def append_label_observation(
                     "FROM label_observations WHERE session_id = ? AND observed_at = ?",
                     (session_id, observed_at),
                 ).fetchone()
-                if existing is not None and tuple(existing) == (
-                    labels_json,
-                    pr_state,
-                    labeler_version,
-                    evidence_sha,
-                    rubric_json,
-                    valid_at_value,
-                    reward_version,
-                    reward_json,
-                    composite_reward,
-                    reviewer_logins_json,
-                    has_posterior_int,
-                    source,
-                    labeler_policy_version,
-                    reply_classifier_version,
-                    reply_evidence_digest,
-                    legacy,
-                ):
+                if existing is not None and tuple(existing) == row_body:
                     return False
                 observed_dt += timedelta(microseconds=1)
         # Recompute the winning observation (human-first, then recency) so the

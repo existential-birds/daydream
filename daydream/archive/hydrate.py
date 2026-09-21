@@ -65,6 +65,19 @@ _LICENSE_REASON_CODES = frozenset(
         REASON_CODE_REPO_COMMIT_UNRESOLVED,
     }
 )
+# License-gate reason code -> human admission bucket. The key set is exactly
+# ``_LICENSE_REASON_CODES``; ``None`` (imported) maps to "admitted" at the call
+# site. ``repo_identity_missing``/``repo_commit_unresolved`` fold into
+# ``license_evidence_missing``: missing identity or an unresolvable repo commit
+# is missing evidence for the license gate.
+_LICENSE_BUCKET_BY_CODE: dict[str, str] = {
+    REASON_CODE_C5_EXCLUDED_REPO: "c5_excluded",
+    REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
+    REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
+    REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
+    REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
+}
+_LICENSE_BUCKETS = ("admitted", "c5_excluded", "c8_copyleft_unopted", "license_evidence_missing")
 
 
 class HydrationError(Exception):
@@ -1498,24 +1511,12 @@ def admission_summary_buckets(
     raises: the bucket sum equals the license-gate session count by
     construction (M8).
     """
-    code_map = {
-        REASON_CODE_C5_EXCLUDED_REPO: "c5_excluded",
-        REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
-        REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
-        REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
-        REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
-    }
-    buckets: dict[str, int] = {
-        "admitted": 0,
-        "c5_excluded": 0,
-        "c8_copyleft_unopted": 0,
-        "license_evidence_missing": 0,
-    }
+    buckets: dict[str, int] = dict.fromkeys(_LICENSE_BUCKETS, 0)
     for _sid, code in entries:
         if code is None:
             buckets["admitted"] += 1
-        elif code in code_map:
-            buckets[code_map[code]] += 1
+        elif code in _LICENSE_BUCKET_BY_CODE:
+            buckets[_LICENSE_BUCKET_BY_CODE[code]] += 1
         else:
             raise ValueError(
                 f"license admission summary: {code!r} is not a license-gate "
@@ -1571,9 +1572,11 @@ def license_admission_by_repo(
         slug, _evidence = _session_identity(
             stage, sid, revision, root="excluded", collision=False
         )
-        buckets = by_repo.setdefault(slug or "unresolved", admission_summary_buckets([]))
-        for bucket, count in admission_summary_buckets([(sid, code)]).items():
-            buckets[bucket] += count
+        buckets = by_repo.setdefault(slug or "unresolved", dict.fromkeys(_LICENSE_BUCKETS, 0))
+        if code is None:
+            buckets["admitted"] += 1
+        else:
+            buckets[_LICENSE_BUCKET_BY_CODE[code]] += 1
     return by_repo
 
 
