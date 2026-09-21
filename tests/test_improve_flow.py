@@ -2953,6 +2953,17 @@ async def test_group_scope_expands_named_service_group_to_all_members(
     assert "No other detected service directories." in report
 
 
+async def _run_plan_subverb(make_config: MakeConfig, repo: Path) -> int:
+    """Run the improve flow's plan subverb for the canonical request."""
+    return await run(
+        make_config(
+            repo,
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+        )
+    )
+
+
 @pytest.mark.anyio
 async def test_plan_subverb_skips_audit_and_writes_single_plan(
     improve_monorepo_target: Path,
@@ -2960,13 +2971,7 @@ async def test_plan_subverb_skips_audit_and_writes_single_plan(
     make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     assert code == 0
     assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
@@ -2984,13 +2989,7 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.return_secret_invalid_enum_once = True
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
@@ -3050,13 +3049,7 @@ async def test_persistent_authoring_failure_blocks_after_one_repair(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, stub_attr, stub_value)
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     plans_dir = improve_monorepo_target / "daydream_plans"
@@ -3099,13 +3092,7 @@ async def test_plan_subverb_clamps_over_length_prose_without_repair(
     assert len(over_length_role) == 306
     stub.plan_file_role_override = over_length_role
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
@@ -3136,13 +3123,7 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
         "production and X-Internal-Service-Secret: test-secret in tests."
     )
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
@@ -3258,13 +3239,7 @@ async def test_sloppy_but_salvageable_output_is_normalized_and_written(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_sloppy = True
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
@@ -3433,13 +3408,7 @@ async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     stub.plan_bad_recon_id_attempts = 1
     stub.plan_missing_path_attempts = 1
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
@@ -3487,13 +3456,7 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_unquoted_path_attempts = 1
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
@@ -3534,13 +3497,7 @@ async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
     deleted = "apps/billing/legacy_loader.py"
     stub.plan_stop_condition_path = deleted
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
@@ -3586,13 +3543,7 @@ async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, failure_attr, 1)
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
@@ -3624,13 +3575,7 @@ async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
     stub.plan_rate_limit_always = True
     stub.retry_attempts = 2
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -3649,13 +3594,7 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_crash_attempts = 2
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -4465,13 +4404,7 @@ async def test_long_step_instruction_reaches_the_plan_whole(
     assert 1500 < len(instruction) <= 4000
     stub.plan_instruction_override = instruction
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     assert code == 0
     plan_text = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")).read_text(
@@ -4491,13 +4424,7 @@ async def test_over_length_instruction_is_repaired_not_silently_truncated(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
 
-    code = await run(
-        make_config(
-        improve_monorepo_target,
-        flow_name="improve",
-        improve_plan_description="add rate limiting",
-        )
-    )
+    code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     assert code == 1
     diagnostics = json.loads(improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json").read_text())

@@ -70,26 +70,6 @@ from tests.test_deep_pr_comment_integration import (
 
 
 @pytest.fixture
-def deep_target(tmp_path: Path) -> Path:
-    """Real git repo on a feature branch with one Python file changed.
-
-    Mirrors ``tests/test_deep_pr_comment_integration.py``'s fixture so the
-    real-path App-identity test drives the identical single-file deep path
-    (tier ``"skip"``) with the shared fake SDK.
-    """
-    repo = tmp_path / "deep_repo"
-    _init_repo(repo)
-    (repo / "foo.py").write_text("def foo():\n    return 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "init")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "foo.py").write_text("def foo():\n    return 2\n")
-    _git(repo, "add", ".")
-    _commit(repo, "tweak foo")
-    return repo
-
-
-@pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
     for symbol, fake in (

@@ -54,7 +54,6 @@ def _seed_archive(path: Path) -> None:
     _seed_archived_deep_run(
         path,
         _SESSION_ID,
-        merged_at="2026-02-01T00:00:00Z",
     )
 
 

@@ -438,21 +438,6 @@ class _FakeSDKClient:
 
 
 @pytest.fixture
-def deep_target(tmp_path: Path) -> Path:
-    """Real git repo on a feature branch with one Python file changed."""
-    repo = tmp_path / "deep_repo"
-    _init_repo(repo)
-    (repo / "foo.py").write_text("def foo():\n    return 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "init")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "foo.py").write_text("def foo():\n    return 2\n")
-    _git(repo, "add", ".")
-    _commit(repo, "tweak foo")
-    return repo
-
-
-@pytest.fixture
 def deep_target_multi(tmp_path: Path) -> Path:
     """Real git repo with >=4 Python files changed between main and feature.
 

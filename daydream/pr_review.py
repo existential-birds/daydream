@@ -31,7 +31,7 @@ import logging
 import os
 import re
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -284,7 +284,7 @@ class ItemFields:
 
 @dataclass
 class _ClassifiedIssues:
-    inline: list[dict[str, Any]] = field(default_factory=list)
+    inline: list[InlineReviewComment] = field(default_factory=list)
     body_only: list[ParsedIssue] = field(default_factory=list)
     # Parallel list to `inline`: the original ParsedIssue for each inline
     # comment. Used to roll severity/confidence into the summary body.
@@ -297,7 +297,7 @@ class _ClassifiedIssues:
     def is_empty(self) -> bool:
         """True when nothing would be posted in any placement.
 
-        Checks ``inline`` (the rendered comment dicts) rather than
+        Checks ``inline`` (the rendered comments) rather than
         ``inline_issues``, so the guard holds even if the two parallel lists
         ever drift.
         """
@@ -1091,14 +1091,14 @@ def _note_relocation(issue: ParsedIssue, posted_line: int) -> None:
     issue.body = f"{issue.body}\n\n{note}" if issue.body else note
 
 
-def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -> dict[str, Any]:
-    """Build one inline review-comment dict for the review payload."""
-    return {
-        "path": issue.path,
-        "line": line,
-        "side": "RIGHT",
-        "body": _format_comment_body(issue, "inline", renderers),
-    }
+def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -> InlineReviewComment:
+    """Build one immutable inline review comment for the review payload."""
+    return InlineReviewComment(
+        path=issue.path,
+        line=line,
+        side="RIGHT",
+        body=_format_comment_body(issue, "inline", renderers),
+    )
 
 
 _SEVERITY_EMOJI: dict[str, str] = {
@@ -1327,22 +1327,6 @@ def resolve_review_renderers(registry: Registry) -> ReviewRenderers:
     )
 
 
-def _snapshot_inline_comment(raw: Mapping[str, Any]) -> InlineReviewComment:
-    """Copy one internal inline dictionary into its immutable payload value."""
-    path = raw.get("path")
-    line = raw.get("line")
-    side = raw.get("side")
-    body = raw.get("body")
-    if (
-        not isinstance(path, str)
-        or type(line) is not int
-        or side != "RIGHT"
-        or not isinstance(body, str)
-    ):
-        raise ValueError("classified inline comment has an invalid shape")
-    return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
-
-
 @dataclass(frozen=True)
 class ClassifiedReviewPlan:
     """Immutable, authorized input to the shared review write operation."""
@@ -1373,7 +1357,7 @@ class ClassifiedReviewPlan:
         """Snapshot a mutable classified review after the caller authorizes it."""
         return cls(
             pr=pr,
-            inline=tuple(_snapshot_inline_comment(comment) for comment in classified.inline),
+            inline=tuple(classified.inline),
             inline_issues=tuple(
                 SubmissionFinding.from_parsed(issue)
                 for issue in classified.inline_issues
@@ -1726,9 +1710,7 @@ def _build_payload_for_event(
         event=event,
         commit_id=pr.head_sha,
         body="\n\n".join(body_chunks),
-        comments=tuple(
-            _snapshot_inline_comment(comment) for comment in classified.inline
-        ),
+        comments=tuple(classified.inline),
     )
 
 
@@ -1780,15 +1762,7 @@ def post_classified_review(
             folded.append(finding)
 
     final_classified = _ClassifiedIssues(
-        inline=[
-            {
-                "path": comment.path,
-                "line": comment.line,
-                "side": comment.side,
-                "body": comment.body,
-            }
-            for comment in plan.inline
-        ],
+        inline=list(plan.inline),
         inline_issues=[finding.to_parsed() for finding in plan.inline_issues],
         file_level=[finding.to_parsed() for finding in posted],
         body_only=[
@@ -1893,7 +1867,7 @@ async def _post(
         )
         return PostStatus.NOTHING_TO_POST
 
-    inline_files = sorted({c["path"] for c in classified.inline})
+    inline_files = sorted({c.path for c in classified.inline})
     summary = (
         f"{len(classified.inline)} inline on "
         f"{', '.join(inline_files) if inline_files else '(none)'}, "

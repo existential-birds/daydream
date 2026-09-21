@@ -246,7 +246,7 @@ def build_findings_artifact(
     """
     classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers)
     findings = [
-        _finding_dict(issue, placement="inline", line=entry["line"])
+        _finding_dict(issue, placement="inline", line=entry.line)
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)
     ]
     findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)

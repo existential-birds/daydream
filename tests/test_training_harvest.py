@@ -783,24 +783,24 @@ def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path) 
     assert no_eval_breakdown.grounding is None
 
 
-def _seed_archived_deep_run(
+def _seed_run_manifest(
     archive_dir: Path,
+    run_dir: Path,
     session_id: str,
     *,
-    merged_at: str,
+    pr_number: int | None,
+    pr_repo: str | None,
+    head_sha: str = "abc",
+    base_branch: str | None = "main",
+    branch: str | None = None,
     source_path: Path | None = None,
-) -> Path:
-    """Seed a deep-run bronze bundle and index it under ``archive_dir``.
+) -> None:
+    """Register the shared indexed manifest row for a seeded bronze bundle.
 
-    ``_seed_deep_bronze`` + ``upsert_run`` (plan note): writes the bronze
-    artifacts beside the archive and registers the indexed manifest row that
-    :func:`run_harvest` walks. Returns the run directory.
-
-    When ``source_path`` is supplied it is recorded on the manifest so
-    :func:`_resolve_repo_for_row` resolves a working tree for the row (the
-    caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
+    Only PR linkage, branch identity, and ``source_path`` vary between the
+    seeded run shapes; the rest is the fixed local-only manifest the harvest
+    services read.
     """
-    run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
     upsert_run(
         archive_dir,
         Manifest(
@@ -809,15 +809,43 @@ def _seed_archived_deep_run(
             run_flow="normal",
             backend="claude",
             repo_slug="org/repo",
-            pr_repo="org/repo",
-            pr_number=42,
-            head_sha="abc",
-            base_branch="main",
+            branch=branch,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            pr_number=pr_number,
+            pr_repo=pr_repo,
             grounding_rate=1.0,
             changed_files=["app.py"],
             archive_path=str(run_dir),
             source_path=str(source_path) if source_path else None,
         ),
+    )
+
+
+def _seed_archived_deep_run(
+    archive_dir: Path,
+    session_id: str,
+    *,
+    source_path: Path | None = None,
+) -> Path:
+    """Seed a deep-run bronze bundle and index it under ``archive_dir``.
+
+    ``_seed_deep_bronze`` + :func:`_seed_run_manifest` (plan note): writes the
+    bronze artifacts beside the archive and registers the indexed manifest row
+    that :func:`run_harvest` walks. Returns the run directory.
+
+    When ``source_path`` is supplied it is recorded on the manifest so
+    :func:`_resolve_repo_for_row` resolves a working tree for the row (the
+    caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
+    """
+    run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
+    _seed_run_manifest(
+        archive_dir,
+        run_dir,
+        session_id,
+        pr_number=42,
+        pr_repo="org/repo",
+        source_path=source_path,
     )
     return run_dir
 
@@ -844,24 +872,16 @@ def _seed_orphan_run(
     (``clone_resolved`` True), enabling the local-commit walk.
     """
     run_dir = _seed_deep_bronze(bronze_parent, verdict="consistent", grounding=1.0)
-    upsert_run(
+    _seed_run_manifest(
         archive_dir,
-        Manifest(
-            session_id=session_id,
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch=branch,
-            head_sha=head_sha,
-            base_branch=base_branch,
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-            source_path=str(source_path) if source_path else None,
-        ),
+        run_dir,
+        session_id,
+        pr_number=None,
+        pr_repo=None,
+        head_sha=head_sha,
+        base_branch=base_branch,
+        branch=branch,
+        source_path=source_path,
     )
     return run_dir
 
@@ -882,29 +902,13 @@ def _seed_pr_runs(
     for pr_number in range(1, count + 1):
         sid = f"s{pr_number}"
         run_dir = _seed_deep_bronze(bronze_parent / sid, verdict="consistent", grounding=1.0)
-        upsert_run(
-            archive_dir,
-            Manifest(
-                session_id=sid,
-                archived_at="2026-01-01T00:00:00Z",
-                run_flow="normal",
-                backend="claude",
-                repo_slug="org/repo",
-                pr_repo="org/repo",
-                pr_number=pr_number,
-                head_sha="abc",
-                base_branch="main",
-                grounding_rate=1.0,
-                changed_files=["app.py"],
-                archive_path=str(run_dir),
-            ),
-        )
+        _seed_run_manifest(archive_dir, run_dir, sid, pr_number=pr_number, pr_repo="org/repo")
         if fingerprints:
             _write_findings(run_dir, *fingerprints)
 
 
 async def test_harvest_writes_one_annotation(tmp_path: Path, archive_dir: Any) -> None:
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s1")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(
         config,
@@ -991,25 +995,9 @@ async def test_harvest_validates_completed_rows_before_resume_filtering(
     archive_dir: Any,
 ) -> None:
     """An invalid completed row still counts; a valid sibling continues normally."""
-    _seed_archived_deep_run(archive_dir, "done", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "done")
     fresh_dir = _seed_deep_bronze(tmp_path / "fresh", verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="fresh",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            pr_repo="org/repo",
-            pr_number=42,
-            head_sha="abc",
-            base_branch="main",
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(fresh_dir),
-        ),
-    )
+    _seed_run_manifest(archive_dir, fresh_dir, "fresh", pr_number=42, pr_repo="org/repo")
     completed = query_runs(archive_dir, "session_id = ?", ("done",))[0]
     fresh = query_runs(archive_dir, "session_id = ?", ("fresh",))[0]
     malformed_completed = {"session_id": "done", "archive_path": "relative/bronze"}
@@ -1044,7 +1032,7 @@ async def test_harvest_stores_github_z_merge_timestamp_canonically(
 ) -> None:
     """Real-path writer convergence: GitHub reports merged_at with a 'Z' suffix;
     the stored valid_at must be the canonical '+00:00' spelling."""
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00Z")
+    _seed_archived_deep_run(archive_dir, "s1")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(
         config,
@@ -1066,7 +1054,7 @@ async def test_harvest_unresolved_daydream_comment_stays_unknown(
     accept or reject, so the conservative rubric persists ``unknown`` (empty
     labels) — bare reply absence and merge state never fabricate a label.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-contest")
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     await run_harvest(
@@ -1151,9 +1139,7 @@ async def test_harvest_fork_pr_404_degrades_not_drops(
     if with_clone:
         source_path = tmp_path / "clone"
         (source_path / ".git").mkdir(parents=True)
-    _seed_archived_deep_run(
-        archive_dir, "s-fork", merged_at="2026-02-01T00:00:00+00:00", source_path=source_path
-    )
+    _seed_archived_deep_run(archive_dir, "s-fork", source_path=source_path)
 
     def _gh_fork_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if re.search(r"/pulls/\d+", endpoint):
@@ -1405,7 +1391,7 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
     shape. Such a run carries no evidence either way, so it must persist as
     ``unknown`` (empty labels) and stay out of the posterior population.
     """
-    _seed_archived_deep_run(archive_dir, "s-vacuous", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-vacuous")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(
         config,
@@ -1435,7 +1421,7 @@ async def test_harvest_merged_pr_with_reject_reply_is_contested(
     reject beside non-decisive evidence aggregates to ``contested`` — a merge
     can never upgrade an explicit rejection to ``accepted``.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-reject", merged_at="2026-08-10T00:00:00Z")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-reject")
     _write_findings(run_dir, _FP_A, _FP_B)
     github = _fake_gh(
             merged_at="2026-08-10T00:00:00Z",
@@ -1471,7 +1457,7 @@ async def test_harvest_unmerged_pr_with_no_semantic_reply_is_unknown(
     judgment, so the finding is ``unanswered`` and the run stays ``unknown``.
     The PR's open state is preserved as context, not read as a rejection.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-open", merged_at="2026-08-10T00:00:00Z")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-open")
     _write_findings(run_dir, _FP_A)
 
     def _gh_open(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -1546,7 +1532,7 @@ async def test_labeler_version_is_not_reward_version(
     archive_dir: Any,
 ) -> None:
     """append_label_observation receives labeler_versions.LABELER_POLICY_VERSION (M13/M22)."""
-    run_dir = _seed_archived_deep_run(archive_dir, "s-lv", merged_at="2026-08-10T00:00:00Z")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-lv")
     _write_findings(run_dir, _FP_A)
     captured: dict[str, Any] = {}
 
@@ -1704,7 +1690,7 @@ async def test_harvest_leaves_true_local_run_unlinked(
 
 
 async def test_re_harvest_is_idempotent(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s1")
     github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
     first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
     await run_harvest(first_config, services=_services(first_config, github=github))
@@ -1719,7 +1705,7 @@ async def test_re_harvest_appends_on_version_bump(
     archive_dir: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s1")
     github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
     first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
     await run_harvest(first_config, services=_services(first_config, github=github))
@@ -1951,7 +1937,7 @@ async def test_harvest_propagates_transient_giterror_for_retry(
     it. Drives ``run_harvest`` end-to-end and asserts the row is counted in
     ``errors``, is NOT annotated, and is NOT marked done in the resume cache.
     """
-    _seed_archived_deep_run(archive_dir, "s-transient-500", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-transient-500")
     cache_dir = tmp_path / "c"
 
     def _gh_merge_ok_comments_500(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -1988,7 +1974,7 @@ async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
     ``unknown`` label. The row must instead surface as a hard error and stay
     un-cached so a later resume retries it and recovers the merge evidence.
     """
-    _seed_archived_deep_run(archive_dir, "s-merge-comments-404", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-merge-comments-404")
     cache_dir = tmp_path / "c"
 
     def _gh_merge_ok_comments_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -2023,7 +2009,7 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
     only the optional prior), not dropped as a hard error through the per-row
     catch-all. Drives ``run_harvest`` end-to-end.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-reviews-err", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-reviews-err")
     _write_findings(run_dir, _FP_A)
 
     def _gh_reviews_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
