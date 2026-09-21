@@ -10,6 +10,7 @@ import pytest
 
 from daydream.backends import ResultEvent
 from tests.deep_orchestrator.support import (
+    _base_repo,
     _direct_fix_context,
     _direct_fix_state,
     _finalization_fixture,
@@ -28,11 +29,7 @@ def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> N
     from daydream.deep.fix_steps import _persist_push_verdict
     from daydream.phases import PushReceipt
 
-    repo = tmp_path / "push-verdict"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "push-verdict")
     ctx = _direct_fix_context(repo, [], changed_files=set())
     _direct_fix_state(ctx, [], set())
     sha = git_ops.head_sha(repo)
@@ -79,11 +76,7 @@ async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Pat
     from daydream.extensions.api import Stop
     from daydream.phases import PushReceipt
 
-    repo = tmp_path / "non-github-push"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "non-github-push")
     ctx = _direct_fix_context(repo, [], changed_files=set())
     _direct_fix_state(ctx, [], set())
     ctx.data["push_receipt"] = PushReceipt("origin", "main", git_ops.head_sha(repo), None)
@@ -177,11 +170,7 @@ async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale
     from daydream.extensions import Stop
     from daydream.run_context import InteractionPolicy, RunContext
 
-    repo = tmp_path / "malformed-related"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "malformed-related")
     (repo / "a.py").write_text("A = 2\n")
     item = _merge_item(1, "a.py", "high")
     item["related_files"] = ["../outside.py"]
@@ -209,11 +198,7 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
     from daydream.extensions import Stop
     from daydream.run_context import InteractionPolicy, RunContext
 
-    repo = tmp_path / "staged-preflight"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "staged-preflight")
     (repo / "a.py").write_text("A = 2\n")
     _git(repo, "add", "a.py")
     item = _merge_item(1, "a.py", "high")
@@ -674,11 +659,7 @@ def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) ->
             )
             return True
 
-    repo = tmp_path / "red-override"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "red-override")
     ctx = _direct_fix_context(repo, [], changed_files=set())
     ctx.run_context = RecordingContext(InteractionPolicy())
 
