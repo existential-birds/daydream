@@ -5361,10 +5361,8 @@ async def phase_cross_stack_merge(
         intent_path=intent_path,
         alternatives_path=alternatives_path,
         dedup_candidates_path=dedup_candidates_path,
-        output_path=report_path,
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
-        structural_records_path=structural_records_path,
         intent_authoritative=intent_authoritative,
         resumed_from_arbiter=continuation is not None,
     )

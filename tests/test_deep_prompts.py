@@ -135,7 +135,6 @@ def _merge_paths(tmp_path: Path) -> dict[str, Path | list[Path] | None]:
         "intent_path": tmp_path / "intent.md",
         "alternatives_path": tmp_path / "alternatives.json",
         "dedup_candidates_path": tmp_path / "dedup.json",
-        "output_path": tmp_path / "review.md",
         "exploration_dir": None,
         "failed_stacks": None,
     }
@@ -230,41 +229,18 @@ def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> No
 
 def test_merge_prompt_does_not_request_structural_findings(tmp_path: Path) -> None:
     """Structural findings are appended by the host (phase_cross_stack_merge) in
-    Python, NOT requested via prose. The agent is never pointed at the structural
-    records file and is told not to emit structural items itself."""
+    Python, NOT requested via prose; the agent is told not to emit them itself."""
     from daydream.deep.prompts import build_merge_prompt
 
-    structural_path = tmp_path / "stack-structure-records.json"
     prompt = build_merge_prompt(
         strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md",
         alternatives_path=tmp_path / "alts.json",
         dedup_candidates_path=tmp_path / "dedup.json",
-        output_path=tmp_path / "report.md",
-        structural_records_path=structural_path,
     )
-    assert str(structural_path) not in prompt  # agent not pointed at structural records
     assert "## Structural Review" not in prompt
     assert "do NOT emit them yourself" in prompt
-
-
-def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path) -> None:
-    """No structural section when the meta-stack did not run (docs-only, empty diff)."""
-    from daydream.deep.prompts import build_merge_prompt
-
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alts.json",
-        dedup_candidates_path=tmp_path / "dedup.json",
-        output_path=tmp_path / "report.md",
-        structural_records_path=None,
-    )
-    assert "## Structural Review" not in prompt
-    assert "Structural-stack parsed records:" not in prompt
-    assert "Structural-stack handling:" not in prompt
 
 
 # Issue #172 — Fix B: read-once inline diff hunks in per-stack / generic prompts
@@ -603,7 +579,6 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
             intent_path=tmp_path / "intent.md",
             alternatives_path=tmp_path / "alternatives.json",
             dedup_candidates_path=tmp_path / "dedup.json",
-            output_path=tmp_path / "report.md",
             intent_authoritative=intent_authoritative,
         )
     msg = f"unknown builder name: {name!r}"
@@ -763,7 +738,6 @@ def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path)
             intent_path=p["intent_path"],
             alternatives_path=p["alternatives_path"],
             dedup_candidates_path=tmp_path / "dedup.json",
-            output_path=tmp_path / "report.md",
         ),
     )
     for prompt in prompts:

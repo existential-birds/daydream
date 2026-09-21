@@ -51,16 +51,11 @@ DOC_REVIEW_NOTICE = (
     "generic-fallback agent (D-20)."
 )
 
-# Repo-wide cross-file symbol existence check (issue #310). Embedded inline as
-# instruction text for the same reason as ``ANTI_SLOP_RUBRIC_INSTRUCTION``: the
-# structural reviewer runs with cwd set to the reviewed repo, so a bare
-# skill-file read resolves against that repo and silently drops the gate.
-# Demands Gate-2 evidence (``rg`` the definition) before flagging any symbol
-# referenced outside the diff, so cross-file bug classes -- a subcommand invoked
-# by a CLI wrapper that does not exist, a trait method implemented by generated
-# code whose contract differs from its call site, a config field read by a
-# different module than the one that writes it -- are verified against the repo
-# rather than asserted from the call site alone.
+# Repo-wide cross-file symbol existence check (issue #310). All rubric
+# constants below are embedded inline as instruction text because reviewers run
+# with cwd set to the reviewed repo, so a bare skill-file read resolves against
+# that repo and silently drops the gate. Demands Gate-2 evidence (``rg`` the
+# definition) before flagging any symbol referenced outside the diff.
 CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "Cross-file symbol existence check (apply before flagging anything about a "
     "symbol defined OUTSIDE the diff):\n"
@@ -76,12 +71,8 @@ CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "the missing definition is real, never when you simply failed to locate it."
 )
 
-# Per-stack config-flow trace (issue #310). Embedded inline as instruction text
-# for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``: per-stack
-# reviewers run with cwd set to the reviewed repo, so a bare skill-file read
-# resolves against that repo and silently drops the gate. Targets the
-# plumbed-config bug class: a field parsed in a config struct but silently
-# dropped before it reaches the request, or the same value read twice at
+# Per-stack config-flow trace (issue #310). Targets the plumbed-config bug
+# class: a field parsed but silently dropped, or the same value read twice at
 # different points with the source able to change between reads (TOCTOU).
 CONFIG_FLOW_TRACE_INSTRUCTION = (
     "Config/env flow trace (apply to every config field or env var plumbed "
@@ -96,12 +87,9 @@ CONFIG_FLOW_TRACE_INSTRUCTION = (
     "with the source able to change between reads (TOCTOU)."
 )
 
-# Trust-model check (issue #310). Embedded inline as instruction text for the
-# same reason as the other rubrics: reviewers run with cwd set to the reviewed
-# repo, so a bare skill-file read resolves against that repo and drops the
-# gate. Targets security-relevant markers -- cache-control injection across a
-# trust boundary, escaping, credential forwarding -- by demanding an explicit
-# trust-model sentence before a finding is reported.
+# Trust-model check (issue #310). Targets security-relevant markers by demanding
+# an explicit trust-model sentence before a finding is reported: cache-control
+# injection across a trust boundary, escaping, credential forwarding.
 TRUST_MODEL_INSTRUCTION = (
     "Trust-model check (apply to every security-relevant marker: cache-control "
     "injection, trust boundaries, escaping, credential forwarding):\n"
@@ -113,14 +101,10 @@ TRUST_MODEL_INSTRUCTION = (
 )
 
 # Shared verification-protocol instruction for structural and generic-fallback
-# builders (issue #229). The gates are embedded inline as instruction text and
-# no skill-file read is required: these two reviewers run with cwd set to the
-# reviewed repo, so a bare ``read`` of the protocol skill file resolves against
-# that repo and fails ("skill doesn't exist as a file"), silently dropping the
-# gates. Both reviewers are language-agnostic (repo-wide structural / non-stack
-# the protocol's language-specific valid-pattern tables add little here — the
-# gate discipline is what matters, and it is self-contained below. Mirrors the
-# inline gate-0 embedding in ``build_verification_prompt``.
+# builders (issue #229). Both reviewers are language-agnostic, so the protocol's
+# language-specific valid-pattern tables add little; the gate discipline is
+# self-contained below. Mirrors the inline gate-0 embedding in
+# ``build_verification_prompt``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
@@ -900,10 +884,8 @@ def build_merge_prompt(
     intent_path: Path,
     alternatives_path: Path,
     dedup_candidates_path: Path,
-    output_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
-    structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
     resumed_from_arbiter: bool = False,
 ) -> str:
@@ -936,24 +918,16 @@ def build_merge_prompt(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
-        output_path: Deep-dir report path. Retained for call-site compatibility;
-            the rendered report is written by ``phase_cross_stack_merge``, so the
-            prompt no longer instructs the agent to write a file here.
         exploration_dir: Pre-scan exploration directory (if available).
         failed_stacks: Optional stack_name -> failure reason for stacks whose
             per-stack agent raised. The merge prompt includes an explicit
             "Uncovered stacks" block so missing coverage is surfaced instead of
             silently pretending the run was complete.
-        structural_records_path: Optional path to the parsed structural-stack
-            records JSON. Retained for call-site compatibility; structural
-            findings are appended by ``phase_cross_stack_merge`` in Python (not
-            via this prompt), so the agent is never pointed at this file.
         intent_authoritative: Issue #279. When True, the context lines include
             the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
             the TTT intent summary line, because the intent phase was grounded
             by a fresh, head-matched PR description.
     """
-    del output_path, structural_records_path  # appended/rendered by the host, not the prompt
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)

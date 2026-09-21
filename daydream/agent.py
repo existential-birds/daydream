@@ -1571,22 +1571,11 @@ async def _run_agent(
         return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
-        # Fallback: extract JSON from the raw text when structured output
-        # failed. Uses robust extraction (handles prose-wrapped JSON and
-        # markdown code fences — common with GLM and other OpenAI-compat models).
-        # The parsed result must also pass the fallback gate — an unvalidated
-        # fallback would be asymmetric with the success path. The gate is
-        # salvage-tolerant, not all-or-nothing (see _salvageable): consumers
-        # like the per-stack parse, the recommendation verifier, and the
-        # cross-stack merge normalize partial output (dropping invalid records
-        # rather than losing the whole payload, or accepting a bare item
-        # array), so salvageable structures still reach them. Only output that
-        # is unusable in any shape falls through to the plain-text return.
-        # Callers that salvage wholesale downstream — the improve recon and
-        # the plan author, whose downstream validators (validate_recon_commands
-        # / assemble_plan) are the fail-closed enforcement point — opt out
-        # with validate_structured_output=False; the downstream validator
-        # remains the fail-closed enforcement point for those call sites.
+        # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
+        # structured output failed. The parsed value must pass the same
+        # salvage-tolerant gate as the success path (see _salvageable); callers
+        # that salvage wholesale downstream opt out via
+        # validate_structured_output=False.
         if raw.strip():
             parsed = extract_json(raw)
             if parsed is not None and _usable(parsed):

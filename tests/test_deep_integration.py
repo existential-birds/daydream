@@ -420,20 +420,16 @@ async def test_structural_meta_stack_flows_end_to_end(
       1. ``detect_stacks`` returned ``structure`` as one of the stacks.
       2. ``phase_per_stack_reviews`` produced a ``stack-structure-review.md``
          artifact on disk.
-      3. The merge prompt received the ``stack-structure-records.json`` path
-         via ``structural_records_path``.
-      4. The final merged report on disk carries a ``## Structural Review``
+      3. The final merged report on disk carries a ``## Structural Review``
          header.
 
-    These are real observable side effects (files on disk, the path threaded
-    into the merge call, the rendered report header) — not dispatch bookkeeping.
-    If any wire in Tasks 2-7 were broken (structure stack not emitted, prompt
-    not routed, records not partitioned out and forwarded, section not
-    rendered) the corresponding assertion below fails.
+    These are real observable side effects (files on disk, the rendered report
+    header) — not dispatch bookkeeping. If any wire in Tasks 2-7 were broken
+    (structure stack not emitted, records not partitioned out and appended,
+    section not rendered) the corresponding assertion below fails.
     """
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep import detection as _detection
-    from daydream.deep import prompts as _prompts
     from daydream.deep.detection import StackAssignment
 
     detected_stacks: list[StackAssignment] = []
@@ -444,18 +440,8 @@ async def test_structural_meta_stack_flows_end_to_end(
         detected_stacks.extend(result)
         return result
 
-    merge_kwargs: dict[str, Any] = {}
-    real_build_merge = _prompts.build_merge_prompt
-
-    def _spy_merge(**kwargs: Any) -> Any:
-        merge_kwargs.update(kwargs)
-        return real_build_merge(**kwargs)
-
     # ``detect_stacks`` is imported into the orchestrator namespace; patch there.
     monkeypatch.setattr("daydream.deep.orchestrator.detect_stacks", _spy_detect)
-    # ``build_merge_prompt`` is imported lazily inside phase_cross_stack_merge;
-    # patch the source module so the late import resolves to the spy.
-    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _spy_merge)
 
     backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -478,17 +464,7 @@ async def test_structural_meta_stack_flows_end_to_end(
         "through build_structural_prompt or its agent never wrote the artifact"
     )
 
-    # (3) The merge prompt received the structural records path.
-    structural_records_path = merge_kwargs.get("structural_records_path")
-    assert structural_records_path is not None, (
-        "merge prompt did not receive structural_records_path -- orchestrator "
-        "failed to partition + forward the structural records"
-    )
-    assert structural_records_path.name == "stack-structure-records.json", (
-        f"unexpected structural records filename: {structural_records_path.name}"
-    )
-
-    # (4) The merged report on disk carries the dedicated structural section.
+    # (3) The merged report on disk carries the dedicated structural section.
     merged_report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert "## Structural Review" in merged_report, (
         "merged report is missing the ## Structural Review header"
