@@ -195,6 +195,15 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     return dest
 
 
+def _golden_task(
+    tmp_path: Path, fixture_manifest_path: Path, rundir_golden: Path
+) -> tuple[Path, DaydreamReviewTask]:
+    """Stage the golden run at ``<tmp_path>/archive`` and load its task."""
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    return archive_root, _task(fixture_manifest_path)
+
+
 # Absolute Unix path shape (``/Users/...``, ``/private/tmp/...``, ``/home/...``):
 # a ``/`` after a string boundary, followed by a letter. The original capture
 # host's ``/private/tmp/`` prefix was one instance of this shape; the guard
@@ -435,9 +444,7 @@ async def test_intrinsic_composite_parity(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
     """The online reward is byte-equal to the offline pipeline's own scorer."""
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -460,9 +467,7 @@ async def test_intrinsic_composite_carries_the_grounding_axis(
     expected_grounding = evaluation["grounding"]["grounding_rate"]
     assert expected_grounding == 1.0, "fixture drift: the golden run is fully grounded"
 
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -684,9 +689,7 @@ async def test_tampered_suite_never_records_honest_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A gutted test oracle records suite_non_regression 0.0 and no suite reward."""
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     (repo / "tests/test_calc.py").write_text(_TAMPER_PASSING, encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -730,9 +733,7 @@ async def test_suite_rejects_protected_test_path_changes(
     green tampered suite, 1.0 if it ran red), so its absence below proves the
     gate held rather than passing vacuously over an empty archive.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=edit)
     (repo / tamper_rel).write_text(tamper_content, encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -874,9 +875,7 @@ async def test_oracle_gate_rejects_flag_tampered_tracked_file(
     flag probe (``git ls-files -v``) must fail closed: setting the flag on any
     protected file is itself tampering with the oracle's verifiability.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     # A real fix (calc.py) plus a flagged, gutted tracked test: diff is fooled,
     # so only the flag probe stands between this and a free green reading.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
@@ -906,9 +905,7 @@ async def test_oracle_gate_rejects_tracked_gitignore_edit(
     covers those ignore files (``:(glob)**/.gitignore``), so the edit itself
     must read as an oracle change.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     gitignore = repo / ".gitignore"
     gitignore.write_text(gitignore.read_text(encoding="utf-8") + "tests/pytest.ini\n", encoding="utf-8")
@@ -933,9 +930,7 @@ async def test_oracle_gate_rejects_info_exclude_rule(
     changes. A fresh clone's file is comments-only; any real rule means the
     oracle changed.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     info_exclude = repo / ".git/info/exclude"
     info_exclude.write_text(info_exclude.read_text(encoding="utf-8") + "tests/conftest.py\n", encoding="utf-8")
@@ -962,9 +957,7 @@ async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
     also neutralizes the global excludes file (``$HOME/.config/git/ignore``), so
     the file is listed and the oracle reads as changed.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     ignores = repo.parent / "excludes"
     ignores.write_text("tests/pytest.ini\n", encoding="utf-8")
@@ -995,9 +988,7 @@ async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
     artifacts are excluded explicitly via ``ORACLE_BENIGN_PATHSPECS`` — never
     loaded by the runner, so excluding them cannot hide a real oracle file.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     pycache = repo / "tests" / "__pycache__"
     pycache.mkdir()
@@ -1025,9 +1016,7 @@ async def test_oracle_gate_rejects_root_sitecustomize(
     ``sys.exit(0)`` makes a suite that never ran look green. It sits outside the
     declared protected paths, so the untracked probe must cover it explicitly.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     (repo / "sitecustomize.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -1153,9 +1142,7 @@ async def test_score_reuses_one_archived_run_snapshot(
     read the shared host snapshot (via ``_read_json``), never re-enter the
     runtime; ``trace.state.run_dir`` must be cleared once scoring returns.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
@@ -1222,9 +1209,7 @@ async def test_review_shape_metrics(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
     """n_findings mirrors merged-items.json; golden_overlap is a path fraction."""
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -1345,9 +1330,7 @@ async def test_reward_version_is_pinned(
         f"the rollout reward contract version moved to {ROLLOUT_REWARD_VERSION!r}"
     )
 
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
