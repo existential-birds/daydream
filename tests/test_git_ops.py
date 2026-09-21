@@ -36,8 +36,6 @@ from tests.harness.git_helpers import configure_identity as _configure_identity
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
-# --- assert_is_worktree / is_inside_worktree --------------------------------
-
 
 def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
@@ -850,7 +848,6 @@ def test_assert_is_worktree_rejects_missing_path(tmp_path: Path) -> None:
         git_ops.assert_is_worktree(tmp_path / "does-not-exist")
 
 
-# --- Read-only queries ------------------------------------------------------
 
 
 def test_head_sha_returns_full_sha(tmp_path: Path) -> None:
@@ -967,7 +964,6 @@ def test_branch_exists_missing(tmp_path: Path) -> None:
     assert git_ops.branch_exists(repo, "nonexistent") is False
 
 
-# --- ref_exists -------------------------------------------------------------
 
 
 def _ref_raw_sha(repo: Path) -> str:
@@ -1019,7 +1015,6 @@ def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
     assert git_ops.ref_exists(repo, "--exec=evil") is False
 
 
-# --- commit_exists -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1085,7 +1080,6 @@ def test_is_ancestor_reports_relationship(
     assert git_ops.is_ancestor(repo, ancestor, descendant) is expected
 
 
-# --- merge_base -------------------------------------------------------------
 
 
 def test_merge_base_returns_shared_commit(tmp_path: Path) -> None:
@@ -1247,7 +1241,6 @@ def test_resolve_pr_merge_base_rejects_invalid_base_ref(tmp_path: Path, local_re
         git_ops.resolve_pr_merge_base(repo, [], local_ref, git_ops.head_sha(repo))
 
 
-# --- diff / log / show / grep / status / upstream_ahead_count ---------------
 
 
 def test_diff_returns_changes(tmp_path: Path) -> None:
@@ -1306,7 +1299,6 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path) -> None:
     assert "local.txt" in out, "diff should show unpushed changes vs origin/main"
 
 
-# --- diff_name_only ---------------------------------------------------------
 
 
 def test_diff_name_only_returns_changed_files(tmp_path: Path) -> None:
@@ -1537,7 +1529,6 @@ def test_upstream_ahead_count_when_remote_ahead(tmp_path: Path) -> None:
     assert git_ops.upstream_ahead_count(repo, "main") == 2
 
 
-# --- Mutating ---------------------------------------------------------------
 
 
 def test_fetch_pulls_new_commits(tmp_path: Path) -> None:
@@ -1603,7 +1594,6 @@ def test_worktree_move_propagates_git_failure(tmp_path: Path) -> None:
     assert not destination.exists()
 
 
-# --- branch / commit / push primitives (Task 3) -----------------------------
 
 
 def test_commit_paths_on_new_branch_pushes_to_origin(repo_with_origin: Path) -> None:
@@ -1660,7 +1650,6 @@ def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
         git_ops.push_branch(git_repo, "daydream/no-remote")
 
 
-# --- Error type identity ----------------------------------------------------
 
 
 def test_error_hierarchy_is_consistent() -> None:
@@ -1670,7 +1659,6 @@ def test_error_hierarchy_is_consistent() -> None:
     assert issubclass(git_ops.GitTimeoutError, GitError)
 
 
-# --- _run_git timeout retry (issue #120) ------------------------------------
 
 
 def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1785,7 +1773,6 @@ def test_mutating_wrapper_does_not_retry_on_timeout(
     assert calls["n"] == 1  # no retries for mutating operations
 
 
-# --- _run_gh timeout retry (fake-gh flake under load) -----------------------
 
 
 @pytest.mark.parametrize(
@@ -1942,7 +1929,6 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
     assert calls["n"] == 1
 
 
-# --- gh issue create ---------------------------------------------------------
 
 
 @pytest.mark.parametrize("labels", [None, ["daydream", "tech-debt"]], ids=["no-labels", "two-labels"])
@@ -2083,7 +2069,6 @@ def test_gh_issue_list_returns_empty_on_failure(
     assert git_ops.gh_issue_list(repo) == []
 
 
-# --- gh wrappers (skipped when gh missing) ----------------------------------
 
 
 _gh_available = shutil.which("gh") is not None
@@ -2141,7 +2126,6 @@ def test_gh_api_raises_without_auth(tmp_path: Path) -> None:
         git_ops.gh_api(repo, "repos/{owner}/{repo}")
 
 
-# --- diff_paths -------------------------------------------------------------
 
 
 def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
@@ -2220,7 +2204,6 @@ def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
         git_ops.diff_paths(repo, "definitely-not-a-ref", "HEAD", ["base.txt"])
 
 
-# --- gh_api(input_data=...) and gh_pr_view(pr=None) -------------------------
 # These tests exercise wrapper logic, not gh itself: subprocess is monkeypatched
 # to capture argv and drive success/failure paths deterministically.
 
@@ -2555,7 +2538,6 @@ def test_gh_pr_view_pr_arg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: 
         assert cmd[:4] == ["gh", "pr", "view", str(pr)]
 
 
-# --- daydream_commits ---------------------------------------------------------
 
 
 def test_daydream_commits_returns_tagged_commits(tmp_path: Path) -> None:
@@ -2586,7 +2568,6 @@ def test_daydream_commits_none_when_no_commits(tmp_path: Path) -> None:
     assert result is None
 
 
-# --- clone -------------------------------------------------------------------
 
 
 def _make_bare_remote(tmp_path: Path) -> Path:
@@ -3049,7 +3030,6 @@ def test_pr_list_fields_include_gh_245_head_ref_name() -> None:
     assert "baseRefOid" not in git_ops.GH_PR_LIST_FIELDS
 
 
-# --- gh secret/variable/PR primitives (Task 2) ------------------------------
 
 from tests.harness.fake_gh import FakeGh  # noqa: E402
 
@@ -3106,7 +3086,6 @@ def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) 
         git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")
 
 
-# --- gh_file_at_ref (issue #1167) -------------------------------------------
 
 _FILE_AT_REF_SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -3361,7 +3340,6 @@ def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch
     assert real_run is not None
 
 
-# --- pre-push hook detection (issue #726 task 6) -----------------------------
 
 
 def test_has_executable_pre_push_hook_default_hooks_dir(tmp_path: Path) -> None:

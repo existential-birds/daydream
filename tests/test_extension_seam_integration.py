@@ -868,7 +868,7 @@ async def test_custom_flow_dispatches_and_dumps_artifacts(
     tmp_path: Path,
 ) -> None:
     """A fork-registered custom flow selected via flow_name runs end-to-end and
-    --dump-artifacts writes the bundle (must-haves 1 + 2)."""
+    --dump-artifacts writes the bundle."""
     ext_dir.write_module(CUSTOM_FLOW_EXT)
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
@@ -892,7 +892,7 @@ async def test_unknown_flow_name_errors(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """An unregistered flow name fails with exit 1 (Extension Error panel; must-have 3)."""
+    """An unregistered flow name fails with exit 1 (Extension Error panel)."""
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
 
@@ -907,7 +907,7 @@ async def test_pr_feedback_not_selectable_via_flow(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """--flow pr-feedback errors (needs PR number + bot; must-have 5)."""
+    """--flow pr-feedback errors (needs PR number + bot)."""
     install_backend(ScriptedBackend(events=_EMPTY_TURN, model="mock-model"))
 
     rc = await runner.run(make_config(multi_stack_target, flow_name="pr-feedback"))
@@ -920,13 +920,12 @@ async def test_custom_phase_full_stack(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """Seam acceptance (Task 17): custom phase end-to-end through ``runner.run``.
+    """Custom phase end-to-end through ``runner.run``.
 
     Proves the extension seams are wired together: a fork-registered phase runs
     inside the deep flow, builds its prompt from its own registered prompt
     builder, and gets its backend through ``[tool.daydream.phases.ro_gate]``
-    per-phase config (Assumption 7: ``_coerce_phases`` / ``_resolved_model``
-    accept arbitrary phase strings).
+    per-phase config.
 
     Observable outcomes: exit 0, the ``RO-GATE`` prompt reached the backend,
     and ``create_backend`` was called with the per-phase model from
@@ -969,7 +968,7 @@ async def test_flow_deep_routes_to_deep_helper(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """--flow deep runs the real deep pipeline (must-have 4): the intent prompt
+    """--flow deep runs the real deep pipeline: the intent prompt
     reaches the backend via the deep flow, exit 0."""
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 

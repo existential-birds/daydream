@@ -613,7 +613,6 @@ class GrpcBridge:
         self._delegate = delegate
         self._ledger = ledger
         self._state = "OPEN"
-        self._attempt_budget = 1  # exactly one Export per owned retry decision
 
     @property
     def delegate(self) -> GrpcExporter:
