@@ -127,33 +127,33 @@ async def test_deep_flow_forwards_approve_on_clean(
 
 def test_approve_on_clean_resolves_from_file_config() -> None:
     """#343 file-config tier: with NO CLI flag but ``approve_on_clean = true`` in
-    the repo config, ``_approve_on_clean`` returns True; with no opt-in anywhere
+    the repo config, the opt-in resolver returns True; with no opt-in anywhere
     it stays False (default off)."""
     from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.merge_steps import _approve_on_clean
+    from daydream.deep.settings import _resolve_opt_in
     from daydream.runner import RunConfig
 
     file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(approve_on_clean=True))
-    assert _approve_on_clean(file_only) is True
+    assert _resolve_opt_in(file_only, "approve_on_clean") is True
 
     unset = RunConfig(target="/t")
-    assert _approve_on_clean(unset) is False
+    assert _resolve_opt_in(unset, "approve_on_clean") is False
 
 
 def test_scope_issue_filing_resolves_precedence() -> None:
     """#1056 precedence: CLI tier over file config over built-in default False."""
     from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.fix_steps import _scope_issue_filing
+    from daydream.deep.settings import _resolve_opt_in
     from daydream.runner import RunConfig
 
     cli = RunConfig(target="/t", scope_issue_filing=True)
-    assert _scope_issue_filing(cli) is True
+    assert _resolve_opt_in(cli, "scope_issue_filing") is True
 
     file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(scope_issue_filing=True))
-    assert _scope_issue_filing(file_only) is True
+    assert _resolve_opt_in(file_only, "scope_issue_filing") is True
 
     unset = RunConfig(target="/t")
-    assert _scope_issue_filing(unset) is False
+    assert _resolve_opt_in(unset, "scope_issue_filing") is False
 
 
 async def test_merge_resume_reruns_arbiter_when_marker_absent(

@@ -656,25 +656,6 @@ def test_verification_prompt_advertises_full_read_only_bash_allowlist(tmp_path: 
     assert "Do NOT write, edit, or move files." in prompt
 
 
-def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
-    """Two different output_path values produce byte-identical prompts."""
-    from daydream.deep.prompts import build_verification_prompt
-
-    items = [
-        {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
-         "line": 10, "description": "x", "rationale": "y"}
-    ]
-    a = build_verification_prompt(
-        strategy=_default_strategy("verification"),
-        items=items, cwd=tmp_path, output_path=tmp_path / "a.json",
-    )
-    b = build_verification_prompt(
-        strategy=_default_strategy("verification"),
-        items=items, cwd=tmp_path, output_path=tmp_path / "b.json",
-    )
-    assert a == b
-
-
 # --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
 
 

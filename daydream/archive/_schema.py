@@ -18,9 +18,8 @@ SCHEMA_VERSION = 8
 _PRECEDENCE_ORDER = "CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC"
 """SQL ORDER BY expression that ranks label_observations by human-first precedence then recency.
 
-Used identically across append_label_observation, latest_label_observation,
-bulk_latest_label_observations, and label_count_summary — centralised here so
-all callers stay in sync if the precedence rule ever changes.
+Used identically across append_label_observation and latest_label_observation —
+centralised here so all callers stay in sync if the precedence rule ever changes.
 """
 
 _REVIEWER_PENALTY_MAP: dict[str, float] = {

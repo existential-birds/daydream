@@ -443,6 +443,18 @@ def _defined_at_by_ref(grounding: dict[str, Any], element: str) -> dict[str, str
     return out
 
 
+def _pruned_capped_parts(grounding: dict[str, Any], noun: str) -> list[str]:
+    """The 'dropped as ungrounded' / 'trimmed to fit the diagram cap' grounding tail."""
+    parts: list[str] = []
+    pruned = _int(_mapping(grounding.get("summary")).get("pruned"))
+    if pruned:
+        parts.append(f"{pruned} proposed {_plural(pruned, noun)} {_was(pruned)} dropped as ungrounded.")
+    capped = _capped_total(grounding)
+    if capped:
+        parts.append(f"{capped} further {_plural(capped, noun)} {_was(capped)} trimmed to fit the diagram cap.")
+    return parts
+
+
 def _sequence_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
     """The ``<sub>`` grounding line for a rendered sequence diagram."""
     messages = len(_dicts(spec.get("messages")))
@@ -452,18 +464,7 @@ def _sequence_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
         f"{participants} {_plural(participants, 'component')}, "
         "each grounded to a cited call site."
     ]
-    pruned = _int(_mapping(grounding.get("summary")).get("pruned"))
-    if pruned:
-        parts.append(
-            f"{pruned} proposed {_plural(pruned, 'interaction')} {_was(pruned)} dropped as ungrounded."
-        )
-    capped = _capped_total(grounding)
-    if capped:
-        parts.append(
-            f"{capped} further {_plural(capped, 'interaction')} {_was(capped)} "
-            "trimmed to fit the diagram cap."
-        )
-    return " ".join(parts)
+    return " ".join(parts + _pruned_capped_parts(grounding, "interaction"))
 
 
 def _flowchart_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
@@ -485,15 +486,7 @@ def _flowchart_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
         f"Control flow of `{name}`{where}: {nodes} {_plural(nodes, 'node')}, "
         "each grounded to a statement inside that function."
     ]
-    pruned = _int(_mapping(grounding.get("summary")).get("pruned"))
-    if pruned:
-        parts.append(f"{pruned} proposed {_plural(pruned, 'node')} {_was(pruned)} dropped as ungrounded.")
-    capped = _capped_total(grounding)
-    if capped:
-        parts.append(
-            f"{capped} further {_plural(capped, 'node')} {_was(capped)} trimmed to fit the diagram cap."
-        )
-    return " ".join(parts)
+    return " ".join(parts + _pruned_capped_parts(grounding, "node"))
 
 
 def _table(header: list[str], rows: list[list[str]]) -> str:

@@ -459,22 +459,6 @@ def _flow_name_for_mode(mode: str) -> str:
     return "diagram" if mode == "diagram" else "deep"
 
 
-# The deep pipeline as a registered flow (D-07):
-#
-#     exploration pre-scan -> TTT intent -> TTT alternative-review ->
-#     per-stack reviews -> per-stack parse + dedup -> uncovered-file sweep (#309)
-#     -> arbiter -> cross-stack merge (or the tiny-diff single-stack bypass) ->
-#     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
-#     test -> commit -> exact-SHA remote CI.
-#
-# ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
-# definition; ``run_deep`` keeps the preamble and delegates here via
-# ``run_flow``. The old imperative body's tier / single_stack_mode /
-# ``start_at`` / ``findings_out`` conditions are the ``enabled`` predicates
-# above (whole-block gates) or stay inside step bodies (resume branches). The
-# mode gates replace the review/comment/shallow flows (#330): review/comment
-# modes stop after ``post-review`` (the fix cycle is gated off).
-#
 # Terminal cleanup (#330) is NOT a step: it is a success-path helper invoked by
 # ``_run_review_spine`` after ``run_flow`` returns. Tying it to the run's exit
 # code (rather than the end of this tuple) means an early successful ``Stop(0)``

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -122,19 +121,6 @@ async def test_safe_explore_returns_empty_on_failure() -> None:
     assert result.dependencies == []
     assert result.guidelines == []
     assert result.raw_notes == ""
-
-
-@patch("daydream.ui.print_warning")
-@patch("daydream.ui.create_console")
-async def test_safe_explore_shows_warning_on_failure(mock_create_console: Any, mock_print_warning: Any) -> None:
-    mock_console = object()
-    mock_create_console.return_value = mock_console
-
-    async def failing_explore() -> ExplorationContext:
-        raise RuntimeError("SDK timeout")
-
-    await safe_explore(failing_explore)
-    mock_print_warning.assert_called_once_with(mock_console, "Exploration failed -- proceeding with review only")
 
 
 def test_merge_pattern_scanner_result() -> None:

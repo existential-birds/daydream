@@ -28,6 +28,7 @@ from daydream.deep.dedup import (
 )
 from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
 from daydream.deep.render import _PIPELINE_STAGE_NAMES, render_held_section, render_report
+from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
@@ -45,45 +46,6 @@ from daydream.ui import print_error, print_info, print_stage_progress, print_war
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
-
-
-def _precision_mode(config: RunConfig) -> bool:
-    """Resolve the precision-mode opt-in (issue #232).
-
-    Precedence (highest first), mirroring the composition root's fan-out threshold
-    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
-
-      1. ``RunConfig.precision_mode`` (CLI tier / direct construction).
-      2. ``DaydreamFileConfig.precision_mode`` (file-config scalar).
-      3. Built-in default ``False`` (byte-identical behavior: the suppression
-         predicate is never called and arbiter output is unchanged).
-
-    Uses truthiness rather than ``is not None``: ``False`` is the meaningful
-    "off" value, so a set-to-False file-config entry just falls through to the
-    default rather than acting as a distinct sentinel.
-    """
-    if config.precision_mode:
-        return True
-    file_config = config.file_config
-    if file_config is not None and file_config.precision_mode:
-        return True
-    return False
-
-
-def _approve_on_clean(config: RunConfig) -> bool:
-    """Resolve the approve-on-clean opt-in (issue #343).
-
-    Precedence mirrors ``_precision_mode``: 1) ``RunConfig.approve_on_clean``
-    (CLI tier), 2) ``DaydreamFileConfig.approve_on_clean`` (file-config
-    scalar), 3) built-in default ``False`` (byte-identical behavior: the
-    event stays COMMENT unless a repo explicitly opts in).
-    """
-    if config.approve_on_clean:
-        return True
-    file_config = config.file_config
-    if file_config is not None and file_config.approve_on_clean:
-        return True
-    return False
 
 
 def _supervisor_mode(config: RunConfig) -> str:
@@ -259,13 +221,9 @@ def _apply_adjudication_verdicts(
         if not verdict.get("keep", False):
             dropped.add(uid)
             continue
-        # Revise IN PLACE rather than rebuilding the dict. A copied ``uid``
-        # would survive a rebuild, so this is no longer the load-bearing
-        # constraint it was when the suppression call site keyed its
-        # arbiter-exclusion set by ``id(record)`` (#232) -- but in-place is still
-        # the correct shape: the caller holds this same list and
-        # ``_rewrite_stack_records`` persists these very dicts, so a fresh dict
-        # would have to be threaded back into both.
+        # Revise IN PLACE rather than rebuilding the dict: the caller holds this
+        # same list and ``_rewrite_stack_records`` persists these very dicts, so
+        # a fresh dict would have to be threaded back into both.
         revise_finding_fields(by_uid[uid], verdict)
 
     new_records: list[dict[str, Any]] = []
@@ -527,7 +485,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # opinion on borderline (LOW-confidence / low-severity uncontested)
         # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
         # arbiter's targets; one batched call via the cheaper `suppression` key.
-        if ctx.pipeline().suppression.enabled or _precision_mode(config):
+        if ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode"):
             # Exclude structural records (high-conviction by construction,
             # #1103) and any record with no uid: suppression is fail-CLOSED, so
             # unidentifiable records must be kept rather than droppable.
@@ -1084,7 +1042,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         renderers=resolve_review_renderers(ctx.registry),
         console=console,
         post=deep_state.mode == "comment",
-        approve_on_clean=_approve_on_clean(ctx.config),
+        approve_on_clean=_resolve_opt_in(ctx.config, "approve_on_clean"),
         diagram_blocks=(deep_state.diagrams or {}).get("blocks"),
         run_context=ctx.run_context,
         auth=ctx.github_execution.auth,

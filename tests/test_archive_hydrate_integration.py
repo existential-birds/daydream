@@ -87,9 +87,9 @@ class TestCleanImport:
         summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
         assert summary.verified
         # M1: the hydrated staging archive is harvest-discoverable from disk alone.
-        from daydream.archive.index import count_runs
+        from daydream.archive.index import query_runs
 
-        assert count_runs(stage) == 3
+        assert len(query_runs(stage)) == 3
         assert summary.dry_run_discovered == 3
         assert summary.dry_run_admitted + summary.dry_run_rejected == 3
 
@@ -130,9 +130,9 @@ class TestInterruptionResume:
         assert state.completed_sessions is not None
         summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
         assert summary.verified
-        from daydream.archive.index import count_runs
+        from daydream.archive.index import query_runs
 
-        assert count_runs(stage) == 3  # no duplicate sessions after resume
+        assert len(query_runs(stage)) == 3  # no duplicate sessions after resume
 
     def test_resume_between_publish_and_finalize_proceeds(self, hub: FakeHub, tmp_path: Path) -> None:
         """A v2 run killed between publish_batches and finalize resumes cleanly.
@@ -158,9 +158,9 @@ class TestInterruptionResume:
         # complete the run instead of refusing the prefix as legacy.
         summary = hydrate.run_hydrate_hub(_config(tmp_path / "resume"), client=hub)
         assert summary.verified
-        from daydream.archive.index import count_runs
+        from daydream.archive.index import query_runs
 
-        assert count_runs(tmp_path / "resume") == 3  # no duplicate sessions
+        assert len(query_runs(tmp_path / "resume")) == 3  # no duplicate sessions
 
 
 class TestCollision:
