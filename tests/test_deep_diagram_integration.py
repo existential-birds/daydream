@@ -558,6 +558,37 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
     )
 
 
+async def test_nonresumable_diagram_prunes_without_losing_grounded_content(
+    tmp_path: Path,
+    review_run: Callable[..., Any],
+    captured_post: _CapturedPost,
+) -> None:
+    """An unavailable continuation skips repair and preserves verified content."""
+    target = dr.build_cross_module_repo(tmp_path)
+
+    exit_code, stub = await review_run(
+        target,
+        specs={"sequence": _fabricated_sequence_turns()},
+        session_id=None,
+    )
+
+    assert exit_code == 0
+    assert len(_diagram_calls(stub, "sequence")) == 1
+    sequence = _artifact(target)["results"]["sequence"]
+    assert sequence["status"] == "rendered"
+    assert sequence["grounding"]["summary"] == {
+        "proposed": 11,
+        "grounded_first_pass": 8,
+        "repaired": 0,
+        "pruned": 3,
+    }
+    assert sequence["mermaid"] == SEQUENCE_GOLDEN
+    body = captured_post.body()
+    assert SEQUENCE_GOLDEN in body
+    assert "3 proposed interactions were dropped as ungrounded." in body
+    assert all(str(item["label"]) not in body for item in _FABRICATED)
+
+
 # --- Spec test 5: flowchart grounding ---------------------------------------
 
 
