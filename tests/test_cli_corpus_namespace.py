@@ -19,21 +19,7 @@ from typing import Any
 import pytest
 
 from daydream import cli
-
-
-def _run_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` and return its exit code."""
-    import sys
-
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:  # main() always exits via sys.exit
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    return 0
+from tests.harness.scripts import cli_main
 
 
 @pytest.mark.parametrize("summary, expected", [
@@ -49,7 +35,7 @@ def test_corpus_harvest_exit_code_maps_summary(
         return summary
 
     monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert _run_main(["corpus", "harvest", "--dry-run"]) == expected
+    assert cli_main(["corpus", "harvest", "--dry-run"]) == expected
 
 
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,7 +46,7 @@ def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
 
     monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
+    assert cli_main(["corpus", "harvest", "--dry-run"]) == 0
     assert called["hit"]
 
 
@@ -76,12 +62,12 @@ def test_corpus_label_route(monkeypatch: pytest.MonkeyPatch) -> None:
     # time. Patching cli._handle_label_command replaces the module attribute but
     # leaves the dict value unchanged, so the real handler still runs.
     monkeypatch.setitem(cli._CORPUS_SUBVERBS, "label", _fake_label)
-    assert _run_main(["corpus", "label", "sess-0001", "--outcome", "accepted"]) == 0
+    assert cli_main(["corpus", "label", "sess-0001", "--outcome", "accepted"]) == 0
     assert label_called["argv"] == ["sess-0001", "--outcome", "accepted"]
 
 
 def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
-    assert _run_main(["corpus"]) == 2
+    assert cli_main(["corpus"]) == 2
     captured = capsys.readouterr()
     # CI terminals wrap help output at 80 cols, so assert per token, not the
     # full usage line.
@@ -114,7 +100,7 @@ def test_adjudicate_publication_commands_run_through_main(
     hub = AnnotationsHub(repo_id="org/private-annotations")
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
 
-    assert _run_main([
+    assert cli_main([
         "corpus", "adjudicate", "publish-state",
         "--state-dir", str(state),
         "--manifest", str(manifest),
@@ -124,7 +110,7 @@ def test_adjudicate_publication_commands_run_through_main(
     assert "annotations/cur-main/checkpoints/batch-latest.json" in hub.list_repo_files(revision)
 
     destination = tmp_path / "restored"
-    assert _run_main([
+    assert cli_main([
         "corpus", "adjudicate", "resume-state",
         "--curation-id", "cur-main",
         "--destination", str(destination),
@@ -135,7 +121,7 @@ def test_adjudicate_publication_commands_run_through_main(
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
     final_destination = tmp_path / "downloaded-final"
-    assert _run_main([
+    assert cli_main([
         "corpus", "adjudicate", "download-final",
         "--curation-id", curation_id,
         "--snapshot-id", published["final_snapshot_id"],
@@ -165,7 +151,7 @@ def _run_build_v2(
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
     out_dir = tmp_path / "corpus-out"
-    rc = _run_main([
+    rc = cli_main([
         "corpus", "build",
         "--bundle-root", str(bundle_dir),
         "--annotation-bundle-root", str(snap.parent),
@@ -228,7 +214,7 @@ def test_bare_harvest_is_unknown_verb_treated_as_review_target(
 ) -> None:
     # 'harvest' is no longer a verb; _first_verb falls through to review,
     # which then rejects the unknown '--dry-run' flag (argparse error → exit 2).
-    assert _run_main(["harvest", "--dry-run"]) == 2
+    assert cli_main(["harvest", "--dry-run"]) == 2
     captured = capsys.readouterr()
     assert "unrecognized arguments" in captured.err
     assert "--dry-run" in captured.err

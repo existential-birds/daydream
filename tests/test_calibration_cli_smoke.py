@@ -3,17 +3,9 @@
 import json
 from pathlib import Path
 
-from daydream.cli import main
+from tests.harness.scripts import cli_main
 
 FIXTURE = Path(__file__).parent / "fixtures" / "training" / "calibration"
-
-
-def _run_main(argv: list[str]) -> int:
-    try:
-        main([*argv])
-    except SystemExit as exc:  # pragma: no cover - main raises SystemExit(0) on success paths
-        return exc.code if isinstance(exc.code, int) else 0
-    return 0
 
 
 def test_fixture_run_produces_valid_replayable_artifact(tmp_path: Path) -> None:
@@ -40,11 +32,11 @@ def test_fixture_run_produces_valid_replayable_artifact(tmp_path: Path) -> None:
         "200",
         "--out",
     ]
-    assert _run_main([*argv, str(out1)]) == 0
+    assert cli_main([*argv, str(out1)]) == 0
     art = json.loads((out1 / "calibration.json").read_text())
     assert art["schema_version"] == "calibration-artifact"
     assert art["stage0_analysis"]["status"] in {"unavailable", "ok"}  # explicit, never missing
-    assert _run_main([*argv, str(out2)]) == 0
+    assert cli_main([*argv, str(out2)]) == 0
     assert (out1 / "calibration.json").read_bytes() == (out2 / "calibration.json").read_bytes()  # AC 1
 
 
