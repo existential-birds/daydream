@@ -1,6 +1,7 @@
 """Hermetic suite for the `daydream benchmark run` supervisor (issue #781).
 
 """
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -317,8 +318,45 @@ def test_ledger_rejects_non_contained_job_dir(tmp_path: Path) -> None:
 
 
 
-def _score(reward: Any) -> dict[str, Any]:
-    return {"reward": reward, "verifier_error": 0, "gold_count": 1, "candidate_count": 1}
+def _score(reward: Any, *, candidate_count: int = 1) -> dict[str, Any]:
+    return {"reward": reward, "verifier_error": 0, "gold_count": 1,
+            "candidate_count": candidate_count}
+
+
+def _compiled_lock_sha(ws: Path) -> str:
+    """Digest of the compiled ``benchmark.lock.json`` a run was gated against."""
+    return hashlib.sha256((ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+
+
+def _reward_spawn(
+    ws: Path,
+    *,
+    reward: float = 1.0,
+    candidate_count: int = 1,
+    capture: dict[str, Any] | None = None,
+    returncode: int = 0,
+) -> Any:
+    """Build a hermetic Harbor ``spawn`` callable that records score evidence.
+
+    ``run_run`` writes the ledger (with the fresh uuid4 job dir) before
+    spawning, so the fake reads that recorded ``job_dir`` and writes
+    ``<trial>/verifier/reward.json`` exactly as a real verifier would. Tests
+    that assert the spawn's ``cwd``/``args``/``env`` pass ``capture``.
+    """
+    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
+        if capture is not None:
+            capture["cwd"] = str(cwd)
+            capture["args"] = cmd
+            capture["env"] = env
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        verifier = Path(ledger["runs"][0]["job_dir"]) / "case-abc" / "verifier"
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.json").write_text(
+            json.dumps(_score(reward, candidate_count=candidate_count))
+        )
+        return {"returncode": returncode}
+
+    return spawn
 
 
 def test_oracle_parse_success_writes_receipt(tmp_path: Path) -> None:
@@ -378,8 +416,6 @@ def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
 
 
 def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
@@ -407,8 +443,6 @@ def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
 
 
 def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
@@ -437,20 +471,7 @@ def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path: Path) -> No
 
     ws = _ws(tmp_path)
     captures: dict[str, Any] = {}
-
-    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
-        captures["cwd"] = str(cwd)
-        captures["args"] = cmd
-        captures["env"] = env
-        # run_run assigns a fresh uuid4 job dir and records it in the ledger
-        # before spawning; write reward evidence into that recorded dir.
-        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-        job_dir = Path(ledger["runs"][0]["job_dir"])
-        verifier = job_dir / "case-abc" / "verifier"
-        verifier.mkdir(parents=True, exist_ok=True)
-        (verifier / "reward.json").write_text(json.dumps(
-            {"reward": 1.0, "verifier_error": 0, "gold_count": 1, "candidate_count": 1}))
-        return {"returncode": 0}
+    spawn = _reward_spawn(ws, capture=captures)
 
     code = run_mod.run_run(
         ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=_docker_ok,
@@ -476,16 +497,7 @@ def test_run_oracle_from_unrelated_cwd_resolves_harbor_cwd(tmp_path: Path, monke
     unrelated.mkdir()
     monkeypatch.chdir(unrelated)
     captured: dict[str, Any] = {}
-
-    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
-        captured["cwd"] = str(cwd)
-        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-        job_dir = Path(ledger["runs"][0]["job_dir"])
-        verifier = job_dir / "case-abc" / "verifier"
-        verifier.mkdir(parents=True, exist_ok=True)
-        (verifier / "reward.json").write_text(json.dumps(
-            {"reward": 1.0, "verifier_error": 0, "gold_count": 1, "candidate_count": 1}))
-        return {"returncode": 0}
+    spawn = _reward_spawn(ws, capture=captured)
 
     code = run_mod.run_run(
         ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=_docker_ok,
@@ -512,14 +524,7 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
-        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-        job_dir = Path(ledger["runs"][0]["job_dir"])
-        verifier = job_dir / "case-abc" / "verifier"
-        verifier.mkdir(parents=True, exist_ok=True)
-        (verifier / "reward.json").write_text(json.dumps(
-            {"reward": 0.5, "verifier_error": 0, "gold_count": 1, "candidate_count": 2}))
-        return {"returncode": 0}
+    spawn = _reward_spawn(ws, reward=0.5, candidate_count=2)
 
     code = run_mod.run_run(
         ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=_docker_ok,
@@ -531,8 +536,6 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
 
 
 def test_default_run_propagates_harbor_exit_code(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
@@ -580,14 +583,7 @@ def test_run_persists_trial_environments_to_ledger(tmp_path: Path) -> None:
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
-        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-        job = Path(ledger["runs"][0]["job_dir"])
-        (job / "case-abc" / "verifier").mkdir(parents=True)
-        (job / "case-abc" / "verifier" / "reward.json").write_text(
-            json.dumps({"reward": 1.0, "verifier_error": 0,
-                        "gold_count": 1, "candidate_count": 1}))
-        return {"returncode": 0}
+    spawn = _reward_spawn(ws)
 
     code = run_mod.run_run(ws, oracle=True, yes=True, env=_env(),
                            spawn=spawn, docker_ok=_docker_ok)
@@ -604,14 +600,7 @@ def test_run_failed_path_persists_environments_cleanup_pending(tmp_path: Path) -
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
-        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-        job = Path(ledger["runs"][0]["job_dir"])
-        (job / "case-abc" / "verifier").mkdir(parents=True)
-        (job / "case-abc" / "verifier" / "reward.json").write_text(
-            json.dumps({"reward": 0.5, "verifier_error": 0,
-                        "gold_count": 1, "candidate_count": 2}))
-        return {"returncode": 0}
+    spawn = _reward_spawn(ws, reward=0.5, candidate_count=2)
 
     code = run_mod.run_run(ws, oracle=True, yes=True, env=_env(),
                            spawn=spawn, docker_ok=_docker_ok)
@@ -672,13 +661,10 @@ def test_ledger_records_reviewer_effort_when_present(tmp_path: Path) -> None:
 
 
 def test_default_run_accepts_old_receipt_with_legacy_calibration_field(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    lock_sha = hashlib.sha256(
-        (ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    lock_sha = _compiled_lock_sha(ws)
     receipt = run_mod._current_state_mapping(
         ws, compiled_lock_sha256=lock_sha, env=_env())
     receipt["calibration_receipt_sha256"] = "0" * 64  # legacy extra field
@@ -689,21 +675,16 @@ def test_default_run_accepts_old_receipt_with_legacy_calibration_field(tmp_path:
 
 
 def test_oracle_receipt_has_no_calibration_state(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    lock_sha = hashlib.sha256(
-        (ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    lock_sha = _compiled_lock_sha(ws)
     mapping = run_mod._current_state_mapping(
         ws, compiled_lock_sha256=lock_sha, env=_env())
     assert "calibration_receipt_sha256" not in mapping
 
 
 def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
@@ -711,8 +692,7 @@ def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
     trial = job_dir / "t1" / "verifier"
     trial.mkdir(parents=True)
     (trial / "reward.json").write_text(json.dumps(_score(1.0)))  # gold reproduced
-    lock_sha = hashlib.sha256(
-        (ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    lock_sha = _compiled_lock_sha(ws)
     code = run_mod._write_oracle_receipt(ws, job_dir=job_dir,
                                          compiled_lock_sha256=lock_sha, env=_env())
     assert code == 0
@@ -722,13 +702,10 @@ def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
 
 
 def test_default_run_still_blocks_without_oracle_receipt(tmp_path: Path) -> None:
-    import hashlib
-
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    lock_sha = hashlib.sha256(
-        (ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    lock_sha = _compiled_lock_sha(ws)
     reason = run_mod._default_run_gate(ws, env=_env(), compiled_lock_sha256=lock_sha)
     assert reason is not None and "no matching oracle receipt" in reason
 

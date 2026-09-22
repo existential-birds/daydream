@@ -988,90 +988,89 @@ async def test_shallow_run_captures_recommended_patch(
 
 
 
-def test_fix_applied_signal_prefers_recommended_patch(tmp_path: Path) -> None:
-    """AC4: with both patches present, the signal parses recommended.patch hunks,
-    not diff.patch hunks — a run whose RECOMMENDATION landed labels 'applied' even
-    though the reviewed line is absent post-window."""
-    from daydream.training.labeler_signals import fix_applied_signal
-
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
-    # Post-window state carries the RECOMMENDED line but NOT the reviewed line.
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: "existing\nrecommended = 1\n",
-    )
-    assert sig.verdict == "applied"
-    assert sig.hunks_applied == 1
-    assert sig.hunks_total == 1
-
-
-def test_fix_applied_signal_falls_back_to_diff_patch(tmp_path: Path) -> None:
-    """AC4 backward compat: an old archive with only diff.patch still labels via
-    the diff.patch hunks."""
-    from daydream.training.labeler_signals import fix_applied_signal
-
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: "existing\nreviewed = 2\n",
-    )
-    assert sig.verdict == "applied"
-    assert sig.hunks_total == 1
-
-
-def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(
+@pytest.mark.parametrize(
+    (
+        "patches",
+        "manifest",
+        "post_window",
+        "expected_verdict",
+        "expected_hunks_total",
+        "expected_hunks_applied",
+    ),
+    [
+        # AC4: with both patches present, the signal parses recommended.patch
+        # hunks, not diff.patch hunks — a run whose RECOMMENDATION landed labels
+        # 'applied' even though the reviewed line is absent post-window.
+        pytest.param(
+            ("diff.patch", "recommended.patch"),
+            None,
+            "existing\nrecommended = 1\n",
+            "applied",
+            1,
+            1,
+            id="prefers-recommended-patch",
+        ),
+        # AC4 backward compat: an old archive with only diff.patch still labels
+        # via the diff.patch hunks.
+        pytest.param(
+            ("diff.patch",),
+            None,
+            "existing\nreviewed = 2\n",
+            "applied",
+            1,
+            None,
+            id="legacy-falls-back-to-diff-patch",
+        ),
+        # A new-format archive (manifest recommended_patch_supported=True) with
+        # no recommended.patch made NO recommendation (review-only /
+        # all-declined / wash). The cascade must score zero hunks and NOT fall
+        # back to diff.patch (the PR-under-review diff), even when diff.patch's
+        # line is present post-window — otherwise such runs are mislabeled.
+        pytest.param(
+            ("diff.patch",),
+            {"schema_version": "1.0", "recommended_patch_supported": True},
+            "existing\nreviewed = 2\n",
+            "not_applied",
+            0,
+            None,
+            id="new-format-no-recommendation-skips-fallback",
+        ),
+    ],
+)
+def test_fix_applied_signal_selects_patch_and_verdict(
     tmp_path: Path,
+    patches: tuple[str, ...],
+    manifest: dict[str, Any] | None,
+    post_window: str,
+    expected_verdict: str,
+    expected_hunks_total: int,
+    expected_hunks_applied: int | None,
 ) -> None:
-    """A new-format archive (manifest ``recommended_patch_supported=True``) with
-    no ``recommended.patch`` made NO recommendation (review-only / all-declined /
-    wash). The cascade must score zero hunks and NOT fall back to ``diff.patch``
-    (the PR-under-review diff), even when diff.patch's line is present
-    post-window — otherwise such runs are mislabeled 'applied'."""
     from daydream.training.labeler_signals import fix_applied_signal
 
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"schema_version": "1.0", "recommended_patch_supported": True})
-    )
+    added_lines = {"diff.patch": "reviewed = 2", "recommended.patch": "recommended = 1"}
+    for name in patches:
+        (tmp_path / name).write_text(diff_adding(added_lines[name]))
+    if manifest is not None:
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
         "base_branch": "main",
         "archive_path": str(tmp_path),
     }
-    # Post-window carries the REVIEWED line; diff.patch would match if the
-    # (forbidden) fallback fired.
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
         repo_clone=tmp_path,
         diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: "existing\nreviewed = 2\n",
+        file_at_fetcher=lambda repo, path, sha: post_window,
     )
-    assert sig.hunks_total == 0
-    assert sig.verdict == "not_applied"
+    assert sig.verdict == expected_verdict
+    assert sig.hunks_total == expected_hunks_total
+    if expected_hunks_applied is not None:
+        assert sig.hunks_applied == expected_hunks_applied
 
 
 @pytest.mark.parametrize(
