@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,7 @@ from daydream.deep.prompts import (
     build_generic_fallback_prompt,
     build_per_stack_prompt,
 )
-from daydream.extensions import get_registry
+from daydream.extensions import Registry, get_registry
 from daydream.output_schema import strict_object
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
@@ -137,10 +137,12 @@ def prepare_finite_review(
     backend: Backend, repo: Path, *, stack_name: str, files: list[str], strategy: str,
     diff_path: Path, inputs: PreparedSanctionedInputs | None,
     interactive: bool, intent_authoritative: bool = False, prior_commits: str | None = None,
+    registry: Registry | None = None,
 ) -> FiniteReview | None:
     """Return a complete bounded packet, or leave the existing reviewer in charge."""
     role = "discovery.generic_fallback" if stack_name == "generic" else "discovery.per_stack"
-    builder = get_registry().prompt("generic-fallback" if stack_name == "generic" else "per-stack")
+    active_registry = registry if registry is not None else get_registry()
+    builder = active_registry.prompt("generic-fallback" if stack_name == "generic" else "per-stack")
     default_builder = build_generic_fallback_prompt if stack_name == "generic" else build_per_stack_prompt
     if (interactive or not isinstance(backend, PiBackend)
             or not getattr(backend, "supports_tools_disabled", False) or stack_name == "structure"
@@ -215,6 +217,7 @@ def prepare_finite_review(
 
 def delegate_structural_review(
     packets: dict[str, FiniteReview | None], scopes: dict[str, list[str]], strategy: str,
+    *, structural_prompt_builder: Callable[..., str],
 ) -> dict[str, FiniteReview] | None:
     """Delegate the default global lens only when every primary owns a full packet."""
     from daydream.deep.prompts import build_structural_prompt
@@ -222,7 +225,7 @@ def delegate_structural_review(
     default = build_default_profile().strategies["discovery.structural"].content
     if (
         strategy not in {default, default + "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION}
-        or get_registry().prompt("structural") is not build_structural_prompt
+        or structural_prompt_builder is not build_structural_prompt
         or not scopes.get("structure")
     ):
         return None

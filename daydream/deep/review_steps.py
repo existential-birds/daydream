@@ -331,13 +331,21 @@ async def _step_intent(ctx: FlowContext) -> None:
     deep_state.intent_path = intent_p
 
 
+def _fold_default_alternatives(ctx: FlowContext) -> bool:
+    """Use the scheduled run's builder for every alternatives scheduling decision."""
+    stacks = DeepState(ctx.data).stacks
+    return any(stack.stack_name == "structure" for stack in stacks) and fold_default_alternatives(
+        stacks, ctx.strategy("alternatives"), structural_prompt_builder=ctx.registry.prompt("structural"),
+    )
+
+
 async def _wonder(ctx: FlowContext) -> None:
     """TTT alternative-review (tier-gated) + its artifact write."""
     deep_state = DeepState(ctx.data)
     intent_summary = deep_state.intent_summary
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-    if fold_default_alternatives(deep_state.stacks, ctx.strategy("alternatives")):
+    if _fold_default_alternatives(ctx):
         alt_issues: list[dict[str, Any]] = []
         print_dim(console, "Design alternatives are included in the structural review")
     elif deep_state.tier == "skip":
@@ -386,7 +394,7 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
     # A resume (--start-at per-stack/merge/fix) skips wonder entirely — its
     # artifact is already on disk, which is also why the pointer stays on.
     run_wonder = fresh_ttt(ctx.config)
-    folded = fold_default_alternatives(deep_state.stacks, ctx.strategy("alternatives"))
+    folded = _fold_default_alternatives(ctx)
     concurrent = run_wonder and not folded and not deep_state.single_stack_mode
     holder: dict[str, BaseException | None] = {"exc": None}
 
@@ -420,7 +428,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     failed_stacks: dict[str, str] = deep_state.failed_stacks
     if config.start_at not in ("merge", "fix"):
         structural_strategy = ctx.strategy("discovery.structural")
-        if fold_default_alternatives(stacks, ctx.strategy("alternatives")):
+        if _fold_default_alternatives(ctx):
             from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION
 
             if FOLDED_ALTERNATIVES_INSTRUCTION not in structural_strategy:
@@ -431,6 +439,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 ctx.backend_for("per_stack_review"),
                 ctx.work,
                 stacks,
+                registry=ctx.registry,
                 diff_path=deep_state.diff_path,
                 intent_path=deep_state.intent_path,
                 alternatives_path=deep_state.alts_path,

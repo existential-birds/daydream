@@ -1,5 +1,6 @@
 """Default design review shares the structural pass without losing coverage."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ import pytest
 
 from daydream.deep.artifacts import per_stack_failures_path
 from daydream.deep.detection import StackAssignment
+from daydream.deep.prompts import build_structural_prompt
 from daydream.deep.review_steps import _step_wonder_and_per_stack
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
@@ -86,8 +88,10 @@ def _context(
     stacks = [StackAssignment("python", ["app.py"])]
     if structural:
         stacks.append(StackAssignment("structure", ["app.py"]))
+    registry = Registry()
+    registry.override_prompt("structural", build_structural_prompt)
     ctx = FlowContext(
-        config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=Registry(),
+        config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=registry,
         review_profile=resolved,
         data={"dd": dd, "stacks": stacks, "tier": "single", "single_stack_mode": False,
               "intent_summary": "Preserve behavior", "intent_path": dd / "intent.md",
@@ -108,3 +112,33 @@ def _context(
     monkeypatch.setattr("daydream.deep.review_steps.phase_alternative_review", alternative)
     monkeypatch.setattr("daydream.deep.review_steps.phase_per_stack_reviews", reviews)
     return ctx, calls
+
+
+@pytest.mark.parametrize("start_at", ["review", "per-stack"])
+async def test_custom_structural_builder_preserves_independent_alternatives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
+    start_at: str,
+) -> None:
+    ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work, start_at=start_at)
+    ctx.registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
+    original_strategy = ctx.strategy("discovery.structural")
+    findings = [{"title": "retained design finding"}]
+
+    async def alternatives(*args: Any, **kwargs: Any) -> list[Any]:
+        calls["alternatives"].append(kwargs)
+        return findings
+
+    monkeypatch.setattr("daydream.deep.review_steps.phase_alternative_review", alternatives)
+    messages: list[str] = []
+    monkeypatch.setattr("daydream.deep.review_steps.print_dim", lambda _, message: messages.append(message))
+    if start_at == "per-stack":
+        ctx.data["alts_path"].write_text(json.dumps(findings))
+    await _step_wonder_and_per_stack(ctx)
+    assert len(calls["alternatives"]) == (1 if start_at == "review" else 0)
+    assert json.loads(ctx.data["alts_path"].read_text()) == findings
+    assert calls["reviews"][0]["registry"] is ctx.registry
+    assert calls["reviews"][0]["strategies"]["discovery.structural"] == original_strategy
+    assert not any("included in the structural review" in message for message in messages)
+    if start_at == "per-stack":
+        assert calls["reviews"][0]["include_alternatives"]
+        assert calls["reviews"][0]["alternatives_path"] == ctx.data["alts_path"]

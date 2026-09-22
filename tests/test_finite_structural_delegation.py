@@ -43,11 +43,11 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         strategies["discovery.structural"] += "\nCUSTOM POLICY"
     if mode == "custom_primary":
         strategies["discovery.per_stack"] += "\nCUSTOM POLICY"
+    registry = None
     if mode == "custom_builder":
         registry = Registry()
         registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
         registry.override_prompt("per-stack", build_per_stack_prompt)
-        monkeypatch.setattr("daydream.deep.finite_review.get_registry", lambda: registry)
     if mode == "folded":
         strategies["discovery.structural"] += "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION
     structural_files = files + (["unowned.py"] if mode == "unowned" else [])
@@ -123,6 +123,7 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
         alternatives_path=alternatives, strategies=strategies, allow_standalone=True,
         write_coverage_receipts=True,
+        **({"registry": registry} if registry is not None else {}),
         run_context=RunContext(InteractionPolicy(interactive=False)),
     )
     if mode in fallback_modes:
@@ -150,6 +151,9 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         assert not any(path.exists() for path in (delegation, structural_record, structural_report))
         assert not list(deep.glob("structural-delegation*.tmp"))
         return
+    if mode == "custom_builder":
+        assert traditional == ["CUSTOM STRUCTURAL BUILDER"]
+        assert len(packets) == 2
     if mode != "complete":
         assert traditional
         assert not delegation.exists()

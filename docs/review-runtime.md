@@ -427,10 +427,12 @@ reach the primary reviewers; the optimization removes advisory discovery work,
 not correctness review. Exploration caches include strategy identity so cached
 default results cannot suppress a custom exploration policy.
 
-When structural review is scheduled, it also owns the packaged default design
-alternatives check. The host omits the independent default alternatives invocation
-and writes its empty compatibility artifact. Custom alternatives strategies and
-runs without structural review retain their independent pass. Structural failures
+When structural review uses the built-in structural prompt builder, it also owns
+the packaged default design alternatives check. The host omits the independent
+default alternatives invocation and writes its empty compatibility artifact.
+Custom alternatives strategies, custom structural prompt builders (including
+wrappers), and runs without structural review retain their independent pass.
+Structural failures
 retain incomplete-review warnings; resume preserves prior alternatives and the
 structural design responsibility. This removes a duplicated investigation without
 raising limits or dropping design review.

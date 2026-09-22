@@ -50,7 +50,7 @@ from daydream.config import (
     TEST_WALL_BUDGET_S,
 )
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
-from daydream.extensions import get_registry
+from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import (
@@ -4286,11 +4286,13 @@ async def phase_per_stack_reviews(
     include_alternatives: bool = True,
     write_coverage_receipts: bool = False,
     strategies: dict[str, str] | None = None,
+    registry: Registry | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result."""
+    active_registry = registry if registry is not None else get_registry()
     run_context = resolve_run_context(run_context)
     # Every ``daydream.deep.*`` import in this module is function-local, and must
     # stay that way: ``daydream.deep.__init__`` imports ``orchestrator``, which
@@ -4380,12 +4382,16 @@ async def phase_per_stack_reviews(
             strategy=strategies[
                 "discovery.generic_fallback" if stack.stack_name == "generic" else "discovery.per_stack"
             ], diff_path=diff_path, inputs=inputs, interactive=run_context.policy.interactive,
-            intent_authoritative=intent_authoritative, prior_commits=prior_commits,
+            intent_authoritative=intent_authoritative, prior_commits=prior_commits, registry=active_registry,
         )
         prepared[stack.stack_name] = (inline_diff, inputs, finite)
     scopes = {stack.stack_name: stack.files for stack in stacks}
-    delegated = delegate_structural_review(
-        {name: values[2] for name, values in prepared.items()}, scopes, strategies["discovery.structural"],
+    delegated = (
+        delegate_structural_review(
+            {name: values[2] for name, values in prepared.items()}, scopes, strategies["discovery.structural"],
+            structural_prompt_builder=active_registry.prompt("structural"),
+        )
+        if STRUCTURE_STACK_NAME in scopes else None
     )
     delegation_path = deep_dir_path / "structural-delegation.json"
     delegation_temp = delegation_path.with_suffix(".json.tmp")
@@ -4417,7 +4423,7 @@ async def phase_per_stack_reviews(
                 # prompt is not inlined — the lens legitimately roams beyond
                 # the diff, so it keeps its diff_path pointer and repo-wide
                 # Read/Grep/Bash freedom. No skill invocation is emitted.
-                prompt = get_registry().prompt("structural")(
+                prompt = active_registry.prompt("structural")(
                     strategy=strategies["discovery.structural"],
                     files=stack.files,
                     diff_path=diff_path,
@@ -4437,7 +4443,7 @@ async def phase_per_stack_reviews(
                 from daydream.deep.detection import GENERIC_STACK
 
                 if stack.stack_name == GENERIC_STACK:
-                    prompt = get_registry().prompt("generic-fallback")(
+                    prompt = active_registry.prompt("generic-fallback")(
                         strategy=strategies["discovery.generic_fallback"],
                         files=stack.files,
                         diff_path=diff_path,
@@ -4457,7 +4463,7 @@ async def phase_per_stack_reviews(
                     # Per-stack reviewer for language + fork stacks. The review
                     # judgment policy is the profile-owned per-stack strategy;
                     # built-in stacks carry no skill (M2).
-                    prompt = get_registry().prompt("per-stack")(
+                    prompt = active_registry.prompt("per-stack")(
                         strategy=strategies["discovery.per_stack"],
                         stack_name=stack.stack_name,
                         files=stack.files,

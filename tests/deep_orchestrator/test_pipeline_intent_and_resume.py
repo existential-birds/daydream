@@ -524,8 +524,19 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
 
 
-async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("custom_builder", [False, True])
+async def test_preflight_notice(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, custom_builder: bool,
+) -> None:
     """D-30: pre-flight notice lists stages, stacks, and agent count."""
+    if custom_builder:
+        from daydream.extensions import Registry
+        from daydream.extensions.builtins import register_builtins
+
+        registry = Registry()
+        register_builtins(registry)
+        registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
+        monkeypatch.setattr("daydream.deep.orchestrator.get_registry", lambda: registry)
     captured: list[dict[str, Any]] = []
 
     def _capture(
@@ -558,14 +569,14 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     notice = captured[0]
     assert notice["stages"] == [
         "TTT intent",
-        "design alternatives (included in structural review)",
+        "TTT alternative-review" if custom_builder else "design alternatives (included in structural review)",
         "per-stack reviews",
         "structural review (parallel with per-stack reviews)",
         "cross-stack merge",
         "optional fix gate",
     ]
     # Folding default alternatives removes one invocation from the legacy estimate.
-    assert notice["agent_count"] == 11
+    assert notice["agent_count"] == (12 if custom_builder else 11)
     assert notice["stack_lines"] == [
         "python: 1 file(s)",
         "react: 1 file(s)",

@@ -845,7 +845,13 @@ async def _run_review_spine(
         default_profile = build_default_profile()
         profile = config.review_profile.profile if config.review_profile is not None else default_profile
         alternatives_strategy = profile.strategies.get("alternatives", default_profile.strategies["alternatives"])
-        folded_alternatives = fold_default_alternatives(stacks, alternatives_strategy.content)
+        registry = get_registry()
+        folded_alternatives = (
+            any(stack.stack_name == STRUCTURE_STACK_NAME for stack in stacks)
+            and fold_default_alternatives(
+                stacks, alternatives_strategy.content, structural_prompt_builder=registry.prompt("structural"),
+            )
+        )
         if folded_alternatives:
             notice_agent_count -= 1
         # Issue #1113: the notice hardcodes "Deep-review pipeline pre-flight",
@@ -894,7 +900,7 @@ async def _run_review_spine(
         ctx = FlowContext(
             config=config,
             work=work,
-            registry=get_registry(),
+            registry=registry,
             review_profile=config.review_profile,
             private_workspace_owner=None if run_artifacts is None else run_artifacts.owner,
             artifacts=None if run_artifacts is None else run_artifacts.session,
