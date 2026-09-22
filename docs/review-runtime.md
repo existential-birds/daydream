@@ -505,11 +505,30 @@ When every primary reviewer qualifies for this protocol, their assigned-file
 union exactly covers the structural scope, and the structural policy and prompt
 builder are defaults, those reviewers also own structural checks involving their
 assigned files. Each receives the full change partition and the structural and
-canonical-design criteria. Cross-stack synthesis remains. An explicit delegation
-artifact records ownership; empty structural compatibility records do not claim
-file coverage. A failed owner leaves its delegated scope incomplete. Custom
-builders or policies, an uncovered structural file, or an ineligible primary
-retain the separate structural reviewer.
+canonical-design criteria. Cross-stack synthesis remains. These are candidate
+owners until every primary completes with valid structured output. Any incomplete
+owner, timeout, exception, or invalid output triggers the ordinary structural
+reviewer before the phase finishes; the original primary failure remains visible.
+Custom builders or policies, an uncovered structural file, or an ineligible
+primary retain the separate structural reviewer.
+
+Delegated calls label each finding `per-stack` for a local implementation defect
+or `structural` for a boundary, canonical-design, lifecycle, or cross-component
+defect. The host removes these invocation-only labels, writes local findings with
+primary UIDs, and reconciles each primary verdict against its local findings.
+When all owners complete, the host aggregates structural findings in primary scope
+order into `stack-structure-records.json`, assigns `structure:N` UIDs, and writes
+an empty verdict list plus `delegated_to`. It writes `structural-delegation.json`
+last as the commit marker, after the structural records and report succeed.
+Uncommitted structural candidates are discarded in favor of the fallback review.
+
+Fresh parsing and `--start-at merge` or `fix` validate the committed sidecar scopes,
+`delegated_to`, and structural UID partition before trusting delegated completion.
+The structure artifact can contain findings; its empty verdict list does not
+claim independent file coverage. Structure UIDs remain the durable provenance
+through merge, suppression, evidence handling, and reporting, including after
+adjudication rewrites the records. Older runs that lost findings need a fresh
+review; resume does not reconstruct them.
 
 Two additional high-effort fixtures checked this combined responsibility. One
 found a changed consumer's unit mismatch against a producer owned by another

@@ -1070,6 +1070,14 @@ PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
     }),
 }
 
+# Invocation-only classification for finite primaries that own structural review.
+# Consume the label before writing records; durable provenance remains host-owned.
+DELEGATED_PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(PER_STACK_RECORD_SCHEMA)
+DELEGATED_PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["lens"] = {
+    "type": "string", "enum": ["per-stack", "structural"],
+}
+DELEGATED_PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"].append("lens")
+
 # Uncovered-sweep parse schema (issue #742 finding 2). The sweep re-runs a
 # bare per-file review that never declares a per-file verdict surface, so its
 # parse must NOT force a required ``verdicts`` array: the sweep parse runs with
@@ -4271,6 +4279,19 @@ async def phase_alternative_review(
 # Deep-mode: per-stack fan-out
 
 
+def _partition_delegated_issues(
+    issues: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Consume validated invocation labels without mutating model output."""
+    local: list[dict[str, Any]] = []
+    structural: list[dict[str, Any]] = []
+    for issue in issues:
+        record = dict(issue)
+        lens = record.pop("lens")
+        (structural if lens == "structural" else local).append(record)
+    return local, structural
+
+
 @bind_resolved_run_context
 async def phase_per_stack_reviews(
     backend: Backend,
@@ -4330,6 +4351,7 @@ async def phase_per_stack_reviews(
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
     completion: dict[str, bool] = {}
+    delegated_issues: dict[str, list[dict[str, Any]]] = {}
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
     )
@@ -4492,6 +4514,8 @@ async def phase_per_stack_reviews(
                                    if intent_authoritative else "Intent is advisory context.")),
             )
             stack_name = stack.stack_name
+            delegated_owner = delegated is not None and stack_name in delegated
+            record_schema = DELEGATED_PER_STACK_RECORD_SCHEMA if delegated_owner else PER_STACK_RECORD_SCHEMA
             completion[stack_name] = False
             structured: Any = None
             budget_reason: str | None = None
@@ -4509,7 +4533,7 @@ async def phase_per_stack_reviews(
                         # can read its completed reads from disk.
                         if finite is not None:
                             outcome = await run_finite_review(
-                                backend, work.repo, finite, schema=PER_STACK_RECORD_SCHEMA,
+                                backend, work.repo, finite, schema=record_schema,
                                 run_context=run_context,
                             )
                             structured = outcome.output
@@ -4543,8 +4567,8 @@ async def phase_per_stack_reviews(
                     )
                 from daydream.agent import _validates_schema
 
-                if delegated is not None and stack_name in delegated:
-                    if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                if delegated_owner:
+                    if not _validates_schema(structured, record_schema):
                         failures[stack_name] = "invalid delegated structured output"
                         return
                 if budget_reason:
@@ -4553,7 +4577,7 @@ async def phase_per_stack_reviews(
                     # "Uncovered stacks" instead of silently shipping
                     # a partial review as a complete one.
                     failures[stack_name] = f"budget exhausted: {budget_reason}"
-                    if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                    if not _validates_schema(structured, record_schema):
                         return
                 if not isinstance(structured, dict):
                     failures[stack_name] = "no structured output produced"
@@ -4580,6 +4604,8 @@ async def phase_per_stack_reviews(
                 # record object. The copy makes the stamped list this
                 # phase's own, so per-stack uid minting stays independent.
                 issues = [dict(issue) for issue in raw_issues if isinstance(issue, dict)]
+                if delegated_owner:
+                    issues, delegated_issues[stack_name] = _partition_delegated_issues(issues)
                 # Mint each record's referential identity (issue #1111). This
                 # is post-validation and host-side: ``run_agent`` already
                 # validated ``structured`` against PER_STACK_RECORD_SCHEMA
@@ -4596,6 +4622,13 @@ async def phase_per_stack_reviews(
                 declared = (
                     declared_verdicts if isinstance(declared_verdicts, list) and not budget_reason else []
                 )
+                if delegated_owner:
+                    declared = [dict(verdict) for verdict in declared]
+                    for verdict in declared:
+                        count = sum(issue["file"] == verdict["path"] for issue in issues)
+                        verdict["n_findings"] = count
+                        if verdict["verdict"] != "not_reviewed":
+                            verdict["verdict"] = "has_findings" if count else "clean"
                 # Persist the records file with the DECLARED verdicts for
                 # now; final verdict reconciliation happens in
                 # ``_step_per_stack_parse`` AFTER the fan-out completes and
@@ -4616,7 +4649,7 @@ async def phase_per_stack_reviews(
                 results[stack_name] = output_path
 
                 completion[stack_name] = (
-                    stack_name not in failures and _validates_schema(structured, PER_STACK_RECORD_SCHEMA)
+                    stack_name not in failures and _validates_schema(structured, record_schema)
                 )
 
         async with anyio.create_task_group() as tg:
@@ -4629,11 +4662,17 @@ async def phase_per_stack_reviews(
                     "primary_scopes": {name: scopes[name] for name in delegated},
                     "status": "delegated; completion is recorded in each primary review",
                 }
-                compatibility = {"issues": [], "verdicts": [], "delegated_to": list(delegated)}
+                structural_issues = [issue for name in delegated for issue in delegated_issues[name]]
+                stamp_record_uids(structural_issues, STRUCTURE_STACK_NAME)
+                compatibility = {"issues": structural_issues, "verdicts": [], "delegated_to": list(delegated)}
                 try:
                     structural_records.write_text(json.dumps(compatibility, indent=2))
                     structural_output.write_text(
-                        "# Structural review\n\nDelegated to primary reviewers: " + ", ".join(delegated),
+                        "# Structural review\n\nDelegated to primary reviewers: " + ", ".join(delegated)
+                        + "\n\n" + "\n".join(
+                            f"- {issue['file']}:{issue['line']} {issue['description']}"
+                            for issue in structural_issues
+                        ),
                     )
                     results[STRUCTURE_STACK_NAME] = structural_output
                     delegation_temp.write_text(json.dumps(delegation, indent=2))

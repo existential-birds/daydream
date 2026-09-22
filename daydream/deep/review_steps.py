@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -560,7 +561,11 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         delegated_to = loaded.get("delegated_to") if isinstance(loaded, dict) else None
         delegated_structure = (
             stack.stack_name == STRUCTURE_STACK_NAME and confirmed_delegation
-            and isinstance(loaded, dict) and loaded.get("issues") == [] and loaded.get("verdicts") == []
+            and isinstance(loaded, dict) and isinstance(loaded.get("issues"), list)
+            and len(issues) == len(loaded["issues"]) and loaded.get("verdicts") == []
+            and all(re.fullmatch(r"structure:[1-9][0-9]*", record_uid(issue)) for issue in issues)
+            and all("lens" not in issue for issue in issues)
+            and not loaded.get("incomplete")
             and isinstance(delegated_to, list) and all(isinstance(name, str) for name in delegated_to)
             and sorted(delegated_to) == sorted(primary_scopes)
         )

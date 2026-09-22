@@ -250,7 +250,10 @@ def delegate_structural_review(
         "of each relevant boundary using supplied evidence or the single request batch. Verify any proposed canonical "
         "replacement exists and is compatible. Report only demonstrated triggers, consequences and precise evidence "
         "in your assigned files. Mark unresolved dependent files not_reviewed. Close resolved candidates and emit "
-        "the existing local and structural judgment together; global context does not add review targets."
+        "the existing local and structural judgment together; global context does not add review targets. "
+        'Label each issue with lens="per-stack" for a local implementation defect, or lens="structural" '
+        "for a boundary, canonical-design, lifecycle or cross-component defect found under this delegated duty. "
+        "This classification is separate from the issue id; the host assigns durable record identity."
     )
     partition = json.dumps({"global_changed_file_partition": primaries}, ensure_ascii=False)
     return {

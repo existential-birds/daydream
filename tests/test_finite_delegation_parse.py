@@ -16,14 +16,18 @@ from daydream.run_context import InteractionPolicy, RunContext
 
 
 @pytest.mark.parametrize("start_at", [None, "merge", "fix"])
+@pytest.mark.parametrize("uids", [[], ["structure:1", "structure:3"]])
 async def test_parse_preserves_confirmed_structural_delegation(
-    tmp_path: Path, make_config: Any, make_work: Any, start_at: str | None,
+    tmp_path: Path, make_config: Any, make_work: Any, start_at: str | None, uids: list[str],
 ) -> None:
     dd = tmp_path / ".daydream/deep"
     dd.mkdir(parents=True)
     primary = {"issues": [], "verdicts": [], "source_evidence": [{"path": "api.py", "sha256": "abc", "lines": 1}]}
     (dd / "stack-python-records.json").write_text(json.dumps(primary))
-    delegated = {"issues": [], "verdicts": [], "delegated_to": ["python"]}
+    issues = [{"id": 1, "uid": uid, "file": "api.py", "line": 1, "description": "Boundary mismatch",
+               "severity": "high", "confidence": "HIGH", "rationale": "Shared contract", "evidence": "api.py:1"}
+              for uid in uids]
+    delegated = {"issues": issues, "verdicts": [], "delegated_to": ["python"]}
     path = dd / "stack-structure-records.json"
     path.write_text(json.dumps(delegated))
     (dd / "structural-delegation.json").write_text(json.dumps({
@@ -38,7 +42,8 @@ async def test_parse_preserves_confirmed_structural_delegation(
     assert await _step_per_stack_parse(ctx) is None
     assert json.loads(path.read_text()) == delegated
     assert json.loads((dd / "stack-python-records.json").read_text())["source_evidence"] == primary["source_evidence"]
-    assert ctx.data["structural_records"] == []
+    assert ctx.data["structural_records"] == issues
+    assert ctx.data["records"] == []
 
 
 @pytest.mark.parametrize("sidecar", [
@@ -120,3 +125,50 @@ async def test_per_stack_rerun_clears_stale_delegation_before_review(
     assert "delegated_to" not in json.loads(artifacts[1].read_text())
     assert artifacts[2].read_text().startswith("# Review")
     assert set(ctx.data["failed_stacks"]) == {"python"}
+
+
+def _mark_delegated_artifacts(deep: Path, scopes: dict[str, list[str]]) -> None:
+    """Add the committed host metadata to a primed structural record fixture."""
+    from daydream.deep.records import stamp_record_uids
+
+    path = deep / "stack-structure-records.json"
+    loaded = json.loads(path.read_text())
+    issues = loaded if isinstance(loaded, list) else loaded["issues"]
+    stamp_record_uids(issues, "structure")
+    path.write_text(json.dumps({"issues": issues, "verdicts": [], "delegated_to": list(scopes)}))
+    (deep / "structural-delegation.json").write_text(json.dumps({
+        "primary_scopes": scopes, "structural_files": [file for files in scopes.values() for file in files],
+    }))
+
+
+@pytest.mark.parametrize("change", [
+    {"uid": "python:1"}, {"uid": "structure:0"}, {"uid": "structure:bad"},
+    {"lens": "structural"}, {"delegated_to": ["react"]},
+])
+async def test_parse_rejects_inconsistent_delegated_record_partition(
+    tmp_path: Path, make_config: Any, make_work: Any, change: dict[str, Any],
+) -> None:
+    dd = tmp_path / ".daydream/deep"
+    dd.mkdir(parents=True)
+    (dd / "stack-python-records.json").write_text('{"issues": [], "verdicts": []}')
+    issue = {"id": 1, "file": "api.py", "line": 1, "description": "Boundary mismatch", "uid": "structure:1",
+             "severity": "high", "confidence": "HIGH", "rationale": "Shared contract", "evidence": "api.py:1"}
+    issue.update({key: value for key, value in change.items() if key != "delegated_to"})
+    path = dd / "stack-structure-records.json"
+    path.write_text(json.dumps({"issues": [issue], "verdicts": []}))
+    _mark_delegated_artifacts(dd, {"python": ["api.py"]})
+    if "delegated_to" in change:
+        loaded = json.loads(path.read_text())
+        loaded["delegated_to"] = change["delegated_to"]
+        path.write_text(json.dumps(loaded))
+    ctx = FlowContext(
+        config=make_config(tmp_path), work=make_work(tmp_path), registry=Registry(),
+        data={"dd": dd, "stacks": [StackAssignment("python", ["api.py"]),
+                                  StackAssignment("structure", ["api.py"])], "failed_stacks": {}},
+    )
+    assert await _step_per_stack_parse(ctx) is None
+    saved = json.loads(path.read_text())
+    assert "delegated_to" not in saved
+    assert saved["issues"] == [issue]
+    assert saved["verdicts"][0]["verdict"] == "has_findings"
+    assert saved["verdicts"][0]["n_findings"] == 1

@@ -123,7 +123,7 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
         alternatives_path=alternatives, strategies=strategies, allow_standalone=True,
         write_coverage_receipts=True,
-        **({"registry": registry} if registry is not None else {}),
+        registry=registry,
         run_context=RunContext(InteractionPolicy(interactive=False)),
     )
     if mode in fallback_modes:
@@ -166,6 +166,8 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         assert all(path in packet.prompt for path in files)
         assert "canonical" in packet.system_instructions
         assert "shared contracts" in packet.system_instructions
+        assert 'lens="per-stack"' in packet.system_instructions
+        assert 'lens="structural"' in packet.system_instructions
         assert "Review the repository-wide interactions" not in packet.system_instructions
         assert "global context does not add review targets" in packet.system_instructions
     saved = json.loads(delegation.read_text())
@@ -173,3 +175,105 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
     assert saved["structural_files"] == files
     assert json.loads((deep / "stack-structure-records.json").read_text())["verdicts"] == []
     assert ("python" in failures) == (mode == "incomplete")
+
+
+@pytest.mark.parametrize("mode", ["mixed", "structural_only", "missing_lens", "invalid_lens", "incomplete"])
+async def test_delegated_findings_route_by_lens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], mode: str,
+) -> None:
+    import copy
+
+    import anyio
+
+    from daydream.phases import PER_STACK_RECORD_SCHEMA
+
+    scopes = {"python": ["api.py"], "react": ["web.ts"]}
+    for files in scopes.values():
+        (tmp_path / files[0]).write_text("value = 1\n")
+    diff = tmp_path / "diff.patch"
+    diff.write_text("".join(
+        f"diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-value = 0\n+value = 1\n"
+        for files in scopes.values() for file in files
+    ))
+    intent = tmp_path / "intent.md"
+    intent.write_text("Preserve shared contracts")
+    alternatives = tmp_path / "alternatives.json"
+    alternatives.write_text("[]")
+    original_schema = copy.deepcopy(PER_STACK_RECORD_SCHEMA)
+    outputs: list[dict[str, Any]] = []
+    schemas: list[dict[str, Any]] = []
+    finished: list[str] = []
+    fallback: list[str] = []
+
+    async def finite(*args: Any, **kwargs: Any) -> FiniteResult:
+        review = args[2]
+        file = review.sources[0].path
+        if file == "api.py":
+            await anyio.sleep(0.01)  # Complete in reverse scope order.
+        schemas.append(kwargs["schema"])
+        issue = {"id": 1, "file": file, "line": 1, "description": f"{file} boundary mismatch",
+                 "severity": "high", "confidence": "HIGH", "rationale": "Shared contract differs",
+                 "evidence": f"{file}:1", "lens": "structural"}
+        issues = [issue]
+        if mode != "structural_only":
+            issues.append({**issue, "description": f"{file} local defect", "lens": "per-stack"})
+        if file == "api.py" and mode == "missing_lens":
+            issue.pop("lens")
+        if file == "api.py" and mode == "invalid_lens":
+            issue["lens"] = "unknown"
+        incomplete = file == "api.py" and mode == "incomplete"
+        output = {"issues": issues, "verdicts": [{"path": file, "lines_read": 1,
+                  "verdict": "not_reviewed" if incomplete else "has_findings", "n_findings": len(issues)}]}
+        outputs.append(output)
+        finished.append(file)
+        return FiniteResult(output, "evidence_incomplete" if incomplete else None,
+                            frozenset() if incomplete else frozenset([file]),
+                            tuple(source.metadata() for source in review.sources))
+
+    async def normal(*args: Any, **kwargs: Any) -> Any:
+        fallback.append(args[2])
+        return {"issues": [{"id": 1, "file": "api.py", "line": 1, "description": "Fallback boundary finding",
+                            "severity": "high", "confidence": "HIGH", "rationale": "Independent fallback",
+                            "evidence": "api.py:1"}], "verdicts": []}, None, None
+
+    monkeypatch.setattr("daydream.deep.finite_review.run_finite_review", finite)
+    monkeypatch.setattr("daydream.phases.run_agent", normal)
+    _, failures = await phase_per_stack_reviews(
+        PiBackend(model="test", reasoning_effort="high"), make_work(tmp_path),
+        [*(StackAssignment(name, files) for name, files in scopes.items()),
+         StackAssignment("structure", ["api.py", "web.ts"])],
+        diff_path=diff, diff_text=diff.read_text(), intent_path=intent, alternatives_path=alternatives,
+        allow_standalone=True, run_context=RunContext(InteractionPolicy(interactive=False)),
+    )
+    deep = tmp_path / ".daydream/deep"
+    structural = json.loads((deep / "stack-structure-records.json").read_text())
+    assert PER_STACK_RECORD_SCHEMA == original_schema
+    if mode in {"missing_lens", "invalid_lens", "incomplete"}:
+        assert "python" in failures
+        assert len(fallback) == 1
+        assert not (deep / "structural-delegation.json").exists()
+        assert "delegated_to" not in structural
+        assert [issue["description"] for issue in structural["issues"]] == ["Fallback boundary finding"]
+        return
+    assert failures == {}
+    assert fallback == []
+    assert finished == ["web.ts", "api.py"]
+    assert structural["delegated_to"] == list(scopes)
+    assert structural["verdicts"] == []
+    assert [issue["uid"] for issue in structural["issues"]] == ["structure:1", "structure:2"]
+    assert [issue["description"] for issue in structural["issues"]] == [
+        "api.py boundary mismatch", "web.ts boundary mismatch",
+    ]
+    for name, files in scopes.items():
+        saved = json.loads((deep / f"stack-{name}-records.json").read_text())
+        assert [issue["uid"] for issue in saved["issues"]] == ([] if mode == "structural_only" else [f"{name}:1"])
+        assert all(issue["description"] == f"{files[0]} local defect" for issue in saved["issues"])
+        assert saved["verdicts"][0]["n_findings"] == (0 if mode == "structural_only" else 1)
+        assert saved["verdicts"][0]["verdict"] == ("clean" if mode == "structural_only" else "has_findings")
+        assert all("lens" not in issue for issue in saved["issues"])
+    assert all("lens" not in issue for issue in structural["issues"])
+    assert all("lens" in issue and "uid" not in issue for output in outputs for issue in output["issues"])
+    for schema in schemas:
+        item = schema["properties"]["issues"]["items"]
+        assert item["properties"]["lens"]["enum"] == ["per-stack", "structural"]
+        assert "lens" in item["required"]
