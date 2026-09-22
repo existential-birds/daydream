@@ -22,6 +22,12 @@ from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 # the path that must be exercised.
 INDEX_REVISION = "a" * 40
 
+
+@pytest.fixture
+def hub() -> AnnotationsHub:
+    """A fresh in-memory hub per test, so commit logs never leak across tests."""
+    return AnnotationsHub(repo_id="org/private-annotations")
+
 # P14 immutable checkpoint protocol -------------------------------------------------
 
 _CID = "cur-1"
@@ -116,8 +122,7 @@ def _published_payloads(hub: AnnotationsHub, revision: str) -> dict[str, bytes]:
     }
 
 
-def test_mandatory_checkpoint_commits_immutable_batch_and_stable_pointer(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_mandatory_checkpoint_commits_immutable_batch_and_stable_pointer(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
 
     result = publish_annotation_state(hub, state, manifest=manifest)
@@ -133,8 +138,7 @@ def test_mandatory_checkpoint_commits_immutable_batch_and_stable_pointer(tmp_pat
     assert hub.atomic_attempt_log[0]["branch"] == "main"
 
 
-def test_changed_same_time_observation_survives_and_exact_row_dedupes(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_changed_same_time_observation_survives_and_exact_row_dedupes(tmp_path: Path, hub: AnnotationsHub) -> None:
     first = _observation(
         record_id="r1", observed_at="2026-01-01T00:00:00Z", disposition="accepted", rationale="first"
     )
@@ -175,9 +179,9 @@ def test_changed_same_time_observation_survives_and_exact_row_dedupes(tmp_path: 
 @pytest.mark.parametrize("name", ["queue.json", "preview-ledger.json", "preview-manifest.json", "index.db"])
 @pytest.mark.parametrize("mode", ["identical", "local-only", "remote-only", "divergent"])
 def test_three_way_checkpoint_non_observation_files(
-    name: str, mode: str, tmp_path: Path
+    name: str, mode: str, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     base_payloads = _published_payloads(hub, baseline["checkpoint_revision"])
@@ -232,8 +236,7 @@ def test_three_way_checkpoint_non_observation_files(
     assert resolved[name] == expected
 
 
-def test_superseded_manifest_identity_fails_instead_of_repointing(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_superseded_manifest_identity_fails_instead_of_repointing(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     remote = _published_payloads(hub, baseline["checkpoint_revision"])
@@ -309,8 +312,7 @@ def test_concurrent_checkpoint_pointer_deletion_is_not_recreated(tmp_path: Path)
     assert _STABLE_POINTER not in hub.revision_files(hub.repo_info("main").sha)
 
 
-def test_resume_stable_bootstrap_is_pinned_and_byte_identical(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_resume_stable_bootstrap_is_pinned_and_byte_identical(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     published = publish_annotation_state(hub, state, manifest=manifest)
     hub.info_revision_log.clear()
@@ -357,8 +359,7 @@ def test_resume_auth_error_is_not_treated_as_missing(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
-def test_resume_requires_fresh_destination(kind: str, tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_resume_requires_fresh_destination(kind: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     destination = tmp_path / "fresh"
     if kind == "file":
         destination.write_text("existing")
@@ -374,8 +375,7 @@ def test_resume_requires_fresh_destination(kind: str, tmp_path: Path) -> None:
     assert hub.info_revision_log == []
 
 
-def test_publish_path_guard_rejects_secret_bearing_outward_symlink(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_publish_path_guard_rejects_secret_bearing_outward_symlink(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     secret = tmp_path / "outside-secret"
     secret.write_text("hf_abc123secret")
@@ -387,8 +387,7 @@ def test_publish_path_guard_rejects_secret_bearing_outward_symlink(tmp_path: Pat
     assert hub.commit_order == []
 
 
-def test_publish_accepts_manifest_under_symlinked_ancestor(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_publish_accepts_manifest_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     outside = tmp_path / "outside-manifest"
     outside.mkdir()
@@ -405,24 +404,22 @@ def test_publish_accepts_manifest_under_symlinked_ancestor(tmp_path: Path) -> No
     assert result["checkpoint_revision"] == hub.repo_info().sha
 
 
-def test_publish_accepts_real_state_root_under_symlinked_ancestor(tmp_path: Path) -> None:
+def test_publish_accepts_real_state_root_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     actual = tmp_path / "actual"
     actual.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(actual, target_is_directory=True)
     state, manifest = _state_v2(alias)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
 
     result = publish_annotation_state(hub, state, manifest=manifest)
 
     assert result["checkpoint_revision"] == hub.repo_info().sha
 
 
-def test_publish_still_refuses_a_declared_symlink_state_root(tmp_path: Path) -> None:
+def test_publish_still_refuses_a_declared_symlink_state_root(tmp_path: Path, hub: AnnotationsHub) -> None:
     actual, manifest = _state_v2(tmp_path)
     linked = tmp_path / "linked-state"
     linked.symlink_to(actual, target_is_directory=True)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
 
     with pytest.raises(PublicDestinationError, match="state_dir.*symlink"):
         publish_annotation_state(hub, linked, manifest=manifest)
@@ -430,8 +427,7 @@ def test_publish_still_refuses_a_declared_symlink_state_root(tmp_path: Path) -> 
     assert hub.info_revision_log == []
 
 
-def test_resume_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_resume_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     publish_annotation_state(hub, state, manifest=manifest)
     actual = tmp_path / "actual"
@@ -445,8 +441,7 @@ def test_resume_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Pat
 
 
 @pytest.mark.parametrize("bad_name", ["../queue.json", "nested\\queue.json", "./queue.json", "queue.json/"])
-def test_resume_path_guard_rejects_malformed_pointer_names(bad_name: str, tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_resume_path_guard_rejects_malformed_pointer_names(bad_name: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     published = publish_annotation_state(hub, state, manifest=manifest)
     tree = hub.revision_files(published["checkpoint_revision"])
@@ -497,9 +492,9 @@ def _fail_parent_fsync_after_rename(
 
 
 def test_resume_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     state, manifest = _state_v2(tmp_path)
     publish_annotation_state(hub, state, manifest=manifest)
     destination = tmp_path / "fresh"
@@ -513,8 +508,7 @@ def test_resume_parent_fsync_failure_removes_owned_install(
 
 
 @pytest.mark.parametrize("name", ["queue.json", "observations.jsonl", "preview-ledger.json", "index.db"])
-def test_publish_secret_in_every_state_payload_commits_nothing(name: str, tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_publish_secret_in_every_state_payload_commits_nothing(name: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     (state / name).write_bytes(b"hf_abc123secret")
 
@@ -523,8 +517,7 @@ def test_publish_secret_in_every_state_payload_commits_nothing(name: str, tmp_pa
     assert hub.commit_order == []
 
 
-def test_publish_secret_in_manifest_identity_commits_nothing(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_publish_secret_in_manifest_identity_commits_nothing(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     manifest["curation_id"] = "cur-hf_abc123secret"
 
@@ -533,8 +526,7 @@ def test_publish_secret_in_manifest_identity_commits_nothing(tmp_path: Path) -> 
     assert hub.commit_order == []
 
 
-def test_observation_only_concurrent_update_unions_remote_then_local_rows(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_observation_only_concurrent_update_unions_remote_then_local_rows(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     remote = _published_payloads(hub, baseline["checkpoint_revision"])
@@ -566,8 +558,7 @@ def test_observation_only_concurrent_update_unions_remote_then_local_rows(tmp_pa
     assert [row["record_id"] for row in rows] == ["r1", "remote", "local"]
 
 
-def test_optional_index_absence_is_a_three_way_state(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_optional_index_absence_is_a_three_way_state(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     remote = _published_payloads(hub, baseline["checkpoint_revision"])
@@ -591,8 +582,7 @@ def test_optional_index_absence_is_a_three_way_state(tmp_path: Path) -> None:
         publish_annotation_state(hub, state, manifest=manifest)
 
 
-def test_optional_index_local_removal_publishes_absence(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_optional_index_local_removal_publishes_absence(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     publish_annotation_state(hub, state, manifest=manifest)
     (state / "index.db").unlink()
@@ -602,8 +592,7 @@ def test_optional_index_local_removal_publishes_absence(tmp_path: Path) -> None:
     assert "index.db" not in _published_payloads(hub, result["checkpoint_revision"])
 
 
-def test_resume_expected_snapshot_mismatch_leaves_destination_absent(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_resume_expected_snapshot_mismatch_leaves_destination_absent(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     published = publish_annotation_state(hub, state, manifest=manifest)
     destination = tmp_path / "fresh"
@@ -621,9 +610,9 @@ def test_resume_expected_snapshot_mismatch_leaves_destination_absent(tmp_path: P
 
 @pytest.mark.parametrize("corruption", ["json", "digest", "duplicate"])
 def test_resume_refuses_corrupt_checkpoint_without_partial_install(
-    corruption: str, tmp_path: Path
+    corruption: str, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     state, manifest = _state_v2(tmp_path)
     published = publish_annotation_state(hub, state, manifest=manifest)
     tree = hub.revision_files(published["checkpoint_revision"])
@@ -650,8 +639,7 @@ def test_resume_refuses_corrupt_checkpoint_without_partial_install(
     assert list(tmp_path.glob(".fresh.*")) == []
 
 
-def test_publish_refuses_secret_from_concurrent_remote_observation(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_publish_refuses_secret_from_concurrent_remote_observation(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     remote = _published_payloads(hub, baseline["checkpoint_revision"])
@@ -821,8 +809,7 @@ def _seed_final_envelope(
     "case",
     ["missing-field", "bool-count", "contradictory-gate", "cross-count"],
 )
-def test_final_publish_rejects_nonproducer_coverage_report(case: str, tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_publish_rejects_nonproducer_coverage_report(case: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     path = bundle / "coverage-report.json"
     report = json.loads(path.read_text())
@@ -849,8 +836,7 @@ def test_final_publish_rejects_nonproducer_coverage_report(case: str, tmp_path: 
     "case",
     ["missing-pin", "schema", "digest", "shared-pin", "as-of"],
 )
-def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     path = bundle / "lineage.json"
     lineage = json.loads(path.read_text())
@@ -882,10 +868,10 @@ def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path) ->
     ],
 )
 def test_final_publish_rejects_tampered_policy_binding(
-    mutation: dict[str, Any], canonical: bool, tmp_path: Path
+    mutation: dict[str, Any], canonical: bool, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
     """Publication reuses the construction-time v2 binding rules."""
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     path = bundle / "policy-binding.json"
     binding = json.loads(path.read_text())
@@ -901,8 +887,7 @@ def test_final_publish_rejects_tampered_policy_binding(
     assert hub.commit_order == []
 
 
-def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     lineage_path = bundle / "lineage.json"
     lineage = json.loads(lineage_path.read_text())
@@ -924,8 +909,8 @@ def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path:
 
 def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(
     tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, curation_id = _final_bundle(tmp_path)
 
     result = publish_final_annotation_bundle(hub, bundle)
@@ -957,8 +942,8 @@ def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(
 
 def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, curation_id = _final_bundle(tmp_path)
     annotations = (bundle / "annotations.jsonl").resolve()
     original = annotations.read_bytes()
@@ -1000,24 +985,22 @@ def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement
     assert (destination / "annotations.jsonl").read_bytes() == original
 
 
-def test_final_publish_accepts_real_bundle_root_under_symlinked_ancestor(tmp_path: Path) -> None:
+def test_final_publish_accepts_real_bundle_root_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     actual = tmp_path / "actual"
     actual.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(actual, target_is_directory=True)
     bundle, _curation_id = _final_bundle(alias)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
 
     result = publish_final_annotation_bundle(hub, bundle)
 
     assert result["hub_commit_sha"] == hub.repo_info().sha
 
 
-def test_final_publish_still_refuses_a_declared_symlink_bundle_root(tmp_path: Path) -> None:
+def test_final_publish_still_refuses_a_declared_symlink_bundle_root(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     linked = tmp_path / "linked-final"
     linked.symlink_to(bundle, target_is_directory=True)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
 
     with pytest.raises(ValueError, match="final bundle must be a real directory"):
         publish_final_annotation_bundle(hub, linked)
@@ -1027,9 +1010,9 @@ def test_final_publish_still_refuses_a_declared_symlink_bundle_root(tmp_path: Pa
 
 @pytest.mark.parametrize("stage", ["data", "success"])
 def test_final_publish_retries_typed_compare_and_swap_conflicts(
-    stage: str, tmp_path: Path
+    stage: str, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     hub.queue_concurrent_commit(stage, {f"unrelated/{stage}.txt": b"rival"})
 
@@ -1039,10 +1022,9 @@ def test_final_publish_retries_typed_compare_and_swap_conflicts(
     assert [entry["stage"] for entry in hub.atomic_attempt_log].count(stage) >= 2
 
 
-def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path) -> None:
+def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path, hub: AnnotationsHub) -> None:
     from daydream.training.adjudication.final_bundle import final_snapshot_id
 
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, curation_id = _final_bundle(tmp_path)
     final_id, _digests = final_snapshot_id(bundle)
     prefix = f"annotations/{curation_id}/{final_id}/final/"
@@ -1056,6 +1038,7 @@ def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path) -
 
 def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit(
     tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
     source_hub = AnnotationsHub(repo_id="org/source-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
@@ -1067,7 +1050,6 @@ def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit
         if path.startswith(source_result["prefix"])
     }
 
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     first_data = hub.seed_remote_files(data_mapping, "first identical data")
     rival_data = hub.seed_remote_files(data_mapping, "rival identical data")
     assert rival_data != first_data
@@ -1112,9 +1094,9 @@ def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit
     ],
 )
 def test_final_publish_refuses_malformed_or_mismatched_success_marker(
-    marker: bytes, tmp_path: Path
+    marker: bytes, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     first = publish_final_annotation_bundle(hub, bundle)
     if b"PLACEHOLDER" in marker:
@@ -1129,8 +1111,8 @@ def test_final_publish_refuses_malformed_or_mismatched_success_marker(
 
 def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(
     tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(hub, bundle)
     marker = _canonical_bytes(
@@ -1159,9 +1141,9 @@ def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(
     ],
 )
 def test_final_publish_secret_in_every_semantic_file_commits_nothing(
-    name: str, tmp_path: Path
+    name: str, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     (bundle / name).write_bytes((bundle / name).read_bytes() + b"hf_abc123secret")
 
@@ -1172,8 +1154,8 @@ def test_final_publish_secret_in_every_semantic_file_commits_nothing(
 
 def test_final_publish_rejects_symlinked_semantic_input_before_hub_access(
     tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     outside = tmp_path / "outside"
     outside.write_text("hf_abc123secret")
@@ -1186,8 +1168,7 @@ def test_final_publish_rejects_symlinked_semantic_input_before_hub_access(
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
-def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(hub, bundle)
     destination = tmp_path / "download"
@@ -1212,8 +1193,7 @@ def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path) ->
     assert hub.info_revision_log == []
 
 
-def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
     hub.info_revision_log.clear()
@@ -1236,8 +1216,7 @@ def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path:
     assert list(tmp_path.glob(".download.*")) == []
 
 
-def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
     actual = tmp_path / "actual"
@@ -1257,9 +1236,9 @@ def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_p
 
 
 def test_final_download_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
     destination = tmp_path / "download"
@@ -1302,9 +1281,9 @@ def _open_fd_identity(fd: int) -> tuple[int, int] | None:
 
 @pytest.mark.parametrize("operation", ["download", "resume"])
 def test_final_download_cleanup_preserves_concurrent_destination_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     if operation == "download":
         bundle, curation_id = _final_bundle(tmp_path)
         published = publish_final_annotation_bundle(hub, bundle)
@@ -1353,9 +1332,9 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
 
 @pytest.mark.parametrize("operation", ["download", "resume"])
 def test_successful_installation_closes_directory_descriptors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+    hub: AnnotationsHub,
 ) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     if operation == "download":
         bundle, curation_id = _final_bundle(tmp_path)
         published = publish_final_annotation_bundle(hub, bundle)
@@ -1410,8 +1389,7 @@ def test_final_publish_verification_failure_never_returns_success(
         assert stages == ["data", "success"]
 
 
-def test_final_publish_rejects_changed_data_behind_success_marker(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_publish_rejects_changed_data_behind_success_marker(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(hub, bundle)
     hub.seed_remote_files(
@@ -1447,11 +1425,11 @@ def test_final_publish_rejects_missing_data_behind_success_marker(tmp_path: Path
 
 @pytest.mark.parametrize("bad_name", ["../escape", "nested\\escape", "./annotations.jsonl"])
 def test_final_publish_rejects_non_normalized_remote_prefix_paths(
-    bad_name: str, tmp_path: Path
+    bad_name: str, tmp_path: Path,
+    hub: AnnotationsHub,
 ) -> None:
     from daydream.training.adjudication.final_bundle import final_snapshot_id
 
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, curation_id = _final_bundle(tmp_path)
     final_id, _digests = final_snapshot_id(bundle)
     prefix = f"annotations/{curation_id}/{final_id}/final/"
@@ -1461,8 +1439,7 @@ def test_final_publish_rejects_non_normalized_remote_prefix_paths(
         publish_final_annotation_bundle(hub, bundle)
 
 
-def test_final_publish_secret_shaped_identity_commits_nothing(tmp_path: Path) -> None:
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+def test_final_publish_secret_shaped_identity_commits_nothing(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     preview_path = bundle / "preview-manifest.json"
     preview = json.loads(preview_path.read_text())
