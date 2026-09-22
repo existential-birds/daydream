@@ -37,6 +37,20 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
 
+def _patch_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> None:
+    """Install a fixed ``gh`` subprocess result at the ``git_ops`` seam."""
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr),
+    )
+
+
 def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     base = _git(repo, "rev-parse", "HEAD")
@@ -2246,10 +2260,7 @@ def test_gh_pr_view_returns_none_only_for_anchored_absence(
     stderr: str,
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=stderr),
-    )
+    _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
     assert git_ops.gh_pr_view(repo, pr) is None
 
 
@@ -2268,10 +2279,7 @@ def test_gh_pr_view_unknown_failures_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=stderr),
-    )
+    _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
     with pytest.raises(GitError, match=re.escape(stderr)):
         git_ops.gh_pr_view(repo, 42)
 
@@ -2281,10 +2289,7 @@ def test_gh_pr_view_rejects_invalid_json_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""),
-    )
+    _patch_subprocess_run(monkeypatch, stdout=stdout)
     with pytest.raises(GitError, match="invalid JSON|JSON object"):
         git_ops.gh_pr_view(repo, 42)
 
@@ -2294,10 +2299,7 @@ def test_gh_pr_list_rejects_failure_and_invalid_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""),
-    )
+    _patch_subprocess_run(monkeypatch, stdout=stdout)
     with pytest.raises(GitError, match="invalid JSON|JSON list|row"):
         git_ops.gh_pr_list_for_branch(repo, "feature")
 
@@ -2306,12 +2308,7 @@ def test_gh_pr_list_nonzero_uses_gh_error_classifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(
-            cmd, 1, stdout="", stderr="rate limit exceeded; retry-after: 7"
-        ),
-    )
+    _patch_subprocess_run(monkeypatch, returncode=1, stderr="rate limit exceeded; retry-after: 7")
     with pytest.raises(git_ops.RateLimitError) as excinfo:
         git_ops.gh_pr_list_for_branch(repo, "feature")
     assert excinfo.value.retry_after == 7
@@ -2322,10 +2319,7 @@ def test_gh_repo_view_required_rejects_invalid_slug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=slug + "\n", stderr=""),
-    )
+    _patch_subprocess_run(monkeypatch, stdout=slug + "\n")
     with pytest.raises(GitError, match="invalid repository slug"):
         git_ops.gh_repo_view_required(repo)
 
@@ -2334,10 +2328,7 @@ def test_gh_repo_view_required_returns_exact_slug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="Owner/Repo\n", stderr=""),
-    )
+    _patch_subprocess_run(monkeypatch, stdout="Owner/Repo\n")
     assert git_ops.gh_repo_view_required(repo) == ("Owner", "Repo")
 
 
@@ -2368,14 +2359,10 @@ def test_gh_repo_view_required_preserves_safe_failure_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    monkeypatch.setattr(
-        "daydream.git_ops.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(
-            cmd,
-            1,
-            stdout="",
-            stderr="HTTP 401: authentication required for token ghp_abcdefghijklmnopqrstuvwxyz1234567890",
-        ),
+    _patch_subprocess_run(
+        monkeypatch,
+        returncode=1,
+        stderr="HTTP 401: authentication required for token ghp_abcdefghijklmnopqrstuvwxyz1234567890",
     )
 
     with pytest.raises(GitError) as excinfo:

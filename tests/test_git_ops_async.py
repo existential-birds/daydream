@@ -55,6 +55,25 @@ def _page_endpoint(endpoint: str, page: int, *, per_page: int = 100) -> str:
     return f"{endpoint}{separator}per_page={per_page}&page={page}"
 
 
+def _forbid_spawn(monkeypatch: pytest.MonkeyPatch, message: str) -> list[Any]:
+    """Patch the ``gh`` subprocess seam to reject any spawn with *message*.
+
+    Returns the observation list; an empty list proves the path under test
+    never reached the process boundary.
+    """
+    spawn_calls: list[Any] = []
+
+    async def create_process(*args: Any, **kwargs: Any) -> Any:
+        spawn_calls.append((args, kwargs))
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        "daydream.git_ops.asyncio.create_subprocess_exec",
+        create_process,
+    )
+    return spawn_calls
+
+
 @pytest.mark.asyncio
 async def test_async_requests_keep_refreshing_session_environments_isolated(
     monkeypatch: pytest.MonkeyPatch,
@@ -206,22 +225,13 @@ async def test_expired_budget_never_resolves_auth_or_spawns(
     tmp_path: Path,
 ) -> None:
     auth_calls = 0
-    spawn_calls = 0
 
     class Auth:
         def environment_for_request(self) -> None:
             nonlocal auth_calls
             auth_calls += 1
 
-    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
-        nonlocal spawn_calls
-        spawn_calls += 1
-        raise AssertionError("expired budget must not spawn gh")
-
-    monkeypatch.setattr(
-        "daydream.git_ops.asyncio.create_subprocess_exec",
-        create_process,
-    )
+    spawn_calls = _forbid_spawn(monkeypatch, "expired budget must not spawn gh")
     budget = git_ops.GitHubRequestBudget(
         deadline=0.0,
         per_request_seconds=1.0,
@@ -237,7 +247,7 @@ async def test_expired_budget_never_resolves_auth_or_spawns(
         )
 
     assert auth_calls == 0
-    assert spawn_calls == 0
+    assert spawn_calls == []
 
 
 @pytest.mark.asyncio
@@ -249,18 +259,9 @@ async def test_blocked_auth_resolution_keeps_loop_responsive_and_is_cancellable(
     started = asyncio.Event()
     release = threading.Event()
     finished = threading.Event()
-    spawn_calls = 0
 
     BlockingAuth = _blocking_auth(loop, started, release, finished)
-    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
-        nonlocal spawn_calls
-        spawn_calls += 1
-        raise AssertionError("cancelled auth resolution must not spawn gh")
-
-    monkeypatch.setattr(
-        "daydream.git_ops.asyncio.create_subprocess_exec",
-        create_process,
-    )
+    spawn_calls = _forbid_spawn(monkeypatch, "cancelled auth resolution must not spawn gh")
     task = asyncio.create_task(
         git_ops._run_gh_async(
             tmp_path,
@@ -281,7 +282,7 @@ async def test_blocked_auth_resolution_keeps_loop_responsive_and_is_cancellable(
         release.set()
         assert await asyncio.to_thread(finished.wait, 1)
 
-    assert spawn_calls == 0
+    assert spawn_calls == []
 
 
 @pytest.mark.asyncio
@@ -293,18 +294,9 @@ async def test_auth_resolution_timeout_never_spawns_and_redacts_details(
     started = asyncio.Event()
     release = threading.Event()
     finished = threading.Event()
-    spawn_calls = 0
 
     BlockingAuth = _blocking_auth(loop, started, release, finished)
-    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
-        nonlocal spawn_calls
-        spawn_calls += 1
-        raise AssertionError("timed-out auth resolution must not spawn gh")
-
-    monkeypatch.setattr(
-        "daydream.git_ops.asyncio.create_subprocess_exec",
-        create_process,
-    )
+    spawn_calls = _forbid_spawn(monkeypatch, "timed-out auth resolution must not spawn gh")
     task = asyncio.create_task(
         git_ops._run_gh_async(
             tmp_path,
@@ -330,7 +322,7 @@ async def test_auth_resolution_timeout_never_spawns_and_redacts_details(
                 await task
 
     assert started.is_set()
-    assert spawn_calls == 0
+    assert spawn_calls == []
 
 
 @pytest.mark.asyncio
@@ -339,17 +331,7 @@ async def test_auth_resolution_that_consumes_budget_never_spawns_request(
     tmp_path: Path,
 ) -> None:
     times = iter((0.0, 2.0))
-    spawn_calls = 0
-
-    async def create_process(*_args: Any, **_kwargs: Any) -> Any:
-        nonlocal spawn_calls
-        spawn_calls += 1
-        raise AssertionError("exhausted budget must not spawn gh")
-
-    monkeypatch.setattr(
-        "daydream.git_ops.asyncio.create_subprocess_exec",
-        create_process,
-    )
+    spawn_calls = _forbid_spawn(monkeypatch, "exhausted budget must not spawn gh")
     budget = git_ops.GitHubRequestBudget(
         deadline=1.0,
         per_request_seconds=1.0,
@@ -364,7 +346,7 @@ async def test_auth_resolution_that_consumes_budget_never_spawns_request(
             budget=budget,
         )
 
-    assert spawn_calls == 0
+    assert spawn_calls == []
 
 
 @pytest.mark.asyncio
