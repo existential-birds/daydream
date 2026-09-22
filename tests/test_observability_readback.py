@@ -39,7 +39,7 @@ import time
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, cast
 
 import pytest
 
@@ -785,13 +785,13 @@ def _run_replay(
     fixture_path: Path = REPLAY_FIXTURE,
 ) -> int:
     """Invoke the replay tool with the canonical fixture manifest."""
-    return _replay.run_replay(
+    return cast(int, _replay.run_replay(
         manifest_path=FIXTURES / "replay-manifest.json",
         fixture_path=fixture_path,
         repo_path=repo,
         fake_pi=fake_pi,
         receipt_path=receipt_path,
-    )
+    ))
 
 
 def test_replay_gate_fixture_hash_mismatch_fails_before_send(
