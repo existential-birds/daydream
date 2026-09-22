@@ -118,6 +118,24 @@ def _issue_comments(fake_gh: FakeGh) -> list[dict[str, Any]]:
     ]
 
 
+def _post_findings_cli(
+    artifact_path: Path, head_sha: str, *, pr: int = 7, repo: str = "acme/widgets"
+) -> int:
+    """Run the production ``post-findings`` Phase-B CLI for *artifact_path*."""
+    return _cli_main(
+        [
+            "post-findings",
+            str(artifact_path),
+            "--pr",
+            str(pr),
+            "--head-sha",
+            head_sha,
+            "--repo",
+            repo,
+        ]
+    )
+
+
 def _diagram_phase_end(target: Path) -> dict[str, Any]:
     paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
     assert len(paths) == 1
@@ -336,18 +354,7 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
 
     # Phase B: the privileged poster, entered from the production CLI.
     monkeypatch.chdir(target)
-    rc = _cli_main(
-        [
-            "post-findings",
-            str(artifact_path),
-            "--pr",
-            "7",
-            "--head-sha",
-            artifact["head_sha"],
-            "--repo",
-            "acme/widgets",
-        ]
-    )
+    rc = _post_findings_cli(artifact_path, artifact["head_sha"])
     assert rc == 0
     posted = _issue_comments(fake_gh)
     assert len(posted) == 1
@@ -397,18 +404,7 @@ async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     no_checkout = tmp_path / "runner-workspace"
     no_checkout.mkdir()
     monkeypatch.chdir(no_checkout)
-    rc = _cli_main(
-        [
-            "post-findings",
-            str(artifact_path),
-            "--pr",
-            "7",
-            "--head-sha",
-            head_sha,
-            "--repo",
-            "acme/widgets",
-        ]
-    )
+    rc = _post_findings_cli(artifact_path, head_sha)
 
     assert rc == 0
     posted = _issue_comments(fake_gh)
@@ -447,18 +443,7 @@ async def test_phase_b_rejects_diagram_evidence_missing_from_the_immutable_head(
     artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
 
     monkeypatch.chdir(target)
-    rc = _cli_main(
-        [
-            "post-findings",
-            str(artifact_path),
-            "--pr",
-            "7",
-            "--head-sha",
-            artifact["head_sha"],
-            "--repo",
-            "acme/widgets",
-        ]
-    )
+    rc = _post_findings_cli(artifact_path, artifact["head_sha"])
 
     assert rc == 1
     assert fake_gh.calls("POST") == []
@@ -496,18 +481,7 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(
     )
     monkeypatch.chdir(tmp_path)
 
-    rc = _cli_main(
-        [
-            "post-findings",
-            str(artifact_path),
-            "--pr",
-            "7",
-            "--head-sha",
-            "h" * 40,
-            "--repo",
-            "acme/widgets",
-        ]
-    )
+    rc = _post_findings_cli(artifact_path, "h" * 40)
 
     assert rc == 1
     assert fake_gh.calls("POST") == []
@@ -1001,18 +975,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     expected = _artifact(target)["results"]["sequence"]["mermaid"]
 
     monkeypatch.chdir(target)
-    rc = _cli_main(
-        [
-            "post-findings",
-            str(artifact_path),
-            "--pr",
-            "7",
-            "--head-sha",
-            artifact["head_sha"],
-            "--repo",
-            "acme/widgets",
-        ]
-    )
+    rc = _post_findings_cli(artifact_path, artifact["head_sha"])
     assert rc == 0
     reviews = fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews")
     assert len(reviews) == 1

@@ -1133,6 +1133,57 @@ def log(repo: Path, base: str, head: str = "HEAD") -> str:
     return proc.stdout.strip()
 
 
+def _log_shas_range(
+    repo: Path,
+    rev_range: str,
+    range_from: str,
+    range_to: str,
+    *,
+    label: str,
+    failure_value: list[str] | None,
+    failure_reason: str,
+) -> list[str] | None:
+    """Walk ``git log --pretty=%H <rev_range>`` with soft failure.
+
+    ``failure_value`` is what a git timeout/error/non-zero exit returns so
+    callers can distinguish "could not look" from "found nothing"; the
+    warning keeps the ``<label>: git log <from>..<to>`` shape and appends
+    ``failure_reason``.
+    """
+    try:
+        proc = _run_git(repo, ["log", "--pretty=%H", rev_range], timeout=30)
+    except GitTimeoutError:
+        _logger.warning(
+            "%s: git log %s..%s timed out after retries; %s",
+            label,
+            range_from,
+            range_to,
+            failure_reason,
+        )
+        return failure_value
+    except GitError as exc:
+        _logger.warning(
+            "%s: git log %s..%s failed: %s; %s",
+            label,
+            range_from,
+            range_to,
+            exc,
+            failure_reason,
+        )
+        return failure_value
+    if proc.returncode != 0:
+        _logger.warning(
+            "%s: git log %s..%s exited non-zero (%d); %s",
+            label,
+            range_from,
+            range_to,
+            proc.returncode,
+            failure_reason,
+        )
+        return failure_value
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def log_shas(repo: Path, ref: str, *, since: str) -> list[str] | None:
     """Return full SHAs of commits on ``since..ref``.
 
@@ -1151,35 +1202,15 @@ def log_shas(repo: Path, ref: str, *, since: str) -> list[str] | None:
         (newest first), possibly empty. ``None`` if the query could not be
         answered.
     """
-    try:
-        proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=30)
-    except GitTimeoutError:
-        _logger.warning(
-            "log_shas: git log %s..%s timed out after retries; "
-            "returning None (commit window unavailable)",
-            since,
-            ref,
-        )
-        return None
-    except GitError as exc:
-        _logger.warning(
-            "log_shas: git log %s..%s failed: %s; "
-            "returning None (commit window unavailable)",
-            since,
-            ref,
-            exc,
-        )
-        return None
-    if proc.returncode != 0:
-        _logger.warning(
-            "log_shas: git log %s..%s exited non-zero (%d); "
-            "returning None (commit window unavailable)",
-            since,
-            ref,
-            proc.returncode,
-        )
-        return None
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return _log_shas_range(
+        repo,
+        f"{since}..{ref}",
+        since,
+        ref,
+        label="log_shas",
+        failure_value=None,
+        failure_reason="returning None (commit window unavailable)",
+    )
 
 
 def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
@@ -1200,39 +1231,16 @@ def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
         List of 40-character SHA strings in ``git log`` output order
         (newest first). Empty list on any soft failure.
     """
-    try:
-        proc = _run_git(
-            repo,
-            ["log", "--pretty=%H", f"{head}..{base}"],
-            timeout=30,
-        )
-    except GitTimeoutError:
-        _logger.warning(
-            "log_shas_since: git log %s..%s timed out after retries; "
-            "returning empty window (fix-applied verdict may degrade to unknown)",
-            head,
-            base,
-        )
-        return []
-    except GitError as exc:
-        _logger.warning(
-            "log_shas_since: git log %s..%s failed: %s; "
-            "returning empty window (fix-applied verdict may degrade to unknown)",
-            head,
-            base,
-            exc,
-        )
-        return []
-    if proc.returncode != 0:
-        _logger.warning(
-            "log_shas_since: git log %s..%s exited non-zero (%d); "
-            "returning empty window (fix-applied verdict may degrade to unknown)",
-            head,
-            base,
-            proc.returncode,
-        )
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    shas = _log_shas_range(
+        repo,
+        f"{head}..{base}",
+        head,
+        base,
+        label="log_shas_since",
+        failure_value=[],
+        failure_reason="returning empty window (fix-applied verdict may degrade to unknown)",
+    )
+    return shas if shas is not None else []
 
 
 def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:

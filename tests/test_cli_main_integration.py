@@ -100,6 +100,14 @@ def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
 
 
+def _cli_main_exit(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int | str | None:
+    """Drive the real ``cli.main`` with *argv* and return its process exit code."""
+    monkeypatch.setattr(sys, "argv", ["daydream", *argv])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    return exc.value.code
+
+
 def test_cli_main_clean_deep_run_exits_0(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -115,14 +123,9 @@ def test_cli_main_clean_deep_run_exits_0(
     _silence_cli_and_runner(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", str(multi_stack_target)])
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-
     # SystemExit.code is the int returned by runner.run, propagated through
     # anyio.run -> sys.exit. Not a hardcoded 0 (see TDD proof in the PR).
-    assert exc.value.code == 0
+    assert _cli_main_exit(monkeypatch, str(multi_stack_target)) == 0
 
 
 def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
@@ -148,15 +151,10 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     trajectory_path = tmp_path / "trajectory.json"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["daydream", "--trajectory", str(trajectory_path), str(multi_stack_target)],
+    assert (
+        _cli_main_exit(monkeypatch, "--trajectory", str(trajectory_path), str(multi_stack_target))
+        == 0
     )
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-    assert exc.value.code == 0
 
     assert trajectory_path.exists(), "deep run must write the trajectory to disk"
     data = json.loads(trajectory_path.read_text(encoding="utf-8"))
@@ -182,12 +180,7 @@ def test_cli_main_wrong_branch_exits_1(
     # The error path renders a panel via print_error; silence it.
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **kw: None)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", str(git_repo)])
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-
-    assert exc.value.code == 1
+    assert _cli_main_exit(monkeypatch, str(git_repo)) == 1
 
 
 def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
@@ -210,11 +203,8 @@ def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
         raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
 
     monkeypatch.setattr("daydream.cli.run", _raising_run)
-    monkeypatch.setattr(sys, "argv", ["daydream", str(git_repo)])
 
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main()
-    assert excinfo.value.code == 1
+    assert _cli_main_exit(monkeypatch, str(git_repo)) == 1
     captured = capsys.readouterr()
     out = captured.out + captured.err
     assert "Finding file must be a confined repository-relative path" in out
@@ -239,24 +229,16 @@ def test_cli_main_rejects_workspace_copy_traversal(
     # The error path renders a "Workspace Error" panel via runner.print_error; silence it.
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "daydream",
-            str(repo_with_origin),
-            "--worktree",
-            "--copy",
-            "safe.txt",
-            "--copy",
-            "../outside-source.txt",
-        ],
+    code = _cli_main_exit(
+        monkeypatch,
+        str(repo_with_origin),
+        "--worktree",
+        "--copy",
+        "safe.txt",
+        "--copy",
+        "../outside-source.txt",
     )
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-
-    assert exc.value.code == 1
+    assert code == 1
     # No stray ephemeral worktree child remains after cleanup.
     wt_root = repo_with_origin / ".daydream" / "worktrees"
     assert not wt_root.exists() or not any(wt_root.iterdir())
@@ -281,10 +263,8 @@ def test_non_tty_auto_enables_non_interactive(
         raise AssertionError("non-TTY run must not prompt")
 
     monkeypatch.setattr("daydream.run_context._prompt_user", forbidden_input)
-    monkeypatch.setattr(sys, "argv", ["daydream", str(multi_stack_target)])
 
-    with pytest.raises(SystemExit):
-        cli.main()
+    _cli_main_exit(monkeypatch, str(multi_stack_target))
 
     assert (multi_stack_target / ".review-output.md").exists()
 
@@ -303,15 +283,7 @@ def test_cli_main_prune_reanchor_removes_and_exits_0(
     _silence_cli_and_runner(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["daydream", "improve", "prune-reanchor", "run-abcd-reanchor", str(repo)],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-    assert exc.value.code == 0
+    assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abcd-reanchor", str(repo)) == 0
     assert not target.exists()
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
@@ -326,15 +298,7 @@ def test_cli_main_prune_reanchor_rejects_name_exits_1(
     _silence_cli_and_runner(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["daydream", "improve", "prune-reanchor", "run-abc", str(repo)],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-    assert exc.value.code == 1
+    assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abc", str(repo)) == 1
     assert not any(
         p.name == "run-abc" for p in (repo / ".daydream" / "worktrees").glob("*")
     )
@@ -365,15 +329,7 @@ def test_cli_main_list_reanchor_lists_and_exits_0(
         "daydream.cli.print_info",
         lambda _console, name: listed.append(str(name)),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["daydream", "improve", "list-reanchor", str(repo)],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-    assert exc.value.code == 0
+    assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
     assert listed == ["run-abcd-reanchor"]
 
 
@@ -387,15 +343,7 @@ def test_cli_main_list_reanchor_empty_exits_0(
     _silence(monkeypatch)
     _silence_cli_and_runner(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_info", lambda *a, **k: None)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["daydream", "improve", "list-reanchor", str(repo)],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-    assert exc.value.code == 0
+    assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -784,12 +732,10 @@ def test_cli_main_fatal_default_concise_no_traceback(
     _silence_cli_and_runner(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "--review", str(multi_stack_target)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--review", str(multi_stack_target))
     out, err = capsys.readouterr()
 
-    assert exc.value.code == 1
+    assert code == 1
     assert "failed to create disposable read-only checkout" in out + err
     assert "Traceback (most recent call last)" not in err
     assert "isolation probe failure" not in out + err
@@ -806,12 +752,10 @@ def test_cli_main_verbose_prints_redacted_chain_on_stderr(
     _silence_cli_and_runner(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
     out, err = capsys.readouterr()
 
-    assert exc.value.code == 1
+    assert code == 1
     assert "failed to create disposable read-only checkout" in out + err
     assert "CodexError" in err and "failed to create disposable read-only checkout" in err
     assert "GitError" in err and "isolation probe failure" in err
@@ -832,12 +776,10 @@ def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
     outer.__cause__ = git_ops.GitError("isolation probe failure\rBEEP\x07")
     _install_chained_failure_backend(monkeypatch, multi_stack_target, outer)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
     out, err = capsys.readouterr()
 
-    assert exc.value.code == 1
+    assert code == 1
     for stream in (out, err):
         assert sentinel not in stream
         assert "\x1b" not in stream and "\r" not in stream
@@ -858,12 +800,10 @@ def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
         raise RuntimeError("formatter exploded")
 
     monkeypatch.setattr("daydream.cli.format_verbose_exception", _boom)
-    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
     out, err = capsys.readouterr()
 
-    assert exc.value.code == 1
+    assert code == 1
     assert "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]" in err
     assert "formatter exploded" not in err
     assert "failed to create disposable read-only checkout" in out + err
@@ -881,11 +821,9 @@ def test_cli_main_verbose_diagnoses_pre_config_failure(
 
     monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "--verbose", str(git_repo)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--verbose", str(git_repo))
     _out, err = capsys.readouterr()
-    assert exc.value.code == 1
+    assert code == 1
     assert "RuntimeError" in err
     assert "observability boom" in err
 
@@ -902,11 +840,9 @@ def test_cli_main_default_hides_pre_config_failure_details(
 
     monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", str(git_repo)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, str(git_repo))
     _out, err = capsys.readouterr()
-    assert exc.value.code == 1
+    assert code == 1
     assert "RuntimeError" not in err
 
 
@@ -945,12 +881,10 @@ def test_cli_main_hostile_str_fatal_default_fails_closed(
     _silence_cli_and_runner(monkeypatch)
     _install_exploding_str_backend(monkeypatch)
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "--review", str(multi_stack_target)])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--review", str(multi_stack_target))
     out, err = capsys.readouterr()
 
-    assert exc.value.code == 1
+    assert code == 1
     assert "cannot stringify" not in out + err
     assert "Traceback (most recent call last)" not in err
     assert "Fatal Error" in out + err
@@ -968,14 +902,10 @@ def test_cli_main_hostile_str_fatal_verbose_emits_unavailable_marker(
     _silence_cli_and_runner(monkeypatch)
     _install_exploding_str_backend(monkeypatch)
 
-    monkeypatch.setattr(
-        sys, "argv", ["daydream", "--verbose", "--review", str(multi_stack_target)]
-    )
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
+    code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
     out, err = capsys.readouterr()
 
-    assert exc.value.code == 1
+    assert code == 1
     assert "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]" in err
     assert "cannot stringify" not in out + err
     assert "Traceback (most recent call last)" not in err
