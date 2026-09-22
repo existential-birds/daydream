@@ -1006,13 +1006,18 @@ def _ref_named_branch(repo: Path) -> str:
 
 
 @pytest.mark.parametrize(
+    "probe",
+    [git_ops.ref_exists, git_ops.commit_exists],
+    ids=["ref_exists", "commit_exists"],
+)
+@pytest.mark.parametrize(
     "build_ref",
     [_ref_raw_sha, _ref_abbreviated_sha, _ref_tag, _ref_relative_commit_ish, _ref_named_branch],
     ids=["raw_sha", "abbreviated_sha", "tag", "relative_commit_ish", "named_branch"],
 )
-def test_ref_exists_true(tmp_path: Path, build_ref: Any) -> None:
+def test_ref_and_commit_exist_true(tmp_path: Path, build_ref: Any, probe: Any) -> None:
     repo = _make_repo_with_main(tmp_path)
-    assert git_ops.ref_exists(repo, build_ref(repo)) is True
+    assert probe(repo, build_ref(repo)) is True
 
 
 def test_ref_exists_missing(tmp_path: Path) -> None:
@@ -1029,16 +1034,6 @@ def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
     assert git_ops.ref_exists(repo, "--exec=evil") is False
 
 
-
-
-@pytest.mark.parametrize(
-    "build_ref",
-    [_ref_raw_sha, _ref_abbreviated_sha, _ref_tag, _ref_relative_commit_ish, _ref_named_branch],
-    ids=["raw_sha", "abbreviated_sha", "tag", "relative_commit_ish", "named_branch"],
-)
-def test_commit_exists_true(tmp_path: Path, build_ref: Any) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    assert git_ops.commit_exists(repo, build_ref(repo)) is True
 
 
 def test_commit_exists_rejects_origin_only(tmp_path: Path) -> None:
@@ -1675,6 +1670,40 @@ def test_error_hierarchy_is_consistent() -> None:
 
 
 
+def _timeout_run(
+    *,
+    cmd: list[str],
+    timeout: float,
+    calls: dict[str, int] | None = None,
+) -> Any:
+    """Return a ``subprocess.run`` double that raises ``TimeoutExpired`` on every call."""
+
+    def run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if calls is not None:
+            calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    return run
+
+
+def _flaky_timeout_run(
+    calls: dict[str, int],
+    ok: subprocess.CompletedProcess[Any],
+    *,
+    cmd: list[str],
+    timeout: float,
+) -> Any:
+    """Return a double that times out on the first call and returns *ok* after."""
+
+    def run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        return ok
+
+    return run
+
+
 def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """`_run_git` retries transient timeouts but not other failures (#120).
 
@@ -1690,24 +1719,14 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
     # Case 1: transient timeout (1st attempt) then success on the retry.
     calls = {"n": 0}
 
-    def flaky_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
-        return ok
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_run)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _flaky_timeout_run(calls, ok, cmd=["git"], timeout=5))
     assert git_ops._run_git(repo, ["rev-parse", "HEAD"]).returncode == 0
     assert calls["n"] == 2  # timed out once, then succeeded
 
     # Case 2: every attempt times out -> GitTimeoutError after retries+1 tries.
     calls["n"] = 0
 
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _timeout_run(cmd=["git"], timeout=5, calls=calls))
     with pytest.raises(git_ops.GitTimeoutError):
         git_ops._run_git(repo, ["rev-parse", "HEAD"], retries=2)
     assert calls["n"] == 3  # 1 initial + 2 retries
@@ -1777,11 +1796,7 @@ def test_mutating_wrapper_does_not_retry_on_timeout(
     repo = _make_repo_with_main(tmp_path)
     calls = {"n": 0}
 
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["command"], timeout=60)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _timeout_run(cmd=["command"], timeout=60, calls=calls))
     with pytest.raises(git_ops.GitTimeoutError):
         operation(repo)
     assert calls["n"] == 1  # no retries for mutating operations
@@ -1811,10 +1826,7 @@ def test_run_gh_timeout_environment_validation(
     repo = _make_repo_with_main(tmp_path)
     monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", env_value)
 
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        raise subprocess.TimeoutExpired(cmd=["gh"], timeout=expected_timeout)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _timeout_run(cmd=["gh"], timeout=expected_timeout))
     with pytest.raises(git_ops.GitTimeoutError) as exc:
         git_ops._run_gh(repo, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
     assert str(exc.value) == (
@@ -1855,11 +1867,7 @@ def test_read_only_gh_retry_environment_validation(
         monkeypatch.delenv("DAYDREAM_GH_TIMEOUT_RETRIES", raising=False)
     calls = {"n": 0}
 
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["gh"], timeout=60)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _timeout_run(cmd=["gh"], timeout=60, calls=calls))
     with pytest.raises(git_ops.GitTimeoutError) as exc:
         git_ops.gh_repo_view(repo)
     assert calls["n"] == expected_attempts
@@ -1891,24 +1899,14 @@ def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
     # Case 1: transient timeout (1st attempt) then success on the retry.
     calls = {"n": 0}
 
-    def flaky_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise subprocess.TimeoutExpired(cmd=["gh"], timeout=60)
-        return ok
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_run)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _flaky_timeout_run(calls, ok, cmd=["gh"], timeout=60))
     assert git_ops.gh_repo_view(repo) == ("octocat", "hello")
     assert calls["n"] == 2  # timed out once, then succeeded
 
     # Case 2: every attempt times out -> GitTimeoutError after retries+1 tries.
     calls["n"] = 0
 
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["gh"], timeout=60)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _timeout_run(cmd=["gh"], timeout=60, calls=calls))
     with pytest.raises(git_ops.GitTimeoutError):
         git_ops.gh_pr_diff(repo, 7)
     assert calls["n"] == git_ops._gh_retries() + 1
@@ -1925,11 +1923,7 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
     repo = _make_repo_with_main(tmp_path)
     calls = {"n": 0}
 
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["gh"], timeout=60)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _timeout_run(cmd=["gh"], timeout=60, calls=calls))
 
     # Read: idempotent=True -> retried to exhaustion.
     with pytest.raises(git_ops.GitTimeoutError):
@@ -2109,20 +2103,19 @@ def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
     assert git_ops.gh_repo_view(repo) is None
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda repo: git_ops.gh_pr_view(repo, 999999), id="gh-pr-view"),
+        pytest.param(lambda repo: git_ops.gh_pr_list_for_branch(repo, "main"), id="gh-pr-list"),
+    ],
+)
 @gh_required
 @pytest.mark.usefixtures("local_only_gh")
-def test_gh_pr_view_raises_without_remote(tmp_path: Path) -> None:
+def test_gh_pr_raises_without_remote(tmp_path: Path, call: Any) -> None:
     repo = _make_repo_with_main(tmp_path)
     with pytest.raises(GitError, match="no git remotes found"):
-        git_ops.gh_pr_view(repo, 999999)
-
-
-@gh_required
-@pytest.mark.usefixtures("local_only_gh")
-def test_gh_pr_list_for_branch_raises_without_remote(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    with pytest.raises(GitError, match="no git remotes found"):
-        git_ops.gh_pr_list_for_branch(repo, "main")
+        call(repo)
 
 
 @gh_required
