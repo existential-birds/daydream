@@ -7,13 +7,12 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from daydream import clock
+from daydream import clock, git_ops
 from daydream.agent import _validates_schema, run_agent
 from daydream.backends import Backend
 from daydream.backends.pi import PiBackend
@@ -279,20 +278,14 @@ def _planning_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _search_paths(repo: Path, target: Path, deadline: float) -> Iterator[Path]:
-    if target.is_file():
-        yield target
-        return
     remaining = deadline - clock.monotonic()
     if remaining <= 0:
         raise EvidenceUnavailable("evidence deadline reached")
     relative = target.relative_to(repo).as_posix()
-    listed = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "ls-files", "-z", "--cached", "--", relative],
-        cwd=repo, capture_output=True, timeout=min(5, remaining), check=False,
-    )
-    if listed.returncode or len(listed.stdout) > 1024 * 1024:
+    listed = git_ops.ls_files_scoped(repo, relative, timeout=min(5, remaining))
+    if sum(len(os.fsencode(path)) + 1 for path in listed) > 1024 * 1024:
         raise EvidenceUnavailable("tracked search scope could not be enumerated")
-    paths = sorted(set(listed.stdout.decode("utf-8").split("\0")) - {""})
+    paths = sorted(set(listed))
     if len(paths) > MAX_SEARCH_FILES:
         raise EvidenceUnavailable("search exceeds its tracked-file allowance")
     for path in paths:
@@ -420,7 +413,7 @@ async def run_finite_review(
                     raise EvidenceUnavailable("evidence batch exceeds its byte allowance")
                 allowance -= size
                 cache[key] = {"evidence": response}
-            except (OSError, ValueError, subprocess.TimeoutExpired):
+            except (OSError, ValueError, git_ops.GitError):
                 cache[key] = {"unavailable": "complete confined evidence could not be supplied"}
         result = cache[key]
         if "unavailable" in result:

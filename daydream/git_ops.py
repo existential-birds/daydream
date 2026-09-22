@@ -412,7 +412,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 5,
+    timeout: int | float = 5,
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -427,7 +427,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 5,
+    timeout: int | float = 5,
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -441,7 +441,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 5,
+    timeout: int | float = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -1923,6 +1923,26 @@ def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
         for path in stdout.split(b"\0")
         if path
     ]
+
+
+def ls_files_scoped(repo: Path, path: str, *, timeout: float = 5) -> list[str]:
+    """Return tracked paths under one literal repository-relative file or directory.
+
+    A successful empty scope returns ``[]``; execution failures and nonzero Git
+    exits raise ``GitError``. Timeout retries are disabled so callers can bound
+    enumeration by their remaining evidence deadline.
+    """
+    proc = _run_git(
+        repo,
+        ["-c", "core.fsmonitor=false", "ls-files", "-z", "--cached", "--", _literal_pathspec(path)],
+        timeout=timeout,
+        capture_bytes=True,
+        retries=0,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        raise GitError(f"git ls-files failed in {repo}: {stderr.strip()}")
+    return _decode_nul_paths(proc.stdout)
 
 
 def tracked_path_collisions(repo: Path, *relatives: str) -> tuple[str, ...]:

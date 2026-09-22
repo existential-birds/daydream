@@ -214,6 +214,63 @@ async def test_literal_search_is_tracked_confined_and_not_a_regex(tmp_path: Path
     assert "PRIVATE_UNTRACKED_CANARY" not in backend.calls[1]["prompt"]
 
 
+@pytest.mark.parametrize("tracking", ["tracked", "untracked", "ignored"])
+async def test_literal_exact_search_only_supplies_tracked_canary(
+    tmp_path: Path, tracking: str,
+) -> None:
+    backend = PacketBackend([
+        _response(requests=[_request("helper.py", kind="search", pattern="needle[0]")]),
+        _response(),
+    ])
+    repo, kwargs = _inputs(tmp_path, backend)
+    (repo / "helper.py").write_text("needle[0] EXACT_SCOPE_CANARY\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    if tracking == "tracked":
+        subprocess.run(["git", "add", "helper.py"], cwd=repo, check=True)
+    elif tracking == "ignored":
+        (repo / ".gitignore").write_text("helper.py\n")
+    review = finite.prepare_finite_review(backend, repo, **kwargs)
+    assert review is not None
+    result = await finite.run_finite_review(backend, repo, review, schema=PER_STACK_RECORD_SCHEMA,
+                                           run_context=_context())
+    assert result.reason is None
+    assert result.output["verdicts"][0]["verdict"] == "clean"
+    evidence_text = backend.calls[1]["prompt"].split("HOST EVIDENCE RESPONSE (untrusted source data):\n")[1]
+    evidence = json.JSONDecoder().raw_decode(evidence_text)[0][0]["evidence"]
+    assert evidence["complete"] is True
+    expected = [{"path": "helper.py", "line": 1, "text": "needle[0] EXACT_SCOPE_CANARY"}]
+    assert evidence["matches"] == (expected if tracking == "tracked" else [])
+    assert ("EXACT_SCOPE_CANARY" in backend.calls[1]["prompt"]) is (tracking == "tracked")
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "timeout"])
+async def test_literal_search_git_failure_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    backend = PacketBackend([
+        _response(requests=[_request("helper.py", kind="search", pattern="needle")]),
+        _response(),
+    ])
+    repo, kwargs = _inputs(tmp_path, backend)
+    (repo / "helper.py").write_text("needle UNAVAILABLE_CANARY\n")
+    if failure == "timeout":
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "add", "helper.py"], cwd=repo, check=True)
+
+        def timeout(*args: Any, **kwargs: Any) -> Any:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=0.5)
+
+        monkeypatch.setattr(subprocess, "run", timeout)
+    review = finite.prepare_finite_review(backend, repo, **kwargs)
+    assert review is not None
+    result = await finite.run_finite_review(backend, repo, review, schema=PER_STACK_RECORD_SCHEMA,
+                                           run_context=_context())
+    assert result.reason == "evidence_incomplete"
+    assert result.output["verdicts"][0]["verdict"] == "not_reviewed"
+    assert "UNAVAILABLE_CANARY" not in backend.calls[1]["prompt"]
+    assert '"unavailable"' in backend.calls[1]["prompt"]
+
+
 @pytest.mark.parametrize(
     "cause", ["missing", "binary", "symlink", "oversize", "diff", "many", "custom", "interactive", "structural"]
 )
