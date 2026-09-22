@@ -100,7 +100,7 @@ def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
 
 
-def _cli_main_exit(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
+def _cli_main_exit(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int | str | None:
     """Drive the real ``cli.main`` with *argv* and return its process exit code."""
     monkeypatch.setattr(sys, "argv", ["daydream", *argv])
     with pytest.raises(SystemExit) as exc:
