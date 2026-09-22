@@ -4,29 +4,32 @@ import pytest
 from daydream.phases import MERGED_ITEMS_SCHEMA, normalize_items
 
 
+def _raw_item(**overrides: object) -> dict[str, object]:
+    """Build one merge-agent item, defaults filled, any field overridable."""
+    item: dict[str, object] = {"id": 1, "lens": "per-stack", "file": "a.py", "line": 1,
+                               "description": "d", "confidence": "HIGH", "rationale": "r",
+                               "evidence": "a.py:1", "severity": "medium",
+                               "source_uids": ["python:1"]}
+    item.update(overrides)
+    return item
+
+
 def test_schema_accepts_related_files() -> None:
-    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
-            "lens": "cross-stack", "severity": "high",
-            "related_files": ["b.py", "svc/handler.py"],
-            "source_uids": ["python:1", "react:2"]}
+    item = _raw_item(line=4, evidence="a.py:4", lens="cross-stack", severity="high",
+                     related_files=["b.py", "svc/handler.py"],
+                     source_uids=["python:1", "react:2"])
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
 
 
 def test_schema_rejects_non_string_related_files() -> None:
-    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
-            "lens": "per-stack", "severity": "medium",
-            "related_files": [42], "source_uids": []}
+    item = _raw_item(line=4, evidence="a.py:4", related_files=[42], source_uids=[])
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
 
 
 def test_schema_requires_lens_and_severity() -> None:
-    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
-            "lens": "structural", "severity": "high", "related_files": None,
-            "source_uids": ["structure:1"]}
+    item = _raw_item(line=4, evidence="a.py:4", lens="structural", severity="high",
+                     related_files=None, source_uids=["structure:1"])
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # passes
     bad = {k: v for k, v in item.items() if k != "lens"}
     with pytest.raises(jsonschema.ValidationError):
@@ -58,10 +61,8 @@ def test_verdict_join_matches_after_collision_resolution() -> None:
 
 
 def test_schema_accepts_wonder_lens() -> None:
-    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "MEDIUM", "rationale": "r", "evidence": "a.py:4",
-            "lens": "wonder", "severity": "medium", "related_files": None,
-            "source_uids": None}
+    item = _raw_item(line=4, evidence="a.py:4", confidence="MEDIUM", lens="wonder",
+                     related_files=None, source_uids=None)
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
 
 
@@ -73,10 +74,8 @@ def test_schema_requires_source_uids() -> None:
     rather than saying it by omission. Omission would be indistinguishable from
     a model that simply ignored the field.
     """
-    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
-            "lens": "cross-stack", "severity": "high", "related_files": None,
-            "source_uids": ["python:1"]}
+    item = _raw_item(line=4, evidence="a.py:4", lens="cross-stack", severity="high",
+                     related_files=None, source_uids=["python:1"])
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
     bad = {k: v for k, v in item.items() if k != "source_uids"}
     with pytest.raises(jsonschema.ValidationError):
@@ -90,22 +89,9 @@ def test_schema_rejects_non_string_source_uids() -> None:
     schema still pins the shape so a structurally wrong payload is caught at the
     boundary rather than silently filtered later.
     """
-    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
-            "lens": "per-stack", "severity": "medium", "related_files": None,
-            "source_uids": [7]}
+    item = _raw_item(line=4, evidence="a.py:4", related_files=None, source_uids=[7])
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
-
-
-def _raw_item(**overrides: object) -> dict[str, object]:
-    """Build one merge-agent item, defaults filled, any field overridable."""
-    item: dict[str, object] = {"id": 1, "lens": "per-stack", "file": "a.py", "line": 1,
-                               "description": "d", "confidence": "HIGH", "rationale": "r",
-                               "evidence": "a.py:1", "severity": "medium",
-                               "source_uids": ["python:1"]}
-    item.update(overrides)
-    return item
 
 
 def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:

@@ -26,7 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
-from daydream import cli, git_ops
+from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers
@@ -38,6 +38,7 @@ from daydream.training.labeler_signals import (
 )
 from tests.harness.fake_gh import FakeGh
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.scripts import cli_main
 
 FILE_FINGERPRINT = "f" * 64
 
@@ -45,21 +46,6 @@ FILE_FINGERPRINT = "f" * 64
 def _never_fetch(*_args: Any, **_kwargs: Any) -> None:
     """A gh_api that must never be called: `threads=` makes the fetch unnecessary."""
     raise AssertionError("gh_api must not be called when threads= is supplied")
-
-
-def cli_main(argv: list[str]) -> int:
-    """Drive ``cli.main`` with ``argv`` and return its exit code."""
-    import sys
-
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    raise AssertionError("cli.main() must exit via sys.exit")
 
 
 # --- Placement: an unplaceable finding on a changed file goes file-level -----

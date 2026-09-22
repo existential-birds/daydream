@@ -533,31 +533,25 @@ def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
     )
 
 
-def test_forged_marker_from_non_bot_commenter_does_not_suppress_finding(
-    fake_gh: FakeGh, tmp_path: Path
+@pytest.mark.parametrize(
+    ("author", "expected_posts"),
+    [
+        pytest.param("evil-attacker", 1, id="forged-human-marker-not-suppressed"),
+        pytest.param("daydream[bot]", 0, id="bot-marker-suppressed"),
+    ],
+)
+def test_marker_suppression_depends_on_prior_thread_author(
+    fake_gh: FakeGh, tmp_path: Path, author: str, expected_posts: int
 ) -> None:
-    # Prior thread carries the SAME fingerprint, but authored by a human -> forged.
+    # Prior thread carries the SAME fingerprint; only its author (human vs bot)
+    # decides whether the review is suppressed as already-posted.
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
     fake_gh.serve_prior_threads(
-        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["evil-attacker"]
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=[author]
     )
     code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
     assert code == 0
-    # Not suppressed -> review still posted once.
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
-
-
-def test_bot_authored_marker_with_bot_login_suppresses_repost(
-    fake_gh: FakeGh, tmp_path: Path
-) -> None:
-    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
-    fake_gh.serve_prior_threads(
-        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
-    )
-    code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
-    assert code == 0
-    # Already on the PR -> NO review posted (idempotent).
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == expected_posts
 
 
 def test_bot_login_env_fallback(
@@ -573,10 +567,21 @@ def test_bot_login_env_fallback(
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_post_findings_approve_when_clean_and_flag(
-    fake_gh: FakeGh, tmp_path: Path
+@pytest.mark.parametrize(
+    ("severity", "expected_event", "expect_clean_marker"),
+    [
+        pytest.param("low", "APPROVE", True, id="low-severity-approves"),
+        pytest.param("high", "COMMENT", False, id="high-severity-keeps-comment"),
+    ],
+)
+def test_post_findings_approve_on_clean_reflects_finding_severity(
+    fake_gh: FakeGh,
+    tmp_path: Path,
+    severity: str,
+    expected_event: str,
+    expect_clean_marker: bool,
 ) -> None:
-    """low-severity-only artifact + --approve-on-clean -> review event APPROVE."""
+    """--approve-on-clean approves only when no high/medium finding remains."""
     artifact = _write_artifact(
         tmp_path / "f.json",
         [
@@ -585,8 +590,8 @@ def test_post_findings_approve_when_clean_and_flag(
                 path="a.py",
                 line=3,
                 placement="inline",
-                title="Nit",
-                severity="low",
+                title="Finding",
+                severity=severity,
             ),
         ],
     )
@@ -594,28 +599,8 @@ def test_post_findings_approve_when_clean_and_flag(
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
-    assert posts[0].payload["event"] == "APPROVE"
-    assert "no high/medium findings" in posts[0].payload["body"]
-
-
-def test_post_findings_keeps_comment_when_high_finding(
-    fake_gh: FakeGh, tmp_path: Path
-) -> None:
-    """high-severity finding + --approve-on-clean -> event stays COMMENT."""
-    artifact = _write_artifact(
-        tmp_path / "f.json",
-        [
-            _finding(
-                "a" * 64, path="a.py", line=3, placement="inline", title="Real finding"
-            ),  # default severity="high"
-        ],
-    )
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
-    assert code == 0
-    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
-    assert len(posts) == 1
-    assert posts[0].payload["event"] == "COMMENT"
-    assert "no high/medium findings" not in posts[0].payload["body"]
+    assert posts[0].payload["event"] == expected_event
+    assert ("no high/medium findings" in posts[0].payload["body"]) is expect_clean_marker
 
 
 def test_post_findings_approve_when_all_matched_and_clean_flag(

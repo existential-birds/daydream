@@ -44,6 +44,41 @@ def _install_annotation_hub(
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
 
 
+def _wired_hub(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    repo_id: str = "org/private-annotations",
+    private: bool = True,
+) -> "AnnotationsHub":
+    """Build the revision-aware fixture and route the CLI at it in one step."""
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    hub = AnnotationsHub(repo_id=repo_id, private=private)
+    _install_annotation_hub(monkeypatch, hub)
+    return hub
+
+
+def _publish_final(
+    index_root: Path,
+    materialize_dir: Path,
+    archive_dir: Path,
+    state_dir: Path,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Drive the real ``publish-final`` argv through the adjudicate CLI."""
+    argv = [
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(materialize_dir), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(state_dir),
+        "--hub-repo", "org/private-ds",
+    ]
+    if dry_run:
+        argv.append("--dry-run")
+    return handle_adjudicate(argv)
+
+
 def _write_checkpoint_inputs(root: Path) -> tuple[Path, Path]:
     state = root / "state"
     state.mkdir()
@@ -412,11 +447,8 @@ def test_cli_publish_state_checkpoint_reports_batch_and_actual_revision(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
     state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    _install_annotation_hub(monkeypatch, hub)
+    hub = _wired_hub(monkeypatch)
 
     assert handle_adjudicate([
         "publish-state",
@@ -438,11 +470,8 @@ def test_cli_resume_state_bootstraps_from_curation_without_local_manifest(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
     state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    _install_annotation_hub(monkeypatch, hub)
+    hub = _wired_hub(monkeypatch)
     assert handle_adjudicate([
         "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
         "--hub-repo", hub.repo_id,
@@ -466,11 +495,8 @@ def test_cli_resume_state_manifest_compatibility_enforces_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
     state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    _install_annotation_hub(monkeypatch, hub)
+    hub = _wired_hub(monkeypatch)
     assert handle_adjudicate([
         "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
         "--hub-repo", hub.repo_id,
@@ -502,17 +528,11 @@ def test_cli_resume_state_missing_unavailable_or_corrupt_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     remote_state: str,
 ) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
-    hub = AnnotationsHub(
-        repo_id="org/annotations",
-        private=remote_state != "public",
-    )
+    hub = _wired_hub(monkeypatch, repo_id="org/annotations", private=remote_state != "public")
     if remote_state == "corrupt":
         hub.seed_remote_files({
             "annotations/cur-1/checkpoints/batch-latest.json": b"not JSON",
         })
-    _install_annotation_hub(monkeypatch, hub)
     destination = tmp_path / "restored"
 
     assert handle_adjudicate([
@@ -531,11 +551,8 @@ def test_cli_resume_state_rejects_existing_destination_before_download(
     monkeypatch: pytest.MonkeyPatch,
     destination_kind: str,
 ) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
     state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    _install_annotation_hub(monkeypatch, hub)
+    hub = _wired_hub(monkeypatch)
     assert handle_adjudicate([
         "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
         "--hub-repo", hub.repo_id,
@@ -565,13 +582,11 @@ def test_cli_download_final_installs_exact_success_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
     from tests.test_training_adjudication_publish import _final_bundle
 
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+    hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
-    _install_annotation_hub(monkeypatch, hub)
     destination = tmp_path / "downloaded"
 
     assert handle_adjudicate([
@@ -597,13 +612,11 @@ def test_cli_download_final_rejects_existing_destination_before_download(
     destination_kind: str,
 ) -> None:
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
     from tests.test_training_adjudication_publish import _final_bundle
 
-    hub = AnnotationsHub(repo_id="org/private-annotations")
+    hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
-    _install_annotation_hub(monkeypatch, hub)
     hub.downloaded_revision_log.clear()
     destination = tmp_path / "downloaded"
     if destination_kind == "file":
@@ -629,10 +642,7 @@ def test_cli_download_final_hub_failure_exits_1_without_partial_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    _install_annotation_hub(monkeypatch, hub)
+    hub = _wired_hub(monkeypatch)
     destination = tmp_path / "downloaded"
 
     assert handle_adjudicate([
@@ -658,13 +668,11 @@ from tests.test_training_adjudication_final_bundle import seed_final_bundle_stat
 def test_publish_final_dry_run_validates_and_publishes_nothing(
         tmp_path: Path, capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch, legacy_stage: bool) -> None:
-    from daydream.training.adjudication import cli as adjudication_cli
     from daydream.training.corpus_projection.identity import record_id
 
-    hub = AnnotationsHub(repo_id="org/private-annotations")
     # Route the CLI's only external boundary at the revision-aware fixture so
     # the dry-run and actual-success OID assertions observe real CLI behavior.
-    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    hub = _wired_hub(monkeypatch)
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     state = tmp_path / "state"
     state.mkdir()
@@ -691,12 +699,7 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     if legacy_stage:
         scratch.mkdir(parents=True)
         (scratch / "annotations.jsonl").write_bytes(scratch_bytes)
-    rc = handle_adjudicate([
-        "publish-final", "--index-root", str(index_root),
-        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
-        "--curation-bundle-dir", str(index_root),
-        "--state-dir", str(state),
-        "--hub-repo", "org/private-ds", "--dry-run"])
+    rc = _publish_final(index_root, mat, archive_dir, state, dry_run=True)
     assert rc == 0
     out = capsys.readouterr().out
     assert "annotations.jsonl" in out and "record" in out.lower()
@@ -711,12 +714,7 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     # Contrast experiment: the same invocation without --dry-run publishes
     # through the very same wired hub and the final/ keys appear, proving the
     # "nothing was published" assertion above is not structurally blind.
-    assert handle_adjudicate([
-        "publish-final", "--index-root", str(index_root),
-        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
-        "--curation-bundle-dir", str(index_root),
-        "--state-dir", str(state),
-        "--hub-repo", "org/private-ds"]) == 0
+    assert _publish_final(index_root, mat, archive_dir, state) == 0
     published_output = _console_text(capsys)
     assert final_id in published_output
     assert hub.repo_info("main").sha in published_output
@@ -735,21 +733,14 @@ def test_publish_final_refuses_when_admission_gate_not_met(
     handler must exit 1 without any byte reaching the Hub (issue #336 finding
     2 — publish-final must not upload identically to a fully adjudicated
     run)."""
-    from daydream.training.adjudication import cli as adjudication_cli
-
     hub = build_snapshot()
     hub.commit_revision("a" * 40)
-    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    _install_annotation_hub(monkeypatch, hub)
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     # canonical harvest with no human observations anywhere: the coverage
     # report's gate has a 0/0 outcome-bearing numerator/denominator
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-    rc = handle_adjudicate([
-        "publish-final", "--index-root", str(index_root),
-        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
-        "--curation-bundle-dir", str(index_root),
-        "--state-dir", str(tmp_path / "state"),
-        "--hub-repo", "org/private-ds"])
+    rc = _publish_final(index_root, mat, archive_dir, tmp_path / "state")
     assert rc == 1
     assert not any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
 
@@ -760,12 +751,7 @@ def test_publish_final_missing_artifact_exits_nonzero(
     ann = mat / "annotations.jsonl"
     if ann.exists():
         ann.unlink()  # the canonical-harvest output when present; either way the artifact is missing
-    rc = handle_adjudicate([
-        "publish-final", "--index-root", str(index_root),
-        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
-        "--curation-bundle-dir", str(index_root),
-        "--state-dir", str(tmp_path / "state"),
-        "--hub-repo", "org/private-ds", "--dry-run"])
+    rc = _publish_final(index_root, mat, archive_dir, tmp_path / "state", dry_run=True)
     assert rc == 1
     captured = capsys.readouterr()
     # the panel hard-folds long messages mid-word (with the right border

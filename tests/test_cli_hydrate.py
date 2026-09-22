@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -12,6 +13,47 @@ from daydream import cli
 from daydream.archive import hydrate
 from daydream.archive.hydrate_client import FakeHub
 from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+
+
+@dataclass
+class _FakeSummary:
+    """Default HydrateHubSummary-shaped result for a monkeypatched `_run_hydrate_hub`."""
+
+    curation_id: str = "cur-" + "0" * 16
+    output_commit_sha: str = "b" * 40
+    verified: bool = True
+    dry_run_discovered: int = 1
+    dry_run_admitted: int = 1
+    dry_run_rejected: int = 0
+    dry_run_incomplete_manifests: tuple[str, ...] = ()
+    verify_admitted: int = 1
+    license_admission: dict[str, int] = field(default_factory=dict)
+
+
+def _hydrate_args(
+    stage_dir: pathlib.Path,
+    *,
+    source_repo: str = "org/ds",
+    revision: str = "a" * 40,
+    destination_repo: str = "org/ds",
+    policy: pathlib.Path | None = None,
+    dry_run: bool = False,
+    allow_copyleft: str | None = None,
+) -> list[str]:
+    """Build the shared `_handle_hydrate_hub_command` argv with per-test extras."""
+    args = [
+        "--source-repo", source_repo,
+        "--source-revision", revision,
+        "--destination-repo", destination_repo,
+        "--stage-dir", str(stage_dir),
+    ]
+    if policy is not None:
+        args += ["--license-policy", str(policy)]
+    if allow_copyleft is not None:
+        args += ["--allow-copyleft", allow_copyleft]
+    if dry_run:
+        args.append("--dry-run")
+    return args
 
 
 def test_hydrate_hub_requires_explicit_args(capsys: pytest.CaptureFixture[str]) -> None:
@@ -47,30 +89,16 @@ def test_success_path_drives_orchestrator(
 ) -> None:
     calls: list[Any] = []
 
-    class FakeSummary:
-        curation_id = "cur-" + "0" * 16
-        output_commit_sha = "b" * 40
-        verified = True
-        dry_run_discovered = 1
-        dry_run_admitted = 1
-        dry_run_rejected = 0
-        dry_run_incomplete_manifests: tuple[str, ...] = ()
-        verify_admitted = 1
-        license_admission: dict[str, int] = {}
-
-    def fake_run(config: Any) -> FakeSummary:
+    def fake_run(config: Any) -> _FakeSummary:
         calls.append(config)
-        return FakeSummary()
+        return _FakeSummary()
 
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
-    rc = cli._handle_hydrate_hub_command(
-        ["--source-repo", "org/ds", "--source-revision", "a" * 40,
-         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path),
-         "--license-policy", str(policy)])
+    rc = cli._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy))
     assert rc == 0
     assert calls and calls[0].source_revision == "a" * 40
 
@@ -82,23 +110,17 @@ def test_cli_wires_license_policy_into_hydration(
     previously unreachable license admission summary prints (issue #1080)."""
     calls: list[Any] = []
 
-    class FakeSummary:
-        curation_id = "cur-" + "0" * 16
-        output_commit_sha = "b" * 40
-        verified = True
-        dry_run_discovered = 2
-        dry_run_admitted = 1
-        dry_run_rejected = 1
-        dry_run_incomplete_manifests: tuple[str, ...] = ()
-        verify_admitted = 1
-        license_admission = {
-            "admitted": 1, "c5_excluded": 1,
-            "c8_copyleft_unopted": 0, "license_evidence_missing": 0,
-        }
-
-    def fake_run(config: Any) -> FakeSummary:
+    def fake_run(config: Any) -> _FakeSummary:
         calls.append(config)
-        return FakeSummary()
+        return _FakeSummary(
+            dry_run_discovered=2,
+            dry_run_admitted=1,
+            dry_run_rejected=1,
+            license_admission={
+                "admitted": 1, "c5_excluded": 1,
+                "c8_copyleft_unopted": 0, "license_evidence_missing": 0,
+            },
+        )
 
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
@@ -106,10 +128,8 @@ def test_cli_wires_license_policy_into_hydration(
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
     rc = cli._handle_hydrate_hub_command(
-        ["--source-repo", "org/ds", "--source-revision", "a" * 40,
-         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path),
-         "--license-policy", str(policy),
-         "--allow-copyleft", "Owner/Gpl-Repo"])
+        _hydrate_args(tmp_path, policy=policy, allow_copyleft="Owner/Gpl-Repo")
+    )
     assert rc == 0
     assert calls and calls[0].license_policy_path == str(policy)
     assert calls[0].allow_copyleft == frozenset({"owner/gpl-repo"})
@@ -120,26 +140,18 @@ def test_cli_wires_license_policy_into_hydration(
 def test_success_path_surfaces_incomplete_manifests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    class FakeSummary:
-        curation_id = "cur-" + "0" * 16
-        output_commit_sha = "b" * 40
-        verified = True
-        dry_run_discovered = 2
-        dry_run_admitted = 1
-        dry_run_rejected = 0
-        dry_run_incomplete_manifests = ("sess-a (missing trajectory.json)",)
-        verify_admitted = 1
-        license_admission: dict[str, int] = {}
-
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setattr(cli, "_run_hydrate_hub", lambda _config: FakeSummary())
+    monkeypatch.setattr(
+        cli, "_run_hydrate_hub",
+        lambda _config: _FakeSummary(
+            dry_run_discovered=2,
+            dry_run_incomplete_manifests=("sess-a (missing trajectory.json)",),
+        ),
+    )
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
-    rc = cli._handle_hydrate_hub_command(
-        ["--source-repo", "org/ds", "--source-revision", "a" * 40,
-         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path),
-         "--license-policy", str(policy)])
+    rc = cli._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy))
     assert rc == 0
     output = " ".join(capsys.readouterr().out.split())
     assert "hydration yield reduced" in output
@@ -154,17 +166,13 @@ def test_dry_run_reports_discovery_accounting_without_publication(
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
 
     rc = cli._handle_hydrate_hub_command(
-        [
-            "--source-repo",
-            "org/private-ds",
-            "--source-revision",
-            SNAPSHOT_REVISION,
-            "--destination-repo",
-            "org/private-ds",
-            "--stage-dir",
-            str(tmp_path),
-            "--dry-run",
-        ]
+        _hydrate_args(
+            tmp_path,
+            source_repo="org/private-ds",
+            revision=SNAPSHOT_REVISION,
+            destination_repo="org/private-ds",
+            dry_run=True,
+        )
     )
 
     assert rc == 0
@@ -199,17 +207,13 @@ def test_dry_run_surfaces_incomplete_manifests_with_reduced_yield(
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
 
     rc = cli._handle_hydrate_hub_command(
-        [
-            "--source-repo",
-            "org/private-ds",
-            "--source-revision",
-            SNAPSHOT_REVISION,
-            "--destination-repo",
-            "org/private-ds",
-            "--stage-dir",
-            str(tmp_path),
-            "--dry-run",
-        ]
+        _hydrate_args(
+            tmp_path,
+            source_repo="org/private-ds",
+            revision=SNAPSHOT_REVISION,
+            destination_repo="org/private-ds",
+            dry_run=True,
+        )
     )
 
     assert rc == 0
@@ -234,17 +238,13 @@ def test_dry_run_fails_closed_on_run_shaped_zero_discovery(
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
 
     rc = cli._handle_hydrate_hub_command(
-        [
-            "--source-repo",
-            "org/private-ds",
-            "--source-revision",
-            SNAPSHOT_REVISION,
-            "--destination-repo",
-            "org/private-ds",
-            "--stage-dir",
-            str(tmp_path),
-            "--dry-run",
-        ]
+        _hydrate_args(
+            tmp_path,
+            source_repo="org/private-ds",
+            revision=SNAPSHOT_REVISION,
+            destination_repo="org/private-ds",
+            dry_run=True,
+        )
     )
 
     assert rc == 1
@@ -260,16 +260,7 @@ def test_hydrate_hub_refuses_non_dry_run_without_policy(
     """A non-dry hydrate-hub publication requires --license-policy and must
     refuse before any Hub access; the dry-run path still works without one."""
     monkeypatch.setenv("HF_TOKEN", "t")
-    argv = [
-        "--source-repo",
-        "org/ds",
-        "--source-revision",
-        "a" * 40,
-        "--destination-repo",
-        "org/ds",
-        "--stage-dir",
-        str(tmp_path / "stage"),
-    ]
+    argv = _hydrate_args(tmp_path / "stage")
     rc = cli._handle_hydrate_hub_command(argv)
     assert rc == 1
     out = capsys.readouterr().out + capsys.readouterr().err
@@ -369,14 +360,14 @@ def run_dry_run_capture(
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "test", "spdx_decisions": {"MIT": "accepted"}}')
     rc = cli._handle_hydrate_hub_command(
-        [
-            "--source-repo", "org/private-ds",
-            "--source-revision", SNAPSHOT_REVISION,
-            "--destination-repo", "org/private-ds",
-            "--stage-dir", str(tmp_path / "stage"),
-            "--license-policy", str(policy),
-            "--dry-run",
-        ]
+        _hydrate_args(
+            tmp_path / "stage",
+            source_repo="org/private-ds",
+            revision=SNAPSHOT_REVISION,
+            destination_repo="org/private-ds",
+            policy=policy,
+            dry_run=True,
+        )
     )
     out = " ".join(capsys.readouterr().out.split())
     per_repo: dict[str, dict[str, int]] = {}
