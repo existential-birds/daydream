@@ -66,7 +66,7 @@ from daydream.extensions.api import FlowStep
 from daydream.flows.engine import BackendFactory, FlowContext, run_flow
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import PushReceipt
-from daydream.review_budget import review_deadline_scope
+from daydream.review_budget import review_deadline_scope, review_scale_for_diff
 from daydream.review_profile import Pipeline
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import DaydreamRunFlow
@@ -146,20 +146,21 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
 
 
-def _deep_shard_enabled(config: RunConfig) -> bool:
+def _deep_shard_enabled(config: RunConfig, *, diff: str = "") -> bool:
     """Resolve the deep-review sharding toggle (issue #731).
 
     Precedence mirrors ``_resolve_config_value``: 1)
     ``RunConfig.deep_shard_enabled`` (CLI tier), 2)
     ``DaydreamFileConfig.deep_shard_enabled`` (file-config scalar), 3) built-in
-    default :data:`DEFAULT_DEEP_SHARD_ENABLED` (False, preserving the established
-    single-agent-per-stack behavior). Resolved via ``_resolve_config_value``
-    (``is not None``, not truthiness) so an explicit set-to-False on the
-    RunConfig tier forces the feature off even when the file-config scalar
-    enables it -- the CLI > file > default precedence holds for explicit False,
-    per the ``RunConfig.deep_shard_enabled`` field contract.
+    built-in default. Large diffs turn the default on, while either explicit
+    tier still wins, including False.
     """
-    return _resolve_config_value(config, "deep_shard_enabled", DEFAULT_DEEP_SHARD_ENABLED)
+    explicit = config.deep_shard_enabled
+    if explicit is None and config.file_config is not None:
+        explicit = config.file_config.deep_shard_enabled
+    if explicit is not None:
+        return explicit
+    return DEFAULT_DEEP_SHARD_ENABLED or review_scale_for_diff(diff) >= 4
 
 
 def _deep_shard_int(config: RunConfig, attr: str, default: int) -> int:
@@ -654,7 +655,7 @@ def _prepare_review_stacks(
     # fail-open (never raises; returns ``{}`` on any failure); byte sizing
     # uses the FULL on-disk ``diff``, not the bounded in-memory value.
     import_graph: dict[str, set[str]] = {}
-    sharding_enabled = _deep_shard_enabled(config)
+    sharding_enabled = _deep_shard_enabled(config, diff=diff)
     if sharding_enabled and not single_stack_mode:
         try:
             import_graph = build_import_graph(changed_files, target_dir)
@@ -944,7 +945,12 @@ async def _run_review_spine(
         # subsequent --start-at resumes can find the artifacts they need.
         #
         # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
-        with review_deadline_scope(ctx.pipeline().review_wall_budget_s):
+        with review_deadline_scope(
+            ctx.pipeline().review_wall_budget_s,
+            diff=diff,
+            scale_deadline=config.review_profile is not None
+            and config.review_profile.source_kind == "default",
+        ):
             exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)

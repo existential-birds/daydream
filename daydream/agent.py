@@ -58,7 +58,7 @@ from daydream.retry_policy import (
     parse_message_retry_hint,
     undeclared_retry_allowance_message,
 )
-from daydream.review_budget import ReviewLimits, review_deadline
+from daydream.review_budget import ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import (
     RunContext,
@@ -741,6 +741,7 @@ async def run_agent(
     review_instructions = review_system_instructions
     hard_deadline = deadline
     if review_limits is not None:
+        review_limits = review_limits_for_scope(review_limits)
         started = clock.monotonic()
         bounds = [started + review_limits.investigation_s + review_limits.finalization_s]
         if deadline is not None:

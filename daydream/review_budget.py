@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,25 +24,63 @@ class ReviewLimits:
 
 
 _review_deadline: ContextVar[tuple[float, float] | None] = ContextVar("review_deadline", default=None)
+_review_scale: ContextVar[int] = ContextVar("review_scale", default=1)
+
+
+def review_scale_for_diff(diff: str) -> int:
+    """Give large changes room to finish without slowing modest reviews."""
+    lines = diff.count("\n") + bool(diff and not diff.endswith("\n"))
+    size = len(diff.encode("utf-8"))
+    if lines > 10_000 or size > 512 * 1024:
+        return 6
+    if lines > 5_000 or size > 256 * 1024:
+        return 4
+    if lines > 1_000 or size > 64 * 1024:
+        return 2
+    return 1
+
+
+def review_limits_for_scope(limits: ReviewLimits) -> ReviewLimits:
+    """Scale each review role's existing time and call allowances together."""
+    scale = _review_scale.get()
+    return replace(
+        limits,
+        investigation_s=limits.investigation_s * scale,
+        finalization_s=limits.finalization_s * scale,
+        tool_calls=limits.tool_calls * scale,
+    )
+
+
+def review_scale_for_scope() -> int:
+    """Return the current review's workload multiplier for outer phase guards."""
+    return _review_scale.get()
 
 
 @contextmanager
-def review_deadline_scope(seconds: float) -> Iterator[None]:
+def review_deadline_scope(
+    seconds: float, *, diff: str = "", scale_deadline: bool = False
+) -> Iterator[None]:
     """A fresh/resumed review shares one deadline, including queue and retry time.
 
     Only review-limited calls consume this scope; fixing and publication do not.
     Context-local state isolates concurrent runs and is restored on cancellation.
     """
-    finish = clock.monotonic() + seconds
-    token = _review_deadline.set((finish - min(300, seconds / 5), finish))
+    scale = review_scale_for_diff(diff)
+    effective_seconds = seconds * scale if scale_deadline else seconds
+    finish = clock.monotonic() + effective_seconds
+    token = _review_deadline.set(
+        (finish - min(300 * scale, effective_seconds / 5), finish)
+    )
+    scale_token = _review_scale.set(scale)
     try:
         yield
     finally:
+        _review_scale.reset(scale_token)
         _review_deadline.reset(token)
 
 
 def review_deadline(*, discovery: bool) -> float | None:
-    """Reserve five minutes of the model pipeline for synthesis/adjudication."""
+    """Return the discovery or total deadline, with scaled synthesis reserve."""
     deadlines = _review_deadline.get()
     return deadlines[0 if discovery else 1] if deadlines is not None else None
 

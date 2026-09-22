@@ -36,7 +36,7 @@ from daydream.prompts.exploration_subagents import (
     build_test_mapper_prompt,
     mapping_source_files,
 )
-from daydream.review_budget import ReviewLimits
+from daydream.review_budget import ReviewLimits, review_scale_for_scope
 from daydream.review_evidence import FinalizationContext
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
@@ -345,7 +345,7 @@ async def pre_scan(
                         "in the schema. Do not review defects. Omit unconfirmed mappings; empty arrays are valid.",
                         supplied_context=(("change diff", diff_text),),
                     ),
-                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                    wall_budget_s=DEFAULT_WALL_BUDGET_S * review_scale_for_scope(),
                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                     run_context=run_context,
                 )
@@ -381,7 +381,7 @@ async def pre_scan(
         phase=DaydreamPhase.EXPLORATION,
         descriptors=descriptors,
     ) as dispatch:
-        with anyio.move_on_after(_PRE_SCAN_TIMEOUT_SECONDS) as timeout_scope:
+        with anyio.move_on_after(_PRE_SCAN_TIMEOUT_SECONDS * review_scale_for_scope()) as timeout_scope:
             async with anyio.create_task_group() as tg:
                 if tier == "single":
                     dep_prompt = build_dependency_tracer_prompt(

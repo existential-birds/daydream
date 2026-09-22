@@ -9,7 +9,7 @@ import pytest
 
 from daydream.agent import run_agent
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
-from daydream.review_budget import ReviewLimits, review_deadline_scope
+from daydream.review_budget import ReviewLimits, review_deadline_scope, review_limits_for_scope, review_scale_for_diff
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -20,6 +20,57 @@ SCHEMA = {
     "required": ["findings"], "additionalProperties": False,
 }
 FINDINGS = {"findings": ["src.py:2 divides by zero for an empty batch"]}
+
+
+def test_large_diff_expands_review_allowances_without_changing_small_reviews() -> None:
+    small = "diff --git a/a.py b/a.py\n" + "+line\n" * 100
+    large = "diff --git a/a.py b/a.py\n" + "+line\n" * 6_500
+    assert review_scale_for_diff(small) == 1
+    assert review_scale_for_diff(large) == 4
+    assert review_scale_for_diff("+line\n" * 10_001) == 6
+    assert review_scale_for_diff("x" * (64 * 1024 + 1)) == 2
+
+    with review_deadline_scope(2700, diff=large, scale_deadline=True):
+        from daydream.review_budget import review_scale_for_scope
+
+        assert review_scale_for_scope() == 4
+        limits = review_limits_for_scope(ReviewLimits())
+        assert limits.investigation_s > 480
+        assert limits.tool_calls > 48
+    with review_deadline_scope(2700, diff=small, scale_deadline=True):
+        assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
+
+
+def test_explicit_review_deadline_remains_exact_for_large_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock().install(monkeypatch)
+    large = "+line\n" * 6_500
+    with review_deadline_scope(15, diff=large, scale_deadline=False):
+        from daydream.review_budget import review_deadline
+
+        assert review_deadline(discovery=False) == clock.monotonic() + 15
+
+
+async def test_large_review_can_complete_after_old_time_and_tool_caps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock().install(monkeypatch)
+
+    async def responder(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        for n in range(60):
+            clock.advance(10)
+            yield ToolStartEvent(id=str(n), name="read", input={"path": "src.py"})
+            yield ToolResultEvent(id=str(n), output="source", is_error=False)
+        yield ResultEvent(structured_output=FINDINGS, continuation=None)
+
+    backend = ScriptedBackend(responder=responder)
+    with review_deadline_scope(2700, diff="+line\n" * 6_500, scale_deadline=True):
+        result, _, reason = await run_agent(
+            backend, tmp_path, "review src.py", phase=DaydreamPhase.DEEP,
+            output_schema=SCHEMA, review_limits=ReviewLimits(),
+            run_context=RunContext(InteractionPolicy(quiet=True)),
+        )
+    assert result == FINDINGS
+    assert reason is None
 
 
 def test_review_prompts_reuse_small_context_and_request_only_json(tmp_path: Path) -> None:

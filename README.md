@@ -466,8 +466,12 @@ The gate is fail-open. A flagged file surfaces as a warning plus a manifest reco
 
 ### Review budgets
 
-The review model pipeline defaults to 45 minutes, including queueing and retries,
-with the last five minutes reserved for synthesis. Set
+The review model pipeline defaults to 45 minutes for modest diffs, including
+queueing and retries, with the last five minutes reserved for synthesis. Diffs
+over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) receive 2×, 4×,
+and 6× review time and per-role tool-call allowances respectively. The 4× and
+6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
+profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
 Individual reviewers also have bounded investigation and finalization stages:
 per-stack investigation stops after eight minutes or 48 tool starts, reserving

@@ -133,9 +133,14 @@ assembling results, then expired again during finalization. The 16-tool limit
 and static shortcut for modest changes remain in place. Increasing the general
 invocation wall budget alone does not override these shorter phase limits.
 
-A whole-review model deadline defaults to 2,700 seconds. It includes queueing,
+A whole-review model deadline defaults to 2,700 seconds for modest diffs. Diffs
+over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) scale the default
+deadline and per-role investigation, finalization, and tool-call limits by 2×,
+4×, and 6× respectively. The 4× and 6× tiers enable the existing deep-review
+sharder unless explicitly disabled. An explicit review profile retains its
+configured whole-review deadline. The deadline includes queueing,
 retries, exploration, intent, discovery, adjudication, merge, and optional diagram
-requests. Discovery stops five minutes earlier, reserving time for synthesis.
+requests. Discovery reserves five minutes per workload multiplier for synthesis.
 For budgets below 25 minutes the synthesis reserve is 20% of the total. A resumed
 run gets a fresh deadline; persisted incomplete markers remain in force. Fix
 execution and artifact publication do not inherit this model deadline.
