@@ -177,6 +177,75 @@ def _lineage_field(manifest: Mapping[str, Any], field: str, manifest_path: Path)
     return value
 
 
+def _validate_policy_binding(
+    raw: bytes,
+    *,
+    label: str,
+    curation_id: str,
+    source_hub_commit: str,
+) -> None:
+    """Validate producer-canonical v2 policy-binding bytes and rederive identity.
+
+    Shared by the staging constructor and the publication boundary so the
+    publication path cannot drift from the construction rules.
+    """
+    try:
+        binding = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label}: unreadable policy binding ({exc})") from None
+    required = {
+        "schema_version",
+        "policy_digest",
+        "policy_version",
+        "allow_copyleft",
+        "exclusions_digest",
+        "resolved_decisions_digest",
+        "distribution_digest",
+    }
+    if not isinstance(binding, dict) or set(binding) != required:
+        raise ValueError(f"{label}: must contain the exact v2 field set")
+    if binding["schema_version"] != "2":
+        raise ValueError(f"{label}: unsupported schema_version")
+    for name in (
+        "policy_digest",
+        "exclusions_digest",
+        "resolved_decisions_digest",
+        "distribution_digest",
+    ):
+        value = binding[name]
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"{label}: invalid {name}")
+    policy_version = binding["policy_version"]
+    if not isinstance(policy_version, str) or not policy_version:
+        raise ValueError(f"{label}: invalid policy_version")
+    allow_copyleft = binding["allow_copyleft"]
+    if (
+        not isinstance(allow_copyleft, list)
+        or any(
+            not isinstance(slug, str)
+            or not slug
+            or slug != slug.casefold()
+            for slug in allow_copyleft
+        )
+        or allow_copyleft != sorted(set(allow_copyleft))
+    ):
+        raise ValueError(f"{label}: invalid allow_copyleft")
+    canonical = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
+    if raw != canonical:
+        raise ValueError(f"{label}: not canonically encoded")
+    derived = derive_curation_id(
+        source_hub_commit,
+        binding["policy_digest"],
+        policy_version,
+        frozenset(allow_copyleft),
+        binding["exclusions_digest"],
+        binding["resolved_decisions_digest"],
+        binding["distribution_digest"],
+    )
+    if derived != curation_id:
+        raise ValueError(f"{label}: derives curation_id {derived!r}, not {curation_id!r}")
+
+
 def _validated_policy_binding(
     curation_bundle_dir: Path,
     *,
@@ -189,63 +258,14 @@ def _validated_policy_binding(
         raise FileNotFoundError(f"curation policy binding not found as a regular file: {path}")
     try:
         raw = path.read_bytes()
-        binding = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         raise ValueError(f"unreadable policy binding at {path}: {exc}") from None
-    required = {
-        "schema_version",
-        "policy_digest",
-        "policy_version",
-        "allow_copyleft",
-        "exclusions_digest",
-        "resolved_decisions_digest",
-        "distribution_digest",
-    }
-    if not isinstance(binding, dict) or set(binding) != required:
-        raise ValueError(f"policy binding at {path} must contain the exact v2 field set")
-    if binding["schema_version"] != "2":
-        raise ValueError(f"policy binding at {path} has unsupported schema_version")
-    for name in (
-        "policy_digest",
-        "exclusions_digest",
-        "resolved_decisions_digest",
-        "distribution_digest",
-    ):
-        value = binding[name]
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise ValueError(f"policy binding at {path} has invalid {name}")
-    policy_version = binding["policy_version"]
-    if not isinstance(policy_version, str) or not policy_version:
-        raise ValueError(f"policy binding at {path} has invalid policy_version")
-    allow_copyleft = binding["allow_copyleft"]
-    if (
-        not isinstance(allow_copyleft, list)
-        or any(
-            not isinstance(slug, str)
-            or not slug
-            or slug != slug.casefold()
-            for slug in allow_copyleft
-        )
-        or allow_copyleft != sorted(set(allow_copyleft))
-    ):
-        raise ValueError(f"policy binding at {path} has invalid allow_copyleft")
-    canonical = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
-    if raw != canonical:
-        raise ValueError(f"policy binding at {path} is not canonically encoded")
-    derived = derive_curation_id(
-        source_hub_commit,
-        binding["policy_digest"],
-        policy_version,
-        frozenset(allow_copyleft),
-        binding["exclusions_digest"],
-        binding["resolved_decisions_digest"],
-        binding["distribution_digest"],
+    _validate_policy_binding(
+        raw,
+        label=f"policy binding at {path}",
+        curation_id=curation_id,
+        source_hub_commit=source_hub_commit,
     )
-    if derived != curation_id:
-        raise ValueError(
-            f"policy binding at {path} derives curation_id {derived!r}, "
-            f"not {curation_id!r}"
-        )
     return raw
 
 

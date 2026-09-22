@@ -97,6 +97,15 @@ def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
     ))
 
 
+def _plan_write_diagnostics(repo: Path) -> dict[str, Any]:
+    """Load the plan-writer diagnostics artifact."""
+    return _load_improve_json(repo, "plan-write-diagnostics.json")
+
+
+def _plan_write_dispositions(repo: Path) -> list[Any]:
+    return [attempt["disposition"] for attempt in _plan_write_diagnostics(repo)["attempts"]]
+
+
 def _flow_context_with_audit_root(
     root: Path,
     *,
@@ -1738,10 +1747,7 @@ async def test_run_with_no_findings_writes_report_and_empty_plan_diagnostics(
     assert code == 0
     assert [call for call in stub.calls if call["marker"] == "audit"]
     assert not [call for call in stub.calls if call["marker"] == "plan-writer"]
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert diagnostics["attempts"] == []
     assert "Plans written: 0" in improve_artifact(
         improve_monorepo_target,
@@ -1782,10 +1788,7 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
             "[0-9][0-9][0-9]-*.md"
         )
     )
-    plan_diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    plan_diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert code == 0
     assert report.is_file()
     assert plans
@@ -2065,10 +2068,6 @@ async def test_repo_with_no_test_files_still_receives_a_plan(
             "[0-9][0-9][0-9]-*.md"
         )
     )
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
 
     assert code == 0
     assert plans
@@ -2077,9 +2076,7 @@ async def test_repo_with_no_test_files_still_receives_a_plan(
     assert "### Named cases" in body
     assert "test_service_name_preserves_contract" in body
     assert "no existing test" in body
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["success"]
+    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
 
 
 @pytest.mark.anyio
@@ -2695,10 +2692,7 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     assert "| high-leverage-title | P1 | S | TODO |" in index
 
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert diagnostics["artifact_type"] == "daydream.plan-write-diagnostics"
     assert any(
         attempt["disposition"] == "success"
@@ -2956,10 +2950,7 @@ async def test_persistent_authoring_failure_blocks_after_one_repair(
 
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     plans_dir = improve_monorepo_target / "daydream_plans"
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert code == 1
     assert len(plan_calls) == 2
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
@@ -3005,13 +2996,7 @@ async def test_plan_subverb_clamps_over_length_prose_without_repair(
     plan_text = plans[0].read_text(encoding="utf-8")
     assert over_length_role[:299] + "…" in plan_text
     assert over_length_role not in plan_text
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["success"]
+    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
 
 
 @pytest.mark.anyio
@@ -3164,13 +3149,7 @@ async def test_sloppy_but_salvageable_output_is_normalized_and_written(
         and "Planner scratch notes" not in observable
         for observable in _improve_observable_texts(improve_monorepo_target)
     )
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["success"]
+    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
 
 
 @pytest.mark.anyio
@@ -3332,10 +3311,7 @@ async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     plan_text = plans[0].read_text(encoding="utf-8")
     assert "uv run pytest apps/billing/test_api.py -q" in plan_text
     assert "apps/billing/legacy_api.py" not in plan_text
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert [
         attempt["disposition"] for attempt in diagnostics["attempts"]
     ] == ["retried", "success"]
@@ -3374,10 +3350,7 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     current_state = plan_text.split("## Current state\n\n", 1)[1].split("\n\n## Commands")[0]
     assert "- `apps/billing/api.py:1-2`" in current_state
     assert "def service_name" in current_state
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert [attempt["disposition"] for attempt in diagnostics["attempts"]] == ["retried", "success"]
     first_attempt = diagnostics["attempts"][0]
     assert first_attempt["stage"] == "authoring"
@@ -3414,13 +3387,7 @@ async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
         "do not create, modify, or depend on this path."
     ) in _out_of_scope_section(plan_text)
     assert "STOP_PATH_UNKNOWN" not in plan_text
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["success"]
+    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
 
 
 @pytest.mark.anyio
@@ -3453,13 +3420,7 @@ async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
     assert stub.plan_writer_calls == 2
     assert len(plans) == 1
     assert "## Steps" in plans[0].read_text(encoding="utf-8")
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["success"]
+    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
 
 
 @pytest.mark.anyio
@@ -3505,10 +3466,7 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     assert "BLOCKED (PLAN_WRITER_FAILED: PROCESS_EXIT)" in index
-    diagnostics = _load_improve_json(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert [
         (attempt["disposition"], attempt["stage"])
         for attempt in diagnostics["attempts"]
@@ -4326,7 +4284,7 @@ async def test_over_length_instruction_is_repaired_not_silently_truncated(
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
 
     assert code == 1
-    diagnostics = _load_improve_json(improve_monorepo_target, "plan-write-diagnostics.json")
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     errors = [error for attempt in diagnostics["attempts"] for error in attempt["errors"]]
     assert any(error["pointer"] == "/steps/0/changes/0/instruction" for error in errors), errors
     # The plan writer was asked again rather than a mangled plan being written.
