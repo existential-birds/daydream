@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 from pathlib import Path
@@ -138,11 +139,22 @@ async def test_successful_final_review_retracts_claim_disproved_by_requested_evi
     assert result.source_packet_files == {"app.py"}
 
 
-async def test_missing_evidence_preserves_independent_defect_without_claiming_completion(tmp_path: Path) -> None:
+@pytest.mark.parametrize("duplicate_count", [1, 2])
+async def test_missing_evidence_preserves_independent_defect_without_claiming_completion(
+    tmp_path: Path, duplicate_count: int,
+) -> None:
+    original_issues = [_issue() for _ in range(duplicate_count)] + [_issue("Second proven defect")]
+    first = _response(
+        requests=[_request("missing.py")],
+        issues=[*original_issues, _issue("Original complete-file claim", path="other.py")],
+        verdicts=[_verdict(verdict="not_reviewed"), _verdict("other.py")],
+    )
+    first_snapshot = copy.deepcopy(first)
+    revised = {**_issue("Reworded proven defect"), "line": 2}
+    complete_issue = _issue("Final complete-file finding", path="other.py")
     backend = PacketBackend([
-        _response(requests=[_request("missing.py")], issues=[_issue()],
-                  verdicts=[_verdict(verdict="not_reviewed"), _verdict("other.py")]),
-        _response(issues=[_issue(), _issue("Speculative missing contract")],
+        first,
+        _response(issues=[revised, _issue("Speculative missing contract"), complete_issue],
                   verdicts=[_verdict(), _verdict("other.py")]),
     ])
     repo, kwargs = _inputs(tmp_path, backend)
@@ -153,9 +165,12 @@ async def test_missing_evidence_preserves_independent_defect_without_claiming_co
     result = await finite.run_finite_review(backend, repo, review, schema=PER_STACK_RECORD_SCHEMA,
                                            run_context=_context())
     assert result.reason == "evidence_incomplete"
-    assert result.output["issues"] == [_issue()]
-    assert [v["verdict"] for v in result.output["verdicts"]] == ["not_reviewed", "clean"]
+    assert result.output["issues"] == [complete_issue, *original_issues]
+    assert [v["verdict"] for v in result.output["verdicts"]] == ["not_reviewed", "has_findings"]
+    assert [v["n_findings"] for v in result.output["verdicts"]] == [len(original_issues), 1]
     assert result.source_packet_files == {"other.py"}
+    assert len(backend.calls) == 2
+    assert backend.responses[0] == first_snapshot
 
 
 @pytest.mark.parametrize("path", ["../outside.txt", "/etc/passwd", ".git/config", ".daydream/private.txt", "link.txt"])

@@ -400,6 +400,7 @@ async def run_finite_review(
         return _finish(review, partial, set(assigned), reason or "evidence_incomplete")
     if not first["requests"]:
         return _finish(review, first, set(), None)
+    first_issues = [dict(issue) for issue in first["issues"]]
     incomplete: set[str] = set()
     evidence: list[dict[str, Any]] = []
     cache: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -437,10 +438,6 @@ async def run_finite_review(
     )
     if reason or not isinstance(final, dict) or not _validates_schema(final, schema):
         return _finish(review, first, set(assigned), reason or "evidence_incomplete")
-    proven = {(item["file"], item["line"], item["description"]) for item in first["issues"]}
-    retained: dict[tuple[str, int, str], dict[str, Any]] = {}
-    for issue in final["issues"]:
-        key = (issue["file"], issue["line"], issue["description"])
-        if issue["file"] not in incomplete or key in proven:
-            retained[key] = issue
-    return _finish(review, {"issues": list(retained.values()), "verdicts": final["verdicts"]}, incomplete, None)
+    issues = [issue for issue in final["issues"] if issue["file"] not in incomplete]
+    issues.extend(issue for issue in first_issues if issue["file"] in incomplete)
+    return _finish(review, {"issues": issues, "verdicts": final["verdicts"]}, incomplete, None)
