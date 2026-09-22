@@ -7,6 +7,7 @@ exactly-once ``label_observations`` append (M5/M8).
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -55,15 +56,34 @@ def _seed_archive(archive_dir: Path) -> None:
     conn.close()
 
 
-def test_canonical_harvest_appends_label_observation_exactly_once(tmp_path: Path) -> None:
+def _materialized(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Index + seeded archive + materialize dir under the canonical pin."""
     root = _index(tmp_path)
     archive = tmp_path / "archive"
     _seed_archive(archive)
-    run_materialize(root, tmp_path / "mat", pin=_PIN)
-    out = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=None,
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    return root, archive, mat
+
+
+def _harvest(
+    root: Path,
+    archive: Path,
+    mat: Path,
+    observations_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run the canonical harvest over a materialized fixture."""
+    return run_canonical_harvest(
+        index_root=root,
+        materialize_dir=mat,
+        archive_dir=archive,
+        observations_path=observations_path,
     )
+
+
+def test_canonical_harvest_appends_label_observation_exactly_once(tmp_path: Path) -> None:
+    root, archive, mat = _materialized(tmp_path)
+    out = _harvest(root, archive, mat, None)
     assert out["appended_sessions"] == 1
     history = label_observation_history(archive, "s1")
     assert len(history) == 1  # exactly once
@@ -78,19 +98,13 @@ def test_canonical_harvest_appends_label_observation_exactly_once(tmp_path: Path
         [stored[0]["evidence"]]
     )
     # re-run unchanged => idempotent, no duplicate row
-    out2 = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=None,
-    )
+    out2 = _harvest(root, archive, mat, None)
     assert out2["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 1
 
 
 def test_canonical_harvest_fails_closed_on_drift_before_any_write(tmp_path: Path) -> None:
-    root = _index(tmp_path)
-    archive = tmp_path / "archive"
-    _seed_archive(archive)
-    run_materialize(root, tmp_path / "mat", pin=_PIN)
+    root, archive, mat = _materialized(tmp_path)
     # evidence drifts AFTER materialization: harvest must refuse pre-write
     sessions_path = root / "sessions.jsonl"
     s = json.loads(sessions_path.read_text().splitlines()[0])
@@ -98,10 +112,7 @@ def test_canonical_harvest_fails_closed_on_drift_before_any_write(tmp_path: Path
     s["resolutions"][0]["evidence"][0]["body_sha256"] = "mut"
     sessions_path.write_text(json.dumps(s, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(AnnotationDriftError) as excinfo:
-        run_canonical_harvest(
-            index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-            observations_path=None,
-        )
+        _harvest(root, archive, mat, None)
     assert excinfo.value.requeued_record_ids  # named for requeue (AC 4/M5)
     assert label_observation_history(archive, "s1") == []  # nothing written
     assert not (tmp_path / "mat" / "annotations.jsonl").exists()
@@ -124,10 +135,7 @@ def test_canonical_harvest_fails_closed_when_record_absent_from_fresh_queue(
         json.dumps(sessions, sort_keys=True) + "\n", encoding="utf-8"
     )
     with pytest.raises(ValueError, match="absent from the freshly built"):
-        run_canonical_harvest(
-            index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-            observations_path=None,
-        )
+        _harvest(root, archive, tmp_path / "mat", None)
     assert not (tmp_path / "mat" / "annotations.jsonl").exists()
 
 
@@ -141,10 +149,7 @@ def test_canonical_harvest_fails_closed_on_missing_materialized_outputs(
     # No manifest at all: _load_pin refuses.
     missing_manifest = tmp_path / "missing-manifest"
     with pytest.raises(FileNotFoundError, match="preview manifest not found"):
-        run_canonical_harvest(
-            index_root=root, materialize_dir=missing_manifest, archive_dir=archive,
-            observations_path=None,
-        )
+        _harvest(root, archive, missing_manifest, None)
     # Manifest present but sessions.jsonl absent: _load_materialized_records refuses.
     mat = tmp_path / "mat"
     mat.mkdir()
@@ -152,10 +157,7 @@ def test_canonical_harvest_fails_closed_on_missing_materialized_outputs(
         json.dumps(_PIN, sort_keys=True), encoding="utf-8"
     )
     with pytest.raises(FileNotFoundError, match="materialized preview snapshot not found"):
-        run_canonical_harvest(
-            index_root=root, materialize_dir=mat, archive_dir=archive,
-            observations_path=None,
-        )
+        _harvest(root, archive, mat, None)
     assert not (mat / "annotations.jsonl").exists()
 
 
@@ -170,10 +172,7 @@ def test_canonical_harvest_fails_closed_on_unreadable_materialized_outputs(
     bad_manifest.mkdir()
     (bad_manifest / "preview-manifest.json").write_text("{not json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="unreadable preview manifest"):
-        run_canonical_harvest(
-            index_root=root, materialize_dir=bad_manifest, archive_dir=archive,
-            observations_path=None,
-        )
+        _harvest(root, archive, bad_manifest, None)
     mat = tmp_path / "mat"
     mat.mkdir()
     (mat / "preview-manifest.json").write_text(
@@ -181,10 +180,7 @@ def test_canonical_harvest_fails_closed_on_unreadable_materialized_outputs(
     )
     (mat / "sessions.jsonl").write_text("{not json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="unreadable materialized snapshot"):
-        run_canonical_harvest(
-            index_root=root, materialize_dir=mat, archive_dir=archive,
-            observations_path=None,
-        )
+        _harvest(root, archive, mat, None)
     assert not (mat / "annotations.jsonl").exists()
 
 
@@ -232,10 +228,7 @@ def _seed_decisive_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Path) -> None:
-    root = _index(tmp_path)
-    archive = tmp_path / "archive"
-    _seed_archive(archive)
-    run_materialize(root, tmp_path / "mat", pin=_PIN)
+    root, archive, mat = _materialized(tmp_path)
     from daydream.training.corpus_projection.identity import record_id
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
@@ -245,10 +238,7 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
         "valid_at": "2026-01-02T00:00:00+00:00", "observed_at": "2026-01-02T01:00:00+00:00",
         "rubric_version": "v1",
     }) + "\n", encoding="utf-8")
-    out = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=obs,
-    )
+    out = _harvest(root, archive, mat, obs)
     assert out["human_adjudicated"] == 1
     history = label_observation_history(archive, "s1")
     rubric = json.loads(history[0]["rubric_json"])
@@ -258,10 +248,7 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
 
 
 def test_canonical_harvest_rejects_unknown_observation_record_id(tmp_path: Path) -> None:
-    root = _index(tmp_path)
-    archive = tmp_path / "archive"
-    _seed_archive(archive)
-    run_materialize(root, tmp_path / "mat", pin=_PIN)
+    root, archive, mat = _materialized(tmp_path)
     obs = tmp_path / "observations.jsonl"
     obs.write_text(json.dumps({
         "record_id": "e" * 64, "disposition": "accepted", "evidence_digest": "d" * 32,
@@ -270,22 +257,13 @@ def test_canonical_harvest_rejects_unknown_observation_record_id(tmp_path: Path)
         "rubric_version": "v1",
     }) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="e" * 64):
-        run_canonical_harvest(
-            index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-            observations_path=obs,
-        )
+        _harvest(root, archive, mat, obs)
     assert label_observation_history(archive, "s1") == []
 
 
 def test_canonical_harvest_emits_annotations_jsonl_from_merged_records(tmp_path: Path) -> None:
-    root = _index(tmp_path)
-    archive = tmp_path / "archive"
-    _seed_archive(archive)
-    run_materialize(root, tmp_path / "mat", pin=_PIN)
-    out = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=None,
-    )
+    root, archive, mat = _materialized(tmp_path)
+    out = _harvest(root, archive, mat, None)
     assert out["record_count"] == 1
     lines = (tmp_path / "mat" / "annotations.jsonl").read_text().splitlines()
     records = [json.loads(line) for line in lines]
@@ -313,10 +291,7 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
     run_materialize(root, tmp_path / "mat", pin=_PIN)
-    run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=None,
-    )
+    _harvest(root, archive, tmp_path / "mat", None)
     # Second index whose evidence carries a created_at after the pin
     # (2026-02-01T00:00:00+00:00).
     sessions = [{
@@ -333,10 +308,7 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
         "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
     )
     run_materialize(root, tmp_path / "mat2", pin=_PIN)
-    out = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat2", archive_dir=archive,
-        observations_path=None,
-    )
+    out = _harvest(root, archive, tmp_path / "mat2", None)
     assert out["evidence_after_as_of"] == [json.loads(
         (tmp_path / "mat2" / "annotations.jsonl").read_text().splitlines()[0]
     )["record_id"]]
@@ -378,17 +350,11 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
     pin_a = dict(_PIN, as_of="2026-03-01T00:00:00+00:00")  # evidence before as_of
     pin_b = dict(_PIN, as_of="2026-02-01T00:00:00+00:00", rubric_version="v2")  # after
     run_materialize(root, tmp_path / "mat-a", pin=pin_a)
-    out_a = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat-a", archive_dir=archive,
-        observations_path=None,
-    )
+    out_a = _harvest(root, archive, tmp_path / "mat-a", None)
     assert out_a["appended_sessions"] == 1
     assert out_a["evidence_after_as_of"] == []
     run_materialize(root, tmp_path / "mat-b", pin=pin_b)
-    out_b = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat-b", archive_dir=archive,
-        observations_path=None,
-    )
+    out_b = _harvest(root, archive, tmp_path / "mat-b", None)
     # Changed pin ⇒ a fresh generation, never a silent dedup skip (the
     # evidence/labels/digest are all unchanged between the two harvests).
     assert out_b["appended_sessions"] == 1
@@ -414,10 +380,7 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
                if line.strip()]
     assert emitted[0]["evidence_after_as_of"] is True
     # Exactly-once still holds for an unchanged re-run under the same pin.
-    out_c = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat-b", archive_dir=archive,
-        observations_path=None,
-    )
+    out_c = _harvest(root, archive, tmp_path / "mat-b", None)
     assert out_c["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 2
 
@@ -430,10 +393,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     tuple omits ``rubric_json``, so the rubric-content digest riding on
     ``evidence_sha`` is what prevents the archived rubric from going stale
     while ``annotations.jsonl`` is re-emitted from the new overlay (M14)."""
-    root = _index(tmp_path)
-    archive = tmp_path / "archive"
-    _seed_archive(archive)
-    run_materialize(root, tmp_path / "mat", pin=_PIN)
+    root, archive, mat = _materialized(tmp_path)
     from daydream.training.corpus_projection.identity import record_id
 
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
@@ -444,10 +404,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
         "valid_at": "2026-01-02T00:00:00+00:00",
         "observed_at": "2026-01-02T01:00:00+00:00", "rubric_version": "v1",
     }) + "\n", encoding="utf-8")
-    out1 = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=obs,
-    )
+    out1 = _harvest(root, archive, mat, obs)
     assert out1["appended_sessions"] == 1
     # Same pin, same materialized snapshot, but a different human labeler
     # re-affirms the same decisive disposition: the archived labels set is
@@ -459,10 +416,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
         "valid_at": "2026-01-02T00:00:00+00:00",
         "observed_at": "2026-01-02T02:00:00+00:00", "rubric_version": "v1",
     }) + "\n", encoding="utf-8")
-    out2 = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=obs,
-    )
+    out2 = _harvest(root, archive, mat, obs)
     assert out2["appended_sessions"] == 1  # fresh generation, never a silent skip
     history = label_observation_history(archive, "s1")
     assert len(history) == 2
@@ -475,10 +429,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
                if line.strip()]
     assert emitted[0]["human_labeler"] == "bob"
     # Unchanged everything (pin + rubric) stays exactly-once.
-    out3 = run_canonical_harvest(
-        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
-        observations_path=obs,
-    )
+    out3 = _harvest(root, archive, mat, obs)
     assert out3["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 2
 
@@ -534,9 +485,7 @@ def test_conflicted_session_yields_no_decisive_label(tmp_path: Path) -> None:
     assert record["disposition"] == "ambiguous"
     archive = tmp_path / "archive"
     _seed_archive(archive)
-    out = run_canonical_harvest(
-        index_root=root, materialize_dir=mat, archive_dir=archive,
-    )
+    out = _harvest(root, archive, mat)
     assert out["appended_sessions"] == 1
     history = label_observation_history(archive, "s1")
     rubric = json.loads(history[0]["rubric_json"])
@@ -593,7 +542,7 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     conn.close()
     archive = tmp_path / "archive"
     _seed_archive(archive)
-    out = run_canonical_harvest(index_root=root, materialize_dir=mat, archive_dir=archive)
+    out = _harvest(root, archive, mat)
     assert out["appended_sessions"] == 1
     history = label_observation_history(archive, "s1")
     # The freshly re-derived conflict suppressed the decisive label even
@@ -631,10 +580,7 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
         "valid_at": "2026-01-02T00:00:00+00:00",
         "observed_at": "2026-01-02T01:00:00+00:00", "rubric_version": "v1",
     }) + "\n", encoding="utf-8")
-    out = run_canonical_harvest(
-        index_root=root, materialize_dir=mat, archive_dir=archive,
-        observations_path=obs,
-    )
+    out = _harvest(root, archive, mat, obs)
     assert out["human_adjudicated"] == 1
     history = label_observation_history(archive, "s1")
     rubric = json.loads(history[0]["rubric_json"])
@@ -665,7 +611,7 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     run_materialize(root, mat, pin=_PIN)
     archive = tmp_path / "archive"
     _seed_archive(archive)
-    run_canonical_harvest(index_root=root, materialize_dir=mat, archive_dir=archive)
+    _harvest(root, archive, mat)
     rows = [
         json.loads(line)
         for line in (mat / "annotations.jsonl").read_text().splitlines()
