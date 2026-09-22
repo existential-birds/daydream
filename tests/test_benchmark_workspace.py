@@ -11,8 +11,7 @@ from daydream.benchmark.schema import BenchmarkManifest, CaseDocument, ImportDoc
 from daydream.benchmark.storage import load_json_strict, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import seeded_commit, write_and_stage
+from tests.harness.git_helpers import seed_pr_origin
 
 
 def test_init_creates_private_layout_and_modes(tmp_path: Path) -> None:
@@ -119,41 +118,14 @@ def test_validate_missing_manifest_returns_1(tmp_path: Path) -> None:
     assert code == 1
 
 
-def _seed_local_origin(root: Path) -> tuple[Any, ...]:
+def _seed_local_origin(root: Path) -> tuple[str, str, str]:
     """Real local bare origin: main base1->base2->base3 + feature head off base2.
 
     The feature head adds ``feature.py`` — the ready fixture's finding
     location — so the frozen head tree contains the location the curated
     finding references. Returns ``(origin_url, base_sha, head_sha)``.
     """
-    import shutil as _sh
-
-    seed = root.parent
-    repo = seed / "local_wt"
-    if repo.exists():
-        _sh.rmtree(repo)
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    write_and_stage(repo, "readme.txt", "base1\n")
-    seeded_commit(repo, "base1")
-    write_and_stage(repo, "base.py", "BASE = 2\n")
-    base_sha = seeded_commit(repo, "base2")
-    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
-    seeded_commit(repo, "base3")
-    _git(repo, "checkout", "--detach", base_sha)
-    (repo / "base.py").write_text("BASE = 20\n")
-    _git(repo, "add", "base.py")
-    write_and_stage(repo, "feature.py", "LINE 1\n")
-    head_sha = seeded_commit(repo, "feature")
-    bare = seed / "origin_local.git"
-    if bare.exists():
-        _sh.rmtree(bare)
-    bare.mkdir()
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head")
-    return str(bare), base_sha, head_sha
+    return seed_pr_origin(root.parent, feature_body="LINE 1\n")
 
 
 def _write_case_docs(root: Path, curation_state: str) -> Any:
