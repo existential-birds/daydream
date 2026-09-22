@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -244,6 +244,46 @@ def _strict_archive_callback(
         )
 
     return _finalize
+
+
+def _upload_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    unsuccessful: bool = False,
+    dump_path: Path | None = None,
+    setup: Callable[[Path], dict[str, Any]] | None = None,
+    **config_kwargs: Any,
+) -> tuple[TrajectoryRecorder, list[tuple[Any, ...]], Path]:
+    """Build a strict-archive recorder and capture its uploader calls.
+
+    ``setup`` may add target-checkout files and return extra ``RunConfig``
+    fields (e.g. a file config parsed after those files exist). The returned
+    list holds one ``(run_dir, repo_id, session_id)`` tuple per upload attempt.
+    """
+    from daydream.runner import RunConfig
+
+    uploaded: list[tuple[Any, ...]] = []
+
+    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
+        uploaded.append((str(run_dir), repo_id, session_id))
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    config_kwargs.update(setup(target_dir) if setup else {})
+    config = RunConfig(run_eval=False, **config_kwargs)
+    recorder = make_recorder(
+        target_dir,
+        on_write=_strict_archive_callback(
+            config, target_dir, unsuccessful=unsuccessful, dump_path=dump_path
+        ),
+    )
+    _add_user_step(recorder)
+    return recorder, uploaded, target_dir
 
 
 def _findings_route(live_root: Path) -> Any:
