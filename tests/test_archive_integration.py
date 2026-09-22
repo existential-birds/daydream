@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -244,6 +244,46 @@ def _strict_archive_callback(
         )
 
     return _finalize
+
+
+def _upload_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    unsuccessful: bool = False,
+    dump_path: Path | None = None,
+    setup: Callable[[Path], dict[str, Any]] | None = None,
+    **config_kwargs: Any,
+) -> tuple[TrajectoryRecorder, list[tuple[Any, ...]], Path]:
+    """Build a strict-archive recorder and capture its uploader calls.
+
+    ``setup`` may add target-checkout files and return extra ``RunConfig``
+    fields (e.g. a file config parsed after those files exist). The returned
+    list holds one ``(run_dir, repo_id, session_id)`` tuple per upload attempt.
+    """
+    from daydream.runner import RunConfig
+
+    uploaded: list[tuple[Any, ...]] = []
+
+    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
+        uploaded.append((str(run_dir), repo_id, session_id))
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    config_kwargs.update(setup(target_dir) if setup else {})
+    config = RunConfig(run_eval=False, **config_kwargs)
+    recorder = make_recorder(
+        target_dir,
+        on_write=_strict_archive_callback(
+            config, target_dir, unsuccessful=unsuccessful, dump_path=dump_path
+        ),
+    )
+    _add_user_step(recorder)
+    return recorder, uploaded, target_dir
 
 
 def _findings_route(live_root: Path) -> Any:
@@ -521,32 +561,13 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A configured trajectory_hub_repo makes the finalizer call the uploader after manifest write."""
-    from daydream.runner import RunConfig
-
-    uploaded: list[tuple[Any, ...]] = []
-
-    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
-        uploaded.append((str(run_dir), repo_id, session_id))
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
-
-    config = RunConfig(
+    recorder, uploaded, _ = _upload_fixture(
+        tmp_path,
+        monkeypatch,
         trajectory_hub_repo="acme/dd-trajectories",
         archive=True,
-        run_eval=False,
         dump_artifacts=None,
     )
-    recorder = make_recorder(
-        target_dir, on_write=_strict_archive_callback(config, target_dir)
-    )
-    _add_user_step(recorder)
     async with recorder:
         pass
 
@@ -580,36 +601,25 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     pyproject.toml or .daydream.toml — the ignored key never reaches the
     uploader even with HF_TOKEN present."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig
 
-    calls: list[Any] = []
     if set_hf_token:
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
 
-    def _fake_upload(*args: object, **kwargs: object) -> bool:
-        calls.append(args)
-        return True
+    def _setup(target_dir: Path) -> dict[str, Any]:
+        if filename is not None and body is not None:
+            (target_dir / filename).write_text(body, encoding="utf-8")
+        return {
+            "file_config": load_file_config(target_dir) if filename is not None else None
+        }
 
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    if filename is not None and body is not None:
-        (target_dir / filename).write_text(body, encoding="utf-8")
-    config = RunConfig(
-        archive=True,
-        run_eval=False,
-        file_config=load_file_config(target_dir) if filename is not None else None,
+    recorder, uploaded, _ = _upload_fixture(
+        tmp_path, monkeypatch, archive=True, setup=_setup
     )
-    recorder = make_recorder(
-        target_dir, on_write=_strict_archive_callback(config, target_dir)
-    )
-    _add_user_step(recorder)
     async with recorder:
         pass
 
-    assert calls == []
+    assert uploaded == []
 
 
 # Signal-flush (partial) archives must never trigger the blocking HF upload
@@ -625,35 +635,14 @@ async def test_archive_upload_tracks_run_success(
     The runner finalizes once and passes ``upload=successful``, so an
     interrupted or failed run is archived without the blocking HF upload — that
     call must never hang a SIGINT/SIGTERM shutdown on a network round trip."""
-    from daydream.runner import RunConfig
-
-    uploaded: list[tuple[Any, ...]] = []
-
-    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
-        uploaded.append((str(run_dir), repo_id, session_id))
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
-
-    config = RunConfig(
+    recorder, uploaded, _ = _upload_fixture(
+        tmp_path,
+        monkeypatch,
+        unsuccessful=not successful,
         trajectory_hub_repo="acme/dd-trajectories",
         archive=True,
-        run_eval=False,
         dump_artifacts=None,
     )
-    recorder = make_recorder(
-        target_dir,
-        on_write=_strict_archive_callback(
-            config, target_dir, unsuccessful=not successful
-        ),
-    )
-    _add_user_step(recorder)
     async with recorder:
         pass
 
@@ -759,35 +748,16 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--no-archive with --dump-artifacts still copies the bundle to the dump dir but never uploads."""
-    from daydream.runner import RunConfig
-
-    uploaded: list[Any] = []
-
-    def _fake_upload(*args: object, **kwargs: object) -> bool:
-        uploaded.append(args)
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
-
     dump_dir = tmp_path / "dump"
     dump_dir.mkdir()
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
-
-    config = RunConfig(
+    recorder, uploaded, _ = _upload_fixture(
+        tmp_path,
+        monkeypatch,
+        dump_path=dump_dir,
         trajectory_hub_repo="acme/dd-trajectories",
         archive=False,
-        run_eval=False,
         dump_artifacts=str(dump_dir),
     )
-    recorder = make_recorder(
-        target_dir,
-        on_write=_strict_archive_callback(config, target_dir, dump_path=dump_dir),
-    )
-    _add_user_step(recorder)
     async with recorder:
         pass
 
