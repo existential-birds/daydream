@@ -679,6 +679,19 @@ def _live_deep_dir(artifact_runtime_root: Path) -> Path:
     return matches[0]
 
 
+def _shallow_pr_config(
+    make_config: Callable[..., "RunConfig"], project: Path, **overrides: object,
+) -> "RunConfig":
+    """Shallow PR-process config for the remote-CI tests, shared defaults seeded."""
+    kwargs: dict[str, object] = {
+        "stack": "python", "quiet": True, "shallow": True, "assume": "yes",
+        "archive": True, "test_command": "true", "pr_number": 7,
+        "pr_repo": "base-user/project",
+    }
+    kwargs.update(overrides)
+    return make_config(project, **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_runner_remote_ci_red_fails_after_real_push(
     tmp_path: Path,
@@ -704,17 +717,7 @@ async def test_runner_remote_ci_red_fails_after_real_push(
 
     try:
         exit_code = await run(
-            make_config(
-                project,
-                stack="python",
-                quiet=True,
-                shallow=True,
-                assume="yes",
-                archive=True,
-                test_command="true",
-                pr_number=7,
-                pr_repo="base-user/project",
-            )
+            _shallow_pr_config(make_config, project)
         )
     finally:
         _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
@@ -810,17 +813,7 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
 
     try:
         exit_code = await run(
-            make_config(
-                project,
-                stack="python",
-                quiet=True,
-                shallow=True,
-                assume="yes",
-                archive=True,
-                test_command="true",
-                pr_number=7,
-                pr_repo="base-user/project",
-            )
+            _shallow_pr_config(make_config, project)
         )
     finally:
         _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
@@ -893,17 +886,7 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
     try:
         with pytest.raises(KeyboardInterrupt):
             await run(
-                make_config(
-                    project,
-                    stack="python",
-                    quiet=True,
-                    shallow=True,
-                    assume="yes",
-                    archive=False,
-                    test_command="true",
-                    pr_number=7,
-                    pr_repo="base-user/project",
-                )
+                _shallow_pr_config(make_config, project, archive=False)
             )
     finally:
         _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
@@ -995,17 +978,9 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     task = asyncio.create_task(
         run(
-            make_config(
-                project,
-                stack="python",
-                quiet=True,
-                shallow=True,
-                assume="yes",
+            _shallow_pr_config(
+                make_config, project, archive=False,
                 start_at="fix" if resume else "ttt",
-                archive=False,
-                test_command="true",
-                pr_number=7,
-                pr_repo="base-user/project",
             )
         )
     )
