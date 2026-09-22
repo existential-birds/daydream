@@ -117,7 +117,7 @@ remain as outer safeguards. Earlier limits now bound useful work:
 
 | Role | Investigation | Tool starts | Reserved finalization |
 |---|---:|---:|---:|
-| Exploration specialist | 120 s | 16 | 30 s |
+| Exploration specialist | 300 s | 16 | 120 s |
 | Intent | 120 s | 12 | 60 s |
 | Alternatives | 300 s | 24 | 90 s |
 | Each language/generic/structural reviewer | 480 s | 48 | 120 s |
@@ -126,9 +126,21 @@ remain as outer safeguards. Earlier limits now bound useful work:
 | Suppression/supervision | 120 s | 12 | 60 s |
 | Merge | 180 s | 16 | 60 s |
 
-A whole-review model deadline defaults to 2,700 seconds. It includes queueing,
+Diff exploration has a 450-second outer timeout, allowing investigation,
+finalization, and stream cleanup. Its former 120/30-second limits interrupted
+Pi dependency mapping in the September 22 Sirona run while it was still
+assembling results, then expired again during finalization. The 16-tool limit
+and static shortcut for modest changes remain in place. Increasing the general
+invocation wall budget alone does not override these shorter phase limits.
+
+A whole-review model deadline defaults to 2,700 seconds for modest diffs. Diffs
+over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) scale the default
+deadline and per-role investigation, finalization, and tool-call limits by 2×,
+4×, and 6× respectively. The 4× and 6× tiers enable the existing deep-review
+sharder unless explicitly disabled. An explicit review profile retains its
+configured whole-review deadline. The deadline includes queueing,
 retries, exploration, intent, discovery, adjudication, merge, and optional diagram
-requests. Discovery stops five minutes earlier, reserving time for synthesis.
+requests. Discovery reserves five minutes per workload multiplier for synthesis.
 For budgets below 25 minutes the synthesis reserve is 20% of the total. A resumed
 run gets a fresh deadline; persisted incomplete markers remain in force. Fix
 execution and artifact publication do not inherit this model deadline.
@@ -365,3 +377,174 @@ For that later rollout:
 5. Preserve strict findings schema/head validation and existing posting gates.
    Diagnostics availability does not authorize posting, approval or resolving
    absent prior findings from an incomplete review.
+
+## Third incident: export rejection and repeated investigation
+
+[Shelfspace run 35633835751, PR 2826](https://github.com/shelfspace-app/shelfspace-mono/actions/runs/35633835751/job/106446456074?pr=2826)
+installed `bb7efbc7956b80ab19c8858dc659cced5c9f0de3`. The reviewed head was
+`406a4ca638533fa6ff560373ce1d9631c902284e`: ten files, 503 additions and nine
+deletions, mostly a workflow, its tests and documentation. Analysis ran from
+17:44:43 to 17:56:39 UTC (about twelve minutes). The Actions log contains 160
+tool-start headers: 91 reads, 53 shell commands, 12 greps, three finds and one
+listing. These are logged starts, not necessarily completed tool executions.
+
+Six cutoffs occurred: three during exploration, then alternatives' wall limit,
+structure's tool limit and React's wall limit. Merge still completed and findings
+were prepared. The fatal exit came afterward: diagnostic publication rejected
+four blocking `url_credential` matches in the generic/React trajectories. A fifth
+`env_var` match in the diff was advisory. Finalization rolled back publication;
+the findings upload was skipped and the diagnostics directory was absent. The
+GitHub artifacts API returned no artifacts, so the four matched values cannot
+be recovered from this run.
+
+The reviewed Makefile contains a PostgreSQL connection template whose username
+and host are Make-variable expansions and whose password is the literal `***`.
+Both reviewers read that file. The existing scanner reproduced a blocking match
+on that non-secret template, and the live trajectory redactor left it unchanged.
+This is a plausible explanation for the incident matches, not proof of their
+exact contents. Separate synthetic regressions reproduce a broader mismatch:
+the live redactor did not cover all credential URL forms that the publication
+scanner rejected.
+
+Budget enforcement itself worked. Work allocation and investigation scope were
+poorly matched to the change:
+
+- The sole detected language absorbed root Makefile/JSON and standalone Node
+  scripts into React: seven assigned files versus three generic files.
+- All exploration specialists received the expanded affected-file list. The
+  test mapper treated imported/context files as additional changed targets.
+- Reviewers repeatedly reconsidered dismissed concerns, read sibling stacks,
+  and attempted dependency installation after missing-package test failures.
+- The structural diff exceeded its inline allowance and dropped five of ten
+  blocks. Bounded finalization evidence also omitted late reads, so a long
+  investigation did not guarantee recoverable complete coverage.
+
+The fixes align live redaction with publication checks while preserving rejection
+of real credentials, correct ownership of root infrastructure, and separate
+changed exploration targets from known context. Oversized exploration diffs receive
+bounded per-file changed-line excerpts with explicit omissions; these advisory
+excerpts do not establish review coverage. This gives mapping agents without a
+shell tool the changed behavior they previously had to infer from whole files.
+Changed tests, documentation, configuration and build manifests remain mapping
+evidence rather than additional test-mapper source targets. One confirmed covering
+test per source completes the mapping task; a no-source change skips that specialist.
+Review prompts define a finite pass, allow extra reads only for concrete candidates,
+and prohibit dependency installation or environment repair during review.
+
+For nontrivial default-policy changes with at most three non-test source files
+and a diff at most 64 KiB, exploration uses the static impact map and bounded repository
+guidance directly. It makes no model mapping calls. Larger changes and custom
+exploration strategies retain the specialist path. All changed files still
+reach the primary reviewers; the optimization removes advisory discovery work,
+not correctness review. Exploration caches include strategy identity so cached
+default results cannot suppress a custom exploration policy.
+
+When structural review uses the built-in structural prompt builder, it also owns
+the packaged default design alternatives check. The host omits the independent
+default alternatives invocation and writes its empty compatibility artifact.
+Custom alternatives strategies, custom structural prompt builders (including
+wrappers), and runs without structural review retain their independent pass.
+Structural failures
+retain incomplete-review warnings; resume preserves prior alternatives and the
+structural design responsibility. This removes a duplicated investigation without
+raising limits or dropping design review.
+
+An isolated replay of the same head/base with Pi 0.86.1 and the same OpenRouter
+model confirmed that removing advisory stages alone was insufficient: all three
+primary reviewers still reached their wall limits. Their effective user prompts
+contained the stopping rules, but Pi's system addendum retained unconditional
+search-first advice and a fixed, inaccurate tool allowance. The model repeatedly
+reopened dismissed candidates and speculated about planted bugs. This is direct
+evidence of non-convergence, not proof that prompt priority was its only cause.
+Pi now receives the computed investigation allowance and stopping contract in
+its system addendum for bounded review calls, including repository-scoped search
+and explicit closure of resolved candidates. The fixed tool-count hint and
+unconditional search-first instruction are removed. Fix calls and explicit
+reasoning-effort settings retain their existing behavior.
+
+That replay nevertheless completed publication with exit status zero: findings,
+trajectory and diagnostic bundle were written, the scan reported zero blocking
+matches and one advisory diff match, and incomplete-review warnings survived.
+
+Existing wall/tool limits, finalization reserves and honest incomplete-coverage
+warnings remain in force.
+Prompt and routing tests establish these contracts; they do not by themselves
+establish model convergence or equivalent recall. Evidence retention remains
+bounded, and this change does not promise that every review completes before a
+limit.
+
+
+### Finite evidence protocol for modest Pi reviews
+
+Eligible unattended default Pi reviewers receive the complete diff and complete
+assigned source text before making a judgment. The model keeps its configured
+reasoning effort and has no executable tools. It can request one batch of up to
+eight specific file reads or literal searches to resolve concrete candidates.
+The host resolves those requests within the repository and supplies the results
+for one final judgment. Both calls share the existing investigation and final
+response deadline; the second call does not receive a fresh investigation budget.
+
+Eligibility requires a diff no larger than 64 KiB, at most ten assigned files,
+and complete assigned text no larger than 192 KiB. Missing, deleted, binary,
+unsafe, schema-incompatible or oversized source packets fall back to the existing reviewer. Custom
+review strategies retain their existing path. Large packets travel through Pi's
+standard input to avoid operating-system argument-size limits.
+
+For modest default intent analysis, the host supplies labeled author context,
+commit metadata and changed paths directly. It does not invent an intent summary
+or promote metadata to authoritative intent. Existing PR freshness checks remain
+in force; reviewers establish behavior from the diff and source.
+
+A host receipt credits supplied source only after a valid final file verdict.
+Unavailable requested evidence leaves dependent files incomplete, even when an
+independently proven finding survives for that file. Those incomplete warnings
+remain in reports and publication gates. Source hashes and line counts are
+preserved in diagnostics; source text itself remains in the live-redacted
+trajectory rather than a new unsanitized packet artifact.
+
+The prototype completed the incident's seven-file generic scope at high effort
+in 249 seconds with one model call and no tools. Small behavioral fixtures
+retained two local defects and a cross-file configuration defect; a clean fixture
+returned no findings, and an unavailable dependency produced an incomplete verdict
+without a speculative finding. These focused checks are evidence of feasibility,
+not a broad recall benchmark. Giving the standalone structural reviewer either
+all ten source files or the diff plus completed primary summaries still exceeded
+480 seconds without a terminal response. Zero tool calls in those attempts rule
+out tool loops, but do not distinguish internal reasoning from provider latency.
+
+
+When every primary reviewer qualifies for this protocol, their assigned-file
+union exactly covers the structural scope, and the structural policy and prompt
+builder are defaults, those reviewers also own structural checks involving their
+assigned files. Each receives the full change partition and the structural and
+canonical-design criteria. Cross-stack synthesis remains. These are candidate
+owners until every primary completes with valid structured output. Any incomplete
+owner, timeout, exception, or invalid output triggers the ordinary structural
+reviewer before the phase finishes; the original primary failure remains visible.
+Custom builders or policies, an uncovered structural file, or an ineligible
+primary retain the separate structural reviewer.
+
+Delegated calls label each finding `per-stack` for a local implementation defect
+or `structural` for a boundary, canonical-design, lifecycle, or cross-component
+defect. The host removes these invocation-only labels, writes local findings with
+primary UIDs, and reconciles each primary verdict against its local findings.
+When all owners complete, the host aggregates structural findings in primary scope
+order into `stack-structure-records.json`, assigns `structure:N` UIDs, and writes
+an empty verdict list plus `delegated_to`. It writes `structural-delegation.json`
+last as the commit marker, after the structural records and report succeed.
+Uncommitted structural candidates are discarded in favor of the fallback review.
+
+Fresh parsing and `--start-at merge` or `fix` validate the committed sidecar scopes,
+`delegated_to`, and structural UID partition before trusting delegated completion.
+The structure artifact can contain findings; its empty verdict list does not
+claim independent file coverage. Structure UIDs remain the durable provenance
+through merge, suppression, evidence handling, and reporting, including after
+adjudication rewrites the records. Older runs that lost findings need a fresh
+review; resume does not reconstruct them.
+
+Two additional high-effort fixtures checked this combined responsibility. One
+found a changed consumer's unit mismatch against a producer owned by another
+stack in 6.74 seconds. The other requested an unchanged canonical helper and
+identified divergent Unicode normalization in 82.03 seconds. Both finished with
+zero model tool calls. These examples test specific cross-file failure modes;
+they do not establish equivalent recall across arbitrary repositories.

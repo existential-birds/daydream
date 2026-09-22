@@ -17,6 +17,7 @@ from tests.deep_orchestrator.support import (
     _uncovered_sweep_target,
 )
 from tests.harness.git_helpers import git as _git
+from tests.harness.review_profile import independent_alternatives_profile
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -238,7 +239,7 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
     """Real path: a small diff is inlined into BOTH the intent and wonder prompts."""
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
 
-    assert await _run_deep(tiny_diff_target) == 0
+    assert await _run_deep(tiny_diff_target, review_profile=independent_alternatives_profile()) == 0
 
     intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
     wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
@@ -265,7 +266,7 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     bounded_results: list[str] = []
     _spy_bound_deep_diff(monkeypatch, bounded_results)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
+    assert await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile()) == 0
 
     # The pointer fallback only discriminates when 0big.py's block really sorts
     # FIRST in git's byte-ordered diff AND the bound keeps it whole (leading
@@ -312,7 +313,7 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
     _git(multi_stack_target, "commit", "-m", "add small and big files")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
+    assert await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile()) == 0
 
     intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
     wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
@@ -446,7 +447,7 @@ async def test_intent_artifact_survives_wonder_failure(
     stub.fail_alternatives = True
 
     with pytest.raises(RuntimeError, match="alternatives blew up"):
-        await _run_deep(multi_stack_target)
+        await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile())
 
     intent_md = multi_stack_target / ".daydream" / "deep" / "intent.md"
     assert intent_md.read_text().strip(), "intent.md must survive the wonder failure"
@@ -466,7 +467,7 @@ async def test_both_ttt_artifacts_written_on_the_happy_path(
 
     deep = multi_stack_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
-    assert json.loads((deep / "alternatives.json").read_text())
+    assert json.loads((deep / "alternatives.json").read_text()) == []
 
 
 async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -989,15 +989,19 @@ async def test_flow_review_routes_to_review_helper(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """--flow review runs the real review pipeline: the alternatives prompt
-    reaches the backend via the review flow, exit 0."""
+    """--flow review reaches structural review with the default design lens."""
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
 
     rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))
 
     assert rc == 0
-    assert any(ALTERNATIVES_MARKER in p for p in backend.prompts)  # review pipeline ran
+    assert any(
+        "You are the structural reviewer" in prompt
+        and "Within this same boundary review, check design choices" in prompt
+        for prompt in backend.prompts
+    )
+    assert not any(ALTERNATIVES_MARKER in prompt for prompt in backend.prompts)
 
 
 async def test_flow_shallow_routes_to_shallow_helper(

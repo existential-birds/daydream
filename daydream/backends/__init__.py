@@ -1244,6 +1244,12 @@ class Backend(Protocol):
     their native supported tool controls without mutating shared settings.
     Codex still needs the host zero-tool guard; its sandbox permits reads.
 
+    Optional extension: ``supports_tools_disabled = True`` declares native
+    invocation-local ``execute(tools_disabled=True)`` support that removes tools
+    without lowering reasoning or replacing the review task with finalization.
+    Callers must gate this request on the capability; it is not interchangeable
+    with a host tool-call budget or the backend's read-only profile.
+
     Optional extension: backends may expose ``reasoning_effort``, the per-phase
     reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
     and applied through the driver's native knob (Claude

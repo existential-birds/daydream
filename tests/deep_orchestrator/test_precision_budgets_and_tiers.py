@@ -640,10 +640,11 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
 
 
 @pytest.mark.parametrize(
-    ("target_fixture", "alternatives_run"),
+    ("target_fixture", "independent", "alternatives_run"),
     [
-        pytest.param("feature_branch_repo", False, id="one-file-skips"),
-        pytest.param("multi_stack_target", True, id="multi-file-runs"),
+        pytest.param("feature_branch_repo", True, False, id="independent-one-file-skips"),
+        pytest.param("multi_stack_target", True, True, id="independent-multi-file-runs"),
+        pytest.param("multi_stack_target", False, False, id="default-multi-file-folds"),
     ],
 )
 async def test_alternatives_phase_follows_diff_size(
@@ -653,16 +654,21 @@ async def test_alternatives_phase_follows_diff_size(
     make_config: MakeConfig,
     mute_side_effects: Mute,
     target_fixture: str,
+    independent: bool,
     alternatives_run: bool,
 ) -> None:
-    """The wonder phase runs for a multi-file diff and leaves an empty artifact when skipped."""
+    """Independent wonder remains tiered; the default shares structural review."""
     from daydream.runner import run
+    from tests.harness.review_profile import independent_alternatives_profile
 
     target = cast(Path, request.getfixturevalue(target_fixture))
     stub = _install_accept_gate_pipeline(monkeypatch, target, mute_side_effects)
     traj = tmp_path / "trajectory.json"
     assert (
-        await run(make_config(target, trajectory_path=traj, assume="yes", output_mode="loop", non_interactive=False))
+        await run(make_config(
+            target, trajectory_path=traj, assume="yes", output_mode="loop", non_interactive=False,
+            review_profile=independent_alternatives_profile() if independent else None,
+        ))
         == 0
     )
 
@@ -675,6 +681,12 @@ async def test_alternatives_phase_follows_diff_size(
         or "evaluate the implementation" in c["prompt"].lower()
     ]
     assert bool(wonder_calls) is alternatives_run, wonder_calls
+    if not independent:
+        assert any(
+            "you are the structural reviewer" in call["prompt"].lower()
+            and "Within this same boundary review, check design choices" in call["prompt"]
+            for call in stub.calls
+        )
     if not alternatives_run:
         artifact = target / ".daydream" / "deep" / "alternatives.json"
         assert json.loads(artifact.read_text()) == []

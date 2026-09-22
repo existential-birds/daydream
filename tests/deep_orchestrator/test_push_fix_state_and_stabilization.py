@@ -350,14 +350,21 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
     assert outcomes["item:a"]["path"] == "b.py"
 
 
+@pytest.mark.parametrize("prior_verdict", [None, "resolved", "unresolved", "wrong_target"])
+@pytest.mark.parametrize("final_verdict", ["unresolved", "wrong_target", "regressed"])
 async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    prior_verdict: str | None, final_verdict: str,
 ) -> None:
     from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
     from daydream.extensions import Stop
     from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
+    ctx.data["fix_outcomes"] = (
+        {"item:a": {"issue_id": 1, "verdict": prior_verdict}}
+        if prior_verdict else {}
+    )
     state.verifier_key = EvidenceKey("prior-tree", state.footprint.policy_revision)
     evidence = TestAttemptEvidence(
         session_id=state.session_id,
@@ -374,7 +381,7 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
 
     async def _actionable(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
         calls["verify"] += 1
-        return {"item:a": {"issue_id": 1, "verdict": "unresolved", "reason": "still broken"}}
+        return {"item:a": {"issue_id": 1, "verdict": final_verdict, "reason": "still broken"}}
 
     async def _no_test(*_a: Any, **_k: Any) -> Any:
         calls["test"] += 1
@@ -388,6 +395,12 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
         TestAndHealResult(True, 0, True, False, (evidence,)),
     )
 
+    if prior_verdict in {"unresolved", "wrong_target"} and final_verdict != "regressed":
+        assert result is None
+        assert calls == {"verify": 1, "test": 0}
+        assert state.latest_retained == snapshot
+        assert ctx.data["fix_outcomes"]["item:a"]["verdict"] == final_verdict
+        return
     assert isinstance(result, Stop) and result.exit_code == 1
     assert calls == {"verify": 1, "test": 0}
     assert state.latest_retained is None

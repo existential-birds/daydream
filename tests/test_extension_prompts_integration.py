@@ -234,3 +234,23 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
     assert "BLOCKED (PLAN_WRITER_FAILED: PROMPT_CONSTRUCTION_FAILED)" in index
     assert "PROMPT_CONSTRUCTION_FAILED" in diagnostics
     assert "PRIVATE_PROMPT_EXCEPTION_SECRET" not in diagnostics
+
+
+async def test_custom_structural_extension_keeps_alternatives_pass(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_deep_orchestrator import _install_stub_backend, _run_deep, _silence
+
+    ext_dir.write_module(
+        "def register(r):\n"
+        "    r.override_prompt('structural', lambda **kw: 'CUSTOM STRUCTURAL BUILDER')\n"
+    )
+    _silence(monkeypatch)
+    backend = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+    prompts = [call["prompt"] for call in backend.calls]
+    assert sum("CUSTOM STRUCTURAL BUILDER" in prompt for prompt in prompts) == 1
+    alternatives = [prompt for prompt in prompts if "evaluate the implementation" in prompt.lower()
+                    or "would you have done this differently" in prompt.lower()]
+    assert len(alternatives) == 1
+    assert (multi_stack_target / ".daydream/deep/alternatives.json").exists()

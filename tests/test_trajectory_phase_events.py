@@ -32,6 +32,7 @@ from daydream.trajectory import (
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
+from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
 
@@ -613,7 +614,10 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     backend.per_stack_emit_reads = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
 
-    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True)) == 0
+    assert await run(RunConfig(
+        target=str(target), cleanup=False, non_interactive=True,
+        review_profile=independent_exploration_profile(independent_alternatives_profile()),
+    )) == 0
     assert backend.finished == {"wonder", "review"}
     assert not any("Fix this issue" in call["prompt"] for call in backend.calls)
     roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
@@ -742,6 +746,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 cleanup=False,
                 output_mode="loop",
                 run_eval=True,
+                review_profile=independent_exploration_profile(),
                 pr_number=no_ci_remote.pr_number,
                 pr_repo=no_ci_remote.base_repository,
             )
@@ -886,7 +891,6 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
             key = (document_descriptors[document_id], invocation["phase"])
             qualified_counts[key] = qualified_counts.get(key, 0) + 1
     assert qualified_counts == {
-        ("root", "alternatives"): 1,
         ("root", "intent"): 1,
         ("root", "merge"): 1,
         ("root", "test"): 1,
@@ -1066,8 +1070,8 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     assert "deep" in phase_timings, f"deep missing from manifest phase_timings: {phase_timings!r}"
     # Declined gate still records the phases reached before fix/test/verify. The
     # parse-<stack> stage was removed (issue #745), so it is not expected here.
-    for phase in ("intent", "alternatives"):
-        assert phase in phase_timings, f"{phase} missing from deep phase_timings: {phase_timings!r}"
+    assert "intent" in phase_timings
+    assert "alternatives" not in phase_timings  # Folded into the structural review.
 
 
 async def test_deep_run_accept_gate_wraps_fix_test_verify(
@@ -1112,8 +1116,9 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
     manifest = json.loads(manifest_files[0].read_text())
     phase_timings = manifest["metrics"]["phase_timings"]
     assert phase_timings is not None
-    for phase in ("intent", "alternatives", "verify", "fix", "test", "deep"):
+    for phase in ("intent", "verify", "fix", "test", "deep"):
         assert phase in phase_timings, f"{phase} missing from deep phase_timings: {phase_timings!r}"
+    assert "alternatives" not in phase_timings
 
 
 async def test_parallel_fix_registers_subtrajectories(
@@ -1181,7 +1186,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     """Review-only mode records review-spine timings and stops before fix/test.
 
     ``--review`` (a mode of the single deep flow, #330) runs the review spine —
-    intent, alternatives, per-stack parse — and stops at ``findings-out``, so
+    intent and per-stack review — and stops at ``findings-out``, so
     the fix cycle's fix/test/verify must never run (and must not appear in the
     recorded phase events or manifest timings).
     """
@@ -1218,12 +1223,12 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Review-only mode records intent + alternatives phases (the parse-<stack>
-    # stage was removed with issue #745).
+    # Default design review is part of the structural deep phase.
     events = data["extra"].get("phase_events", [])
     event_phases = {e["phase"] for e in events}
-    for phase in ("intent", "alternatives"):
+    for phase in ("intent", "deep"):
         assert phase in event_phases, f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
+    assert "alternatives" not in event_phases
     # The fix cycle must never run in review mode.
     for phase in ("fix", "test", "verify"):
         assert phase not in event_phases, (
@@ -1237,5 +1242,6 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     manifest = json.loads(manifest_files[0].read_text())
     phase_timings = manifest["metrics"]["phase_timings"]
     assert phase_timings is not None, "review flow phase_timings must not be null"
-    for phase in ("intent", "alternatives"):
+    for phase in ("intent", "deep"):
         assert phase in phase_timings, f"{phase} missing from review phase_timings: {phase_timings!r}"
+    assert "alternatives" not in phase_timings

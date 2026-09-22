@@ -486,6 +486,11 @@ def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
     # Default off (forensic mode): no RunConfig attr, no file config.
     cfg = RunConfig(target=str(tmp_path))
     assert _deep_shard_enabled(cfg) is False
+    # Large diffs opt into the existing sharder unless a caller explicitly
+    # selected a value.
+    large_diff = "+line\n" * 6_500
+    assert _deep_shard_enabled(cfg, diff=large_diff) is True
+    assert _deep_shard_enabled(cfg, diff="+line\n" * 1_500) is False
     # RunConfig True (highest tier) enables.
     cfg = RunConfig(target=str(tmp_path), deep_shard_enabled=True)
     assert _deep_shard_enabled(cfg) is True
@@ -498,6 +503,7 @@ def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
     # Explicit RunConfig False (highest tier) force-off a file-config-enabled repo.
     cfg = RunConfig(target=str(tmp_path), file_config=fc, deep_shard_enabled=False)
     assert _deep_shard_enabled(cfg) is False
+    assert _deep_shard_enabled(cfg, diff=large_diff) is False
 
 
 def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:

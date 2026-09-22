@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
+    from daydream.deep.detection import StackAssignment
     from daydream.runner import RunConfig
 
 
@@ -37,3 +39,23 @@ def _resolve_opt_in(config: RunConfig, attr: str) -> bool:
 def fresh_ttt(config: RunConfig) -> bool:
     """Whether fresh intent and alternatives run for this resume point."""
     return config.start_at not in ("per-stack", "merge", "fix")
+
+
+def fold_default_alternatives(
+    stacks: list[StackAssignment], strategy: str, *, structural_prompt_builder: Callable[..., str],
+) -> bool:
+    """The scheduled structural reviewer owns the packaged design-review lens.
+
+    Compare effective content, not provenance: partial profiles inherit defaults,
+    while any distinct custom alternatives policy keeps its independent pass.
+    This is independent of resume state so re-reviews retain the folded duty.
+    """
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep.prompts import build_structural_prompt
+    from daydream.review_profile import build_default_profile
+
+    return (
+        any(stack.stack_name == STRUCTURE_STACK_NAME for stack in stacks)
+        and structural_prompt_builder is build_structural_prompt
+        and strategy == build_default_profile().strategies["alternatives"].content
+    )

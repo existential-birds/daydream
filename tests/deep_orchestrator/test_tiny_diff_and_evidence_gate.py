@@ -403,8 +403,10 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
 
 
+@pytest.mark.parametrize("delegated", [False, True])
 async def test_ac_merge_resume_on_tiny_diff(
     tiny_diff_target: Path,
+    delegated: bool,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -434,6 +436,11 @@ async def test_ac_merge_resume_on_tiny_diff(
         structure=[_record(id="structure-1", description="file-size budget violated", evidence="api.py:1")],
     )
 
+    if delegated:
+        from tests.test_finite_delegation_parse import _mark_delegated_artifacts
+
+        _mark_delegated_artifacts(tiny_diff_target / ".daydream/deep", {"generic": ["api.py"]})
+
     rc = await run(make_config(tiny_diff_target, start_at="merge"))
     assert rc == 0
 
@@ -450,6 +457,9 @@ async def test_ac_merge_resume_on_tiny_diff(
     assert any(i.get("description") == "file-size budget violated" and i.get("lens") == "structural" for i in items), (
         f"structural item missing or mislabeled: {items}"
     )
+
+    structural = [item for item in items if item.get("lens") == "structural"]
+    assert structural[0]["source_uids"] == ["structure:1"]
 
 
 async def test_evidence_gate_drops_speculative_finding(

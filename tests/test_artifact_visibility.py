@@ -932,7 +932,12 @@ async def test_artifact_session_rejects_recognized_legacy_anchor_with_unknown_si
 
 @pytest.mark.parametrize(
     ("anchor", "kind"),
-    [pytest.param("improve", "directory", id="improve"), pytest.param("recommended.patch", "file", id="patch")],
+    [
+        pytest.param("improve", "directory", id="improve"),
+        pytest.param("intents", "directory", id="intents"),
+        pytest.param("recommended.patch", "file", id="patch"),
+        pytest.param(".DS_Store", "file", id="ds-store"),
+    ],
 )
 async def test_artifact_session_accepts_registered_legacy_anchor_format(
     source: Path, anchor: str, kind: str,
@@ -955,7 +960,9 @@ async def test_artifact_session_accepts_registered_legacy_anchor_format(
     ("anchor", "make_wrong_type"),
     [
         pytest.param("improve", lambda path: path.write_bytes(b"not a directory"), id="improve-file"),
+        pytest.param("intents", lambda path: path.write_bytes(b"not a directory"), id="intents-file"),
         pytest.param("recommended.patch", lambda path: path.mkdir(), id="patch-directory"),
+        pytest.param(".DS_Store", lambda path: path.mkdir(), id="ds-store-directory"),
     ],
 )
 async def test_artifact_session_rejects_registered_legacy_anchor_with_wrong_type(

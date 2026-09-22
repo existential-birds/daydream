@@ -485,6 +485,34 @@ async def test_precision_mode_suppression_never_sees_structural_records(
     assert any("Low-severity structural erosion" in d for d in descriptions), descriptions
 
 
+async def test_precision_suppression_excludes_delegated_structure_on_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_finite_delegation_parse import _mark_delegated_artifacts
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    stub.suppression_keep = False
+    deep = _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(description="Local borderline finding", severity="low", confidence="MEDIUM")],
+        react=[], generic=[],
+        structure=[_record(description="Delegated boundary mismatch", severity="low", confidence="MEDIUM",
+                           evidence="api.py:1")],
+    )
+    _mark_delegated_artifacts(deep, {
+        "python": ["api.py"], "react": ["App.tsx"], "generic": ["README.md"],
+    })
+    assert await _run_deep(multi_stack_target, start_at="merge", precision_mode=True) == 0
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert not any(item["description"] == "Local borderline finding" for item in items)
+    structural = [item for item in items if item["description"] == "Delegated boundary mismatch"]
+    assert len(structural) == 1
+    assert structural[0]["lens"] == "structural"
+    assert structural[0]["source_uids"] == ["structure:1"]
+
+
 async def test_distinct_structural_finding_survives_the_fold(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -623,10 +651,11 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     # Issue #745: the pre-merge parse-<stack> stage was removed (reviewers emit
     # records directly), so "parse" is no longer a resolved deep phase.
-    expected_phases = {"intent", "wonder", "per_stack_review", "merge", "fix", "test", "verify"}
+    expected_phases = {"intent", "per_stack_review", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
+    assert "wonder" not in captured  # The default design lens shares per_stack_review.
 
 
 def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch) -> None:

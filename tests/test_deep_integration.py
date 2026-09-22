@@ -309,13 +309,15 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), (
         "merged report missing after Claude-shape run"
     )
-    # Stages fired: intent, alternatives, at least one per-stack, merge. The
+    # The default design lens shares structural review instead of a separate
+    # alternatives stage. Intent, language review and merge still run. The
     # parse-<stack> stage was removed (issue #745) -- reviewers emit records
     # directly.
-    required = {"intent", "alternatives", "per-stack", "merge"}
+    required = {"intent", "structure", "per-stack", "merge"}
     assert required.issubset(set(backend.stages)), (
         f"missing stages; saw only: {sorted(set(backend.stages))}"
     )
+    assert "alternatives" not in backend.stages
 
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:

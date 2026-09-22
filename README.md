@@ -76,6 +76,11 @@ The default flow is the deep multi-stack pipeline. This pipeline performs the fo
 10. Commit and push through ordinary Git commands and repository hooks.
 11. Verify GitHub CI for the exact pushed repository, PR, branch, and commit SHA.
 
+Fix verification retries unresolved findings for up to three rounds. Findings
+that remain unresolved are reported in `.daydream/deep/fix-outcomes.json`; the
+retained changes continue through tests, commit, and push. Detected regressions
+still stop publication, and commit messages list only verified fixes.
+
 Local verification, push verification, and remote CI are recorded as distinct
 states. Remote CI polls every 10 seconds, allows 120 seconds for checks to
 register, and has a 30-minute completion bound. Required checks determine the
@@ -461,8 +466,12 @@ The gate is fail-open. A flagged file surfaces as a warning plus a manifest reco
 
 ### Review budgets
 
-The review model pipeline defaults to 45 minutes, including queueing and retries,
-with the last five minutes reserved for synthesis. Set
+The review model pipeline defaults to 45 minutes for modest diffs, including
+queueing and retries, with the last five minutes reserved for synthesis. Diffs
+over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) receive 2×, 4×,
+and 6× review time and per-role tool-call allowances respectively. The 4× and
+6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
+profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
 Individual reviewers also have bounded investigation and finalization stages:
 per-stack investigation stops after eight minutes or 48 tool starts, reserving

@@ -280,7 +280,21 @@ def _receipt_covered_files(
             frontier_evidence |= loaded
 
     for stack_name, receipt in receipts.items():
+        if not isinstance(receipt, dict):
+            continue
         inline_covered = shard_covered.get(stack_name)
+        packet_files = receipt.get("source_packet_files", [])
+        if isinstance(packet_files, list) and packet_files:
+            packet_covered = covered_by_type.setdefault("source_packet_reviewed", set())
+            for path in packet_files:
+                if (
+                    isinstance(path, str)
+                    and path in diff_set
+                    and inline_covered is not None
+                    and path in inline_covered
+                ):
+                    covered.add(path)
+                    packet_covered.add(path)
         # Inline evidence is gated on THIS shard's own records: a shard without
         # a records file contributes zero inline evidence (fail-open).
         if inline_covered is not None:
@@ -329,8 +343,9 @@ def resolve_per_stack_verdicts(
     declared_verdicts: list[dict[str, Any]],
     completed_read_paths: set[str],
     finding_files: set[str],
+    source_packet_paths: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Reconcile declared per-file verdicts against completed-read evidence (issue #742).
+    """Reconcile verdicts against completed reads or host-supplied full sources.
 
     A per-stack reviewer's declared verdict is NOT the recorded truth: a
     ``clean`` verdict for an assigned file with no completed read of that file
@@ -339,7 +354,10 @@ def resolve_per_stack_verdicts(
     (``_completed_read_paths`` output + parsed finding files), never reviewer
     self-report.
 
-    The final verdict per assigned file is resolved by evidence, in order:
+    A finite review receipt first gates completion: a file excluded from the
+    receipt or without a completed declared verdict stays ``not_reviewed``,
+    even if an independent finding was established before evidence ran out.
+    Otherwise the final verdict is resolved by evidence, in order:
     a parsed finding that exactly matches the file (``_same_repo_relative``) wins (``has_findings``
     beats a read, beats ``clean``); otherwise a completed read that
     path-component-matches the file yields ``clean``; otherwise the file is
@@ -355,12 +373,18 @@ def resolve_per_stack_verdicts(
         completed_read_paths: Completed-read paths from the stack's own fork
             trajectory (``_completed_read_paths``).
         finding_files: ``file`` fields from the stack's parsed issues.
+        source_packet_paths: Assigned paths whose complete source the host supplied
+            to a completed finite review. Unlike tool reads, packet presence also
+            requires a final ``clean`` or ``has_findings`` verdict; an unresolved
+            evidence request must remain ``not_reviewed``. ``None`` identifies
+            a legacy tool-based review; an empty set identifies a finite review
+            that completed no files.
 
     Returns:
         Exactly one verdict dict per ``assigned_files`` path, in the given
         order: ``{"path", "lines_read", "verdict", "n_findings"}``. ``n_findings``
-        is the count of parsed findings matching the path (0 for ``clean`` /
-        ``not_reviewed``), so every recorded verdict conforms to
+        is the count of parsed finding files matching the path, including any
+        independent finding retained for a finite ``not_reviewed`` file, so every recorded verdict conforms to
         ``PER_STACK_RECORD_SCHEMA``'s required ``n_findings`` key. The declared
         ``lines_read`` is preserved even when the verdict is downgraded to
         ``not_reviewed`` (the reviewer said it did read N lines; the gate
@@ -384,9 +408,20 @@ def resolve_per_stack_verdicts(
         matching_findings = [
             ff for ff in finding_files if _same_repo_relative(ff, path)
         ]
-        if matching_findings:
+        if source_packet_paths is not None and (
+            path not in source_packet_paths
+            or declared.get("verdict") not in {"clean", "has_findings"}
+        ):
+            out.append(_verdict(path, lines_read, "not_reviewed", len(matching_findings)))
+        elif matching_findings:
             # A finding beats a read and beats a declared clean.
             out.append(_verdict(path, lines_read, "has_findings", len(matching_findings)))
+        elif (
+            source_packet_paths is not None
+            and path in source_packet_paths
+            and declared.get("verdict") in {"clean", "has_findings"}
+        ):
+            out.append(_verdict(path, lines_read, "clean", 0))
         elif any(_path_component_matches(r, path) for r in completed_read_paths):
             # A completed read that matches the file yields clean.
             out.append(_verdict(path, lines_read, "clean", 0))
@@ -394,6 +429,20 @@ def resolve_per_stack_verdicts(
             # No finding and no completed read: never recorded as a pass.
             out.append(_verdict(path, lines_read, "not_reviewed", 0))
     return out
+
+
+def load_source_packet_paths(
+    deep_dir: Path, stack_name: str, assigned_files: list[str]
+) -> set[str] | None:
+    """Load finite completion evidence; ``None`` means no finite receipt exists."""
+    try:
+        receipts = json.loads(coverage_receipt_path(deep_dir).read_text())
+        paths = receipts[stack_name]["source_packet_files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(paths, list):
+        return set()
+    return {path for path in paths if isinstance(path, str) and path in assigned_files}
 
 
 def compute_uncovered_files(

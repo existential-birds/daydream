@@ -2994,3 +2994,24 @@ def _git_add_commit(repo: Path) -> None:
         cwd=repo,
         check=True,
     )
+
+
+async def test_dispatch_registers_late_dynamic_fork_before_scope_exit(tmp_path: Path) -> None:
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with trajectory_module.dispatch_scope(
+            recorder, phase=DaydreamPhase.DEEP, descriptors=("deep-python", "deep-react"),
+        ) as dispatch:
+            assert dispatch is not None
+            for descriptor in ("deep-python", "deep-react", "deep-structure"):
+                async with trajectory_module.maybe_fork(recorder, descriptor, dispatch=dispatch) as child:
+                    async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
+                        observe_text_and_result(inv, descriptor)
+    step = only_dispatch(read_trajectory(recorder.path))
+    assert step["extra"]["planned_count"] == 3
+    assert step["extra"]["attempted_count"] == 3
+    assert step["extra"]["completed_count"] == 3
+    assert step["extra"]["dispatch_status"] == "succeeded"
+    assert [result["content"] for result in step["observation"]["results"]] == [
+        "Dispatched to deep-python", "Dispatched to deep-react", "Dispatched to deep-structure",
+    ]

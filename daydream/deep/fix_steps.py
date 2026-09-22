@@ -1357,8 +1357,18 @@ async def _step_fix_verify_authorized(
     if actionable and iteration not in (None, 3):
         return None
     _render_fix_outcome_summary(deep_state.items, outcomes)
-    if actionable:
+    if "regressed" in actionable:
+        print_error(
+            console, "Fix verification failed",
+            "The retained changes introduce a regression; commit and push blocked.",
+        )
         return Stop(1)
+    if actionable:
+        print_warning(
+            console,
+            f"Fix attempts exhausted with {len(actionable)} finding(s) still unresolved; "
+            "continuing to validate the retained changes before commit and push.",
+        )
     return BreakLoop()
 
 
@@ -1504,6 +1514,7 @@ async def finalize_retained_tree_after_test(
             )
 
         if state.verifier_key != key:
+            prior_outcomes = deep_state.fix_outcomes or {}
             try:
                 outcomes = await verify_retained_tree(
                     ctx, snapshot, deep_state.items, pass_number=pass_number
@@ -1518,7 +1529,15 @@ async def finalize_retained_tree_after_test(
                 )
             state.verifier_key = key
             deep_state.fix_outcomes = outcomes
-            if _actionable_verdicts(outcomes):
+            if any(
+                outcome.get("verdict") == "regressed"
+                or (
+                    outcome.get("verdict") in ACTIONABLE_VERDICTS
+                    and prior_outcomes.get(uid, {}).get("verdict")
+                    not in {"unresolved", "wrong_target"}
+                )
+                for uid, outcome in outcomes.items()
+            ):
                 return _stabilization_stop(
                     ctx,
                     state,
@@ -1727,7 +1746,11 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             ctx.work,
             preexisting_untracked=set(state.preexisting_untracked),
             config=ctx.config,
-            items=deep_state.items_or_empty or [],
+            items=[
+                item for item in deep_state.items_or_empty or []
+                if (deep_state.fix_outcomes or {}).get(item.get("item_uid", ""), {}).get("verdict")
+                == "resolved"
+            ],
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,

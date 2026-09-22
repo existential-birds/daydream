@@ -41,6 +41,47 @@ def test_ambiguous_single_stack_shortcut() -> None:
     assert "migrations/001.sql" in python.files
 
 
+def test_mixed_frontend_and_repository_infrastructure_routes_separately() -> None:
+    """Shelfspace #2826's Node/CI changes must not inflate the React review."""
+    from daydream.deep.detection import detect_stacks
+
+    frontend = [
+        "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
+        "frontend/app/components/shelf/ShelfNameInput.tsx",
+        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
+    ]
+    infrastructure = [
+        ".github/workflows/daydream.yml", "Makefile", "docs/README.md",
+        "docs/daydream-review.md", "quality-workspaces.json",
+        "scripts/daydream-workflow.test.mjs", "scripts/github-actions-workflow-policy.mjs",
+    ]
+    files = frontend + infrastructure
+    stacks = {stack.stack_name: stack.files for stack in detect_stacks(files)}
+    assert set(stacks["react"]) == set(frontend)
+    assert set(stacks["generic"]) == set(infrastructure)
+    assert set(stacks["structure"]) == set(files)
+
+
+def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> None:
+    from daydream.deep.detection import detect_stacks
+    from daydream.extensions import Registry, StackRule
+
+    registry = Registry()
+    registry.add_stack(StackRule("build", ("scripts/custom.cjs",)))
+    react_files = [
+        "frontend/App.tsx", "package.json", "tsconfig.json",
+        "frontend/fixtures/data.json", "frontend/Makefile", "frontend/helpers.mjs",
+    ]
+    generic_files = ["Makefile", "quality.json", "scripts/check.cjs", "scripts/ci/check.mjs"]
+    stacks = {
+        stack.stack_name: stack.files
+        for stack in detect_stacks(react_files + generic_files + ["scripts/custom.cjs"], registry=registry)
+    }
+    assert set(stacks["react"]) == set(react_files)
+    assert set(stacks["generic"]) == set(generic_files)
+    assert stacks["build"] == ["scripts/custom.cjs"]
+
+
 def test_ambiguous_nearest_ancestor() -> None:
     """D-12: ambiguous file routes to nearest-ancestor unambiguous stack."""
     from daydream.deep.detection import detect_stacks
@@ -450,4 +491,3 @@ def test_detect_stacks_registry_independent_same_scopes() -> None:
     # python + react language stacks + generic (md + unknown) + structural last.
     assert "python" in names and "react" in names and GENERIC_STACK in names
     assert names[-1] == "structure"
-

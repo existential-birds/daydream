@@ -2690,6 +2690,46 @@ def test_strict_enumeration_raises_where_soft_fails(tmp_path: Path) -> None:
     assert "untracked.txt" in git_ops.list_untracked(repo, strict=True)
 
 
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ("tracked.txt", ["tracked.txt"]),
+        ("routes", ["routes/[tab].py", "routes/nested/helper.py", "routes/t.py"]),
+        ("routes/[tab].py", ["routes/[tab].py"]),
+        ("literal[dir]", ["literal[dir]/exact.py"]),
+        ("untracked.txt", []),
+        ("ignored.txt", []),
+    ],
+)
+def test_ls_files_scoped_is_literal_and_tracked(
+    tmp_path: Path, scope: str, expected: list[str],
+) -> None:
+    _init_repo(tmp_path)
+    tracked = ["tracked.txt", "routes/[tab].py", "routes/nested/helper.py", "routes/t.py",
+               "literal[dir]/exact.py", "literald/outside.py"]
+    for name in tracked:
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("tracked\n")
+    _git(tmp_path, "add", "--", *tracked)
+    (tmp_path / "untracked.txt").write_text("untracked\n")
+    (tmp_path / "ignored.txt").write_text("ignored\n")
+    (tmp_path / ".gitignore").write_text("ignored.txt\n")
+
+    assert git_ops.ls_files_scoped(tmp_path, scope) == expected
+
+
+def test_ls_files_scoped_nonzero_is_not_empty_evidence(tmp_path: Path) -> None:
+    with pytest.raises(GitError, match="ls-files"):
+        git_ops.ls_files_scoped(tmp_path, ".")
+
+
+def test_ls_files_scoped_timeout_does_not_retry(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    with pytest.raises(git_ops.GitTimeoutError, match=r"0.0s \(1 attempts\)"):
+        git_ops.ls_files_scoped(tmp_path, ".", timeout=0.0)
+
+
 def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
     """clone() raises GitError when the remote URL is invalid."""
     target = tmp_path / "nope"

@@ -314,6 +314,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
     """Real-path: the pre-scan summary renders as a readable panel, not raw JSON."""
     from rich.console import Console
 
+    from tests.harness.review_profile import independent_exploration_profile
 
     # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
     # runs and its conventions reach the rendered summary).
@@ -329,7 +330,9 @@ async def test_run_deep_renders_prescan_summary_not_json(
     monkeypatch.setattr("daydream.deep.review_steps.console", rec)
     _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
 
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    exit_code = await run(make_config(
+        multi_stack_target, assume="yes", output_mode="loop", review_profile=independent_exploration_profile(),
+    ))
     assert exit_code == 0
     out = rec.export_text()
     assert "OpenAPI First" in out  # convention surfaced by the summary
@@ -598,7 +601,7 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
-    assert exit_code == 1
+    assert exit_code == 0
     assert "Attempted, not fixed" in capsys.readouterr().out
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
     assert outcomes["outcomes"]["item:1"]["verdict"] == "unresolved"

@@ -13,10 +13,12 @@ backend seam stubbed.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from daydream.review_profile import ResolvedProfile, build_default_profile
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
@@ -60,12 +62,26 @@ def _drift_cached_key_between_runs(
     _atomic_json(state_root / "canonical-manifest.json", _manifest_payload(_manifest(canonical)))
 
 
-async def _run_deep(target: Path) -> int:
+def _specialist_profile() -> ResolvedProfile:
+    """The cache's specialist tests explicitly opt into model exploration."""
+    profile = build_default_profile()
+    strategies = dict(profile.strategies)
+    strategies["exploration.dependency_trace"] = replace(
+        strategies["exploration.dependency_trace"],
+        content=strategies["exploration.dependency_trace"].content + "\nCustom dependency mapping policy.",
+    )
+    return ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")
+
+
+async def _run_deep(target: Path, *, custom_exploration: bool = True) -> int:
     from daydream.runner import RunConfig, run
 
     exclude = target / ".git" / "info" / "exclude"
     exclude.write_text(f"{exclude.read_text()}\n.daydream/\n.review-output.md\n")
-    return await run(RunConfig(target=str(target), start_at="review", cleanup=False))
+    return await run(RunConfig(
+        target=str(target), start_at="review", cleanup=False,
+        review_profile=_specialist_profile() if custom_exploration else None,
+    ))
 
 
 def _add_one_hop_graph_on_main(multi_stack_target: Path) -> None:
@@ -200,7 +216,9 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
 
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
-    assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)) == 0
+    assert await run(RunConfig(
+        target=str(multi_stack_target), start_at="review", cleanup=False, review_profile=_specialist_profile(),
+    )) == 0
     assert _count_specialist_calls(stub1) > 0
 
     _drift_cached_key_between_runs(
@@ -208,7 +226,9 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     )
 
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
-    assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)) == 0
+    assert await run(RunConfig(
+        target=str(multi_stack_target), start_at="review", cleanup=False, review_profile=_specialist_profile(),
+    )) == 0
     assert _count_specialist_calls(stub2) > 0
     exploration = multi_stack_target / ".daydream" / "exploration"
     assert (exploration / "cache-key").read_text().strip() != "stale"
@@ -316,3 +336,31 @@ def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
     assert exploration_cache_key("a", "b", "standard") != exploration_cache_key(
         "a\nb", "", "standard"
     )
+
+
+def test_cache_key_distinguishes_exploration_strategy_identity() -> None:
+    from daydream.exploration import exploration_cache_key
+
+    default = {"exploration.pattern_scan": "packaged conventions"}
+    custom = {"exploration.pattern_scan": "custom conventions"}
+    assert exploration_cache_key("sha", "diff", "parallel", strategies=default) != exploration_cache_key(
+        "sha", "diff", "parallel", strategies=custom,
+    )
+
+
+async def test_static_cache_does_not_suppress_custom_exploration(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    silence(monkeypatch)
+    default_backend = _install(monkeypatch, multi_stack_target, "DEFAULT")
+    assert await _run_deep(multi_stack_target, custom_exploration=False) == 0
+    assert _count_specialist_calls(default_backend) == 0
+    exploration = multi_stack_target / ".daydream/exploration"
+    default_key = (exploration / "cache-key").read_text()
+    assert "Deterministic pre-scan" in (exploration / "summary.md").read_text()
+
+    custom_backend = _install(monkeypatch, multi_stack_target, "CUSTOM")
+    assert await _run_deep(multi_stack_target) == 0
+    assert _count_specialist_calls(custom_backend) > 0
+    assert (exploration / "cache-key").read_text() != default_key
+    assert "CUSTOM" in (exploration / "dependencies.md").read_text()

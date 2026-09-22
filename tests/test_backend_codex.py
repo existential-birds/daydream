@@ -462,8 +462,9 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continuation_token_resumes() -> None:
-    """Test that continuation token is passed as 'resume' argument."""
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> None:
+    """Stable directories retain native resume, including non-Git read-only runs."""
     from daydream.backends import ContinuationToken
 
     backend = CodexBackend(model="fixture-model")
@@ -471,13 +472,18 @@ async def test_continuation_token_resumes() -> None:
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "Continue", continuation=token):
-            pass
+        events = [event async for event in backend.execute(
+            tmp_path, "Continue", continuation=token, read_only=read_only,
+        )]
 
         call_args = mock_exec.call_args
         flat_args = list(call_args.args) if call_args.args else []
         assert "resume" in flat_args
         assert "th_prev" in flat_args
+        result = next(event for event in events if isinstance(event, ResultEvent))
+        assert result.continuation is not None
+        assert result.continuation.data["thread_id"] == "th_abc123"
+        assert result.session_id == "th_abc123"
 
 
 @pytest.mark.asyncio
@@ -553,6 +559,10 @@ async def test_codex_read_only_uses_read_only_sandbox(
     assert request.prompt.encode() == written
     # Temp dir removed after execute.
     assert not isolated.exists()
+    # The native session remains observable, but its deleted cwd cannot resume.
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.session_id == "th_abc123"
+    assert result.continuation is None
 
 
 @pytest.mark.asyncio

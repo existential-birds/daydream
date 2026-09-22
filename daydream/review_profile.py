@@ -224,6 +224,13 @@ class ReviewProfile:
 INTENT_STRATEGY_JUDGMENT_MARKER = "That diff is the complete review target"
 ALTERNATIVES_STRATEGY_JUDGMENT_MARKER = "Report only concrete problems you can substantiate "
 
+FOLDED_ALTERNATIVES_INSTRUCTION = (
+    "Within this same boundary review, check design choices that conflict with the confirmed intent, "
+    "an existing canonical implementation, or an applicable repository convention. "
+    "Report only a concrete downside supported by repository evidence; do not launch "
+    "a separate file-by-file alternatives audit or propose hypothetical replacements."
+)
+
 
 def build_default_profile() -> ReviewProfile:
     """Return the packaged default profile (R7).
@@ -313,8 +320,10 @@ def build_default_profile() -> ReviewProfile:
                 "searches, not as permission to apply a memorized framework checklist.\n"
                 "\n"
                 "Method:\n"
-                "1. Read every assigned file and the full enclosing symbol for each "
-                "relevant hunk. Follow changed callers, callees, types, configuration, "
+                "1. Read each relevant hunk in every assigned file with its full "
+                "enclosing symbol or configuration section. Expand to other sections "
+                "only when needed to resolve a concrete candidate. Follow changed callers, "
+                "callees, types, configuration, "
                 "persistence or network boundaries, error paths, and cleanup or lifecycle "
                 "paths as needed.\n"
                 "2. Compare the change with repository-local conventions and canonical "
@@ -346,6 +355,7 @@ def build_default_profile() -> ReviewProfile:
                 "Review the repository-wide interactions introduced or exposed by this "
                 "diff. Concentrate on boundaries that a file-scoped reviewer can miss:\n"
                 "\n"
+                f"{FOLDED_ALTERNATIVES_INSTRUCTION}\n\n"
                 "- incompatible contracts across modules or stacks, including types, "
                 "schemas, CLI or API behavior, configuration, serialization, error "
                 "semantics, and ownership or lifecycle expectations;\n"
@@ -364,7 +374,7 @@ def build_default_profile() -> ReviewProfile:
                 "\n"
                 "For each candidate, read both sides of the boundary and trace the relevant "
                 "value, call, state transition, or resource lifetime end to end. Do not repeat "
-                "the language reviewers’ file-by-file correctness audit or alternatives analysis. "
+                "the language reviewers’ file-by-file correctness audit. "
                 "Stop tracing a boundary when its contract agrees and no concrete candidate remains. Search for "
                 "repository evidence that disproves the concern. Verify that any "
                 "recommended canonical helper, contract, or layer actually exists and is "
@@ -382,8 +392,9 @@ def build_default_profile() -> ReviewProfile:
         "discovery.generic_fallback": Strategy(
             content=(
                 "Review these files for correctness, clarity, and consistency with the "
-                "author's intent. Read every assigned file in full and the full "
-                "enclosing symbol for each relevant hunk before judging it. Apply "
+                "author's intent. Read each relevant hunk in every assigned file with "
+                "its full enclosing symbol or configuration section before judging it. "
+                "Expand to other sections only to resolve a concrete candidate. Apply "
                 "language-agnostic review practices."
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",

@@ -56,6 +56,7 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
+from tests.harness.review_profile import independent_exploration_profile
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,
     _FakeSDKClient,
@@ -726,8 +727,8 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
             async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
-    # Four changed files select pre_scan's parallel tier; the backend's real
-    # fan-out capacity admits exactly two children while the third waits.
+    # The custom exploration policy retains pre_scan's parallel specialist tier;
+    # the backend admits exactly two children while the third waits.
     (multi_stack_target / "extra.py").write_text("EXTRA = 1\n", encoding="utf-8")
     _git(multi_stack_target, "add", "extra.py")
     _commit(multi_stack_target, "add fourth changed file")
@@ -773,6 +774,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
                     archive=True,
                     run_eval=True,
                     diagram="off",
+                    review_profile=independent_exploration_profile(),
                 ),
                 private_roots=private_root_locations(base=private_base),
             )

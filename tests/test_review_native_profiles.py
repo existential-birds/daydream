@@ -46,6 +46,20 @@ def test_authored_blocks_land_verbatim() -> None:
     assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"
 
 
+def test_discovery_strategy_reads_hunk_context_without_mandatory_full_large_files() -> None:
+    profile = rp.build_default_profile()
+    for name in ("discovery.per_stack", "discovery.generic_fallback"):
+        strategy = profile.strategies[name].content
+        assert "Read every assigned file in full" not in strategy
+        assert "enclosing symbol or configuration section" in strategy
+
+
+def test_structural_strategy_owns_folded_design_review() -> None:
+    strategy = rp.build_default_profile().strategies["discovery.structural"].content
+    assert "design choices that conflict with the confirmed intent" in strategy
+    assert "or alternatives analysis" not in strategy
+
+
 def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None:
     from daydream.deep.coverage import build_uncovered_sweep_prompt
     from daydream.deep.prompts import (

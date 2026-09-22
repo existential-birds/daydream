@@ -640,8 +640,10 @@ class CodexBackend:
                 non-Git *cwd* keeps the read-only sandbox in place (no clone).
                 If the disposable checkout cannot be created or prepared, the
                 call raises ``CodexError`` — never a fallback to the caller's
-                cwd. Default False keeps ``danger-full-access`` in the
-                caller's cwd.
+                cwd. Disposable-checkout results retain their native session
+                ID for observability but omit a continuation token because
+                their cwd is deleted. Default False keeps ``danger-full-access``
+                in the caller's cwd.
             finalization: Cap the invocation-local reasoning override at low,
                 preserving explicitly lower levels. There is no native tool
                 disable control here; callers must retain the host zero-tool
@@ -1191,7 +1193,9 @@ class CodexBackend:
                                     break
 
                     continuation_token = None
-                    if thread_id:
+                    # A disposable checkout disappears after this invocation;
+                    # only sessions with a stable cwd can offer native resume.
+                    if thread_id and shared_checkout is None:
                         continuation_token = ContinuationToken(
                             backend="codex",
                             data={"thread_id": thread_id},
