@@ -777,6 +777,23 @@ def _fake_pi_script(tmp_path: Path, *, marker: bool = True, fixture_path: Path |
     return script
 
 
+def _run_replay(
+    repo: Path,
+    fake_pi: Path,
+    receipt_path: Path,
+    *,
+    fixture_path: Path = REPLAY_FIXTURE,
+) -> int:
+    """Invoke the replay tool with the canonical fixture manifest."""
+    return _replay.run_replay(
+        manifest_path=FIXTURES / "replay-manifest.json",
+        fixture_path=fixture_path,
+        repo_path=repo,
+        fake_pi=fake_pi,
+        receipt_path=receipt_path,
+    )
+
+
 def test_replay_gate_fixture_hash_mismatch_fails_before_send(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -789,13 +806,7 @@ def test_replay_gate_fixture_hash_mismatch_fails_before_send(
     repo = _public_fixture_repo(tmp_path)
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=bad_fixture,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path, fixture_path=bad_fixture)
     assert exit_code == 1
     assert not receipt_path.exists()
     assert "gate=identity" in buffer.getvalue()
@@ -811,13 +822,7 @@ def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
     repo = _public_fixture_repo(tmp_path, origin="https://github.com/private-org/private-repo.git")
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
     assert exit_code == 1
     assert not receipt_path.exists()
     assert "allowlist" in buffer.getvalue()
@@ -827,13 +832,7 @@ def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
     (repo / "README.md").write_text("# dirty\n", encoding="utf-8")
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
     assert exit_code == 1
     assert "dirty" in buffer.getvalue()
 
@@ -851,13 +850,7 @@ def test_replay_gate_real_pi_or_wrong_output_fails(
     real_like.chmod(0o755)
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=real_like,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, real_like, receipt_path)
     assert exit_code == 1
     assert not receipt_path.exists()
     assert "marker" in buffer.getvalue() or "replay" in buffer.getvalue()
@@ -874,13 +867,7 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, mo
     repo = _public_fixture_repo(tmp_path)
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
     assert exit_code == 1
     assert "DAYDREAM_TRACE_TO" in buffer.getvalue()
 
@@ -888,13 +875,7 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, mo
     monkeypatch.delenv("HH_API_KEY", raising=False)
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
     assert exit_code == 1
     assert "HH_API_KEY" in buffer.getvalue()
 
@@ -911,13 +892,7 @@ def test_replay_fake_pi_marker_requirement(
     fk = _fake_pi_script(tmp_path, marker=marker)
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
     if not marker:
         assert exit_code == 1
         assert not receipt_path.exists()
@@ -959,13 +934,7 @@ def test_replay_receipt_is_accepted_by_verifier_validator(tmp_path: Path, monkey
         repo = _public_fixture_repo(tmp_path)
         fk = _fake_pi_script(tmp_path)
         receipt_path = tmp_path / "receipt.json"
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
         assert exit_code == 0, "replay must produce its receipt before validation"
         receipt = json.loads(receipt_path.read_text())
         # Must not raise: the replay receipt is the verifier's canonical input.
@@ -1166,13 +1135,7 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(tmp_path: Path, monkeypat
         repo = _public_fixture_repo(tmp_path)
         fk = _fake_pi_script(tmp_path)
         receipt_path = tmp_path / "receipt.json"
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
         assert exit_code == 0, "replay must pass all gates before the verifier runs"
         receipt = json.loads(receipt_path.read_text())
         run_id = receipt["run_id"]
@@ -1272,13 +1235,7 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(tmp_path: Path, monkeyp
         repo = _public_fixture_repo(tmp_path)
         fk = _fake_pi_script(tmp_path)
         receipt_path = tmp_path / "receipt.json"
-        exit_code = _replay.run_replay(
-            manifest_path=FIXTURES / "replay-manifest.json",
-            fixture_path=REPLAY_FIXTURE,
-            repo_path=repo,
-            fake_pi=fk,
-            receipt_path=receipt_path,
-        )
+        exit_code = _run_replay(repo, fk, receipt_path)
         assert exit_code == 0, "hermetic replay should pass all gates and the local wire check"
         receipt = json.loads(receipt_path.read_text())
         assert receipt["acceptance_kind"] == "sanitized_protocol_replay"

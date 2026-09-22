@@ -872,6 +872,35 @@ def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path) ->
     assert hub.commit_order == []
 
 
+@pytest.mark.parametrize(
+    ("mutation", "canonical"),
+    [
+        pytest.param({"schema_version": "1"}, True, id="wrong-schema"),
+        pytest.param({"policy_digest": "not-a-digest"}, True, id="invalid-digest"),
+        pytest.param({"policy_version": "rival-v2"}, True, id="curation-mismatch"),
+        pytest.param({}, False, id="non-canonical"),
+    ],
+)
+def test_final_publish_rejects_tampered_policy_binding(
+    mutation: dict[str, Any], canonical: bool, tmp_path: Path
+) -> None:
+    """Publication reuses the construction-time v2 binding rules."""
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    bundle, _curation_id = _final_bundle(tmp_path)
+    path = bundle / "policy-binding.json"
+    binding = json.loads(path.read_text())
+    binding.update(mutation)
+    if canonical:
+        path.write_bytes((json.dumps(binding, sort_keys=True) + "\n").encode())
+    else:
+        path.write_bytes(json.dumps(binding, sort_keys=True, indent=2).encode())
+
+    with pytest.raises(ValueError, match="policy-binding.json"):
+        publish_final_annotation_bundle(hub, bundle)
+
+    assert hub.commit_order == []
+
+
 def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path: Path) -> None:
     hub = AnnotationsHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
