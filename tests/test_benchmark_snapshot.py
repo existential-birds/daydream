@@ -21,7 +21,7 @@ import pytest
 from daydream import git_ops
 from daydream.git_ops import GitError
 from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import seeded_commit, write_and_stage
+from tests.harness.git_helpers import seed_pr_origin, seeded_commit, write_and_stage
 
 # real-git seed helpers (deterministic commit SHAs)
 
@@ -36,44 +36,44 @@ def monkeypatch_relative_cwd(cwd: Path) -> Any:
         os.chdir(old)
 
 
-def _fetch_pr_refs(
-    root: Path,
-    repo_slug: str,
-    pr_number: int,
+def _publish_origin(repo: Path, bare: Path, *refspecs: str) -> None:
+    """Init *bare*, add it as *repo*'s origin, and push each *refspec*.
+
+    A refspec prefixed with ``!`` is pushed with ``check=False`` -- the
+    non-fast-forward PR-head refs a plain push rejects; every other refspec is
+    a hard-failing push.
+    """
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    for refspec in refspecs:
+        _git(repo, "push", "origin", refspec.removeprefix("!"),
+             check=not refspec.startswith("!"))
+
+
+def _primed_mirror(
+    tmp_path: Path,
+    origin: str,
+    *,
     base_tip: str,
     explicit_shas: list[str] | tuple[str, ...] = (),
-    origin_url: str | None = None,
-) -> None:
+    pr_number: int = 1,
+) -> Path:
+    """Bring up the shared mirror and prime it with the base tip and PR head(s)."""
     from daydream.benchmark import snapshot as sn
 
-    sn.fetch_base_tip(root, repo_slug, base_tip, origin_url)
-    sn.fetch_head_refs(root, repo_slug, pr_number, explicit_shas, origin_url)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_base_tip(tmp_path, "o/r", base_tip, origin)
+    sn.fetch_head_refs(tmp_path, "o/r", pr_number, explicit_shas, origin)
+    return sn.mirror(tmp_path)
 
 
 def _seed_origin(tmp_path: Path) -> str:
     """Bare origin: main (base1->base2->base3) + "refs/pull/1/head" off base2."""
-    repo = tmp_path / "seed_wt"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    write_and_stage(repo, "readme.txt", "base1\n")
-    seeded_commit(repo, "base1")
-    write_and_stage(repo, "base.py", "BASE = 2\n")
-    base2_sha = seeded_commit(repo, "base2")
-    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
-    seeded_commit(repo, "base3")
-    _git(repo, "checkout", "--detach", base2_sha)
-    repo.joinpath("base.py").write_text("BASE = 20\n")
-    _git(repo, "add", "base.py")
-    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
-    head_sha = seeded_commit(repo, "feature")
-
-    bare = tmp_path / "origin.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
-    return str(bare)
+    bare, _, _ = seed_pr_origin(
+        tmp_path, repo_name="seed_wt", bare_name="origin.git", number=1
+    )
+    return bare
 
 
 def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
@@ -105,12 +105,10 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     _git(repo, "add", "dev.py")
     pr2_head = seeded_commit(repo, "dev2")
     bare = tmp_path / "origin.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main", "dev:dev")
-    _git(repo, "push", "origin", f"{pr1_head}:refs/pull/1/head", check=False)
-    _git(repo, "push", "origin", f"{pr2_head}:refs/pull/2/head", check=False)
+    _publish_origin(
+        repo, bare, "main:main", "dev:dev",
+        f"!{pr1_head}:refs/pull/1/head", f"!{pr2_head}:refs/pull/2/head",
+    )
     return str(bare), dev_tip, pr2_head
 
 
@@ -130,11 +128,7 @@ def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
     head_sha = seeded_commit(repo, "rename old.py to new.py")
 
     bare = tmp_path / "origin_rename.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    _publish_origin(repo, bare, "main:main", f"!{head_sha}:refs/pull/1/head")
     return str(bare), authoring_sha, head_sha
 
 
@@ -201,11 +195,7 @@ def _seed_anchor_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str, str]:
     head_sha = seeded_commit(repo, "edit a.py")
 
     bare = tmp_path / "anchor_origin.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/{pr}/head", check=False)
+    _publish_origin(repo, bare, "main:main", f"!{head_sha}:refs/pull/{pr}/head")
     return str(bare), authoring_sha, head_sha
 
 
@@ -227,11 +217,7 @@ def _seed_double_rename_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str
     head_sha = seeded_commit(repo, "rename both")
 
     bare = tmp_path / "dbl_origin.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/{pr}/head", check=False)
+    _publish_origin(repo, bare, "main:main", f"!{head_sha}:refs/pull/{pr}/head")
     return str(bare), authoring_sha, head_sha
 
 
@@ -298,13 +284,11 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
     mirror = tmp_path / "cache" / "repository.git"
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
     assert mirror.is_dir()
-    _fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
-                     explicit_shas=[], origin_url=origin)
+    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
     assert sn.rev_parse(mirror, "refs/heads/base_tip") == _SHA_BASE2
     # second call is idempotent
-    _fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
-                     explicit_shas=[], origin_url=origin)
+    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
 
 
@@ -314,10 +298,7 @@ def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE3,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE3, explicit_shas=[_SHA_HEAD])
     pr_head = sn.rev_parse(m, "refs/pull/1/head")
     assert sn.head_reachability(m, _SHA_BASE2, pr_head) == "ok"     # ancestor
     assert sn.head_reachability(m, _SHA_HEAD, pr_head) == "ok"      # equal
@@ -331,10 +312,7 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
     assert base == _SHA_BASE2
     trees = sn.resolve_trees(m, base, _SHA_HEAD)
@@ -350,10 +328,7 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
     d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
@@ -367,10 +342,7 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     from daydream.benchmark import storage
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
@@ -391,10 +363,7 @@ def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path) -> None
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     rel_bundle = Path(os.path.relpath(bundle, tmp_path))
@@ -415,10 +384,7 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     # widen the mirror's effective abbrev past the fresh 2-commit clone's default
     _git(m, "config", "core.abbrev", "12")
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -455,10 +421,7 @@ def test_offline_clone_validates(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
@@ -479,10 +442,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     base_tree, head_tree = _SHA_BASE2_TREE, _SHA_HEAD_TREE
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
 
@@ -634,9 +594,7 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     from daydream.benchmark.schema import case_id_for
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
                            policy="final_pr_head", requested_head="final",
                            pr_changed_files=set(), origin_url=origin)
@@ -695,9 +653,7 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
-                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     # PR head is forked from base2; main has advanced to base3.
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD,
                            policy="final_pr_head", requested_head="final",
@@ -809,13 +765,7 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
 
     bare = tmp_path / "rich_origin.git"
-    if bare.exists():
-        shutil.rmtree(bare)
-    bare.mkdir()
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    _publish_origin(repo, bare, "main:main", f"!{head_sha}:refs/pull/1/head")
     return str(bare), base_sha, head_sha, base_tree, head_tree
 
 
@@ -824,10 +774,7 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: 
     from daydream.benchmark import storage
 
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    _fetch_pr_refs(tmp_path, "o/r", 1, base_tip=base, explicit_shas=[head],
-                     origin_url=origin)
-    m = sn.mirror(tmp_path)
+    m = _primed_mirror(tmp_path, origin, base_tip=base, explicit_shas=[head])
     bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"
     sn.build_bundle(m, base, head, bundle)
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
@@ -899,11 +846,7 @@ def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
     head_sha = seeded_commit(repo, "rename + edit + binary")
 
     bare = tmp_path / "facts_origin.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    _publish_origin(repo, bare, "main:main", f"!{head_sha}:refs/pull/1/head")
     return str(bare), authoring_sha, base3_sha, head_sha
 
 
@@ -996,14 +939,14 @@ def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:
     orphan_sha = seeded_commit(repo, "orphan")
 
     bare = tmp_path / "delta_origin.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    for name, sha in (("edit", edit_head), ("rename", rename_head),
-                      ("delete", delete_head), ("binary", binary_head),
-                      ("orphan", orphan_sha)):
-        _git(repo, "push", "origin", f"{sha}:refs/heads/{name}")
+    _publish_origin(
+        repo, bare, "main:main",
+        *(f"{sha}:refs/heads/{name}" for name, sha in (
+            ("edit", edit_head), ("rename", rename_head),
+            ("delete", delete_head), ("binary", binary_head),
+            ("orphan", orphan_sha),
+        )),
+    )
     heads = {"edit": edit_head, "rename": rename_head,
              "delete": delete_head, "binary": binary_head}
     return str(bare), base2_sha, orphan_sha, heads
