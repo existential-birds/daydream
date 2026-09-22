@@ -230,6 +230,44 @@ def _context_pointers(
     return f"{head}\n{alternatives_paragraph}" if include_alternatives else head
 
 
+def _review_context_parts(
+    exploration_dir: Path | None,
+    cwd: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    *,
+    intent_authoritative: bool = False,
+    include_alternatives: bool = True,
+    prior_commits: str | None = None,
+) -> list[str]:
+    """Shared context block for the review/adjudication prompts: exploration
+    pointer, settled-decisions block, CWD grounding, and TTT context pointers."""
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
+    parts.append(_context_pointers(
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        intent_authoritative=intent_authoritative,
+        include_alternatives=include_alternatives,
+    ))
+    return parts
+
+
+def _artifact_footer(output_path: Path) -> str:
+    """The host-managed review-artifact instruction shared by the review builders."""
+    return (
+        f"Host-managed review artifact: {output_path}. "
+        "Return only the JSON object required by the output schema, with issues and verdicts. "
+        "Do not write review files or return a separate markdown report; the host persists the result."
+    )
+
+
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     """Host-owned scope/verdict envelope for a reviewed stack scope.
 
@@ -602,21 +640,10 @@ def build_per_stack_prompt(
             include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
             the intent phase was grounded by a fresh, head-matched PR description.
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-            include_alternatives=include_alternatives,
-        )
+    parts = _review_context_parts(
+        exploration_dir, cwd, intent_path, alternatives_path,
+        intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
+        prior_commits=prior_commits,
     )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
@@ -633,9 +660,7 @@ def build_per_stack_prompt(
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
-    parts.append(f"Host-managed review artifact: {output_path}. "
-                 "Return only the JSON object required by the output schema, with issues and verdicts. "
-                 "Do not write review files or return a separate markdown report; the host persists the result.")
+    parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
 
 
@@ -703,9 +728,7 @@ def build_structural_prompt(
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
-    parts.append(f"Host-managed review artifact: {output_path}. "
-                 "Return only the JSON object required by the output schema, with issues and verdicts. "
-                 "Do not write review files or return a separate markdown report; the host persists the result.")
+    parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
 
 
@@ -741,17 +764,8 @@ def build_arbiter_prompt(
             include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
             the intent phase was grounded by a fresh, head-matched PR description.
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-        )
+    parts = _review_context_parts(
+        exploration_dir, cwd, intent_path, alternatives_path, intent_authoritative=intent_authoritative
     )
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(arbiter_input_path=arbiter_input_path))
@@ -804,12 +818,7 @@ def build_supervise_prompt(
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts = _review_context_parts(exploration_dir, cwd, intent_path, alternatives_path)
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(supervise_input_path=supervise_input_path))
     parts.append(
@@ -858,12 +867,7 @@ def build_suppression_prompt(
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts = _review_context_parts(exploration_dir, cwd, intent_path, alternatives_path)
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(suppression_input_path=suppression_input_path))
     parts.append(
@@ -1272,19 +1276,11 @@ def build_generic_fallback_prompt(
     parts: list[str] = []
     if is_docs_only:
         parts.append(DOC_REVIEW_NOTICE)
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-            include_alternatives=include_alternatives,
+    parts.extend(
+        _review_context_parts(
+            exploration_dir, cwd, intent_path, alternatives_path,
+            intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
+            prior_commits=prior_commits,
         )
     )
     parts.append(_confidence_and_convention_instructions())
@@ -1300,9 +1296,7 @@ def build_generic_fallback_prompt(
     parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
-    parts.append(f"Host-managed review artifact: {output_path}. "
-                 "Return only the JSON object required by the output schema, with issues and verdicts. "
-                 "Do not write review files or return a separate markdown report; the host persists the result.")
+    parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
 
 
