@@ -33,6 +33,7 @@ from daydream.prompts.grounding import (
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
 from tests.harness.backend import Responder, ScriptedBackend
+from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
@@ -245,6 +246,37 @@ def test_single_tier_dependency_tracer_only(tmp_path: Path) -> None:
     assert all(call["read_only"] is True for call in backend.calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
+
+
+@pytest.mark.parametrize(
+    ("investigation_s", "finalization_s", "completed", "has_dependencies", "calls"),
+    [(180, 0, True, True, 1), (301, 60, False, True, 2), (301, 121, False, False, 2)],
+)
+async def test_pre_scan_retains_slow_dependency_mapping_with_bounded_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    investigation_s: float,
+    finalization_s: float,
+    completed: bool,
+    has_dependencies: bool,
+    calls: int,
+) -> None:
+    """Pi can need over two minutes to investigate and over 30s to finalize."""
+    clock = FakeClock().install(monkeypatch)
+
+    async def responder(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        finalizing = "INVESTIGATION HAS ENDED" in args[1]
+        clock.advance(finalization_s if finalizing else investigation_s)
+        yield ResultEvent(structured_output=_VALID_ENVELOPE["dependency_tracer"], continuation=None)
+
+    backend = _specialist_backend(responder=responder)
+    context = await specialist_pre_scan(
+        cast(Backend, backend), tmp_path, (FIXTURES / "python_multifile.diff").read_text(),
+    )
+
+    assert context.completed is completed
+    assert bool(context.dependencies) is has_dependencies
+    assert backend.call_count == calls
 
 
 def test_specialist_rows_carry_llm_provenance(tmp_path: Path) -> None:
@@ -640,7 +672,7 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
             return _never_yield()
         return None
 
-    monkeypatch.setattr(exploration_runner, "_SPECIALIST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(exploration_runner, "_PRE_SCAN_TIMEOUT_SECONDS", 0.05)
     diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
     recorder = make_recorder(tmp_path)
 

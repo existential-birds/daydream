@@ -117,7 +117,7 @@ remain as outer safeguards. Earlier limits now bound useful work:
 
 | Role | Investigation | Tool starts | Reserved finalization |
 |---|---:|---:|---:|
-| Exploration specialist | 120 s | 16 | 30 s |
+| Exploration specialist | 300 s | 16 | 120 s |
 | Intent | 120 s | 12 | 60 s |
 | Alternatives | 300 s | 24 | 90 s |
 | Each language/generic/structural reviewer | 480 s | 48 | 120 s |
@@ -125,6 +125,13 @@ remain as outer safeguards. Earlier limits now bound useful work:
 | Arbiter | 120 s | 16 | 60 s |
 | Suppression/supervision | 120 s | 12 | 60 s |
 | Merge | 180 s | 16 | 60 s |
+
+Diff exploration has a 450-second outer timeout, allowing investigation,
+finalization, and stream cleanup. Its former 120/30-second limits interrupted
+Pi dependency mapping in the September 22 Sirona run while it was still
+assembling results, then expired again during finalization. The 16-tool limit
+and static shortcut for modest changes remain in place. Increasing the general
+invocation wall budget alone does not override these shorter phase limits.
 
 A whole-review model deadline defaults to 2,700 seconds. It includes queueing,
 retries, exploration, intent, discovery, adjudication, merge, and optional diagram

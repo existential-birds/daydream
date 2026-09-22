@@ -65,6 +65,13 @@ _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/", re.MULTILINE)
 
 _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 
+# Pi's dependency mapping can still be productive after two minutes. Allow
+# synthesis time as well as investigation, with outer grace for stream cleanup.
+_PRE_SCAN_REVIEW_LIMITS = ReviewLimits(300, 120, 16)
+_PRE_SCAN_TIMEOUT_SECONDS = (
+    _PRE_SCAN_REVIEW_LIMITS.investigation_s + _PRE_SCAN_REVIEW_LIMITS.finalization_s + 30
+)
+
 # Cap subagents at 50 turns: on large repos they otherwise exhaust their
 # context window and lose track of the task (D-06 graceful degradation).
 EXPLORATION_MAX_TURNS = 50
@@ -330,7 +337,7 @@ async def pre_scan(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
                     phase=DaydreamPhase.EXPLORATION,
                     read_only=True,
-                    review_limits=ReviewLimits(120, 30, 16),
+                    review_limits=_PRE_SCAN_REVIEW_LIMITS,
                     finalization_context=FinalizationContext(
                         task=f"Finalize exploration mapping: {name}",
                         assigned_files=tuple(f.path for f in static_files),
@@ -374,7 +381,7 @@ async def pre_scan(
         phase=DaydreamPhase.EXPLORATION,
         descriptors=descriptors,
     ) as dispatch:
-        with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
+        with anyio.move_on_after(_PRE_SCAN_TIMEOUT_SECONDS) as timeout_scope:
             async with anyio.create_task_group() as tg:
                 if tier == "single":
                     dep_prompt = build_dependency_tracer_prompt(
