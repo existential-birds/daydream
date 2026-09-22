@@ -1318,9 +1318,21 @@ def test_claude_fanout_concurrency_env_validation(
 # --- Session continuation via SDK resume --------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("token", "expected_resume"),
+    [
+        (ContinuationToken(backend="claude", data={"session_id": "sess-123"}), "sess-123"),
+        (ContinuationToken(backend="codex", data={"thread_id": "th-1"}), None),
+    ],
+    ids=["claude-minted", "foreign-backend"],
+)
 @pytest.mark.asyncio
-async def test_continuation_token_sets_resume(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A claude-minted token becomes ``options.resume`` on the next call."""
+async def test_continuation_token_controls_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    token: ContinuationToken,
+    expected_resume: str | None,
+) -> None:
+    """A claude-minted token becomes ``options.resume``; a foreign token starts cold."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
         monkeypatch,
@@ -1330,12 +1342,11 @@ async def test_continuation_token_sets_resume(monkeypatch: pytest.MonkeyPatch) -
         ),
     )
     backend = ClaudeBackend(model="opus")
-    token = ContinuationToken(backend="claude", data={"session_id": "sess-123"})
 
     async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
         pass
 
-    assert captured["options"].resume == "sess-123"
+    assert captured["options"].resume == expected_resume
 
 
 @pytest.mark.asyncio
@@ -1377,26 +1388,6 @@ async def test_no_token_without_persist_session(monkeypatch: pytest.MonkeyPatch)
 
     assert results[0].continuation is None
     assert captured["options"].extra_args == {"no-session-persistence": None}
-
-
-@pytest.mark.asyncio
-async def test_foreign_backend_token_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A token minted by another backend starts cold instead of raising."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client(
-            [MockResultMessage(total_cost_usd=0.01, session_id="sess-1")],
-            captured=captured,
-        ),
-    )
-    backend = ClaudeBackend(model="opus")
-    token = ContinuationToken(backend="codex", data={"thread_id": "th-1"})
-
-    async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
-        pass
-
-    assert captured["options"].resume is None
 
 
 @pytest.mark.asyncio

@@ -913,11 +913,7 @@ def _write_single_plan(
 
 
 def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_sha: str) -> None:
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo), head_sha)
 
     assert len(result["written"]) == 1
     text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
@@ -1264,11 +1260,7 @@ def test_scope_paths_reject_tracked_and_untracked_symlinked_parents(
 def test_valid_new_path_with_nonexistent_parent_remains_allowed(repo: Path, head_sha: str) -> None:
     plan = _authored_new_file_plan()
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo, plan)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
 
     assert len(result["written"]) == 1
     assert "tests/test_catalog_batching.py" in (
@@ -1319,11 +1311,7 @@ def test_plan_current_state_uses_locator_and_persists_host_excerpt(
         plan["scope"]["existing_paths"][0]["verbatim_excerpt"] = model_excerpt
     raw_plan = deepcopy(plan)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo, plan)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
 
     assert len(result["written"]) == 1
     assert plan == raw_plan
@@ -1339,11 +1327,7 @@ def test_stray_markdown_key_is_stripped_and_plan_writes(repo: Path, head_sha: st
     plan = _authored_plan()
     plan["markdown"] = "## Steps\n\nTOKEN=super-secret-value"
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo, plan)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
 
     assert len(result["written"]) == 1
     for artifact in (repo / "daydream_plans").iterdir():
@@ -1649,11 +1633,7 @@ def test_planned_at_naming_only_remote_branch_is_invalid(
     git(repo, "checkout", "main")
     git(repo, "branch", "-D", "only-remote")
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at="only-remote",
-    )
+    result = _write_single_plan(repo, _assembled(repo), "only-remote")
 
     assert result["written"] == []
     assert "PLANNED_AT_INVALID" in (repo / "daydream_plans/README.md").read_text()
@@ -2284,11 +2264,7 @@ def test_planned_at_still_matching_head_writes_in_place(
     head_sha: str,
 ) -> None:
     """The common case is unchanged: a matching anchor writes in place."""
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo), head_sha)
 
     assert len(result["written"]) == 1
     assert result["written"][0]["path"] == "001-batch-catalog-queries.md"
@@ -2562,11 +2538,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
     assert planned_fingerprints(plans_dir) == set()
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
-    retried = _write_plans(
-        plans_dir,
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at=head_sha,
-    )
+    retried = _write_single_plan(repo, _assembled(repo), head_sha)
     unrelated = _write_plans(
         plans_dir,
         [
