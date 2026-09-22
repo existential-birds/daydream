@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,42 +43,6 @@ from daydream.eval.analyzer import _records_issues_or_empty
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
 
-@dataclass
-class MockBackend:
-    """Minimal Backend implementation that replays a canned event list.
-
-    Mirrors the Backend protocol surface (execute / cancel) without inheriting;
-    tests substitute this in place of ClaudeBackend / CodexBackend so the event
-    deterministic.
-    """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        events = self.events
-
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
-
-
 class _StubRetryableError(RuntimeError):
     """Default transport-shaped failure for ``fix_retryable_failures``."""
 
@@ -87,7 +50,7 @@ class _StubRetryableError(RuntimeError):
 
 
 class StubBackend:
-    """MockBackend that dispatches on prompt content.
+    """Prompt-dispatching fake backend.
 
     Writes realistic per-stack review outputs and a merged report so the
     orchestrator can progress through every stage. Records every call so

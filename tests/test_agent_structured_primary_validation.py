@@ -7,7 +7,7 @@ from pathlib import Path
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
-from tests.harness.stub_backend import MockBackend
+from tests.harness.backend import ScriptedBackend
 
 _FILE_SCHEMA = {
     "type": "object",
@@ -17,10 +17,13 @@ _FILE_SCHEMA = {
 
 
 async def test_primary_path_schema_violation_degrades_to_fallback(tmp_path: Path) -> None:
-    backend = MockBackend([
-        TextEvent(text='{"file": "src/a.py"}'),
-        ResultEvent(structured_output={"line": 3}, continuation=None),
-    ])
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text='{"file": "src/a.py"}'),
+            ResultEvent(structured_output={"line": 3}, continuation=None),
+        ],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=_FILE_SCHEMA
     )
@@ -37,8 +40,13 @@ async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(t
     # reject and run_agent degrades to the plain-text string — not the
     # unvalidated dict that leaked out before the primary gate existed.
     payload = {"line": 3}
-    backend = MockBackend([TextEvent(text=json.dumps(payload)),
-                           ResultEvent(structured_output=payload, continuation=None)])
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text=json.dumps(payload)),
+            ResultEvent(structured_output=payload, continuation=None),
+        ],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=_FILE_SCHEMA)
     assert result == '{"line": 3}'   # identical invalid JSON in text and structured
@@ -56,7 +64,7 @@ async def test_primary_path_salvages_partial_dict(tmp_path: Path) -> None:
     # No TextEvent: a mirrored text would let the fallback re-extract the same
     # value, so this would pass even without the primary gate. Only the primary
     # return path can yield ``partial`` here.
-    backend = MockBackend([ResultEvent(structured_output=partial, continuation=None)])
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=partial, continuation=None)], model="mock-model")
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema)
     assert result == partial          # salvage-tolerant: nested validity not gated
@@ -70,7 +78,7 @@ async def test_primary_path_bare_array_reaches_merge_shape(tmp_path: Path) -> No
     # No TextEvent: a mirrored text would let the fallback re-extract the same
     # value, so this would pass even without the primary gate. Only the primary
     # return path can yield ``items`` here.
-    backend = MockBackend([ResultEvent(structured_output=items, continuation=None)])
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=items, continuation=None)], model="mock-model")
     result, _, _ = await run_agent(
         backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema)
     assert result == items            # bare array is a salvageable form
@@ -78,7 +86,10 @@ async def test_primary_path_bare_array_reaches_merge_shape(tmp_path: Path) -> No
 
 
 async def test_primary_path_respects_validate_structured_output_false(tmp_path: Path) -> None:
-    backend = MockBackend([ResultEvent(structured_output={"line": 3}, continuation=None)])
+    backend = ScriptedBackend(
+        events=[ResultEvent(structured_output={"line": 3}, continuation=None)],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.RECON,
         output_schema=_FILE_SCHEMA, validate_structured_output=False)
@@ -89,7 +100,7 @@ async def test_primary_path_respects_validate_structured_output_false(tmp_path: 
 async def test_primary_path_valid_structured_output_returned(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}}}
     payload = {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}
-    backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=payload, continuation=None)], model="mock-model")
     result, _, _ = await run_agent(
         backend, tmp_path, "Parse", phase=DaydreamPhase.REVIEW, output_schema=schema)
     assert result == payload          # valid codex-shaped output returned unchanged

@@ -1,6 +1,6 @@
 """Phase-seam render tests for the de-silenced structured phases.
 
-These tests drive the real phase entrypoints with a ``MockBackend`` whose
+These tests drive the real phase entrypoints with a ``ScriptedBackend`` whose
 ``ResultEvent.structured_output`` matches each phase's schema and assert the
 restored summaries render observable content (counts, a table) without dumping
 raw JSON.
@@ -24,7 +24,6 @@ from daydream.phases import (
 )
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.stub_backend import MockBackend
 
 
 def _rec(monkeypatch: Any) -> Console:
@@ -53,7 +52,10 @@ async def test_merge_prints_item_count(
         }
         for i in range(1, 4)
     ]
-    backend = MockBackend([ResultEvent(structured_output={"items": items}, continuation=None)])
+    backend = ScriptedBackend(
+        events=[ResultEvent(structured_output={"items": items}, continuation=None)],
+        model="mock-model",
+    )
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True, exist_ok=True)
@@ -101,7 +103,10 @@ async def test_arbiter_prints_kept_dropped(
         {"arb_id": 2, "keep": True, "severity": "high", "confidence": "HIGH", "description": "d2", "rationale": "r"},
         {"arb_id": 3, "keep": False, "severity": "low", "confidence": "LOW", "description": "d3", "rationale": "r"},
     ]
-    backend = MockBackend([ResultEvent(structured_output={"findings": findings}, continuation=None)])
+    backend = ScriptedBackend(
+        events=[ResultEvent(structured_output={"findings": findings}, continuation=None)],
+        model="mock-model",
+    )
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True, exist_ok=True)

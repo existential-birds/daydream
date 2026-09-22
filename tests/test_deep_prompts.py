@@ -57,6 +57,20 @@ def _paths(tmp_path: Path) -> _PromptPaths:
     }
 
 
+def _arbiter_prompt(tmp_path: Path, **overrides: Any) -> str:
+    """Build the arbiter prompt with the shared path set, plus any per-test overrides."""
+    p = _paths(tmp_path)
+    return build_arbiter_prompt(
+        strategy=_default_strategy("arbitration"),
+        arbiter_input_path=tmp_path / "arbiter-input.json",
+        diff_path=p["diff_path"],
+        intent_path=p["intent_path"],
+        alternatives_path=p["alternatives_path"],
+        cwd=p["cwd"],
+        **overrides,
+    )
+
+
 _REVIEW_BUILDERS: dict[str, Callable[..., str]] = {
     "per_stack": build_per_stack_prompt,
     "structural": build_structural_prompt,
@@ -463,18 +477,7 @@ def test_review_prompt_contains_cwd_grounding(tmp_path: Path, builder: str) -> N
 
 
 def test_arbiter_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_arbiter_prompt
-    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
-
-    out = build_arbiter_prompt(
-        strategy=_default_strategy("arbitration"),
-        arbiter_input_path=tmp_path / "arbiter-input.json",
-        diff_path=tmp_path / "diff.patch",
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alternatives.json",
-        cwd=tmp_path,
-    )
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in _arbiter_prompt(tmp_path)
 
 
 def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) -> None:
@@ -486,16 +489,7 @@ def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) 
     other's severity. Without saying so, the pair comes back kept twice with
     their original severities and nothing is adjudicated.
     """
-    from daydream.deep.prompts import build_arbiter_prompt
-
-    out = build_arbiter_prompt(
-        strategy=_default_strategy("arbitration"),
-        arbiter_input_path=tmp_path / "arbiter-input.json",
-        diff_path=tmp_path / "diff.patch",
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alternatives.json",
-        cwd=tmp_path,
-    )
+    out = _arbiter_prompt(tmp_path)
     assert "the same defect, keep exactly one" in out
     assert "`keep: false` on the redundant entry" in out
     assert "higher of the two severities" in out
@@ -560,19 +554,10 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
     ``arbiter_input_path``; ``merge`` has no ``cwd``/``diff_path`` and needs
     ``per_stack_records_paths`` and ``dedup_candidates_path``.
     """
-    p = _paths(tmp_path)
     if name.replace("-", "_") in _REVIEW_BUILDERS:
         return _review_prompt(name.replace("-", "_"), tmp_path, intent_authoritative=intent_authoritative)
     if name == "arbiter":
-        return build_arbiter_prompt(
-            strategy=_default_strategy("arbitration"),
-            arbiter_input_path=tmp_path / "arbiter-input.json",
-            diff_path=p["diff_path"],
-            intent_path=p["intent_path"],
-            alternatives_path=p["alternatives_path"],
-            cwd=p["cwd"],
-            intent_authoritative=intent_authoritative,
-        )
+        return _arbiter_prompt(tmp_path, intent_authoritative=intent_authoritative)
     if name == "merge":
         return build_merge_prompt(
             strategy=_default_strategy("merge"),
@@ -689,40 +674,7 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path) -> None:
     """Every adjudication prompt points at the shared alternatives artifact."""
     p = _paths(tmp_path)
-    prompts = (
-        build_arbiter_prompt(
-            strategy=_default_strategy("arbitration"),
-            arbiter_input_path=tmp_path / "arbiter-input.json",
-            diff_path=p["diff_path"],
-            intent_path=p["intent_path"],
-            alternatives_path=p["alternatives_path"],
-            cwd=p["cwd"],
-        ),
-        build_suppression_prompt(
-            strategy=_default_strategy("suppression"),
-            suppression_input_path=tmp_path / "suppression-input.json",
-            diff_path=p["diff_path"],
-            intent_path=p["intent_path"],
-            alternatives_path=p["alternatives_path"],
-            cwd=p["cwd"],
-        ),
-        build_supervise_prompt(
-            strategy=_default_strategy("supervision"),
-            supervise_input_path=tmp_path / "supervise-input.json",
-            diff_path=p["diff_path"],
-            intent_path=p["intent_path"],
-            alternatives_path=p["alternatives_path"],
-            cwd=p["cwd"],
-        ),
-        build_merge_prompt(
-            strategy=_default_strategy("merge"),
-            per_stack_records_paths=[tmp_path / "python.json"],
-            intent_path=p["intent_path"],
-            alternatives_path=p["alternatives_path"],
-            dedup_candidates_path=tmp_path / "dedup.json",
-        ),
-    )
-    for prompt in prompts:
+    for prompt in _adjudication_prompts(tmp_path).values():
         assert str(p["alternatives_path"]) in prompt
 
 
@@ -1127,7 +1079,7 @@ def _adjudication_prompts(tmp_path: Path) -> dict[str, str]:
         ),
         "build_merge_prompt": build_merge_prompt(
             strategy=_default_strategy("merge"),
-            **_merge_paths(tmp_path),  # type: ignore[arg-type]
+            **(_merge_paths(tmp_path) | {"alternatives_path": p["alternatives_path"]}),  # type: ignore[arg-type]
         ),
         "build_supervise_prompt": build_supervise_prompt(
             strategy=_default_strategy("supervision"),

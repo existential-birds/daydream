@@ -289,10 +289,10 @@ def test_task_prompt_truncation_uses_named_limit() -> None:
 def _taskoutput_backend() -> Any:
     """Build a backend stream containing a background task and its final output."""
     from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from tests.harness.stub_backend import MockBackend
+    from tests.harness.backend import ScriptedBackend
 
-    return MockBackend(
-        [
+    return ScriptedBackend(
+        events=[
             ToolStartEvent(
                 id="c1",
                 name="Bash",
@@ -314,7 +314,8 @@ def _taskoutput_backend() -> Any:
                 is_error=False,
             ),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
 
 
@@ -364,16 +365,17 @@ async def test_run_agent_callback_coalesces_streaming_text_deltas(tmp_path: Path
     from daydream.agent import run_agent
     from daydream.backends import ResultEvent, TextEvent
     from daydream.trajectory import DaydreamPhase
-    from tests.harness.stub_backend import MockBackend
+    from tests.harness.backend import ScriptedBackend
 
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent("B"),
             TextEvent("ash"),
             TextEvent(" is"),
             TextEvent(" blocked."),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     lines: list[Text] = []
 
@@ -400,10 +402,10 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     from daydream.agent import run_agent
     from daydream.backends import ResultEvent, ToolStartEvent
     from daydream.trajectory import DaydreamPhase
-    from tests.harness.stub_backend import MockBackend
+    from tests.harness.backend import ScriptedBackend
 
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             ToolStartEvent(
                 id="e1",
                 name="Edit",
@@ -415,7 +417,8 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
                 },
             ),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     lines: list[Text] = []
     await run_agent(
