@@ -40,12 +40,8 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
-_LEGACY_DIRECTORY_ANCHORS = frozenset(
-    ("runs", "deep", "exploration", "partial-fixes", "improve")
-)
-_LEGACY_FILE_ANCHORS = frozenset(
-    ("diff.patch", "hunk-index.json", "recommended.patch")
-)
+_LEGACY_DIRECTORY_ANCHORS = frozenset(("runs", "deep", "exploration", "partial-fixes", "improve", "intents"))
+_LEGACY_FILE_ANCHORS = frozenset(("diff.patch", "hunk-index.json", "recommended.patch", ".DS_Store"))
 _LEGACY_ANCHORS = _LEGACY_DIRECTORY_ANCHORS | _LEGACY_FILE_ANCHORS
 _OPERATIONAL_NAMES = frozenset(("worktrees", "audit"))
 
