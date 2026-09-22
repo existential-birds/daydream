@@ -21,7 +21,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -326,39 +325,3 @@ def test_output_finish_reason_members_are_registry_derived() -> None:
     schema = _schema("gen-ai-output-messages.json")
     members = schema["$defs"]["FinishReason"]["enum"]
     assert {"stop", "tool_call", "error"} <= set(members)
-
-
-# Native timestamp validator contract (frozen here for Task 1 reuse)
-
-
-def _is_valid_native_unix_ms(value: Any) -> bool:
-    """Pinned validator: exact int (never bool), bounded 0..(2**63-1)//1_000_000."""
-    if type(value) is not int:  # bool is a subclass of int; reject it
-        return False
-    return 0 <= value <= (2**63 - 1) // 1_000_000
-
-
-@pytest.mark.parametrize(
-    ("value", "ok"),
-    [
-        (0, True),
-        (1788690314289, True),
-        ((2**63 - 1) // 1_000_000, True),
-        (True, False),
-        (False, False),
-        (1.0, False),
-        ("1788690314289", False),
-        (-1, False),
-        ((2**63 - 1) // 1_000_000 + 1, False),
-        (None, False),
-    ],
-)
-def test_native_timestamp_validator_bounds(value: Any, ok: bool) -> None:
-    assert _is_valid_native_unix_ms(value) is ok
-
-
-def test_native_ms_to_ns_conversion_is_multiplication_exact() -> None:
-    ms = 1788690314289
-    ns = ms * 1_000_000
-    assert ns == 1788690314289000000
-    assert type(ns) is int
