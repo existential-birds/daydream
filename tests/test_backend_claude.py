@@ -744,7 +744,7 @@ async def test_execute_passes_none_when_no_agents(patch_sdk: Any) -> None:
 def _assistant_message(*, text: str, message_id: str) -> MockAssistantMessage:
     """Build a MockAssistantMessage carrying one TextBlock + a message_id."""
     msg = MockAssistantMessage(content=[MockTextBlock(text=text)])
-    msg.message_id = message_id  # type: ignore[attr-defined]
+    msg.message_id = message_id
     return msg
 
 

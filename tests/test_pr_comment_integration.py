@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -45,66 +44,21 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
 )
-from tests.test_deep_pr_comment_integration import (
-    FakeAssistantMessage,
-    FakeResultMessage,
-    FakeTextBlock,
-    FakeThinkingBlock,
-    FakeToolResultBlock,
-    FakeToolUseBlock,
-    FakeUserMessage,
+from tests.harness.claude_sdk import (
+    MockAssistantMessage,
+    MockResultMessage,
+    MockTextBlock,
+    patch_claude_sdk,
+    scripted_client,
 )
-
-# Per-test FakeClient factory: each test queues a message sequence, then patches
-# ClaudeSDKClient to a class whose instances replay it.
-
-
-class _FakeClientBase:
-    """Subclass per test and override ``MESSAGES`` to control the stream."""
-
-    MESSAGES: list[Any] = []
-
-    def __init__(self, options: Any = None) -> None:
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self) -> _FakeClientBase:
-        return self
-
-    async def __aexit__(self, *exc: Any) -> None:
-        return None
-
-    async def query(self, prompt: str) -> None:
-        self._prompt = prompt
-
-    async def receive_response(self) -> AsyncIterator[Any]:  # noqa: ANN201 - matches SDK shape
-        for msg in self.MESSAGES:
-            yield msg
-
-
-def _make_fake_client(messages: list[Any]) -> type[_FakeClientBase]:
-    """Build a fresh FakeClient class whose instances replay *messages*."""
-
-    class _ScopedFakeClient(_FakeClientBase):
-        MESSAGES = messages
-
-    return _ScopedFakeClient
 
 
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
+    """Patch the SDK boundary; each call re-routes the backend to a fresh stream."""
 
     def _patch(messages: list[Any]) -> None:
-        client_cls = _make_fake_client(messages)
-        monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_cls)
-        monkeypatch.setattr("daydream.backends.claude.AssistantMessage", FakeAssistantMessage)
-        monkeypatch.setattr("daydream.backends.claude.UserMessage", FakeUserMessage)
-        monkeypatch.setattr("daydream.backends.claude.ResultMessage", FakeResultMessage)
-        monkeypatch.setattr("daydream.backends.claude.TextBlock", FakeTextBlock)
-        monkeypatch.setattr("daydream.backends.claude.ThinkingBlock", FakeThinkingBlock)
-        monkeypatch.setattr("daydream.backends.claude.ToolUseBlock", FakeToolUseBlock)
-        monkeypatch.setattr("daydream.backends.claude.ToolResultBlock", FakeToolResultBlock)
+        patch_claude_sdk(monkeypatch, scripted_client(messages))
 
     return _patch
 
@@ -167,11 +121,11 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
     recorder-stamped backend alias ``"claude"``.
     """
     patch_sdk([
-        FakeAssistantMessage(
-            content=[FakeTextBlock(text="reviewing the code")],
+        MockAssistantMessage(
+            content=[MockTextBlock(text="reviewing the code")],
             model=FIXTURE_MODEL_ID,
         ),
-        FakeResultMessage(
+        MockResultMessage(
             total_cost_usd=0.42,
             usage={
                 "input_tokens": 1000,
@@ -213,11 +167,11 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     aggregator skips → rollup reads ``$0.00`` / ``0 in / 0 out``.
     """
     review_messages = [
-        FakeAssistantMessage(
-            content=[FakeTextBlock(text="reviewing")],
+        MockAssistantMessage(
+            content=[MockTextBlock(text="reviewing")],
             model=FIXTURE_MODEL_ID,
         ),
-        FakeResultMessage(
+        MockResultMessage(
             total_cost_usd=0.30,
             usage={
                 "input_tokens": 5000,
@@ -227,11 +181,11 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
         ),
     ]
     fix_messages = [
-        FakeAssistantMessage(
-            content=[FakeTextBlock(text="fixing")],
+        MockAssistantMessage(
+            content=[MockTextBlock(text="fixing")],
             model=FIXTURE_MODEL_ID,
         ),
-        FakeResultMessage(
+        MockResultMessage(
             total_cost_usd=0.15,
             usage={
                 "input_tokens": 2500,
@@ -324,11 +278,11 @@ async def test_per_phase_rollup_distinguishes_phases(
     enough — they must reflect the right Steps / Tools / Cost values.
     """
     review_messages = [
-        FakeAssistantMessage(
-            content=[FakeTextBlock(text="reviewing")],
+        MockAssistantMessage(
+            content=[MockTextBlock(text="reviewing")],
             model=FIXTURE_MODEL_ID,
         ),
-        FakeResultMessage(
+        MockResultMessage(
             total_cost_usd=0.20,
             usage={
                 "input_tokens": 4000,
@@ -338,11 +292,11 @@ async def test_per_phase_rollup_distinguishes_phases(
         ),
     ]
     parse_messages = [
-        FakeAssistantMessage(
-            content=[FakeTextBlock(text="parsed")],
+        MockAssistantMessage(
+            content=[MockTextBlock(text="parsed")],
             model=FIXTURE_MODEL_ID,
         ),
-        FakeResultMessage(
+        MockResultMessage(
             total_cost_usd=0.05,
             usage={
                 "input_tokens": 1000,
