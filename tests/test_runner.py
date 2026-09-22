@@ -50,19 +50,13 @@ from daydream.trajectory import (
 from daydream.workspace import AuditWorkspace, WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.claude_sdk import patch_claude_sdk
 from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.test_deep_pr_comment_integration import (
-    FakeAssistantMessage,
-    FakeResultMessage,
-    FakeTextBlock,
-    FakeThinkingBlock,
-    FakeToolResultBlock,
-    FakeToolUseBlock,
-    FakeUserMessage,
     _answer_prompts,
     _FakeSDKClient,
     _silence_ui,
@@ -72,17 +66,7 @@ from tests.test_deep_pr_comment_integration import (
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
-    for symbol, fake in (
-        ("ClaudeSDKClient", _FakeSDKClient),
-        ("AssistantMessage", FakeAssistantMessage),
-        ("UserMessage", FakeUserMessage),
-        ("ResultMessage", FakeResultMessage),
-        ("TextBlock", FakeTextBlock),
-        ("ThinkingBlock", FakeThinkingBlock),
-        ("ToolUseBlock", FakeToolUseBlock),
-        ("ToolResultBlock", FakeToolResultBlock),
-    ):
-        monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
+    patch_claude_sdk(monkeypatch, _FakeSDKClient)
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 

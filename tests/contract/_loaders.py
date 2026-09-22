@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -39,18 +38,6 @@ from tests.harness.codex_replay import make_mock_process
 from tests.harness.pi_replay import make_mock_process as make_mock_process_pi
 
 # Claude loader — synthesize SDK message objects, mock receive_response()
-
-
-@dataclass
-class _MockAssistantMessage(MockAssistantMessage):
-    message_id: str = ""
-    model: str = "claude-test-model"
-    usage: dict[str, Any] | None = None
-
-
-@dataclass
-class _MockResultMessage(MockResultMessage):
-    usage: dict[str, Any] | None = None
 
 
 def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
@@ -86,8 +73,9 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
         # exactly once (same cardinality as Codex's single turn.completed).
         usage = final_usage if idx == len(turns) - 1 else None
         messages.append(
-            _MockAssistantMessage(
+            MockAssistantMessage(
                 content=blocks,
+                model="claude-test-model",
                 message_id=turn["message_id"],
                 usage=usage,
             )
@@ -111,7 +99,7 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
             messages.append(MockUserMessage(content=result_blocks))
 
     messages.append(
-        _MockResultMessage(
+        MockResultMessage(
             total_cost_usd=None,
             structured_output=None,
             usage=final_usage,
@@ -127,12 +115,7 @@ async def claude_loader(
     messages = _build_claude_messages(script)
     client = scripted_client(messages)
     with pytest.MonkeyPatch.context() as monkeypatch:
-        patch_claude_sdk(
-            monkeypatch,
-            client,
-            assistant_message=_MockAssistantMessage,
-            result_message=_MockResultMessage,
-        )
+        patch_claude_sdk(monkeypatch, client)
         backend = ClaudeBackend(model="claude-test-model")
         async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):
             yield event

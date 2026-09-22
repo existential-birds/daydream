@@ -7,14 +7,13 @@ Covers Phase 2 / Plan 02-03:
     field names (`prompt_tokens` / `completion_tokens`); the SDK boundary
     keys (`input_tokens` / `output_tokens`) are renamed at emission time.
 
-Reuses the shared mock-block dataclasses in tests/harness/claude_sdk.py and
-extends MockAssistantMessage / MockResultMessage with the `usage` and
-`message_id` fields needed by Phase 2.
+Reuses the shared mock-block dataclasses in tests/harness/claude_sdk.py;
+the shared MockAssistantMessage / MockResultMessage carry the ``usage`` and
+``message_id`` fields needed by Phase 2.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,30 +34,9 @@ from tests.harness.claude_sdk import (
 )
 
 
-# Phase 2 extensions: AssistantMessage needs message_id + usage; ResultMessage needs usage.
-@dataclass
-class MockAssistantMessageWithUsage(MockAssistantMessage):
-    """Shared MockAssistantMessage plus EVNT-06 fields (message_id, usage)."""
-
-    message_id: str = ""
-    usage: dict[str, Any] | None = None
-
-
-@dataclass
-class MockResultMessageWithUsage(MockResultMessage):
-    """Shared MockResultMessage plus the EVNT-04/05 usage field."""
-
-    usage: dict[str, Any] | None = None
-
-
 async def _collect_events(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[Any]:
     """Drive ClaudeBackend.execute with a canned message sequence; return events."""
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client(messages),
-        assistant_message=MockAssistantMessageWithUsage,
-        result_message=MockResultMessageWithUsage,
-    )
+    patch_claude_sdk(monkeypatch, scripted_client(messages))
     backend = ClaudeBackend(model="opus")
     events: list[Any] = []
     async for event in backend.execute(Path("/tmp"), "test prompt"):
@@ -72,12 +50,12 @@ async def test_dropped_token_bug_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="Reviewing")],
                 message_id="msg_01",
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.001,
                 structured_output=None,
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
@@ -97,12 +75,12 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.M
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="Hi")],
                 message_id="msg_01",
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
             ),
-            MockResultMessageWithUsage(total_cost_usd=0.001, structured_output=None, usage=None),
+            MockResultMessage(total_cost_usd=0.001, structured_output=None, usage=None),
         ],
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
@@ -123,7 +101,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="cached")],
                 message_id="msg_cached",
                 usage={
@@ -133,7 +111,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
                     "cache_creation_input_tokens": 0,
                 },
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.002,
                 structured_output=None,
                 usage={
@@ -158,7 +136,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="write")],
                 message_id="msg_write",
                 usage={
@@ -168,7 +146,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
                     "cache_creation_input_tokens": 15000,
                 },
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.003,
                 structured_output=None,
                 usage={
@@ -193,7 +171,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="both")],
                 message_id="msg_both",
                 usage={
@@ -203,7 +181,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest
                     "cache_creation_input_tokens": 12000,
                 },
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.004,
                 structured_output=None,
                 usage={
@@ -229,8 +207,8 @@ async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPat
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(content=[MockTextBlock(text="ok")], message_id="msg_03", usage=None),
-            MockResultMessageWithUsage(total_cost_usd=0.001, structured_output=None, usage=None),
+            MockAssistantMessage(content=[MockTextBlock(text="ok")], message_id="msg_03", usage=None),
+            MockResultMessage(total_cost_usd=0.001, structured_output=None, usage=None),
         ],
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
@@ -247,12 +225,12 @@ async def test_partial_usage_data(monkeypatch: pytest.MonkeyPatch) -> None:
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="ok")],
                 message_id="msg_04",
                 usage={"input_tokens": 100},  # output_tokens missing
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.001,
                 structured_output=None,
                 usage={"input_tokens": 100},
@@ -274,8 +252,8 @@ async def test_cost_event_emitted_on_usage_only(monkeypatch: pytest.MonkeyPatch)
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(content=[MockTextBlock(text="ok")], message_id="msg_05", usage=None),
-            MockResultMessageWithUsage(
+            MockAssistantMessage(content=[MockTextBlock(text="ok")], message_id="msg_05", usage=None),
+            MockResultMessage(
                 total_cost_usd=None,
                 structured_output=None,
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0},

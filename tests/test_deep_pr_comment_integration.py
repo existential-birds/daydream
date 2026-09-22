@@ -22,12 +22,21 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.harness.claude_sdk import (
+    MockAssistantMessage,
+    MockResultMessage,
+    MockTextBlock,
+    MockToolResultBlock,
+    MockToolUseBlock,
+    MockUserMessage,
+    patch_claude_sdk,
+)
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
@@ -64,62 +73,6 @@ def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
         "complete" if malformed else "partial",
     )
     return path
-
-
-# Fake SDK message types (real-shape: AssistantMessage carries .model, no .usage;
-# ResultMessage carries .total_cost_usd + .usage). Monkeypatched over the symbols
-# ClaudeBackend.execute isinstance-checks so they match.
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeThinkingBlock:
-    thinking: str
-
-
-@dataclass
-class FakeToolUseBlock:
-    id: str
-    name: str
-    input: dict[str, Any] | None = None
-
-
-@dataclass
-class FakeToolResultBlock:
-    tool_use_id: str
-    content: str | None = None
-    is_error: bool = False
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list[Any]
-    model: str
-    parent_tool_use_id: str | None = None
-    error: object | None = None
-
-
-@dataclass
-class FakeUserMessage:
-    content: list[Any] = field(default_factory=list)
-
-
-@dataclass
-class FakeResultMessage:
-    total_cost_usd: float | None = None
-    usage: dict[str, Any] | None = None
-    structured_output: Any = None
-    subtype: str = "success"
-    duration_ms: int = 0
-    duration_api_ms: int = 0
-    is_error: bool = False
-    num_turns: int = 1
-    session_id: str = "fake-session"
-    result: str | None = None
 
 
 # Fake ClaudeSDKClient: picks a canned response per query() prompt and emulates
@@ -213,26 +166,26 @@ class _FakeSDKClient:
         """
         tool_id = f"toolu_{tool_name.lower()}_01"
         return [
-            FakeAssistantMessage(
+            MockAssistantMessage(
                 content=[
-                    FakeToolUseBlock(id=tool_id, name=tool_name, input=tool_input),
+                    MockToolUseBlock(id=tool_id, name=tool_name, input=tool_input),
                 ],
                 model=FIXTURE_MODEL_ID,
             ),
-            FakeUserMessage(
+            MockUserMessage(
                 content=[
-                    FakeToolResultBlock(
+                    MockToolResultBlock(
                         tool_use_id=tool_id,
                         content="ok",
                         is_error=False,
                     ),
                 ],
             ),
-            FakeAssistantMessage(
-                content=[FakeTextBlock(text="exploration complete")],
+            MockAssistantMessage(
+                content=[MockTextBlock(text="exploration complete")],
                 model=FIXTURE_MODEL_ID,
             ),
-            FakeResultMessage(
+            MockResultMessage(
                 structured_output=structured,
                 total_cost_usd=0.12,
                 usage={
@@ -280,11 +233,11 @@ class _FakeSDKClient:
             "alternative" in pl and "intent" in pl and "given" in pl
         ):
             return [
-                FakeAssistantMessage(
-                    content=[FakeTextBlock(text="evaluating alternatives")],
+                MockAssistantMessage(
+                    content=[MockTextBlock(text="evaluating alternatives")],
                     model=FIXTURE_MODEL_ID,
                 ),
-                FakeResultMessage(
+                MockResultMessage(
                     structured_output={"issues": []},
                     total_cost_usd=0.10,
                     usage={
@@ -327,11 +280,11 @@ class _FakeSDKClient:
             else:  # structural parse
                 issues = []
             return [
-                FakeAssistantMessage(
-                    content=[FakeTextBlock(text="parsing")],
+                MockAssistantMessage(
+                    content=[MockTextBlock(text="parsing")],
                     model=FIXTURE_MODEL_ID,
                 ),
-                FakeResultMessage(
+                MockResultMessage(
                     structured_output={
                         "issues": issues,
                         # Issue #742: the deep per-stack parse schema requires a
@@ -350,11 +303,11 @@ class _FakeSDKClient:
         # phase_understand_intent: free-form text.
         if "understand" in pl and "intent" in pl:
             return [
-                FakeAssistantMessage(
-                    content=[FakeTextBlock(text="The PR refactors foo() for clarity.")],
+                MockAssistantMessage(
+                    content=[MockTextBlock(text="The PR refactors foo() for clarity.")],
                     model=FIXTURE_MODEL_ID,
                 ),
-                FakeResultMessage(
+                MockResultMessage(
                     total_cost_usd=0.08,
                     usage={
                         "input_tokens": 2000,
@@ -369,11 +322,11 @@ class _FakeSDKClient:
         # item keeps the rendered report (and PR comment) non-empty.
         if "cross-stack merge agent" in pl:
             return [
-                FakeAssistantMessage(
-                    content=[FakeTextBlock(text="merging")],
+                MockAssistantMessage(
+                    content=[MockTextBlock(text="merging")],
                     model=FIXTURE_MODEL_ID,
                 ),
-                FakeResultMessage(
+                MockResultMessage(
                     structured_output={
                         "items": [
                             {
@@ -418,11 +371,11 @@ class _FakeSDKClient:
                 }
             ]
         return [
-            FakeAssistantMessage(
-                content=[FakeTextBlock(text="ok, wrote the review")],
+            MockAssistantMessage(
+                content=[MockTextBlock(text="ok, wrote the review")],
                 model=FIXTURE_MODEL_ID,
             ),
-            FakeResultMessage(
+            MockResultMessage(
                 structured_output={"issues": review_issues, "verdicts": []},
                 total_cost_usd=0.20,
                 usage={
@@ -479,17 +432,7 @@ def deep_target_multi(tmp_path: Path) -> Path:
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ClaudeBackend.execute does isinstance on."""
-    for symbol, fake in (
-        ("ClaudeSDKClient", _FakeSDKClient),
-        ("AssistantMessage", FakeAssistantMessage),
-        ("UserMessage", FakeUserMessage),
-        ("ResultMessage", FakeResultMessage),
-        ("TextBlock", FakeTextBlock),
-        ("ThinkingBlock", FakeThinkingBlock),
-        ("ToolUseBlock", FakeToolUseBlock),
-        ("ToolResultBlock", FakeToolResultBlock),
-    ):
-        monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
+    patch_claude_sdk(monkeypatch, _FakeSDKClient)
 
 
 # gh / PR plumbing patches: find_open_pr returns a fake PRInfo and fake gh
