@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # token-level updates while the model is alive and uses the shorter default
 # below for model responses.
 DEFAULT_STREAM_IDLE_TIMEOUT_S = 2700.0
-DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S = 300.0
+DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S = 600.0
 STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"
 
 # Grace between SIGTERM and SIGKILL when reaping a subprocess. A cooperative CLI
