@@ -13,13 +13,15 @@ from daydream.deep.finite_review import FiniteResult, FiniteReview
 from daydream.deep.prompts import build_per_stack_prompt
 from daydream.extensions import Registry
 from daydream.phases import phase_per_stack_reviews
-from daydream.review_profile import build_default_profile
+from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION, build_default_profile
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
 
 
 @pytest.mark.parametrize("mode", [
     "complete", "incomplete", "custom_structure", "custom_primary", "custom_builder", "unowned", "large",
+    "exception", "timeout", "budget", "invalid", "no_output", "fallback_budget", "fallback_exception", "folded",
+    "write_record", "write_markdown", "write_marker",
 ])
 async def test_structural_delegation_requires_complete_default_primary_packets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], mode: str,
@@ -46,27 +48,73 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
         registry.override_prompt("per-stack", build_per_stack_prompt)
         monkeypatch.setattr("daydream.deep.finite_review.get_registry", lambda: registry)
+    if mode == "folded":
+        strategies["discovery.structural"] += "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION
     structural_files = files + (["unowned.py"] if mode == "unowned" else [])
     stacks = [StackAssignment("python", [files[0]]), StackAssignment("react", [files[1]]),
               StackAssignment("structure", structural_files)]
     packets: list[FiniteReview] = []
     traditional: list[str] = []
+    completed: list[str] = []
+    deep = tmp_path / ".daydream/deep"
+    delegation = deep / "structural-delegation.json"
+    structural_record = deep / "stack-structure-records.json"
+    structural_report = deep / "stack-structure-review.md"
+    fallback_modes = {"incomplete", "exception", "timeout", "budget", "invalid", "no_output",
+                      "fallback_budget", "fallback_exception", "folded"}
+    write_failure_modes = {"write_record", "write_markdown", "write_marker"}
+    original_write = Path.write_text
+    original_replace = Path.replace
+
+    def write(path: Path, *args: Any, **kwargs: Any) -> int:
+        if (mode == "write_record" and path == structural_record
+                or mode == "write_markdown" and path == structural_report):
+            raise OSError("compatibility write failed")
+        return original_write(path, *args, **kwargs)
+
+    def replace(path: Path, target: Any) -> Path:
+        if target == delegation:
+            assert structural_record.exists() and structural_report.exists()
+            assert set(completed) == set(files)
+            if mode == "write_marker":
+                raise OSError("commit marker replacement failed")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(Path, "replace", replace)
 
     async def finite(*args: Any, **kwargs: Any) -> FiniteResult:
         review: FiniteReview = args[2]
         packets.append(review)
-        incomplete = mode == "incomplete" and review.sources[0].path == files[0]
+        completed.append(review.sources[0].path)
+        incomplete = mode in fallback_modes and review.sources[0].path == files[0]
+        if incomplete and mode == "exception":
+            raise RuntimeError("primary failed")
+        if incomplete and mode == "timeout":
+            raise TimeoutError("primary timed out")
+        output: Any = {"issues": [], "verdicts": [{"path": source.path, "lines_read": 1,
+            "verdict": "not_reviewed" if incomplete else "clean", "n_findings": 0} for source in review.sources]}
+        if incomplete and mode in {"invalid", "no_output"}:
+            output = {"issues": "invalid", "verdicts": []} if mode == "invalid" else None
         return FiniteResult(
-            {"issues": [], "verdicts": [{"path": source.path, "lines_read": 1,
-             "verdict": "not_reviewed" if incomplete else "clean", "n_findings": 0} for source in review.sources]},
-            "evidence_incomplete" if incomplete else None,
+            output,
+            ("wall_budget" if mode == "budget" else "evidence_incomplete")
+            if incomplete and mode not in {"invalid", "no_output"} else None,
             frozenset() if incomplete else frozenset(source.path for source in review.sources),
             tuple(source.metadata() for source in review.sources),
         )
 
     async def normal(*args: Any, **kwargs: Any) -> Any:
         traditional.append(args[2])
-        return {"issues": [], "verdicts": []}, None, None
+        if mode in fallback_modes:
+            assert set(completed) == set(files)
+            assert not delegation.exists()
+        if mode == "fallback_exception":
+            raise RuntimeError("structural fallback failed")
+        issues = [{"id": 1, "file": "api.py", "line": 1, "description": "Shared contract mismatch",
+                   "severity": "high", "confidence": "HIGH", "rationale": "Boundary differs",
+                   "evidence": "api.py:1 and web.ts:1"}] if mode == "fallback_budget" else []
+        return {"issues": issues, "verdicts": []}, None, "wall_budget" if mode == "fallback_budget" else None
 
     monkeypatch.setattr("daydream.deep.finite_review.run_finite_review", finite)
     monkeypatch.setattr("daydream.phases.run_agent", normal)
@@ -77,9 +125,32 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
         write_coverage_receipts=True,
         run_context=RunContext(InteractionPolicy(interactive=False)),
     )
-    deep = tmp_path / ".daydream/deep"
-    delegation = deep / "structural-delegation.json"
-    if mode not in {"complete", "incomplete"}:
+    if mode in fallback_modes:
+        assert len(traditional) == 1
+        assert "python" in failures
+        assert not delegation.exists()
+        if mode == "fallback_exception":
+            assert "structure" in failures
+            assert "structure" not in results
+        else:
+            assert "structure" in results
+            assert ("structure" in failures) == (mode == "fallback_budget")
+            record = json.loads(structural_record.read_text())
+            assert "delegated_to" not in record
+            if mode == "fallback_budget":
+                assert record["incomplete"] is True
+                assert record["issues"][0]["uid"] == "structure:1"
+        if mode == "folded":
+            assert FOLDED_ALTERNATIVES_INSTRUCTION in traditional[0]
+        return
+    if mode in write_failure_modes:
+        assert traditional == []
+        assert "structure" in failures
+        assert "structure" not in results
+        assert not any(path.exists() for path in (delegation, structural_record, structural_report))
+        assert not list(deep.glob("structural-delegation*.tmp"))
+        return
+    if mode != "complete":
         assert traditional
         assert not delegation.exists()
         return
