@@ -140,8 +140,7 @@ def test_suppression_selects_low_confidence_and_low_severity_uncontested() -> No
         _rec_conf("b.py", 2, "medium", "LOW"),
         _rec_conf("c.py", 3, "medium", "MEDIUM"),
     ]
-    sources = ["python", "react", "go"]
-    assert select_suppression_targets(records, sources) == [0, 1]
+    assert select_suppression_targets(records) == [0, 1]
 
 
 def test_suppression_excludes_arbiter_targets() -> None:
@@ -154,7 +153,7 @@ def test_suppression_excludes_arbiter_targets() -> None:
     sources = ["python", "react"]
     arbiter_targets = select_arbiter_targets(records, sources)
     assert arbiter_targets == [0]
-    assert select_suppression_targets(records, sources, arbiter_targets) == [1]
+    assert select_suppression_targets(records, arbiter_targets) == [1]
 
 
 def test_suppression_excludes_contested_low_finding() -> None:
@@ -169,25 +168,18 @@ def test_suppression_excludes_contested_low_finding() -> None:
     sources = ["python", "react", "go"]
     arbiter_targets = select_arbiter_targets(records, sources)
     assert arbiter_targets == [0, 1]
-    assert select_suppression_targets(records, sources, arbiter_targets) == [2]
+    assert select_suppression_targets(records, arbiter_targets) == [2]
 
 
 def test_suppression_selects_nothing_when_all_medium_uncontested() -> None:
     records = [_rec_conf("a.py", 1, "medium", "MEDIUM"), _rec_conf("b.py", 2, "medium", "HIGH")]
-    sources = ["python", "react"]
-    assert select_suppression_targets(records, sources) == []
+    assert select_suppression_targets(records) == []
 
 
 def test_suppression_default_exclude_is_empty() -> None:
     # Called without an exclude set, every borderline record is selected.
     records = [_rec_conf("a.py", 1, "low", "LOW")]
-    assert select_suppression_targets(records, ["python"]) == [0]
-
-
-def test_suppression_length_mismatch_raises() -> None:
-
-    with pytest.raises(ValueError):
-        select_suppression_targets([_rec("a.py", 1, "low")], ["python", "react"])
+    assert select_suppression_targets(records) == [0]
 
 
 def test_select_suppression_targets_honors_severity_classes_knob() -> None:
@@ -196,11 +188,10 @@ def test_select_suppression_targets_honors_severity_classes_knob() -> None:
         {"severity": "medium", "file": "b.py", "line": 2},
         {"severity": "low", "confidence": "LOW", "file": "c.py", "line": 3},
     ]
-    sources = ["s1", "s2", "s3"]
     # Default ("low",): low-severity records selected; medium not; LOW-confidence still selected.
-    assert select_suppression_targets(records, sources) == [0, 2]
+    assert select_suppression_targets(records) == [0, 2]
     # Knob widened to include medium.
-    assert select_suppression_targets(records, sources, severity_classes=("low", "medium")) == [0, 1, 2]
+    assert select_suppression_targets(records, severity_classes=("low", "medium")) == [0, 1, 2]
 
 
 def test_select_suppression_targets_honors_confidence_classes_knob() -> None:
@@ -213,23 +204,22 @@ def test_select_suppression_targets_honors_confidence_classes_knob() -> None:
         {"severity": "medium", "confidence": "MEDIUM", "file": "b.py", "line": 2},
         {"severity": "medium", "confidence": "HIGH", "file": "c.py", "line": 3},
     ]
-    sources = ["s1", "s2", "s3"]
     # Default ("LOW",): LOW-confidence selected; MEDIUM- and HIGH-confidence not.
-    assert select_suppression_targets(records, sources) == [0]
+    assert select_suppression_targets(records) == [0]
     # Widened to include MEDIUM: now selects LOW- and MEDIUM-confidence.
     assert select_suppression_targets(
-        records, sources, confidence_classes=("LOW", "MEDIUM")
+        records, confidence_classes=("LOW", "MEDIUM")
     ) == [0, 1]
     # Narrowed to HIGH (or any other non-LOW selection) must NOT silently fall
     # back to the old LOW-only branch -- the knob is live in both directions.
-    assert select_suppression_targets(records, sources, confidence_classes=("HIGH",)) == [2]
+    assert select_suppression_targets(records, confidence_classes=("HIGH",)) == [2]
 
 
 def test_suppression_rejects_unknown_confidence_class() -> None:
 
     records = [_rec_conf("a.py", 1, "low", "LOW")]
     with pytest.raises(ValueError):
-        select_suppression_targets(records, ["python"], confidence_classes=("LOW", "GUESSED"))
+        select_suppression_targets(records, confidence_classes=("LOW", "GUESSED"))
 
 
 def test_contested_only_records_skip_the_severity_branch() -> None:

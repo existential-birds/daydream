@@ -505,7 +505,6 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             ]
             suppression_targets = select_suppression_targets(
                 adjudicated,
-                adjudicated_sources,
                 suppression_exclude,
                 severity_classes=ctx.pipeline().suppression.severity_classes,
                 confidence_classes=ctx.pipeline().suppression.confidence_classes,

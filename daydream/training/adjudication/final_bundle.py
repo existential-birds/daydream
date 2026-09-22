@@ -109,6 +109,11 @@ def _bundle_input_names(root: Path) -> set[str]:
     }
 
 
+def _write_bundle_file(out_dir: Path, name: str, data: bytes) -> None:
+    """Atomically stage one bundle file under the deterministic-write convention."""
+    atomic_write_bytes(out_dir / name, data, fsync=False, dir_fsync=False, mode=umask_derived_mode())
+
+
 def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
     """Hash the exact seven-file semantic annotation bundle contract."""
     root = Path(bundle_dir)
@@ -409,34 +414,14 @@ def build_final_bundle(
     # 1. annotations.jsonl + sessions.jsonl: verbatim copies of the canonical
     #    materialized artifacts (already canonical JSONL — re-serializing
     #    would be a second code path for the same bytes).
-    atomic_write_bytes(
-        out_dir / _ANNOTATIONS_FILENAME,
-        (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes(),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
+    _write_bundle_file(
+        out_dir, _ANNOTATIONS_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
     )
-    atomic_write_bytes(
-        out_dir / _SESSIONS_OUT_FILENAME,
-        (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes(),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
+    _write_bundle_file(
+        out_dir, _SESSIONS_OUT_FILENAME, (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes()
     )
-    atomic_write_bytes(
-        out_dir / _MANIFEST_FILENAME,
-        manifest_path.read_bytes(),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
-    atomic_write_bytes(
-        out_dir / _POLICY_BINDING_FILENAME,
-        policy_binding,
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+    _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_path.read_bytes())
+    _write_bundle_file(out_dir, _POLICY_BINDING_FILENAME, policy_binding)
 
     # 2. label-observations.jsonl: the archive's per-session observation
     #    history, chronological by ``observed_at`` (per-session rows are
@@ -446,12 +431,10 @@ def build_final_bundle(
     for session_id in snapshot_session_ids:
         history_rows.extend(label_observation_history(archive_dir, session_id))
     history_rows.sort(key=lambda row: (str(row.get("observed_at")), str(row.get("session_id"))))
-    atomic_write_bytes(
-        out_dir / _OBSERVATIONS_FILENAME,
+    _write_bundle_file(
+        out_dir,
+        _OBSERVATIONS_FILENAME,
         "".join(_canonical(row) + "\n" for row in history_rows).encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
     )
 
     # 3. coverage-report.json over the fresh complete queue, enriched exactly
@@ -474,13 +457,7 @@ def build_final_bundle(
     report["strata"] = {
         f"{stack}/{profile}": count for (stack, profile), count in report["strata"].items()
     }
-    atomic_write_bytes(
-        out_dir / _REPORT_FILENAME,
-        (_canonical(report) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+    _write_bundle_file(out_dir, _REPORT_FILENAME, (_canonical(report) + "\n").encode("utf-8"))
 
     # 4. lineage.json: generated from the pin — every field must be present.
     lineage: dict[str, Any] = {
@@ -497,13 +474,7 @@ def build_final_bundle(
         )
     as_of = manifest["as_of"]
     lineage["as_of"] = "" if as_of is None else str(as_of)
-    atomic_write_bytes(
-        out_dir / _LINEAGE_FILENAME,
-        (_canonical(lineage) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+    _write_bundle_file(out_dir, _LINEAGE_FILENAME, (_canonical(lineage) + "\n").encode("utf-8"))
 
     written = sorted(path.name for path in out_dir.iterdir() if path.is_file())
     missing = [name for name in _BUNDLE_FILES if name not in written]
