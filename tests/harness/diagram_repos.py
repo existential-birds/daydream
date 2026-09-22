@@ -39,14 +39,9 @@ def _finish(repo: Path) -> Path:
     return repo
 
 
-def build_cross_module_repo(root: Path) -> Path:
-    """Two packages, three changed code files, one cross-module import edge.
-
-    Satisfies the sequence diagram's cross-module rule (>= 3 code files, >= 2
-    modules, >= 1 import edge crossing modules) and deliberately misses the
-    flowchart rule: no changed function gains a single branch point.
-    """
-    repo = root / "cross_module"
+def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path:
+    """Two-package initial tree with one cross-module import edge, then feature edits."""
+    repo = root / name
     (repo / "pkg_a").mkdir(parents=True)
     (repo / "pkg_b").mkdir(parents=True)
     (repo / "pkg_a" / "__init__.py").write_text("", encoding="utf-8")
@@ -70,8 +65,18 @@ def build_cross_module_repo(root: Path) -> Path:
     (repo / "pkg_a" / "util.py").write_text(
         "def normalize(text):\n    return text.strip()\n", encoding="utf-8"
     )
-    (repo / "pkg_b" / "client.py").write_text(CLIENT_PY, encoding="utf-8")
+    (repo / "pkg_b" / "client.py").write_text(client_body, encoding="utf-8")
     return _finish(repo)
+
+
+def build_cross_module_repo(root: Path) -> Path:
+    """Two packages, three changed code files, one cross-module import edge.
+
+    Satisfies the sequence diagram's cross-module rule (>= 3 code files, >= 2
+    modules, >= 1 import edge crossing modules) and deliberately misses the
+    flowchart rule: no changed function gains a single branch point.
+    """
+    return _build_cross_module_variant(root, "cross_module", CLIENT_PY)
 
 
 def _large_core_body(marker: str, lines: int) -> str:
@@ -181,34 +186,7 @@ def build_both_signals_repo(root: Path) -> Path:
     the branch-heavy ``run`` function added to ``pkg_b/client.py`` so a single
     run exercises the two-kind fan-out.
     """
-    repo = root / "both_signals"
-    (repo / "pkg_a").mkdir(parents=True)
-    (repo / "pkg_b").mkdir(parents=True)
-    (repo / "pkg_a" / "__init__.py").write_text("", encoding="utf-8")
-    (repo / "pkg_b" / "__init__.py").write_text("", encoding="utf-8")
-    (repo / "pkg_a" / "core.py").write_text(
-        "def handle(payload):\n    return payload\n", encoding="utf-8"
-    )
-    (repo / "pkg_a" / "util.py").write_text(
-        "def normalize(text):\n    return text\n", encoding="utf-8"
-    )
-    (repo / "pkg_b" / "client.py").write_text(
-        "from pkg_a.core import handle\n\n\ndef call_handle(payload):\n"
-        "    return handle(payload)\n",
-        encoding="utf-8",
-    )
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "init")
-    git(repo, "checkout", "-b", "feature")
-    (repo / "pkg_a" / "core.py").write_text(CORE_PY, encoding="utf-8")
-    (repo / "pkg_a" / "util.py").write_text(
-        "def normalize(text):\n    return text.strip()\n", encoding="utf-8"
-    )
-    (repo / "pkg_b" / "client.py").write_text(
-        CLIENT_PY + "\n\n" + BOTH_RUN_PY, encoding="utf-8"
-    )
-    return _finish(repo)
+    return _build_cross_module_variant(root, "both_signals", CLIENT_PY + "\n\n" + BOTH_RUN_PY)
 
 
 def build_cross_service_repo(root: Path) -> Path:

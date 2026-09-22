@@ -54,6 +54,17 @@ def _write_manifest(path: Path, entries: list[tuple[str, list[dict[str, object]]
     return path
 
 
+def _taskset(manifest_path: Path, gate_report_path: Path, **overrides: object) -> DaydreamReviewTaskset:
+    return DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review",
+            manifest_path=manifest_path,
+            gate_report_path=gate_report_path,
+            **overrides,
+        )
+    )
+
+
 @pytest.mark.parametrize("precreate_dest", [False, True], ids=["missing-destination", "empty-destination"])
 def test_fixture_repo_is_deterministic(tmp_path: Path, precreate_dest: bool) -> None:
     """The SHAs pinned in fixture.py and the manifest are the real ones."""
@@ -135,13 +146,7 @@ def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_pa
 def test_load_builds_tasks_from_the_committed_manifest(
     fixture_manifest_path: Path, stage0_gate_report: Path
 ) -> None:
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, stage0_gate_report)
     tasks = list(taskset.load())
     assert len(tasks) == 3
 
@@ -177,14 +182,7 @@ def test_use_images_false_leaves_tasks_imageless(
     fixture_manifest_path: Path, stage0_gate_report: Path
 ) -> None:
     """The subprocess smoke path needs imageless tasks (verifiers env.py:189-195)."""
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-            use_images=False,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, stage0_gate_report, use_images=False)
     tasks = list(taskset.load())
     assert [task.data.image for task in tasks] == [None, None, None]
     assert [
@@ -196,11 +194,7 @@ def test_load_rejects_excluded_repo(tmp_path: Path, stage0_gate_report: Path) ->
     """C5 is unconditional: an excluded slug fails the load."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [("getsentry/sentry", [_pr(7, "a" * 40, "b" * 40)])])
 
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review", manifest_path=manifest, gate_report_path=stage0_gate_report
-        )
-    )
+    taskset = _taskset(manifest, stage0_gate_report)
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "C5" in str(excinfo.value)
@@ -211,11 +205,7 @@ def test_load_rejects_excluded_repo_case_insensitively(tmp_path: Path, stage0_ga
     """GitHub slugs are case-insensitive; `GetSentry/Sentry` is the same repo."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [("GetSentry/Sentry", [_pr(7, "a" * 40, "b" * 40)])])
 
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review", manifest_path=manifest, gate_report_path=stage0_gate_report
-        )
-    )
+    taskset = _taskset(manifest, stage0_gate_report)
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "C5" in str(excinfo.value)
@@ -414,11 +404,7 @@ def test_load_rejects_snapshot_without_base_sha(tmp_path: Path, stage0_gate_repo
     """No base SHA means no reviewable diff and no image to build — fail loudly."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [("acme/widgets", [_pr(4, "", "b" * 40)])])
 
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review", manifest_path=manifest, gate_report_path=stage0_gate_report
-        )
-    )
+    taskset = _taskset(manifest, stage0_gate_report)
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "base_sha" in str(excinfo.value)
@@ -427,13 +413,7 @@ def test_load_rejects_snapshot_without_base_sha(tmp_path: Path, stage0_gate_repo
 
 def test_load_refuses_without_gate_report_path(fixture_manifest_path: Path) -> None:
     """M4: an unconfigured gate path is itself a refusal, never a default-to-allow."""
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=Path(""),
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, Path(""))
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
     assert "--taskset.gate-report-path" in str(excinfo.value)
@@ -441,13 +421,7 @@ def test_load_refuses_without_gate_report_path(fixture_manifest_path: Path) -> N
 
 def test_load_refuses_missing_gate_report(fixture_manifest_path: Path, tmp_path: Path) -> None:
     """A missing gate report refuses the load, not just the require_stage0_gate leaf."""
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=tmp_path / "missing-gate.json",
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, tmp_path / "missing-gate.json")
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
     assert "gate report missing" in str(excinfo.value)
@@ -457,13 +431,7 @@ def test_load_refuses_failed_gate_report(fixture_manifest_path: Path, tmp_path: 
     """A report that did not pass refuses the load, not just the require_stage0_gate leaf."""
     gate = tmp_path / "failed-gate.json"
     gate.write_text(json.dumps({"passed": False, "separation": 0.01}), encoding="utf-8")
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=gate,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, gate)
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
     assert "failed" in str(excinfo.value)
@@ -492,14 +460,7 @@ def test_load_refuses_model_not_bound_to_gate_report(
         ),
         encoding="utf-8",
     )
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-            outcome_model_path=model,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, stage0_gate_report, outcome_model_path=model)
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
     assert "does not bind" in str(excinfo.value)
@@ -511,14 +472,7 @@ def test_load_refuses_missing_outcome_model(
 ) -> None:
     """A configured-but-absent checkpoint refuses the load, not the first score."""
     missing = tmp_path / "missing-outcome-model.json"
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-            outcome_model_path=missing,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, stage0_gate_report, outcome_model_path=missing)
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
     assert "missing" in str(excinfo.value)
@@ -529,14 +483,7 @@ def test_load_binds_outcome_model_to_gate_report(
     fixture_manifest_path: Path, stage0_gate_report: Path, outcome_model_path: Path
 ) -> None:
     """The bound pair (conftest fixtures) loads, stamping the model onto each task (M13)."""
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-            outcome_model_path=outcome_model_path,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, stage0_gate_report, outcome_model_path=outcome_model_path)
     tasks = list(taskset.load())
     assert tasks
     assert all(task.config.outcome_model_path == outcome_model_path for task in tasks)
@@ -581,13 +528,7 @@ def test_reference_manifest_loads_against_the_committed_snapshot(
     drift between a task and its image would silently point rollouts at an image
     that does not exist.
     """
-    taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-        )
-    )
+    taskset = _taskset(fixture_manifest_path, stage0_gate_report)
     tasks = taskset.load()
     (task,) = [t for t in tasks if t.data.repo_slug == "pallets/itsdangerous"]
     assert task.data.pr_number == 406
