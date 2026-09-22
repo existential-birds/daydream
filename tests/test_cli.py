@@ -484,13 +484,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     )
 
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
-    _seed_remote_ci_pr(fake_gh, head_sha=subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip())
+    _seed_remote_ci_pr(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
     seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome=remote_outcome
     )
@@ -535,27 +529,9 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
 
     assert exc_info.value.code == expected_code
     assert hook_marker.read_text() == "ran\n"
-    pushed_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert subprocess.run(
-        ["git", "rev-parse", "refs/heads/feature"],
-        cwd=remote,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == pushed_sha
-    assert subprocess.run(
-        ["git", "config", "--get", "remote.origin.url"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == raw_remote
+    pushed_sha = git(project, "rev-parse", "HEAD")
+    assert git(remote, "rev-parse", "refs/heads/feature") == pushed_sha
+    assert git(project, "config", "--get", "remote.origin.url") == raw_remote
     verdict = json.loads(
         (project / ".daydream" / "deep" / "remote-ci-verdict.json").read_text()
     )
