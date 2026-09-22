@@ -38,11 +38,10 @@ _SHARED_HARNESS_BACKENDS = (
     ("MockBackend", "tests.harness.stub_backend", "MockBackend"),
     ("StubBackend", "tests.harness.stub_backend", "StubBackend"),
     ("PhaseDispatchBackend", "tests.harness.phase_backend", "PhaseDispatchBackend"),
+    # The four ImproveStubBackend subclasses bend one axis via _pre_execute/
+    # _post_execute hooks and inherit the base execute, so they declare no
+    # execute of their own for this parity check to cover.
     ("ImproveStubBackend", "tests.harness.improve_backend", "ImproveStubBackend"),
-    ("AuditAbsoluteWorkingDirectoryBackend", "tests.harness.improve_backend", "AuditAbsoluteWorkingDirectoryBackend"),
-    ("ProductionPathBackend", "tests.harness.improve_backend", "ProductionPathBackend"),
-    ("IncrementalPlanBackend", "tests.harness.improve_backend", "IncrementalPlanBackend"),
-    ("OutOfOrderPlanBackend", "tests.harness.improve_backend", "OutOfOrderPlanBackend"),
 )
 
 
