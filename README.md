@@ -76,6 +76,11 @@ The default flow is the deep multi-stack pipeline. This pipeline performs the fo
 10. Commit and push through ordinary Git commands and repository hooks.
 11. Verify GitHub CI for the exact pushed repository, PR, branch, and commit SHA.
 
+Fix verification retries unresolved findings for up to three rounds. Findings
+that remain unresolved are reported in `.daydream/deep/fix-outcomes.json`; the
+retained changes continue through tests, commit, and push. Detected regressions
+still stop publication, and commit messages list only verified fixes.
+
 Local verification, push verification, and remote CI are recorded as distinct
 states. Remote CI polls every 10 seconds, allows 120 seconds for checks to
 register, and has a 30-minute completion bound. Required checks determine the

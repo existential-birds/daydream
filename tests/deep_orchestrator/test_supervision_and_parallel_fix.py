@@ -601,7 +601,7 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
-    assert exit_code == 1
+    assert exit_code == 0
     assert "Attempted, not fixed" in capsys.readouterr().out
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
     assert outcomes["outcomes"]["item:1"]["verdict"] == "unresolved"

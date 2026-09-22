@@ -314,6 +314,14 @@ key `fix-verify`; its retained-tree verifier resolves model and backend
 overrides from `[tool.daydream.phases.verify]` and uses the separately
 registered `fix-verify` prompt.
 
+At the round limit, `unresolved` and `wrong_target` findings remain in
+`fix-outcomes.json` and produce a warning; the retained patch continues through
+tests, commit, and push. A `regressed` verdict still stops the run. If tests or
+healing change the retained tree, verification runs again: previously unresolved
+findings may remain unresolved, but newly actionable findings stop publication.
+Tree identity, scope enforcement, test validation, and Git hooks still gate
+publication. Commit messages list only findings verified as resolved.
+
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder has no step of
 its own. Its per-phase config key is still `wonder`

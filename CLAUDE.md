@@ -210,6 +210,12 @@ exploration pre-scan (cached across runs)
     -> test validation
 ```
 
+- The fix/verify loop has at most three rounds. Remaining `unresolved` or
+  `wrong_target` findings are reported honestly and do not prevent the retained
+  patch from proceeding through tests, commit, and push. A `regressed` verdict
+  stops publication. Post-test re-verification permits existing unresolved
+  findings but stops newly actionable findings; tree identity, scope, tests, and
+  repository hooks remain required. Commit messages list only resolved findings.
 - Wonder ∥ per-stack are siblings in one task group on a fresh multi-stack run (wonder feeds only merge and
   the dedup pre-filter, so reviewer prompts drop the `alternatives.json` pointer; they join before parse).
   Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack

@@ -1878,9 +1878,11 @@ async def phase_fix_verify(
       - Read-only: ``run_agent(..., read_only=True)`` delegates enforcement to
         the backend. A verification turn that attempts to edit a file fails
         that step.
-      - Advisory: a non-``resolved`` verdict schedules follow-up work in a
-        later round (or the terminal report); it never fails the run and never
-        reverts the patch.
+      - Verdicts schedule follow-up work in a later round or the terminal
+        report; this phase never reverts the patch. The orchestrator allows
+        exhausted ``unresolved``/``wrong_target`` findings to proceed through
+        tests, but blocks ``regressed`` findings and newly actionable findings
+        introduced during post-test stabilization.
       - Dispatched-count == outcome-count: every item passed in comes back with
         exactly one verdict dict keyed by its canonical ``id``. A finding the
         agent omitted coerces to ``unresolved`` ("no verifier verdict") — the
