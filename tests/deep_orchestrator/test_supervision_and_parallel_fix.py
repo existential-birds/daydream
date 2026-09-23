@@ -40,6 +40,49 @@ def _prepare_fix_stub(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_e
     return _install_stub_backend(monkeypatch, target)
 
 
+def _supervision_stub(
+    target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute | None = None,
+    *,
+    pin_pr: bool = False,
+    **install_kwargs: Any,
+) -> StubBackend:
+    """Silence UI, optionally mute/pin findings-out, then install the stub backend."""
+    _silence(monkeypatch)
+    if mute_side_effects is not None:
+        mute_side_effects()
+    if pin_pr:
+        _pin_findings_pr(monkeypatch, target)
+    return _install_stub_backend(monkeypatch, target, **install_kwargs)
+
+
+def _findings_out_config(
+    make_config: MakeConfig,
+    target: Path,
+    out: Path,
+    trajectory: Path | None = None,
+) -> Any:
+    """Build the shared findings-out run config (PR 7, target file config)."""
+    kwargs: dict[str, Any] = {
+        "pr_number": 7,
+        "findings_out": str(out),
+        "file_config": load_file_config(target),
+    }
+    if trajectory is not None:
+        kwargs["trajectory_path"] = trajectory
+    return make_config(target, **kwargs)
+
+
+def _forbid_pr_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install a findings-out PR poster that fails if it is ever invoked."""
+
+    async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("findings-out must not post to the PR")
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
+
+
 async def test_supervise_rules_drops_deny_globbed_finding(
     multi_stack_target: Path,
     tmp_path: Path,
@@ -48,9 +91,7 @@ async def test_supervise_rules_drops_deny_globbed_finding(
 ) -> None:
     """Rule supervision rewrites the canonical items before findings-out."""
 
-    _silence(monkeypatch)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, pin_pr=True)
     stub.merge_items = [
         _merge_item(1, "vendor/generated.py", "high", desc="drop this finding"),
         _merge_item(2, "src/app.py", "low", desc="keep this finding"),
@@ -59,19 +100,8 @@ async def test_supervise_rules_drops_deny_globbed_finding(
     out = multi_stack_target / "findings.json"
     traj = tmp_path / "trajectory.json"
 
-    async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("findings-out must not post to the PR")
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            pr_number=7,
-            findings_out=str(out),
-            file_config=load_file_config(multi_stack_target),
-            trajectory_path=traj,
-        )
-    )
+    _forbid_pr_post(monkeypatch)
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out, traj))
 
     assert rc == 0
     items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
@@ -97,9 +127,7 @@ async def test_supervise_hold_excluded_but_rendered(
 ) -> None:
     """Held findings leave the actionable items but remain visible in the report."""
 
-    _silence(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [
         _merge_item(1, "vendor/generated.py", "high", desc="hold this finding"),
         _merge_item(2, "src/app.py", "low", desc="keep this finding"),
@@ -131,9 +159,7 @@ async def test_supervise_llm_drop_records_step(
 ) -> None:
     """LLM supervision drops by canonical id and records its deep stage."""
 
-    _silence(monkeypatch)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, pin_pr=True)
     stub.merge_items = [
         _merge_item(1, "api.py", "high", desc="drop by llm"),
         _merge_item(2, "App.tsx", "low", desc="keep by llm"),
@@ -146,19 +172,8 @@ async def test_supervise_llm_drop_records_step(
     out = multi_stack_target / "findings.json"
     traj = tmp_path / "trajectory.json"
 
-    async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("findings-out must not post to the PR")
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            pr_number=7,
-            findings_out=str(out),
-            file_config=load_file_config(multi_stack_target),
-            trajectory_path=traj,
-        )
-    )
+    _forbid_pr_post(monkeypatch)
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out, traj))
 
     assert rc == 0
     items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
@@ -177,10 +192,7 @@ async def test_supervise_llm_edit_revises_severity(
 ) -> None:
     """LLM edit verdicts revise severity in canonical items and findings-out."""
 
-    _silence(monkeypatch)
-    mute_side_effects()
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="downgrade me")]
     stub.supervise_verdicts = {
         1: {"action": "edit", "reason": "less severe", "severity": "low"},
@@ -188,14 +200,7 @@ async def test_supervise_llm_edit_revises_severity(
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
     out = multi_stack_target / "findings.json"
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            pr_number=7,
-            findings_out=str(out),
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out))
 
     assert rc == 0
     payload = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
@@ -213,22 +218,12 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
 ) -> None:
     """All findings may be dropped while findings-out still writes an empty artifact."""
 
-    _silence(monkeypatch)
-    mute_side_effects()
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop everything")]
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "rules"\nsupervisor_deny_globs = ["**"]\n')
     out = multi_stack_target / "findings.json"
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            pr_number=7,
-            findings_out=str(out),
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out))
 
     assert rc == 0
     assert json.loads(out.read_text())["findings"] == []
@@ -242,10 +237,7 @@ async def test_supervise_off_byte_identical(
 ) -> None:
     """No config and explicit off produce the same canonical items bytes."""
 
-    _silence(monkeypatch)
-    mute_side_effects()
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [
         _merge_item(1, "api.py", "high", desc="first finding"),
         _merge_item(2, "App.tsx", "low", desc="second finding"),
@@ -258,14 +250,7 @@ async def test_supervise_off_byte_identical(
     first_findings = json.loads(out.read_text())["findings"]
 
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "off"\n')
-    second_rc = await run(
-        make_config(
-            multi_stack_target,
-            pr_number=7,
-            findings_out=str(out),
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    second_rc = await run(_findings_out_config(make_config, multi_stack_target, out))
     second_items = (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_bytes()
     second_findings = json.loads(out.read_text())["findings"]
 
@@ -282,9 +267,7 @@ async def test_supervise_dropped_finding_never_reaches_fix(
 ) -> None:
     """A dropped finding is absent from the real fix prompt and remains unmodified."""
 
-    _silence(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [
         _merge_item(1, "api.py", "high", desc="drop before fix"),
         _merge_item(2, "App.tsx", "low", desc="fix this survivor"),
@@ -328,7 +311,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
     mute_side_effects()
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=120)
     monkeypatch.setattr("daydream.deep.review_steps.console", rec)
-    _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
+    _supervision_stub(multi_stack_target, monkeypatch, enable_exploration=True)
 
     exit_code = await run(make_config(
         multi_stack_target, assume="yes", output_mode="loop", review_profile=independent_exploration_profile(),

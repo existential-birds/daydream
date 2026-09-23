@@ -9,6 +9,32 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from daydream.config import (
+    DEFAULT_DEEP_SHARD_ENABLED,
+    DEFAULT_DEEP_SHARD_MAX_BYTES,
+    DEFAULT_DEEP_SHARD_MAX_FILES,
+)
+from daydream.config_file import DaydreamFileConfig
+from daydream.deep import orchestrator as o
+from daydream.deep.orchestrator import (
+    DIAGRAM_STEPS,
+    STEPS,
+    _config_pipeline,
+    _deep_shard_enabled,
+    _deep_shard_max_files,
+    _flow_kind_for_mode,
+    _flow_name_for_mode,
+    _resolve_mode,
+    _uncovered_sweep_enabled,
+)
+from daydream.deep.review_steps import _uncovered_sweep_max_files, _uncovered_sweep_min_hunk_lines
+from daydream.extensions import Registry
+from daydream.extensions.builtins import register_builtins
+from daydream.flows.engine import FlowContext
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+from daydream.runner import RunConfig, run
+from daydream.trajectory import DaydreamRunFlow
+from daydream.workspace import WorkContext
 from tests.deep_orchestrator.support import (
     _install_uncovered_sweep_stub,
     _root_phase_events,
@@ -40,7 +66,6 @@ async def test_uncovered_sweep_failure_is_audited_without_claiming_coverage(
     failure_mode: str,
 ) -> None:
     """A failed sweep leaves a report and artifacts without claiming the file was covered."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)
@@ -97,7 +122,6 @@ async def test_uncovered_sweep_disabled_by_config(
     mute_side_effects: Mute,
 ) -> None:
     """A profile pipeline with ``uncovered_sweep_enabled = false`` skips the sweep entirely."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)
@@ -212,7 +236,6 @@ async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_cover
     mute_side_effects: Mute,
 ) -> None:
     """A successful sweep review WITHOUT a file Read is an attempt, not coverage (issue #309 finding 6)."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)
@@ -253,7 +276,6 @@ async def test_run_deep_uncovered_sweep_structured_output_without_review_file_is
     mute_side_effects: Mute,
 ) -> None:
     """Valid structured sweep output is authoritative without a Markdown sidecar."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)
@@ -340,7 +362,6 @@ async def test_uncovered_sweep_malformed_stats_does_not_fail_run(
 
 def test_diagram_step_position_and_phase_key() -> None:
     """Issue #1113: ``diagram`` sits between ``supervise`` and ``findings-out``."""
-    from daydream.deep.orchestrator import DIAGRAM_STEPS, STEPS
 
     names = [step.name for step in STEPS]
     assert names.index("supervise") + 1 == names.index("diagram")
@@ -358,8 +379,6 @@ def test_diagram_step_position_and_phase_key() -> None:
 
 def test_diagram_flow_is_registered_with_its_three_steps() -> None:
     """The ``diagram`` flow reuses the deep flow's exploration + diagram steps."""
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     registry = Registry()
     register_builtins(registry)
@@ -369,13 +388,6 @@ def test_diagram_flow_is_registered_with_its_three_steps() -> None:
 
 def test_resolve_mode_maps_diagram_output_mode() -> None:
     """``--diagram-only`` resolves to the ``diagram`` mode and its own flow."""
-    from daydream.deep.orchestrator import (
-        _flow_kind_for_mode,
-        _flow_name_for_mode,
-        _resolve_mode,
-    )
-    from daydream.runner import RunConfig
-    from daydream.trajectory import DaydreamRunFlow
 
     config = RunConfig(target="/tmp", output_mode="diagram", diagram="sequence")
     assert _resolve_mode(config) == "diagram"
@@ -390,7 +402,6 @@ def test_resolve_mode_maps_diagram_output_mode() -> None:
 
 def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:
     """The sweep step registers ``config_phase="parse"`` (docs/extensions.md)."""
-    from daydream.deep.orchestrator import STEPS
 
     steps = {s.name: s for s in STEPS}
     assert steps["uncovered-sweep"].phase_key == "parse"
@@ -399,11 +410,6 @@ def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:
 
 def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
     """The sweep toggle resolves from the profile pipeline (M8), not config tiers."""
-    from daydream.deep.orchestrator import _uncovered_sweep_enabled
-    from daydream.extensions import Registry
-    from daydream.flows.engine import FlowContext
-    from daydream.runner import RunConfig
-    from daydream.workspace import WorkContext
 
     def _ctx(config: RunConfig, review_profile: "ResolvedProfile | None" = None) -> FlowContext:
         work = WorkContext(
@@ -435,11 +441,6 @@ def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
 
 def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> None:
     """The sweep numeric caps resolve from the profile pipeline (already host-clamped)."""
-    from daydream.deep.review_steps import _uncovered_sweep_max_files, _uncovered_sweep_min_hunk_lines
-    from daydream.extensions import Registry
-    from daydream.flows.engine import FlowContext
-    from daydream.runner import RunConfig
-    from daydream.workspace import WorkContext
 
     work = WorkContext(
         repo=tmp_path,
@@ -478,9 +479,6 @@ def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> No
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
     """Sharding is forensic-off by default: DEFAULT_DEEP_SHARD_ENABLED = False."""
-    from daydream.config import DEFAULT_DEEP_SHARD_ENABLED
-    from daydream.deep.orchestrator import _deep_shard_enabled
-    from daydream.runner import RunConfig
 
     assert DEFAULT_DEEP_SHARD_ENABLED is False
     # Default off (forensic mode): no RunConfig attr, no file config.
@@ -495,7 +493,6 @@ def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
     cfg = RunConfig(target=str(tmp_path), deep_shard_enabled=True)
     assert _deep_shard_enabled(cfg) is True
     # File-config True with no RunConfig override enables.
-    from daydream.config_file import DaydreamFileConfig
 
     fc = DaydreamFileConfig(deep_shard_enabled=True)
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
@@ -509,10 +506,6 @@ def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
 def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     """The per-shard file bound resolves with RunConfig > file-config > default
     and degrades malformed ints to the named default (never raises)."""
-    from daydream.config import DEFAULT_DEEP_SHARD_MAX_FILES
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.orchestrator import _deep_shard_max_files
-    from daydream.runner import RunConfig
 
     # Default.
     cfg = RunConfig(target=str(tmp_path))
@@ -538,8 +531,6 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
 def test_deep_shard_default_bounds_align_with_inline_budget() -> None:
     """Issue #740: the default shard bounds retune to 5 files / 12288 bytes, and
     the byte bound equals INLINE_DIFF_BUDGET_BYTES so shards inline by construction."""
-    from daydream.config import DEFAULT_DEEP_SHARD_MAX_BYTES, DEFAULT_DEEP_SHARD_MAX_FILES
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     assert DEFAULT_DEEP_SHARD_MAX_FILES == 5
     assert DEFAULT_DEEP_SHARD_MAX_BYTES == INLINE_DIFF_BUDGET_BYTES  # == 12_288
@@ -551,7 +542,6 @@ async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
     install_backend: Callable[[object], object],
 ) -> None:
     """Issue #731: an inline-grounded, finding-referenced file is NOT swept."""
-    from daydream.runner import RunConfig, run
 
     install_stub_backend(monkeypatch, multi_stack_target)
     exit_code = await run(
@@ -586,7 +576,6 @@ async def test_deep_default_run_coverage_by_evidence_present(
     mute_side_effects: Mute,
 ) -> None:
     """Issue #740 AC2/AC3: coverage_by_evidence is non-empty on a DEFAULT (non-sharded) run."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)
@@ -614,7 +603,6 @@ async def test_deep_large_diff_produces_review_and_record_shards(
     install_backend: Callable[[object], object],
 ) -> None:
     """A large Python stack produces multiple review and records artifacts."""
-    from daydream.runner import RunConfig, run
 
     install_stub_backend(monkeypatch, shard_many_python_target)
     # Sharding enabled, tiny file bound -> the python stack shards.
@@ -641,7 +629,6 @@ async def test_deep_forensic_mode_keeps_single_agent_per_stack(
     install_backend: Callable[[object], object],
 ) -> None:
     """Issue #731: forensic (default off) keeps exactly one agent per stack."""
-    from daydream.runner import RunConfig, run
 
     install_stub_backend(monkeypatch, shard_many_python_target)
     rc = await run(
@@ -665,7 +652,6 @@ async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
 ) -> None:
     """AC4: per-stack reviewer declares clean for an assigned file it never Read -> that file is recorded
     not_reviewed, never a pass; the assigned and Read file stays clean."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)
@@ -764,8 +750,6 @@ async def test_no_parse_phase_and_records_from_output_schema(
 
 def test_structural_gate_resolver_reads_profile_pipeline() -> None:
     """The structural gate's pre-context resolver reads the profile flag."""
-    from daydream.deep.orchestrator import _config_pipeline
-    from daydream.runner import RunConfig
 
     assert _config_pipeline(RunConfig(target="/tmp/x")).structural_enabled is True
     off = _profile_with_pipeline(structural_enabled=False)
@@ -773,8 +757,6 @@ def test_structural_gate_resolver_reads_profile_pipeline() -> None:
 
 
 def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.deep import orchestrator as o
-    from daydream.flows.engine import FlowContext
 
     class _Ctx:
         class _Cfg:

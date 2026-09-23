@@ -20,7 +20,7 @@ Test inventory (keyed to the Stage 4.2 spec):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -56,6 +56,31 @@ def _make_feature_branch_on_origin(
     sha = _git(sidecar, "rev-parse", "HEAD")
     _git(sidecar, "push", "origin", branch)
     return sha
+
+
+def _stub_run_loop_deep(
+    monkeypatch: pytest.MonkeyPatch, on_dispatch: Callable[[Any, Any], None]
+) -> None:
+    """Install a ``_run_loop_deep`` stub that asserts the dispatch contract.
+
+    ``on_dispatch(work, config)`` captures whatever fields a test cares about;
+    the stub always returns success so each test owns its own assertions.
+    """
+
+    async def _stub(
+        work: Any,
+        config: Any,
+        run_artifacts: Any = None,
+        *,
+        run_context: Any, github_execution: GitHubExecutionInput,
+        backend_factory: BackendFactory | None,
+    ) -> int:
+        assert run_context is current_run_context()
+        assert backend_factory is None
+        on_dispatch(work, config)
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_loop_deep", _stub)
 
 
 @pytest.fixture
@@ -145,25 +170,15 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     captured: dict[str, Any] = {}
     worktree_path_at_dispatch: dict[str, Path] = {}
 
-    async def fake_run_loop_deep(
-        work: Any,
-        config: Any,
-        run_artifacts: Any = None,
-        *,
-        run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
-        assert backend_factory is None
+    def _capture(work: Any, config: Any) -> None:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
         worktree_path_at_dispatch["repo"] = work.repo
         # Sanity: the ephemeral worktree exists on disk while we're inside it.
         assert work.repo.is_dir()
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
+    _stub_run_loop_deep(monkeypatch, _capture)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -226,22 +241,12 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(
-        work: Any,
-        config: Any,
-        run_artifacts: Any = None,
-        *,
-        run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
-        assert backend_factory is None
+    def _capture(work: Any, config: Any) -> None:
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
+    _stub_run_loop_deep(monkeypatch, _capture)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -291,22 +296,12 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     )
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(
-        work: Any,
-        config: Any,
-        run_artifacts: Any = None,
-        *,
-        run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
-        assert backend_factory is None
+    def _capture(work: Any, config: Any) -> None:
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
         captured["output_mode"] = config.output_mode
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
+    _stub_run_loop_deep(monkeypatch, _capture)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -361,21 +356,11 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(
-        work: Any,
-        config: Any,
-        run_artifacts: Any = None,
-        *,
-        run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
-        assert backend_factory is None
+    def _capture(work: Any, config: Any) -> None:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
+    _stub_run_loop_deep(monkeypatch, _capture)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -417,21 +402,11 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError guard into the deep flow.
     routed: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(
-        work: Any,
-        config: Any,
-        run_artifacts: Any = None,
-        *,
-        run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
-        assert backend_factory is None
+    def _capture(work: Any, config: Any) -> None:
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
+    _stub_run_loop_deep(monkeypatch, _capture)
 
     config = RunConfig(
         target=str(repo_with_origin),
