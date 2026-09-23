@@ -34,6 +34,44 @@ def _wait_for_pushed_sha(
             return None
 
 
+def write_pre_push_sha_hook(
+    project: Path,
+    *,
+    sha_path: Path,
+    ready_path: Path,
+    marker: Path | None = None,
+) -> None:
+    """Install a pre-push hook that publishes the pushed SHA and waits for ``ready_path``.
+
+    The hook atomically writes the pushed ``local_sha`` to *sha_path*, then blocks
+    until the test writes *ready_path* (bounded by a 3000 * 0.01s retry loop). When
+    *marker* is given, the hook also writes ``ran`` to it as evidence it executed.
+    """
+    hook = project / ".git" / "hooks" / "pre-push"
+    if hook.exists():
+        raise AssertionError(f"refusing to replace existing pre-push hook: {hook}")
+    sha_temp_prefix = f"{sha_path}.tmp"
+    marker_line = f"printf '%s\\n' ran > {shlex.quote(str(marker))}\n" if marker else ""
+    hook.write_text(
+        "#!/bin/sh\n"
+        "read local_ref local_sha remote_ref remote_sha\n"
+        f"{marker_line}"
+        f"sha_tmp={shlex.quote(sha_temp_prefix)}.$$\n"
+        "cleanup_sha_tmp() { rm -f \"$sha_tmp\"; }\n"
+        "trap cleanup_sha_tmp EXIT HUP INT TERM\n"
+        "printf '%s\\n' \"$local_sha\" > \"$sha_tmp\"\n"
+        f"mv \"$sha_tmp\" {shlex.quote(str(sha_path))}\n"
+        "trap - EXIT HUP INT TERM\n"
+        "i=0\n"
+        f"while [ ! -f {shlex.quote(str(ready_path))} ]; do\n"
+        "  i=$((i + 1))\n"
+        "  [ \"$i\" -lt 3000 ] || exit 91\n"
+        "  sleep 0.01\n"
+        "done\n"
+    )
+    hook.chmod(0o755)
+
+
 class NoCIRemote:
     """Route a GitHub-shaped remote to a real bare repo and serve no-CI evidence."""
 
@@ -92,27 +130,7 @@ class NoCIRemote:
         marker = self._tmp_path / f"remote-ci-{len(self._threads)}"
         sha_path = marker.with_suffix(".sha")
         ready_path = marker.with_suffix(".ready")
-        hook = repo / ".git" / "hooks" / "pre-push"
-        if hook.exists():
-            raise AssertionError(f"refusing to replace existing pre-push hook: {hook}")
-        sha_temp_prefix = f"{sha_path}.tmp"
-        hook.write_text(
-            "#!/bin/sh\n"
-            "read local_ref local_sha remote_ref remote_sha\n"
-            f"sha_tmp={shlex.quote(sha_temp_prefix)}.$$\n"
-            "cleanup_sha_tmp() { rm -f \"$sha_tmp\"; }\n"
-            "trap cleanup_sha_tmp EXIT HUP INT TERM\n"
-            "printf '%s\\n' \"$local_sha\" > \"$sha_tmp\"\n"
-            f"mv \"$sha_tmp\" {shlex.quote(str(sha_path))}\n"
-            "trap - EXIT HUP INT TERM\n"
-            "i=0\n"
-            f"while [ ! -f {shlex.quote(str(ready_path))} ]; do\n"
-            "  i=$((i + 1))\n"
-            "  [ \"$i\" -lt 3000 ] || exit 91\n"
-            "  sleep 0.01\n"
-            "done\n"
-        )
-        hook.chmod(0o755)
+        write_pre_push_sha_hook(repo, sha_path=sha_path, ready_path=ready_path)
         errors: list[BaseException] = []
         stop = threading.Event()
         pushed_shas: list[str] = []
