@@ -1,6 +1,6 @@
 """Supervised Harbor runs behind the Oracle self-match gate (issue #781).
 
-A thin safety wrapper around Harbor 0.22 that fail-closes on every preflight
+A thin safety wrapper around Harbor 0.23 that fail-closes on every preflight
 before Harbor starts (same-interpreter Harbor, compiled-tree presence,
 endpoint hosts vs the compiled network policy, telemetry/upload rejection,
 and Docker allowlist support), prints a pre-run spend summary, and

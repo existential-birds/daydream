@@ -1,4 +1,4 @@
-"""Package compiled benchmark tasks for Harbor 0.22."""
+"""Package compiled benchmark tasks for Harbor 0.23."""
 
 from __future__ import annotations
 
@@ -100,12 +100,12 @@ def resolve_harbor() -> str:
         parts = tuple(int(part) for part in version.split(".")[:2])
     except ValueError as exc:
         raise PackageError(
-            f"Harbor version {version!r} is invalid; supported range is [0.22, 0.23)",
+            f"Harbor version {version!r} is invalid; supported range is [0.23, 0.24)",
             remediation=remediation,
         ) from exc
-    if parts != (0, 22):
+    if parts != (0, 23):
         raise PackageError(
-            f"Harbor version {version} is outside supported range [0.22, 0.23)",
+            f"Harbor version {version} is outside supported range [0.23, 0.24)",
             remediation=remediation,
         )
     executable = Path(sys.executable).parent / "harbor"
@@ -338,7 +338,7 @@ def validate_compiled(root: Path | None) -> int:
             from harbor.models.task.task import Task
     except ImportError as exc:
         raise PackageError(
-            f"cannot import Harbor 0.22 models from the Daydream interpreter: {exc}",
+            f"cannot import Harbor 0.23 models from the Daydream interpreter: {exc}",
             remediation="pip install 'daydream[benchmark]'",
         ) from exc
 

@@ -1,4 +1,4 @@
-"""Packaging and Harbor 0.22 integration tests for compiled benchmarks."""
+"""Packaging and Harbor 0.23 integration tests for compiled benchmarks."""
 import hashlib
 import importlib.metadata
 import importlib.resources
@@ -79,7 +79,7 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.
     pytest.importorskip("harbor")
 
 
-    monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.22.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.23.0")
     exe = pkg.resolve_harbor()
     assert exe == str(Path(sys.executable).parent / "harbor")
 
@@ -91,10 +91,10 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.
         pkg.resolve_harbor()
     assert "pip install 'daydream[benchmark]'" in str(missing.value)
 
-    monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.21.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.22.0")
     with pytest.raises(pkg.PackageError) as wrong:
         pkg.resolve_harbor()
-    assert "[0.22, 0.23)" in str(wrong.value)
+    assert "[0.23, 0.24)" in str(wrong.value)
 
 
 def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
