@@ -985,13 +985,46 @@ def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
     assert "Diagram dropped (the findings are still posted)" in printed
 
 
-def test_post_findings_drops_evidence_absent_from_the_api_head(
-    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize(
+    ("label", "response", "present_message", "absent_message"),
+    [
+        (
+            "not-found",
+            {"__error__": "gh: Not Found (HTTP 404)"},
+            "is missing from immutable head",
+            "could not be read from immutable head",
+        ),
+        (
+            "directory",
+            {"type": "dir", "path": "a.py"},
+            "is missing from immutable head",
+            "could not be read from immutable head",
+        ),
+        (
+            "rate-limited",
+            {"__error__": "gh: HTTP 403: API rate limit exceeded"},
+            "could not be read from immutable head",
+            "is missing from immutable head",
+        ),
+    ],
+)
+def test_post_findings_classifies_api_head_reads(
+    fake_gh: FakeGh,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    label: str,
+    response: dict[str, str],
+    present_message: str,
+    absent_message: str,
 ) -> None:
-    """A 404 at the head SHA is a missing citation, not an unreadable one."""
-    fake_gh.set_response(
-        "GET", "repos/o/r/contents/a.py", value={"__error__": "gh: Not Found (HTTP 404)"},
-    )
+    """A head read is missing only when the API positively proves absence.
+
+    A 404 and a non-file response are proofs of absence; a rate-limited read is
+    the poster's problem, not a forged citation. In every case the artifact
+    carries no findings, so the run reaches the no-new-findings short-circuit --
+    not the old fail-closed diagram gate (#1176) -- and posts no review.
+    """
+    fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
     artifact = _write_artifact(
         tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
     )
@@ -999,57 +1032,10 @@ def test_post_findings_drops_evidence_absent_from_the_api_head(
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
     assert code == 0
-    # The artifact carries no findings, so the run reaches the no-new-findings
-    # short-circuit -- not the old fail-closed diagram gate (#1176).
-    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
-    # gh's own 404 diagnostic is the only positive proof of absence over the
-    # API, and it must survive as ``PathAbsentError`` all the way to the wording.
-    printed = _console_text(capsys)
-    assert "is missing from immutable head" in printed
-    assert "could not be read from immutable head" not in printed
-
-
-def test_post_findings_drops_a_non_file_api_response_as_a_missing_citation(
-    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A directory (or symlink) at the cited path is the second proof of absence."""
-    fake_gh.set_response(
-        "GET", "repos/o/r/contents/a.py", value={"type": "dir", "path": "a.py"},
-    )
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
-
-    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
-
-    assert code == 0
-    printed = _console_text(capsys)
-    assert "is missing from immutable head" in printed
-    assert "could not be read from immutable head" not in printed
-
-
-def test_post_findings_reports_a_throttled_read_as_unreadable_not_missing(
-    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A rate-limited read is the poster's problem, not a forged citation."""
-    fake_gh.set_response(
-        "GET",
-        "repos/o/r/contents/a.py",
-        value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
-    )
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
-
-    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
-
-    assert code == 0
-    # The artifact carries no findings, so the run reaches the no-new-findings
-    # short-circuit -- not the old fail-closed diagram gate (#1176).
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
     printed = _console_text(capsys)
-    assert "could not be read from immutable head" in printed
-    assert "is missing from immutable head" not in printed
+    assert present_message in printed, label
+    assert absent_message not in printed, label
 
 
 def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
