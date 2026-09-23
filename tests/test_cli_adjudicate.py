@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 
 from daydream import cli
-from daydream.training.adjudication.publish import AnnotationHubClient
+from daydream.training.adjudication import cli as adjudication_cli
+from daydream.training.adjudication.final_bundle import final_snapshot_id
+from daydream.training.adjudication.observations import append_observation
+from daydream.training.adjudication.preview import run_preview
+from daydream.training.adjudication.publish import AnnotationHubClient, publish_final_annotation_bundle
+from daydream.training.corpus_projection.identity import record_id
+from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+from tests.test_training_adjudication_publish import _final_bundle
 
 
 def _write_sessions(tmp_path: Path) -> Path:
@@ -39,7 +46,6 @@ def _install_annotation_hub(
     monkeypatch: pytest.MonkeyPatch, hub: AnnotationHubClient,
 ) -> None:
     """Route only the external Hub boundary at an in-memory implementation."""
-    from daydream.training.adjudication import cli as adjudication_cli
 
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
 
@@ -51,7 +57,6 @@ def _wired_hub(
     private: bool = True,
 ) -> "AnnotationsHub":
     """Build the revision-aware fixture and route the CLI at it in one step."""
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 
     hub = AnnotationsHub(repo_id=repo_id, private=private)
     _install_annotation_hub(monkeypatch, hub)
@@ -165,7 +170,6 @@ def test_adjudicate_show_lists_queue_and_progress(tmp_path: Path, capsys: pytest
 def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
     """Hydrated index + state dir with a built queue, one human decision, and
     a digest-pinned preview ledger (export harvest input)."""
-    from daydream.training.adjudication.preview import run_preview
 
     root = tmp_path
     state = tmp_path / "adj"
@@ -186,7 +190,6 @@ def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
 def _seed_with_conflict(tmp_path: Path) -> tuple[Path, Path]:
     """State dir where two records each have two disagreeing human raters;
     the first record's conflict is older than the second's."""
-    from daydream.training.adjudication.observations import append_observation
 
     root = tmp_path
     state = tmp_path / "adj"
@@ -418,7 +421,6 @@ def test_cli_publish_state_missing_state_file_exits_1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Missing state files fail closed with exit 1, naming the offender (cli.py:31-44)."""
-    from daydream.training.adjudication import cli as adjudication_cli
 
     class _FakeHub:
         @property
@@ -581,8 +583,6 @@ def test_cli_download_final_installs_exact_success_revision(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from tests.test_training_adjudication_publish import _final_bundle
 
     hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
@@ -611,8 +611,6 @@ def test_cli_download_final_rejects_existing_destination_before_download(
     monkeypatch: pytest.MonkeyPatch,
     destination_kind: str,
 ) -> None:
-    from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from tests.test_training_adjudication_publish import _final_bundle
 
     hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
@@ -660,7 +658,7 @@ def test_cli_download_final_hub_failure_exits_1_without_partial_destination(
 # ---- final publish verb (issue #1078, task 6 / M4-M6) ----
 
 from daydream.training.adjudication.canonical import run_canonical_harvest  # noqa: E402
-from tests.fixtures.training.build_hub_snapshot import AnnotationsHub, build_snapshot  # noqa: E402
+from tests.fixtures.training.build_hub_snapshot import build_snapshot  # noqa: E402
 from tests.test_training_adjudication_final_bundle import seed_final_bundle_state  # noqa: E402
 
 
@@ -668,7 +666,6 @@ from tests.test_training_adjudication_final_bundle import seed_final_bundle_stat
 def test_publish_final_dry_run_validates_and_publishes_nothing(
         tmp_path: Path, capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch, legacy_stage: bool) -> None:
-    from daydream.training.corpus_projection.identity import record_id
 
     # Route the CLI's only external boundary at the revision-aware fixture so
     # the dry-run and actual-success OID assertions observe real CLI behavior.
@@ -703,7 +700,6 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     assert rc == 0
     out = capsys.readouterr().out
     assert "annotations.jsonl" in out and "record" in out.lower()
-    from daydream.training.adjudication.final_bundle import final_snapshot_id
 
     final_id, _digests = final_snapshot_id(mat / "final-bundle")
     assert final_id in "".join(out.split()).replace("║", "")

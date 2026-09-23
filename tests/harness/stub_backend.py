@@ -38,6 +38,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.deep.records import record_uid
 from daydream.eval.analyzer import _records_issues_or_empty
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
@@ -344,7 +345,6 @@ class StubBackend:
         Returns:
             One list of uids per records file that had any, in prompt order.
         """
-        from daydream.deep.records import record_uid
 
         groups: list[list[str]] = []
         for path_str in re.findall(r"  - (\S+-records\.json)", prompt):

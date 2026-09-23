@@ -15,7 +15,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import bot_setup, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
+from daydream.templates import workflow_template_files
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import git as _git
 from tests.harness.scripts import cli_main
 
 
@@ -123,7 +126,6 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(
     """
     wf = repo_with_origin / ".github/workflows"
     wf.mkdir(parents=True)
-    from daydream.templates import workflow_template_files
 
     for template in workflow_template_files():
         (wf / template.name).write_text(template.read_text())
@@ -168,8 +170,6 @@ def test_verify_healthy_install_passes_all_checks(
     The workflows are committed to local ``main`` and pushed to origin so the
     check passes.
     """
-    from tests.harness.git_helpers import commit as _commit
-    from tests.harness.git_helpers import git as _git
 
     pem = _real_pem()
     monkeypatch.setenv(APP_ID_ENV, "7")
@@ -185,7 +185,6 @@ def test_verify_healthy_install_passes_all_checks(
     # commit must be pushed to the bare remote (origin).
     wf = repo_with_origin / ".github/workflows"
     wf.mkdir(parents=True)
-    from daydream.templates import workflow_template_files
 
     for template in workflow_template_files():
         (wf / template.name).write_text(template.read_text())
@@ -202,9 +201,6 @@ def test_verify_healthy_install_passes_all_checks(
 
 def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """A present but stale workflow — one that lost the approval gate — fails the doctor."""
-    from daydream.templates import workflow_template_files
-    from tests.harness.git_helpers import commit as _commit
-    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)
@@ -261,9 +257,6 @@ def test_verify_rejects_workflow_that_loosens_the_command_contract(
     could then name a run the maintainer never approved), and a dispatch that
     stops binding the resolved live head to ``approved_head_sha``.
     """
-    from daydream.templates import workflow_template_files
-    from tests.harness.git_helpers import commit as _commit
-    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)
@@ -291,9 +284,6 @@ def test_verify_accepts_customized_workflow_with_intact_gate(
     """A divergent-but-gated workflow (e.g. a different backend) passes with a warning."""
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
     fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
-    from daydream.templates import workflow_template_files
-    from tests.harness.git_helpers import commit as _commit
-    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)
@@ -322,9 +312,6 @@ def test_land_workflows_warns_before_overwriting_customized_workflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """land_workflows warns that customization is unsupported before replacing it."""
-    from daydream.templates import workflow_template_files
-    from tests.harness.git_helpers import commit as _commit
-    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)

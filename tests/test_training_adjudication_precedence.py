@@ -3,7 +3,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from daydream.training.adjudication.precedence import effective_adjudication, has_rater_conflict
+from daydream.training.adjudication.observations import append_observation, load_observations
+from daydream.training.adjudication.precedence import (
+    effective_adjudication,
+    has_rater_conflict,
+    reopen_on_digest_change,
+)
 
 R1 = "b" * 64
 
@@ -73,7 +78,6 @@ def test_conflicting_raters_fixture_order_is_stable() -> None:
 
 
 def test_digest_change_requeues_prior_judgment() -> None:
-    from daydream.training.adjudication.precedence import reopen_on_digest_change
     human = _obs("accepted", "alice", digest="d" * 64)
     # Same digest: judgment stands.
     assert reopen_on_digest_change(human, current_digest="d" * 64) is False
@@ -82,7 +86,6 @@ def test_digest_change_requeues_prior_judgment() -> None:
 
 
 def test_model_suggested_queue_item_never_gold_eligible_unreviewed(tmp_path: Path) -> None:
-    from daydream.training.adjudication.observations import append_observation, load_observations
 
     # Model suggested 'accepted' on a queue item: stored via the store API,
     # which must force review_required=True on the record.

@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from daydream import config
 from daydream.config import (
     AUDIT_CATEGORIES,
     DEEP_PHASE_DEFAULT_EFFORT,
@@ -53,7 +54,6 @@ IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
 
 def test_no_pr_feedback_skill_constants() -> None:
     """M7/M8: no PR-feedback skill constants remain in config."""
-    from daydream import config
 
     assert not hasattr(config, "PR_FEEDBACK_FETCH_SKILL")
     assert not hasattr(config, "PR_FEEDBACK_RESPOND_SKILL")
