@@ -72,6 +72,17 @@ _FP_B = "b" * 64
 _FP_C = "c" * 64
 
 
+def _bot_comment(fp: str | None = None, *, id: int = 1) -> dict[str, Any]:
+    """A footer-marked daydream finding comment, optionally carrying ``fp``'s marker."""
+    marker = f"{finding_marker(fp)}\n\n" if fp is not None else ""
+    return {
+        "id": id,
+        "in_reply_to_id": None,
+        "user": {"login": "daydream-runner"},
+        "body": f"finding\n\n{marker}{DAYDREAM_FOOTER}",
+    }
+
+
 def _finding_comments(
     fp: str,
     *,
@@ -85,14 +96,7 @@ def _finding_comments(
     evidence the classifier can label. ``reply_created_at`` feeds the
     decisive-evidence ``valid_at`` derivation.
     """
-    comments: list[dict[str, Any]] = [
-        {
-            "id": 1,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-runner"},
-            "body": f"finding\n\n{finding_marker(fp)}\n\n{DAYDREAM_FOOTER}",
-        }
-    ]
+    comments: list[dict[str, Any]] = [_bot_comment(fp)]
     if reply is not None:
         entry: dict[str, Any] = {
             "id": 2,
@@ -122,12 +126,7 @@ def _write_findings(run_dir: Path, *fps: str) -> None:
 # ``comment_resolution`` is ``(0, 0, 0)`` and a merge alone is not evidence
 # daydream contributed.
 _REPLIED_FINDING: list[dict[str, Any]] = [
-    {
-        "id": 1,
-        "in_reply_to_id": None,
-        "user": {"login": "daydream-runner"},
-        "body": f"finding\n\n{DAYDREAM_FOOTER}",
-    },
+    _bot_comment(),
     {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
 ]
 
@@ -287,18 +286,8 @@ def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: s
     return _fake_gh(
         merged_at=merged_at,
         comments=[
-            {
-                "id": 1,
-                "in_reply_to_id": None,
-                "user": {"login": "daydream-runner"},
-                "body": f"finding\n\n{finding_marker(fp_replied)}\n\n{DAYDREAM_FOOTER}",
-            },
-            {
-                "id": 2,
-                "in_reply_to_id": None,
-                "user": {"login": "daydream-runner"},
-                "body": f"finding\n\n{finding_marker(fp_unreplied)}\n\n{DAYDREAM_FOOTER}",
-            },
+            _bot_comment(fp_replied),
+            _bot_comment(fp_unreplied, id=2),
             {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"},
              "author_association": "MEMBER", "body": "applied"},
         ],
@@ -335,24 +324,9 @@ def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
         gh_api=_fake_gh(
             merged_at="2026-02-05T00:00:00+00:00",
             comments=[
-                {
-                    "id": 1,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
-                },
-                {
-                    "id": 2,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
-                },
-                {
-                    "id": 3,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_C)}\n\n{DAYDREAM_FOOTER}",
-                },
+                _bot_comment(_FP_A),
+                _bot_comment(_FP_B, id=2),
+                _bot_comment(_FP_C, id=3),
                 {
                     "id": 4,
                     "in_reply_to_id": 1,
@@ -462,12 +436,7 @@ def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> No
     row = _pr_row(run_dir, "s_fork_auth", pr_number=13)
     reply_created = "2026-08-02T10:00:00Z"
     comments = [
-        {
-            "id": 1,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-runner"},
-            "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
-        },
+        _bot_comment(_FP_A),
         {
             "id": 2,
             "in_reply_to_id": 1,
@@ -512,12 +481,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
     _write_findings(run_dir, _FP_A)
     row = _pr_row(run_dir, "s_review_auth", pr_number=14)
     comments = [
-        {
-            "id": 1,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-runner"},
-            "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
-        },
+        _bot_comment(_FP_A),
         {
             "id": 2,
             "in_reply_to_id": 1,
@@ -1087,12 +1051,7 @@ async def test_harvest_relinks_orphan_run_and_labels_it(
             merged_at="2026-02-01T00:00:00+00:00",
             comments=[
                 *_finding_comments(_FP_A, reply="applied"),
-                {
-                    "id": 3,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
-                },
+                _bot_comment(_FP_B, id=3),
             ],
             commit_pulls=_ORPHAN_COMMIT_PULLS,
         )
@@ -1411,12 +1370,7 @@ async def test_harvest_merged_pr_with_reject_reply_is_contested(
             merged_at="2026-08-10T00:00:00Z",
             comments=[
                 *_finding_comments(_FP_A, reply="False positive — the code already handles this"),
-                {
-                    "id": 3,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
-                },
+                _bot_comment(_FP_B, id=3),
             ],
         )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
