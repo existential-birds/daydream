@@ -11,7 +11,8 @@ from typing import Any
 import pytest
 
 from daydream import pr_review
-from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
+from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, build_payload, finding_marker
+from daydream.training import labeler_signals
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -53,9 +54,6 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     """M5: a comment body containing the reviewed-commit line is still
     recognised by _is_daydream_comment and still ends with exactly one
     version-stable footer."""
-    from daydream.pr_review import PRInfo, build_payload
-    from daydream.training import labeler_signals
-
     pr = PRInfo(
         number=1,
         head_sha="f" * 40,

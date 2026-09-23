@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 
 from daydream.archive.hydrate import HubDownloadError, HydrationError, PublicDestinationError
+from daydream.archive.hydrate_rules import derive_curation_id
+from daydream.training.adjudication.final_bundle import FINAL_IDENTITY_FILES, final_snapshot_id
 from daydream.training.adjudication.publish import (
     download_final_annotation_bundle,
     publish_annotation_state,
@@ -84,8 +86,6 @@ def _state_v2(
 
 
 def _checkpoint_files(payloads: dict[str, bytes], *, manifest: dict[str, Any]) -> tuple[str, dict[str, bytes]]:
-    import hashlib
-
     entries = [
         {"path": name, "sha256": hashlib.sha256(data).hexdigest()}
         for name, data in sorted(payloads.items())
@@ -689,8 +689,6 @@ def test_publish_and_resume_refuse_public_repository(tmp_path: Path) -> None:
 
 
 def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
-    from daydream.archive.hydrate_rules import derive_curation_id
-
     source = "a" * 40
     binding: dict[str, Any] = {
         "schema_version": "2",
@@ -772,8 +770,6 @@ def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
 def _seed_final_envelope(
     hub: AnnotationsHub, bundle: Path
 ) -> tuple[str, str, str]:
-    from daydream.training.adjudication.final_bundle import FINAL_IDENTITY_FILES, final_snapshot_id
-
     final_id, digests = final_snapshot_id(bundle)
     semantic = {name: (bundle / name).read_bytes() for name in FINAL_IDENTITY_FILES}
     preview = json.loads(semantic["preview-manifest.json"])
@@ -1023,8 +1019,6 @@ def test_final_publish_retries_typed_compare_and_swap_conflicts(
 
 
 def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path, hub: AnnotationsHub) -> None:
-    from daydream.training.adjudication.final_bundle import final_snapshot_id
-
     bundle, curation_id = _final_bundle(tmp_path)
     final_id, _digests = final_snapshot_id(bundle)
     prefix = f"annotations/{curation_id}/{final_id}/final/"
@@ -1428,8 +1422,6 @@ def test_final_publish_rejects_non_normalized_remote_prefix_paths(
     bad_name: str, tmp_path: Path,
     hub: AnnotationsHub,
 ) -> None:
-    from daydream.training.adjudication.final_bundle import final_snapshot_id
-
     bundle, curation_id = _final_bundle(tmp_path)
     final_id, _digests = final_snapshot_id(bundle)
     prefix = f"annotations/{curation_id}/{final_id}/final/"
