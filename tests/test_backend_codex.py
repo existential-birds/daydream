@@ -62,11 +62,9 @@ from tests.harness.codex_replay import (
     make_mock_process_from_fixture,
 )
 from tests.harness.fake_cli_process import (
-    BlockingStdout,
     FakeCliProcess,
-    ImmediateStdout,
     LimitAwareStdout,
-    blocking_cli_process,
+    assert_concurrent_streams_isolated,
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.protocol_cli import install_protocol_cli
@@ -1346,43 +1344,13 @@ async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend must keep reading their own process."""
-    backend = CodexBackend(model="fixture-model")
-
-    first_proc = blocking_cli_process(
-        ImmediateStdout(
-            [
-                '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
-                '{"type":"turn.completed","usage":{}}',
-            ]
-        )
+    await assert_concurrent_streams_isolated(
+        CodexBackend(model="fixture-model"),
+        [
+            '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
+            '{"type":"turn.completed","usage":{}}',
+        ],
     )
-    second_stdout = BlockingStdout()
-    second_proc = blocking_cli_process(second_stdout)
-    procs = iter([first_proc, second_proc])
-
-    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        return next(procs)
-
-    async def consume_second() -> list[object]:
-        return [event async for event in backend.execute(Path("/tmp"), "second")]
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        first_iter = backend.execute(Path("/tmp"), "first")
-        assert isinstance(await anext(first_iter), RequestEvent)
-        first_event = await anext(first_iter)
-        assert isinstance(first_event, TextEvent)
-
-        second_task = asyncio.create_task(consume_second())
-        await second_stdout.entered.wait()
-
-        try:
-            turn_end = await anext(first_iter)
-            assert isinstance(turn_end, TurnEndEvent)
-            next_first_event = await anext(first_iter)
-            assert isinstance(next_first_event, CostEvent)
-        finally:
-            second_stdout.release.set()
-            await second_task
 
 
 class TestUnwrapShellCommand:

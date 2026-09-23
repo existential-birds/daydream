@@ -29,6 +29,8 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
+from daydream.retry_policy import derive_retry_summary
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import (
     DaydreamPhase,
@@ -36,6 +38,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
 )
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
 
 def _burst_backend(*, count: int = 200, sleep_s: float = 0.0) -> ScriptedBackend:
@@ -225,7 +228,6 @@ async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A caller deadline spans the whole retry ladder; a retry cannot restart it."""
-    from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     # retry_policy: attempts=20, delays=0.0; advances the injected clock per attempt.
@@ -247,7 +249,6 @@ async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
 async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_value(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
@@ -300,7 +301,6 @@ async def test_run_agent_wall_budget(tmp_path: Path) -> None:
 async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock
 
     class _ClockAdvancingBurstBackend:
         """Streams text + tool starts, advancing the injected clock per event."""
@@ -353,7 +353,6 @@ async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
 async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=1_000.0)
 
@@ -498,7 +497,6 @@ async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> N
 async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
@@ -521,7 +519,6 @@ async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_agai
 async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
@@ -542,7 +539,6 @@ async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
 async def test_group_deadline_still_wins_over_a_larger_allowance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -561,7 +557,6 @@ async def test_group_deadline_still_wins_over_a_larger_allowance(
 async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -590,8 +585,6 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
     erased even though real retry overhead had been spent. The stop is now a
     retry-ladder stop naming the deadline, and the reducer folds it in.
     """
-    from daydream.retry_policy import derive_retry_summary
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -640,8 +633,6 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
     ending rather than masquerading as a plain deadline stop that erased the
     retry summary.
     """
-    from daydream.retry_policy import derive_retry_summary
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -682,7 +673,6 @@ async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
     but every counter is zero: the failed attempt is useful work, not retry
     overhead, so the summary cannot claim a retry that never happened.
     """
-    from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=2_000.0).install(monkeypatch)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=250.0)
@@ -711,8 +701,6 @@ def _ending_backend(
     monkeypatch: pytest.MonkeyPatch, ending: str
 ) -> tuple[Any, ScriptedBackend, RunContext]:
     """Build ``(fake_clock, backend, run_context)`` for one ladder ending."""
-    from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -797,7 +785,6 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Failing siblings coordinate on one circuit instead of one ladder each."""
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
@@ -838,7 +825,6 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     never execute. ``RETRY_CIRCUIT_PROBE_INTERVAL_S = 0`` isolates the grant from
     the interval wait: an open circuit admits a probe on the very next retry.
     """
-    from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -846,7 +832,6 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     monkeypatch.setattr("daydream.config.RETRY_CIRCUIT_PROBE_INTERVAL_S", 0.0)
     run_context = RunContext(InteractionPolicy(interactive=False))
     # Open the circuit up front, then let the first ladder's retry be the probe.
-    from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
 
     for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
         run_context.outage_circuit.record_failure(fake.monotonic_value)

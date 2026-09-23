@@ -29,10 +29,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from daydream.backends import CostEvent, RequestEvent, TextEvent, TurnEndEvent
 
 SIGTERM_RC = -15
 SIGKILL_RC = -9
@@ -114,6 +117,44 @@ def blocking_cli_process(stdout: object) -> MagicMock:
     process.terminate = MagicMock()
     process.kill = MagicMock()
     return process
+
+
+async def assert_concurrent_streams_isolated(backend: Any, first_lines: list[str]) -> None:
+    """Overlapping runs on one backend keep reading their own process.
+
+    Drives *backend* through two overlapped ``execute()`` runs while patching
+    the transport seam to hand out two scripted processes. The second run's
+    first ``readline`` must block (:class:`BlockingStdout`) while the first run
+    still reaches its TurnEnd/Cost, proving no shared stdout reader.
+    """
+    first_proc = blocking_cli_process(ImmediateStdout(first_lines))
+    second_stdout = BlockingStdout()
+    second_proc = blocking_cli_process(second_stdout)
+    procs = iter([first_proc, second_proc])
+
+    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
+        return next(procs)
+
+    async def consume_second() -> list[object]:
+        return [event async for event in backend.execute(Path("/tmp"), "second")]
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
+        first_iter = backend.execute(Path("/tmp"), "first")
+        assert isinstance(await anext(first_iter), RequestEvent)
+        first_event = await anext(first_iter)
+        assert isinstance(first_event, TextEvent)
+
+        second_task = asyncio.create_task(consume_second())
+        await second_stdout.entered.wait()
+
+        try:
+            turn_end = await anext(first_iter)
+            assert isinstance(turn_end, TurnEndEvent)
+            next_first_event = await anext(first_iter)
+            assert isinstance(next_first_event, CostEvent)
+        finally:
+            second_stdout.release.set()
+            await second_task
 
 
 class _FakePipeTransport:
