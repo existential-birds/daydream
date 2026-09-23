@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from copy import deepcopy
@@ -22,6 +23,7 @@ from daydream.improve.assemble import (
     render_issue,
 )
 from daydream.improve.command_contract import (
+    APPLICABILITY_SCHEMA,
     canonicalize_directory_scope,
     literal_command_error,
     path_is_confined,
@@ -42,8 +44,11 @@ from daydream.improve.plans import (
     PlanIndexEntry,
     PlanWriteSession,
     _entry_payload,
+    list_reanchor_worktrees,
     load_rejections,
     planned_fingerprints,
+    prune_named_reanchor_worktree,
+    prune_stale_reanchor_worktrees,
     reanchored_plan_rows,
     record_rejections,
 )
@@ -54,7 +59,9 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
+from daydream.improve.render import render_plan as real_render
 from daydream.improve.repo_commands import enumerate_repository_commands
+from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
 
 
@@ -374,7 +381,6 @@ def test_directory_scope_canonicalization_drops_the_trailing_slash(
 
 
 def test_command_contract_schema_discloses_scope_cross_field_invariants() -> None:
-    from daydream.improve.command_contract import APPLICABILITY_SCHEMA
 
     invalid_variants = [
         {
@@ -1620,7 +1626,6 @@ def test_planned_at_naming_only_remote_branch_is_invalid(
     {plan}^{commit} probe did not resolve such a short name, so it must be
     reported as an invalid anchor.
     """
-    from tests.harness.git_helpers import bare_remote as _bare_remote
 
     bare = _bare_remote(tmp_path / "remote.git")
     git(repo, "remote", "add", "origin", str(bare))
@@ -1857,7 +1862,6 @@ def test_reanchored_plan_survives_worktree_pruning(
     assert f"`{new_head}`" in main_plan.read_text(encoding="utf-8")
     assert landed.is_file()
 
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     removed = prune_stale_reanchor_worktrees(repo)
 
@@ -1896,7 +1900,6 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     git(repo, "worktree", "add", "--detach", str(stale_dir), "HEAD")
     (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
 
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     removed = prune_stale_reanchor_worktrees(repo)
 
@@ -1910,8 +1913,6 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
 ) -> None:
     """Acceptance #1/#4/#5: run B's start-of-run prune must not destroy run A's
     live re-anchor worktree; A's finished plan still lands on finish()."""
-    from daydream import git_ops
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     new_head = _advance_head(repo)
 
@@ -1948,7 +1949,6 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
 def test_prune_named_reanchor_worktree_removes_valid_worktree(
     repo: Path
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
@@ -1963,7 +1963,6 @@ def test_prune_named_reanchor_worktree_removes_valid_worktree(
 def test_prune_named_reanchor_worktree_reports_plan_count(
     repo: Path
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
@@ -1992,7 +1991,6 @@ def test_prune_named_reanchor_worktree_rejects_unsafe_names(
     repo: Path,
     bad_name: str,
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     _forbid_default_private_base(monkeypatch, "unsafe name reached storage")
 
@@ -2013,7 +2011,6 @@ def test_prune_named_reanchor_worktree_rejects_unsafe_names(
 def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(
     repo: Path,
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     before = set((repo / ".daydream" / "worktrees").glob("*")) if (
         repo / ".daydream" / "worktrees"
@@ -2030,7 +2027,6 @@ def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(
 
 
 def test_prune_named_reanchor_worktree_not_found(repo: Path) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     outcome = prune_named_reanchor_worktree(repo, "run-zzzz-reanchor")
 
@@ -2040,7 +2036,6 @@ def test_prune_named_reanchor_worktree_not_found(repo: Path) -> None:
 def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
     repo: Path,
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     target.mkdir(parents=True, exist_ok=True)  # plain dir, NOT a git worktree
@@ -2057,7 +2052,6 @@ def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
 def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(
     repo: Path
 ) -> None:
-    from daydream.improve.plans import list_reanchor_worktrees
 
     a = repo / ".daydream" / "worktrees" / "run-aaaa-reanchor"
     b = repo / ".daydream" / "worktrees" / "run-bbbb-reanchor"
@@ -2077,10 +2071,6 @@ def test_list_and_named_prune_cover_operational_and_legacy_roots(
     tmp_path: Path,
     owner: Any,
 ) -> None:
-    from daydream.improve.plans import (
-        list_reanchor_worktrees,
-        prune_named_reanchor_worktree,
-    )
 
     monkeypatch.setattr(
         artifact_visibility,
@@ -2112,10 +2102,6 @@ def test_duplicate_reanchor_name_across_roots_fails_without_mutation(
     repo: Path,
     owner: Any,
 ) -> None:
-    from daydream.improve.plans import (
-        list_reanchor_worktrees,
-        prune_named_reanchor_worktree,
-    )
 
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
@@ -2141,7 +2127,6 @@ def test_list_reanchors_rejects_symlinked_operational_root_without_following(
     tmp_path: Path,
     owner: Any,
 ) -> None:
-    from daydream.improve.plans import list_reanchor_worktrees
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -2166,9 +2151,7 @@ def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
     owner: Any,
     lock_state: str,
 ) -> None:
-    import os
 
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
@@ -2235,10 +2218,6 @@ def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     namespace_shape: str,
     reanchor_op: str,
 ) -> None:
-    from daydream.improve.plans import (
-        list_reanchor_worktrees,
-        prune_stale_reanchor_worktrees,
-    )
 
     scan = list_reanchor_worktrees if reanchor_op == "list" else prune_stale_reanchor_worktrees
     external, canary, unsafe_file = _unsafe_legacy_reanchor_namespace(
@@ -4503,7 +4482,6 @@ def test_reanchored_failure_releases_worktree_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Should-have #1: a graceful re-anchor write failure releases the lock."""
-    from daydream import git_ops
 
     _advance_head(repo)
 
@@ -4535,13 +4513,11 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
     """Fix #2: a re-anchor failure must remove the worktree so a later
     re-anchorable finding in the same run can re-add the path instead of
     failing with PLAN_REANCHOR_FAILED."""
-    from daydream.improve.plans import PlanWriteSession
 
     _advance_head(repo)
 
     calls = {"n": 0}
 
-    from daydream.improve.render import render_plan as real_render
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         calls["n"] += 1
@@ -4573,10 +4549,7 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
 ) -> None:
     """Acceptance #3: a crashed session's still-locked worktree is eventually
     reclaimed (lock backdated past the staleness window), not wedged forever."""
-    import os
 
-    from daydream import git_ops
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
     git_ops.worktree_add(repo, stale, "HEAD", lock_reason="run-dead")

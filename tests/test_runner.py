@@ -18,13 +18,16 @@ from typing import Any, Literal, cast
 import anyio
 import pytest
 
-from daydream import git_ops, pr_review, runner
+from daydream import clipboard, git_ops, pr_review, runner
+from daydream.archive import ArchiveFinalizationError
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import (
     Manifest,
     archive_recorder_provenance_from_snapshot,
     build_manifest_from_snapshot,
 )
+from daydream.artifact_visibility import ArtifactSession, private_root_locations
+from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION,
     AgentEvent,
@@ -33,21 +36,34 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.cli import _signal_handler
+from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
 from daydream.exploration import ExplorationContext
+from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
+from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.pr_review import PRInfo
 from daydream.run_context import RunContext, current_run_context
 from daydream.run_snapshot import ArchiveRunSnapshot
-from daydream.runner import RunConfig, capture_manifest_run_identity
+from daydream.runner import (
+    RunConfig,
+    _open_recorder,
+    _RunSnapshotCaptureError,
+    _RunWriteCapture,
+    capture_manifest_run_identity,
+)
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from daydream.workspace import AuditWorkspace, WorkContext
+from daydream.ui import get_shutdown_panel, set_shutdown_panel
+from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.claude_sdk import patch_claude_sdk
@@ -57,6 +73,7 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
+from tests.harness.stub_backend import StubBackend, silence
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,
     _FakeSDKClient,
@@ -198,7 +215,6 @@ def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
     tmp_path: Path, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The recorder callback is a non-raising immutable handoff, not finalization."""
-    from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
 
     final = _capture_snapshot(tmp_path, "complete")
     capture = _RunWriteCapture(session_id="session")
@@ -218,7 +234,6 @@ def test_run_write_capture_closes_ordinary_json_validation_failure(
     tmp_path: Path, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The synchronous recorder callback never leaks an ordinary parser error."""
-    from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
 
     partial = _capture_snapshot(tmp_path, "partial")
     capture = _RunWriteCapture(session_id="session")
@@ -249,7 +264,6 @@ def test_run_write_capture_does_not_swallow_base_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
 ) -> None:
     """Cancellation-class failures remain authoritative at the callback boundary."""
-    from daydream.runner import _RunWriteCapture
 
     capture = _RunWriteCapture(session_id="session")
 
@@ -270,8 +284,6 @@ def test_flow_context_exposes_typed_artifact_session_without_data_fallback(
     tmp_path: Path,
 ) -> None:
     """The host session arrives explicitly, never through ctx.data."""
-    from daydream.artifact_visibility import ArtifactSession
-    from daydream.extensions import get_registry
 
     sentinel = cast(ArtifactSession, object())
     ctx = FlowContext(
@@ -291,7 +303,6 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The producer acknowledges preparation without disclosing host storage."""
-    from daydream.pr_review import PRInfo
 
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -333,7 +344,6 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Missing local PR objects keep artifact classification on the owning session."""
-    from daydream.pr_review import PRInfo
 
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -459,7 +469,6 @@ class _ControlledBackend:
 
 async def _run_private(config: RunConfig, tmp_path: Path) -> int:
     """Drive the real ``runner.run`` against a per-test private artifact root."""
-    from daydream.artifact_visibility import private_root_locations
 
     return await runner.run(
         config, private_roots=private_root_locations(base=tmp_path / "private")
@@ -496,7 +505,6 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
     if failure_mode == "archive":
         (repo / ".review-output.md").write_bytes(b"operator baseline\x00")
-        from daydream.archive import ArchiveFinalizationError
 
         def fail_archive(**_kwargs: Any) -> None:
             raise ArchiveFinalizationError("injected strict archive failure")
@@ -697,11 +705,6 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
     make_config: Callable[..., RunConfig],
 ) -> None:
     """Initial exploration fan-out archives a rooted immutable T1 snapshot."""
-    from daydream.artifact_visibility import private_root_locations
-    from daydream.atif import validate as atif_validate
-    from daydream.cli import _signal_handler
-    from daydream.ui import get_shutdown_panel, set_shutdown_panel
-    from tests.harness.stub_backend import StubBackend, silence
 
     class InitialExplorationBarrierBackend(StubBackend):
         fanout_concurrency = 2
@@ -875,7 +878,6 @@ def patch_workspace(
     keep their synthetic ``WorkContext`` while exercising the real artifact
     lease around dispatch.
     """
-    from daydream.artifact_visibility import private_root_locations
 
     _init_repo(tmp_path)
     work = make_work(tmp_path)
@@ -1122,8 +1124,6 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     to the App bot identity, and the minted token is injected as ``GH_TOKEN``
     into every ``gh`` subprocess for the duration of the run.
     """
-    from daydream import pr_review
-    from daydream.runner import RunConfig
 
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
@@ -1564,9 +1564,6 @@ def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
     Returns:
         The ``.daydream/deep`` directory.
     """
-    from daydream import git_ops
-    from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
-    from daydream.workspace import _resolve_base
 
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
@@ -1733,7 +1730,6 @@ async def test_fix_cycle_items_severity_ordered(
         return {}
 
     async def _noop_test(*_a: Any, **kwargs: Any) -> Any:
-        from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
         key = kwargs["capture_tree_key"]()
         attempt = TestAttemptEvidence(
@@ -1835,7 +1831,6 @@ async def test_fix_cycle_yes_commits_fixes(
     under ``assume="yes"`` the gate auto-approves and the commit agent runs. The
     observable outcome is a NEW git commit carrying the Daydream trailer.
     """
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     _seed_fix_resume(feature_branch_repo, [_fix_item()])
     _silence_fix_cycle_ui(silence_console)
@@ -2065,7 +2060,6 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     warning fires. An event-loop ticker must keep ticking during the worker-thread block —
     proving the copy is offloaded, not run on the loop.
     """
-    from daydream import clipboard
 
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -2210,7 +2204,6 @@ def test_open_recorder_backend_identity(
     expected: tuple[str, str, str, str],
 ) -> None:
     """Each flow records only backend identities for phases it can run."""
-    from daydream.runner import _open_recorder
 
     target_dir = tmp_path / "project"
     target_dir.mkdir()
@@ -2253,7 +2246,6 @@ def test_manifest_backend_is_general_default_not_per_stack_review(tmp_path: Path
     per-phase review override is set, and ``review_backend`` records only the
     review-specific override marker.
     """
-    from daydream.config_file import DaydreamFileConfig
 
     config = RunConfig(
         target=str(tmp_path / "project"),
@@ -2375,7 +2367,6 @@ def test_manifest_identity_uses_registered_pipeline(
 def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     tmp_path: Path, flow_name: str | None, shallow: bool,
 ) -> None:
-    from daydream.config_file import DaydreamFileConfig
 
     config = RunConfig(
         flow_name=flow_name, shallow=shallow, review_backend="claude",
@@ -2425,7 +2416,6 @@ def test_manifest_identity_separates_general_backend_and_review_override(
     tmp_path: Path, backend: str | None, review_backend: str | None, file_backend: str | None,
     file_review: str | None, expected_backend: str, expected_review: str | None,
 ) -> None:
-    from daydream.config_file import DaydreamFileConfig
 
     config = RunConfig(
         backend=backend, review_backend=review_backend,
@@ -2442,7 +2432,6 @@ def test_manifest_identity_separates_general_backend_and_review_override(
 def test_manifest_identity_captures_pi_working_directory_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool,
 ) -> None:
-    from daydream.config import DEFAULT_PI_MODEL
 
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "empty-global"))
     if configured:

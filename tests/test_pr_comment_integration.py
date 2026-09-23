@@ -76,25 +76,11 @@ def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
     )
 
 
-def _model_line(markdown: str) -> str:
+def _line(markdown: str, prefix: str) -> str:
     for line in markdown.splitlines():
-        if line.startswith("- **Model:**"):
+        if line.startswith(prefix):
             return line
-    raise AssertionError(f"No Model line in markdown:\n{markdown}")
-
-
-def _cost_line(markdown: str) -> str:
-    for line in markdown.splitlines():
-        if line.startswith("- **Cost:**"):
-            return line
-    raise AssertionError(f"No Cost line in markdown:\n{markdown}")
-
-
-def _tokens_line(markdown: str) -> str:
-    for line in markdown.splitlines():
-        if line.startswith("- **Tokens:**"):
-            return line
-    raise AssertionError(f"No Tokens line in markdown:\n{markdown}")
+    raise AssertionError(f"No {prefix!r} line in markdown:\n{markdown}")
 
 
 def _phase_row(markdown: str, label: str) -> str:
@@ -106,6 +92,31 @@ def _phase_row(markdown: str, label: str) -> str:
 
 
 FIXTURE_MODEL_ID = "fixture-sdk-model-id"
+
+
+def _stream(
+    text: str,
+    cost: float,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+) -> list[Any]:
+    """One assistant turn plus its result usage; the shape every test streams."""
+    return [
+        MockAssistantMessage(
+            content=[MockTextBlock(text=text)],
+            model=FIXTURE_MODEL_ID,
+        ),
+        MockResultMessage(
+            total_cost_usd=cost,
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+            },
+        ),
+    ]
 
 
 async def test_render_uses_real_sdk_model_id_not_backend_alias(
@@ -120,20 +131,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
     backend ignores ``msg.model`` entirely, so the renderer sees only the
     recorder-stamped backend alias ``"claude"``.
     """
-    patch_sdk([
-        MockAssistantMessage(
-            content=[MockTextBlock(text="reviewing the code")],
-            model=FIXTURE_MODEL_ID,
-        ),
-        MockResultMessage(
-            total_cost_usd=0.42,
-            usage={
-                "input_tokens": 1000,
-                "output_tokens": 200,
-                "cache_read_input_tokens": 800,
-            },
-        ),
-    ])
+    patch_sdk(_stream("reviewing the code", 0.42, input_tokens=1000, output_tokens=200, cache_read_input_tokens=800))
 
     recorder = _make_recorder(tmp_path)
     target_path = recorder.path
@@ -144,7 +142,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
     assert target_path.exists(), "Trajectory file should have been written"
     markdown = render_run_info_block([target_path])
 
-    model_line = _model_line(markdown)
+    model_line = _line(markdown, "- **Model:**")
     assert FIXTURE_MODEL_ID in model_line, (
         f"Bug A: expected real SDK model id {FIXTURE_MODEL_ID!r} in Model line, "
         f"got: {model_line!r}\n\nFull markdown:\n{markdown}"
@@ -166,34 +164,8 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     populates the open step's _metrics), every Step.metrics is ``None`` →
     aggregator skips → rollup reads ``$0.00`` / ``0 in / 0 out``.
     """
-    review_messages = [
-        MockAssistantMessage(
-            content=[MockTextBlock(text="reviewing")],
-            model=FIXTURE_MODEL_ID,
-        ),
-        MockResultMessage(
-            total_cost_usd=0.30,
-            usage={
-                "input_tokens": 5000,
-                "output_tokens": 600,
-                "cache_read_input_tokens": 2000,
-            },
-        ),
-    ]
-    fix_messages = [
-        MockAssistantMessage(
-            content=[MockTextBlock(text="fixing")],
-            model=FIXTURE_MODEL_ID,
-        ),
-        MockResultMessage(
-            total_cost_usd=0.15,
-            usage={
-                "input_tokens": 2500,
-                "output_tokens": 400,
-                "cache_read_input_tokens": 1000,
-            },
-        ),
-    ]
+    review_messages = _stream("reviewing", 0.30, input_tokens=5000, output_tokens=600, cache_read_input_tokens=2000)
+    fix_messages = _stream("fixing", 0.15, input_tokens=2500, output_tokens=400, cache_read_input_tokens=1000)
 
     recorder = _make_recorder(tmp_path)
     target_path = recorder.path
@@ -216,8 +188,8 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
 
     markdown = render_run_info_block([target_path])
 
-    cost_line = _cost_line(markdown)
-    tokens_line = _tokens_line(markdown)
+    cost_line = _line(markdown, "- **Cost:**")
+    tokens_line = _line(markdown, "- **Tokens:**")
 
     assert "$0.00" not in cost_line, (
         f"Bug B/C: rollup cost is $0.00 — per-step metrics never landed.\n"
@@ -277,34 +249,8 @@ async def test_per_phase_rollup_distinguishes_phases(
     metrics from their own ResultMessage usage. The rows existing isn't
     enough — they must reflect the right Steps / Tools / Cost values.
     """
-    review_messages = [
-        MockAssistantMessage(
-            content=[MockTextBlock(text="reviewing")],
-            model=FIXTURE_MODEL_ID,
-        ),
-        MockResultMessage(
-            total_cost_usd=0.20,
-            usage={
-                "input_tokens": 4000,
-                "output_tokens": 500,
-                "cache_read_input_tokens": 1500,
-            },
-        ),
-    ]
-    parse_messages = [
-        MockAssistantMessage(
-            content=[MockTextBlock(text="parsed")],
-            model=FIXTURE_MODEL_ID,
-        ),
-        MockResultMessage(
-            total_cost_usd=0.05,
-            usage={
-                "input_tokens": 1000,
-                "output_tokens": 100,
-                "cache_read_input_tokens": 500,
-            },
-        ),
-    ]
+    review_messages = _stream("reviewing", 0.20, input_tokens=4000, output_tokens=500, cache_read_input_tokens=1500)
+    parse_messages = _stream("parsed", 0.05, input_tokens=1000, output_tokens=100, cache_read_input_tokens=500)
 
     recorder = _make_recorder(tmp_path)
     target_path = recorder.path
