@@ -158,25 +158,8 @@ def test_judge_host_resolved_from_env() -> None:
         })
 
 
-def test_out_of_allowlist_host_rejected(tmp_path: Path) -> None:
-    ws = tmp_path / "ws"
-    (ws / "runtime").mkdir(parents=True)
-    (ws / "benchmark.yaml").write_text(json.dumps({
-        "schema_version": 1,
-        "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
-        "created_at": "2026-08-21T12:00:00Z",
-        "source": {"provider": "github", "hostname": "github.com",
-                    "repository": "OWNER/REPO", "repository_id": None,
-                    "visibility": "unresolved"},
-        "privacy": {"classification": "confidential",
-                     "reviewer_data": "source_snapshot",
-                     "reviewer_allowed_hosts": ["review.example"],
-                     "judge_data": "finding_text_and_location_only",
-                     "judge_allowed_hosts": ["127.0.0.1"],
-                     "archive": "disabled", "uploads": "disabled"},
-        "pull_requests": [],
-        "cases": [],
-    }))
+def test_out_of_allowlist_host_rejected(tmp_path: Path, ws_factory: Any) -> None:
+    ws = ws_factory(tmp_path)
     allow = _load_workspace_allowlist(ws)
     assert allow == ["127.0.0.1"]
     with pytest.raises(ValueError):
