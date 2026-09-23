@@ -11,9 +11,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from daydream_review.verifier import SealResult, seal_artifacts, verify
+
 
 def test_seal_verify_roundtrip(tmp_path: Path) -> None:
-    from daydream_review.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
     a.write_text('{"x": 1}', encoding="utf-8")
@@ -28,7 +31,6 @@ def test_seal_verify_roundtrip(tmp_path: Path) -> None:
 
 
 def test_verify_detects_tampered_artifact(tmp_path: Path) -> None:
-    from daydream_review.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
     a.write_text('{"x": 1}', encoding="utf-8")
@@ -39,7 +41,6 @@ def test_verify_detects_tampered_artifact(tmp_path: Path) -> None:
 
 
 def test_verify_detects_altered_candidate_diff(tmp_path: Path) -> None:
-    from daydream_review.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
     a.write_text('{"x": 1}', encoding="utf-8")
@@ -49,7 +50,6 @@ def test_verify_detects_altered_candidate_diff(tmp_path: Path) -> None:
 
 
 def test_verify_detects_missing_artifact(tmp_path: Path) -> None:
-    from daydream_review.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
     a.write_text('{"x": 1}', encoding="utf-8")
@@ -61,7 +61,6 @@ def test_verify_detects_missing_artifact(tmp_path: Path) -> None:
 
 def test_seal_json_roundtrip(tmp_path: Path) -> None:
     """The seal serializes to JSON and parses back to the same verification result."""
-    from daydream_review.verifier import SealResult, seal_artifacts, verify
 
     a = tmp_path / "a.json"
     a.write_text('{"x": 1}', encoding="utf-8")
@@ -76,9 +75,7 @@ def test_seal_json_roundtrip(tmp_path: Path) -> None:
 
 def test_validate_rejects_unsupported_algorithm() -> None:
     """A seal.json with a downgraded algorithm (e.g. md5) must fail closed."""
-    import pytest
 
-    from daydream_review.verifier import SealResult
 
     raw = json.dumps(
         {
@@ -94,9 +91,7 @@ def test_validate_rejects_unsupported_algorithm() -> None:
 
 def test_validate_rejects_malformed_json() -> None:
     """Garbage seal.json content must fail closed as a verification failure."""
-    import pytest
 
-    from daydream_review.verifier import SealResult
 
     with pytest.raises(ValueError, match="not valid JSON"):
         SealResult.model_validate_json("this is not json{")
