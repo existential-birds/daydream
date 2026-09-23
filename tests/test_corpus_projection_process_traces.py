@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.training.corpus_projection.projector import build_frozen_corpus
 from tests.test_corpus_projection import (
     _cfg,
     _write_annotations_snapshot,
@@ -27,8 +28,6 @@ def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any], Path]:
         bundle_dir, dispositions=["accepted", "ambiguous"]
     )
     out_dir = tmp_path / "out"
-    from daydream.training.corpus_projection.projector import build_frozen_corpus
-
     out = build_frozen_corpus(_cfg(out_dir, bundle_dir, snap, **kw))
     return out_dir, out, snap
 

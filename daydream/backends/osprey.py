@@ -226,19 +226,6 @@ def _stderr_diagnostic_sink(diagnostics: list[str]) -> Callable[[str], None]:
     return sink
 
 
-@dataclass(frozen=True)
-class _OspreyCommandOptions:
-    """Per-invocation inputs to the verified Osprey argv surface."""
-
-    prompt: str
-    output_schema_path: str | Path | None
-    continuation: ContinuationToken | None
-    max_turns: int | None
-    read_only: bool
-    persist_session: bool
-    tool_search_mode: str | None
-
-
 @dataclass
 class _OspreyProtocolState:
     """Ordering and correlation state owned by one Osprey JSONL stream."""
@@ -386,27 +373,7 @@ class OspreyBackend:
         persist_session: bool = True,
         tool_search_mode: str | None = None,
     ) -> list[str]:
-        return self._build_command(
-            _OspreyCommandOptions(
-                prompt=prompt,
-                output_schema_path=output_schema_path,
-                continuation=continuation,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
-                tool_search_mode=tool_search_mode,
-            )
-        )
-
-    def _build_command(self, options: _OspreyCommandOptions) -> list[str]:
         """Build only flags verified against the current Osprey CLI source."""
-        prompt = options.prompt
-        output_schema_path = options.output_schema_path
-        continuation = options.continuation
-        max_turns = options.max_turns
-        read_only = options.read_only
-        persist_session = options.persist_session
-        tool_search_mode = options.tool_search_mode
         selected_tool_search = tool_search_mode if tool_search_mode is not None else self.tool_search_mode
         if selected_tool_search is not None:
             raise OspreyUnsupportedOption(

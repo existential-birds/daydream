@@ -12,8 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from daydream.agent import run_agent
+from daydream.backends import AgentEvent, MetricsEvent, ResultEvent, TextEvent
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.summarize import summarize
+from daydream.trajectory import DaydreamPhase
+from tests.harness.backend import ScriptedBackend
+from tests.harness.trajectory import make_recorder
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trajectories"
 _DEEP_PARENT = _FIXTURE_DIR / "deep_mode_parent.json"
@@ -284,12 +289,6 @@ async def test_per_phase_cells_show_whole_invocation_tokens(
     Drives two phases through ``run_agent`` with a real recorder, each phase
     reporting usage once per turn, then reads the rendered per-phase table.
     """
-    from daydream.agent import run_agent
-    from daydream.backends import AgentEvent, MetricsEvent, ResultEvent, TextEvent
-    from daydream.trajectory import DaydreamPhase
-    from tests.harness.backend import ScriptedBackend
-    from tests.harness.trajectory import make_recorder
-
     def _multi_turn(turns: int, in_tok: int, out_tok: int) -> ScriptedBackend:
         turn: list[AgentEvent | BaseException] = []
         for i in range(turns):

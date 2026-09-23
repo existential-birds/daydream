@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from daydream.archive import _schema
+from daydream.archive import _schema, index
 from daydream.archive._schema import RUNS_COLUMNS, RunColumn
 from daydream.archive.index import _get_connection, _run_upsert_values
 from tests.harness.trajectory import make_manifest
@@ -187,8 +187,6 @@ def test_upsert_values_mapping_covers_exactly_the_declared_upsert_columns() -> N
 
 
 def test_declaration_is_importable_from_both_module_paths() -> None:
-    from daydream.archive import index
-
     assert index.RUNS_COLUMNS is RUNS_COLUMNS
     assert "RUNS_COLUMNS" in index.__all__
 
@@ -264,13 +262,13 @@ def test_generation_tracks_a_mutated_declaration() -> None:
     open_paren = source.index("(", start)
     depth = 0
     close_paren = -1
-    for index in range(open_paren, len(source)):
-        if source[index] == "(":
+    for idx in range(open_paren, len(source)):
+        if source[idx] == "(":
             depth += 1
-        elif source[index] == ")":
+        elif source[idx] == ")":
             depth -= 1
             if depth == 0:
-                close_paren = index
+                close_paren = idx
                 break
     assert close_paren > open_paren
     probe = '    RunColumn("zzz_probe", "TEXT NOT NULL DEFAULT \'probe\'", True, True),\n'

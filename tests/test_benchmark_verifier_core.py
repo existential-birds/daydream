@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from daydream.benchmark import schema
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.harbor.verifier_core import (
     CandidateFinding,
@@ -110,8 +111,6 @@ def test_gold_rejects_bad_id_hex() -> None:
 
 
 def test_harbor_package_imports_stdlib_only() -> None:
-    import daydream.benchmark.harbor.verifier_core as vc
-
     assert vc.MAX_GOLD_FINDINGS == 50
     assert vc.MAX_CANDIDATE_FINDINGS == 100
     assert vc.MAX_ARTIFACT_BYTES == 1_048_576
@@ -474,7 +473,6 @@ def test_null_location_normalizes_to_empty_in_canonical_tuple() -> None:
 
 
 def test_locationless_canonical_digest_matches_schema_derive() -> None:
-    from daydream.benchmark import schema
     raw = _gold(path=None, start_line=None, end_line=None)
     payload = "\x1f".join([
         str("case-x" or ""), str(raw["title"] or ""), str(raw["body"] or ""),

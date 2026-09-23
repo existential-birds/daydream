@@ -4,6 +4,7 @@ The deletion set is strictly ledger-driven and containment-checked: every
 hermetic test stubs the Docker-removal default so CI never shells out to a
 real Docker/network call (the real ``docker rmi`` path is issue #13).
 """
+import fcntl
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from typing import Any
 import pytest
 
 import daydream.benchmark.harbor.clean as clean_mod
+import daydream.benchmark.harbor.run as run_mod
+from daydream.benchmark import storage
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 from daydream.benchmark.storage import atomic_write_json as storage_atomic_write_json
 
@@ -22,8 +25,6 @@ def _stub_harbor_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests that explicitly inject a ``docker_rm`` callable override this stub;
     a default (no explicit seam) must never shell out to real Docker in CI.
     """
-    import daydream.benchmark.harbor.clean as clean_mod
-
     monkeypatch.setattr(
         clean_mod, "_default_docker_rm", lambda refs: {"returncode": 0}
     )
@@ -56,8 +57,6 @@ def _docker_env(trial_name: Any, *, removed: Any=False, image_id: Any=None) -> d
 
 def _append_ledger_run(ws: Path, run_id: Any, *, state: Any, environments: Any) -> None:
     """Append a contained, validated ledger run via the run supervisor helpers."""
-    import daydream.benchmark.harbor.run as run_mod
-
     job_dir = str((ws / "harbor" / "jobs" / run_id).resolve())
     run_mod.ledger_append_running(
         ws, run_id=run_id, compiled_lock_sha256="a" * 64, job_dir=job_dir,
@@ -68,8 +67,6 @@ def _append_ledger_run(ws: Path, run_id: Any, *, state: Any, environments: Any) 
 
 def _append_ledger_run_raw(ws: Path, run_id: Any, *, job_dir: Any, state: Any, environments: Any) -> None:
     """Append a caller-supplied job_dir row (to inject a non-contained path)."""
-    from daydream.benchmark import storage
-
     path = ws / "runtime" / "harbor.json"
     if path.exists():
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -102,7 +99,6 @@ def test_clean_parser_exposes_flags_and_derived_union() -> None:
 
 
 def test_handle_clean_routes_to_clean_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.benchmark.harbor.clean as clean_mod
     captured: dict[str, Any] = {}
     def fake_clean(root: Any, *, cache: pytest.Cache, jobs: Any, trajectories: Any, all_: Any, yes: Any) -> Any:
         captured.update(root=Path(root), cache=cache, jobs=jobs,
@@ -525,8 +521,6 @@ def test_workspace_lock_held_during_mutation(tmp_path: Path, monkeypatch: pytest
         state="complete",
         environments=[_docker_env("case-abc__1", removed=False)],
     )
-
-    import fcntl
 
     lock_held_at_write: list[bool] = []
     real_atomic_write_json = storage_atomic_write_json

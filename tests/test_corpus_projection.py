@@ -3,9 +3,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
+from jsonschema import Draft202012Validator
 
+from daydream.archive.hydrate_rules import (
+    REASON_CODE_LICENSE_EVIDENCE_MISSING,
+    REASON_CODE_REPO_IDENTITY_MISSING,
+)
 from daydream.archive.sanitize import _derivative_digest
+from daydream.cli import _CORPUS_SUBVERBS
 from daydream.training.corpus_projection.bundle import (
     BundleBatch,
     BundleError,
@@ -16,6 +23,7 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
+from daydream.training.exclusion import EXCLUSION_PATH
 from tests.harness.scripts import cli_main
 
 _MANIFEST = {
@@ -100,8 +108,6 @@ def _write_bundle(
 
 
 def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
-    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
-
     if kw.get("license_policy_path") is None:
         kw["license_policy_path"] = _policy_file(bundle_dir.parent)
     return BuildFrozenCorpusConfig(out_dir=out_dir, bundle_dir=bundle_dir,
@@ -137,8 +143,6 @@ def _write_annotations_snapshot(
     (bundle_dir / "batches" / session_id / "trajectory.json").write_text(
         json.dumps(trajectory) + "\n"
     )
-    from daydream.training.corpus_projection.identity import record_id as _record_id
-
     ann_dir = bundle_dir.parent / f"{bundle_dir.name}-annotations"
     ann_dir.mkdir(parents=True, exist_ok=True)
     # Merge with any rows a previous call wrote (per-session helper called
@@ -169,7 +173,7 @@ def _write_annotations_snapshot(
             )
             fingerprint = fps[i % len(fps)]
             rows.append({
-                "record_id": _record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
+                "record_id": record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
                 "session_id": session_id, "fingerprint": fingerprint,
                 "disposition": disposition, "evidence": evidence,
                 # Real canonical-record shape (adjudication/snapshot.py:
@@ -216,8 +220,6 @@ def test_load_bundle_refuses_batches_missing_repo_identity(tmp_path: Path) -> No
         batch.pop("license_evidence", None)
     manifest_path.write_text(json.dumps(manifest))
     _write_sumsums(bundle_dir)
-    from daydream.archive.hydrate_rules import REASON_CODE_REPO_IDENTITY_MISSING
-
     with pytest.raises(BundleError, match=REASON_CODE_REPO_IDENTITY_MISSING):
         load_curated_bundle(bundle_dir)
 
@@ -232,8 +234,6 @@ def test_load_bundle_refuses_missing_license_evidence(tmp_path: Path) -> None:
             batch.pop("license_evidence", None)
     manifest_path.write_text(json.dumps(manifest))
     _write_sumsums(bundle_dir)
-    from daydream.archive.hydrate_rules import REASON_CODE_LICENSE_EVIDENCE_MISSING
-
     with pytest.raises(BundleError, match=REASON_CODE_LICENSE_EVIDENCE_MISSING):
         load_curated_bundle(bundle_dir)
 
@@ -667,8 +667,6 @@ def test_schema_validation_accepts_evolved_v2_records(
 ) -> None:
     # The projected records validate against the edited schema/record-schema.json
     # (repo_slug required in lineage; license_decision required as object).
-    import jsonschema  # noqa: PLC0415
-
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     schema = json.loads((tmp_path / "out" / "schema.json").read_text())
@@ -736,7 +734,7 @@ def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
     assert all(r["tier"] in {"gold", "silver", "task-only"} for r in records)
 
 
-def test_v2_loader_refuses_non_v2_record_naming_record_id(tmp_path: Path) -> None:
+def test_v2_loader_refuses_non_v2_record_namingrecord_id(tmp_path: Path) -> None:
     out = tmp_path / "proj"
     out.mkdir()
     (out / "_SUCCESS").write_text("ok\n")
@@ -770,8 +768,6 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
     # The projector copies schema/record-schema.json beside its output, so every emitted
     # record must validate against that exact artifact (nothing may ship a schema the
     # projector's own output cannot satisfy).
-    from jsonschema import Draft202012Validator
-
     schema_path = Path(__file__).resolve().parents[1] / "daydream/training/schema/record-schema.json"
 
     bundle_dir = _write_bundle(tmp_path)
@@ -1021,19 +1017,15 @@ def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
 def test_build_lineage_pins_license_policy_and_decisions(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
-    import hashlib as _hashlib  # noqa: PLC0415
-
-    from daydream.training.exclusion import EXCLUSION_PATH  # noqa: PLC0415
-
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     out = tmp_path / "out"
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     lineage = json.loads((out / "lineage.json").read_text())
     assert lineage["license_policy"]["policy_version"] == "1"
-    assert lineage["license_policy"]["path_digest"] == _hashlib.sha256(
+    assert lineage["license_policy"]["path_digest"] == hashlib.sha256(
         _policy_file(tmp_path).read_bytes()
     ).hexdigest()
-    assert lineage["exclusion_list_digest"] == _hashlib.sha256(
+    assert lineage["exclusion_list_digest"] == hashlib.sha256(
         EXCLUSION_PATH.read_bytes()
     ).hexdigest()
     assert lineage["copyleft_opt_ins"] == []
@@ -1083,11 +1075,7 @@ def test_multi_session_repo_license_decisions_all_recorded(
 
 
 def _sha256_of_exclusion_txt() -> str:
-    import hashlib as _hashlib  # noqa: PLC0415
-
-    from daydream.training.exclusion import EXCLUSION_PATH  # noqa: PLC0415
-
-    return _hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
+    return hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
 
 
 def test_license_report_artifact_is_deterministic(
@@ -1310,7 +1298,5 @@ def test_corpus_build_verb_gone() -> None:
 
     After the Task 4 rename, `build` is the canonical subverb (build-v2 retired).
     """
-    from daydream.cli import _CORPUS_SUBVERBS
-
     assert "build" in _CORPUS_SUBVERBS
     assert "build-v2" not in _CORPUS_SUBVERBS
