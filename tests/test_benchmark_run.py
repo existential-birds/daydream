@@ -2,14 +2,19 @@
 
 """
 import hashlib
+import importlib.metadata
 import json
+import stat
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 from daydream.benchmark.harbor import package as _pkg
+from daydream.benchmark.harbor import run as run_mod
 
 
 def _docker_ok() -> _pkg.DockerNetworkPolicyCapability:
@@ -29,11 +34,6 @@ def _stub_harbor_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     — but the CI ``check`` job installs base deps only). Stub the Harbor
     environment so the suite stays hermetic.
     """
-    import importlib.metadata
-    import sys
-
-    from daydream.benchmark.harbor import package as _pkg
-
     real_version = importlib.metadata.version
 
     def _version(dist: str) -> Any:
@@ -122,7 +122,6 @@ def test_benchmark_parser_has_run_subcommand() -> None:
 
 
 def test_handle_benchmark_run_routes_to_supervisor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     captured: dict[str, Any] = {}
 
@@ -144,7 +143,6 @@ def test_handle_benchmark_run_routes_to_supervisor(tmp_path: Path, monkeypatch: 
 
 
 def test_preflight_ok_when_all_checks_pass(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     errs = run_mod._preflight(ws, oracle=True, env=_env(), docker_ok=_docker_ok)
@@ -152,7 +150,6 @@ def test_preflight_ok_when_all_checks_pass(tmp_path: Path) -> None:
 
 
 def test_preflight_requires_explicit_judge_endpoint(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     errs = run_mod._preflight(
         _ws(tmp_path),
@@ -166,7 +163,6 @@ def test_preflight_requires_explicit_judge_endpoint(tmp_path: Path) -> None:
 
 def test_preflight_claude_cli_judge_needs_no_base_url(tmp_path: Path) -> None:
     """claude-cli resolves its judge host (api.anthropic.com) without a base URL."""
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path, judge_allowed_hosts=["api.anthropic.com"])
     _seed_compiled_task(ws, reviewer=["review.example"], judge=["api.anthropic.com"])
@@ -181,7 +177,6 @@ def test_preflight_claude_cli_judge_needs_no_base_url(tmp_path: Path) -> None:
 
 
 def test_spend_summary_prints_claude_cli_judge_host(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     text = run_mod._pre_run_summary(
         _ws(tmp_path), env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli")
@@ -193,7 +188,6 @@ def test_spend_summary_prints_claude_cli_judge_host(tmp_path: Path) -> None:
 
 
 def test_preflight_blocks_judge_host_outside_allowlist(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     errs = run_mod._preflight(_ws(tmp_path), oracle=True,
                               env=_env(DAYDREAM_JUDGE_BASE_URL="http://evil.example"), docker_ok=_docker_ok)
@@ -201,7 +195,6 @@ def test_preflight_blocks_judge_host_outside_allowlist(tmp_path: Path) -> None:
 
 
 def test_preflight_blocks_reviewer_host_outside_allowlist(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     errs = run_mod._preflight(_ws(tmp_path), oracle=True,
                               env=_env(DAYDREAM_REVIEW_BASE_URL="http://other.example"), docker_ok=_docker_ok)
@@ -215,7 +208,6 @@ def test_preflight_enforces_compiled_task_policy_not_raw_manifest(tmp_path: Path
     predates the manifest edit) must still block the run, because the stale
     compiled task.toml is the artifact Harbor actually executes.
     """
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path, judge_allowed_hosts=["127.0.0.1", "stale.example"])
     # simulate a compiled tree produced before the manifest added stale.example
@@ -226,7 +218,6 @@ def test_preflight_enforces_compiled_task_policy_not_raw_manifest(tmp_path: Path
 
 
 def test_preflight_blocks_uploads_enabled(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     errs = run_mod._preflight(_ws(tmp_path, uploads="enabled"), oracle=True,
                               env=_env(), docker_ok=_docker_ok)
@@ -234,7 +225,6 @@ def test_preflight_blocks_uploads_enabled(tmp_path: Path) -> None:
 
 
 def test_preflight_blocks_unsupported_docker_allowlist(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env(), docker_ok=lambda: False)
     assert any("Docker allowlist" in e for e in errs)
@@ -242,9 +232,7 @@ def test_preflight_blocks_unsupported_docker_allowlist(tmp_path: Path) -> None:
 
 def test_preflight_uses_live_docker_capability_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Production preflight must fail with the actual sidecar probe reason."""
-    from types import SimpleNamespace
 
-    import daydream.benchmark.harbor.run as run_mod
 
     monkeypatch.setattr(
         "daydream.benchmark.harbor.package.docker_network_policy_capability",
@@ -264,7 +252,6 @@ def test_preflight_uses_live_docker_capability_by_default(tmp_path: Path, monkey
 
 
 def test_pre_run_summary_lists_all_required_fields(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     text = run_mod._pre_run_summary(ws, env=_env())
@@ -281,9 +268,7 @@ def test_pre_run_summary_lists_all_required_fields(tmp_path: Path) -> None:
 
 
 def test_ledger_append_running_and_mark_complete(tmp_path: Path) -> None:
-    import stat
 
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = tmp_path / "ws"
     (ws / "runtime").mkdir(parents=True)
@@ -307,7 +292,6 @@ def test_ledger_append_running_and_mark_complete(tmp_path: Path) -> None:
 
 
 def test_ledger_rejects_non_contained_job_dir(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = tmp_path / "ws"
     (ws / "runtime").mkdir(parents=True)
@@ -378,7 +362,6 @@ def _seed_passing_oracle_receipt(
     ws: Path, *, job_dir_name: str = "run-1",
 ) -> tuple[Path, str]:
     """Seed a matching compiled lock plus the receipt the gate accepts."""
-    import daydream.benchmark.harbor.run as run_mod
 
     lock = {"schema_version": 1, "cases": {}, "daydream": _WHEEL}
     lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
@@ -391,7 +374,6 @@ def _seed_passing_oracle_receipt(
 
 
 def test_oracle_parse_success_writes_receipt(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     (ws / "runtime" / "calibration-receipt.json").write_text(json.dumps({"inputs": {"cal": 1}}))
@@ -411,7 +393,6 @@ def test_oracle_parse_success_writes_receipt(tmp_path: Path) -> None:
 
 
 def test_oracle_no_receipt_on_reward_below_one(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     job_dir = _seed_verifier_reward(ws, reward=0.8)
@@ -425,7 +406,6 @@ def test_oracle_no_receipt_on_reward_below_one(tmp_path: Path) -> None:
 
 
 def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     job_dir = ws / "harbor" / "jobs" / "run-1"
@@ -440,7 +420,6 @@ def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
 
 
 def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     _seed_passing_oracle_receipt(ws)
@@ -458,7 +437,6 @@ def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
 
 
 def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     _, lock_sha = _seed_passing_oracle_receipt(ws)
@@ -471,9 +449,7 @@ def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:
 
 
 def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path: Path) -> None:
-    import stat
 
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     captures: dict[str, Any] = {}
@@ -496,7 +472,6 @@ def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path: Path) -> No
 
 
 def test_run_oracle_from_unrelated_cwd_resolves_harbor_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     unrelated = tmp_path / "unrelated"
@@ -513,7 +488,6 @@ def test_run_oracle_from_unrelated_cwd_resolves_harbor_cwd(tmp_path: Path, monke
 
 
 def test_run_refuses_without_yes_and_no_confirm(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     code = run_mod.run_run(
@@ -527,7 +501,6 @@ def test_run_refuses_without_yes_and_no_confirm(tmp_path: Path) -> None:
 
 
 def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     spawn = _reward_spawn(ws, reward=0.5, candidate_count=2)
@@ -542,7 +515,6 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
 
 
 def test_default_run_propagates_harbor_exit_code(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     # seed a matching oracle receipt the gate will accept
@@ -558,7 +530,6 @@ def test_default_run_propagates_harbor_exit_code(tmp_path: Path) -> None:
 
 
 def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     called = []
@@ -577,7 +548,6 @@ def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
 
 
 def test_run_persists_trial_environments_to_ledger(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     spawn = _reward_spawn(ws)
@@ -594,7 +564,6 @@ def test_run_persists_trial_environments_to_ledger(tmp_path: Path) -> None:
 
 
 def test_run_failed_path_persists_environments_cleanup_pending(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     spawn = _reward_spawn(ws, reward=0.5, candidate_count=2)
@@ -612,7 +581,6 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
     the environment it spawned, so ``clean --jobs`` can address the Docker
     image it left behind instead of orphaning it by deleting the job dir.
     """
-    import daydream.benchmark.harbor.run as run_mod
 
     job_dir = tmp_path / "jobs" / "r"
     trial = job_dir / "case-abc"
@@ -629,7 +597,6 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
 
 
 def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     _seed_compiled_lock(ws)   # benchmark.lock.json with daydream block
@@ -641,7 +608,6 @@ def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) 
 
 
 def test_ledger_records_reviewer_effort_when_present(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     run_id = "run-1"
@@ -658,7 +624,6 @@ def test_ledger_records_reviewer_effort_when_present(tmp_path: Path) -> None:
 
 
 def test_default_run_accepts_old_receipt_with_legacy_calibration_field(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     lock_sha = _compiled_lock_sha(ws)
@@ -672,7 +637,6 @@ def test_default_run_accepts_old_receipt_with_legacy_calibration_field(tmp_path:
 
 
 def test_oracle_receipt_has_no_calibration_state(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     lock_sha = _compiled_lock_sha(ws)
@@ -682,7 +646,6 @@ def test_oracle_receipt_has_no_calibration_state(tmp_path: Path) -> None:
 
 
 def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     job_dir = _seed_verifier_reward(ws, job_dir_name="j1", trial_name="t1")
@@ -696,7 +659,6 @@ def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
 
 
 def test_default_run_still_blocks_without_oracle_receipt(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     lock_sha = _compiled_lock_sha(ws)
@@ -705,7 +667,6 @@ def test_default_run_still_blocks_without_oracle_receipt(tmp_path: Path) -> None
 
 
 def test_ledger_reviewer_effort_defaults_none_when_omitted(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
     run_id = "run-1"
