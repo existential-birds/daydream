@@ -2856,6 +2856,16 @@ async def _run_improve(make_config: MakeConfig, repo: Path, **overrides: Any) ->
     return await run(make_config(repo, flow_name="improve", **overrides))
 
 
+async def _run_publish(make_config: MakeConfig, repo: Path) -> int:
+    """Run the improve flow through the GitHub issue-publishing path."""
+    return await _run_improve(
+        make_config,
+        repo,
+        pr_repo="acme/widgets",
+        file_config=DaydreamFileConfig(improve_github_publish_issues=True),
+    )
+
+
 async def _run_plan_subverb(make_config: MakeConfig, repo: Path) -> int:
     """Run the improve flow's plan subverb for the canonical request."""
     return await _run_improve(make_config, repo, improve_plan_description="add rate limiting")
@@ -4523,14 +4533,7 @@ async def test_configured_headless_publish_selects_all_and_embeds_local_plans(
         "refs/heads",
     )
 
-    code = await _run_improve(
-                     make_config,
-                     improve_monorepo_target,
-                     pr_repo="acme/widgets",
-                     file_config=DaydreamFileConfig(
-                improve_github_publish_issues=True,
-            ),
-                 )
+    code = await _run_publish(make_config, improve_monorepo_target)
 
     assert code == 0
     selected = _load_improve_json(improve_monorepo_target, "selected.json")
@@ -4621,14 +4624,7 @@ async def test_configured_publish_records_a_pathless_reconciled_plan(
         lambda *args, **kwargs: pytest.fail("a pathless package must fail before GitHub reconciliation"),
     )
 
-    second_code = await _run_improve(
-                            make_config,
-                            improve_monorepo_target,
-                            pr_repo="acme/widgets",
-                            file_config=DaydreamFileConfig(
-                improve_github_publish_issues=True,
-            ),
-                        )
+    second_code = await _run_publish(make_config, improve_monorepo_target)
 
     publication = _load_improve_json(
         improve_monorepo_target,
@@ -4685,14 +4681,7 @@ async def test_reused_plan_publishes_its_stored_package_and_member_identities(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
 
-    second_code = await _run_improve(
-                            make_config,
-                            improve_monorepo_target,
-                            pr_repo="acme/widgets",
-                            file_config=DaydreamFileConfig(
-                improve_github_publish_issues=True,
-            ),
-                        )
+    second_code = await _run_publish(make_config, improve_monorepo_target)
 
     publication = _load_improve_json(
         improve_monorepo_target,
@@ -4745,14 +4734,7 @@ async def test_configured_publish_records_partial_plan_write_failure(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
 
-    code = await _run_improve(
-                     make_config,
-                     improve_monorepo_target,
-                     pr_repo="acme/widgets",
-                     file_config=DaydreamFileConfig(
-                improve_github_publish_issues=True,
-            ),
-                 )
+    code = await _run_publish(make_config, improve_monorepo_target)
 
     publication = _load_improve_json(
         improve_monorepo_target,
@@ -4789,14 +4771,7 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("offline")),
     )
 
-    code = await _run_improve(
-                     make_config,
-                     improve_monorepo_target,
-                     pr_repo="acme/widgets",
-                     file_config=DaydreamFileConfig(
-                improve_github_publish_issues=True,
-            ),
-                 )
+    code = await _run_publish(make_config, improve_monorepo_target)
 
     publication = _load_improve_json(
         improve_monorepo_target,

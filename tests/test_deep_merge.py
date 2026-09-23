@@ -13,15 +13,24 @@ from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.review_profile import default_strategy as _default_strategy
 
 
-def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
-    """D-26: cross-stack concerns are tagged via the cross-stack lens."""
-    prompt = build_merge_prompt(
+def _merge_prompt(
+    tmp_path: Path,
+    records: list[Path] | None = None,
+    *,
+    dedup_candidates_path: Path | None = None,
+) -> str:
+    return build_merge_prompt(
         strategy=_default_strategy("merge"),
-        per_stack_records_paths=[tmp_path / "r.json"],
+        per_stack_records_paths=records if records is not None else [tmp_path / "r.json"],
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
-        dedup_candidates_path=tmp_path / "d.json",
+        dedup_candidates_path=dedup_candidates_path if dedup_candidates_path is not None else tmp_path / "d.json",
     )
+
+
+def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
+    """D-26: cross-stack concerns are tagged via the cross-stack lens."""
+    prompt = _merge_prompt(tmp_path)
     assert "cross-stack" in prompt
     assert "spanning multiple stacks" in prompt
 
@@ -32,26 +41,14 @@ def test_merge_prompt_references_records_by_path(tmp_path: Path) -> None:
         tmp_path / "deep" / "stack-python-records.json",
         tmp_path / "deep" / "stack-react-records.json",
     ]
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=records,
-        intent_path=tmp_path / "i.md",
-        alternatives_path=tmp_path / "a.json",
-        dedup_candidates_path=tmp_path / "d.json",
-    )
+    prompt = _merge_prompt(tmp_path, records)
     for r in records:
         assert str(r) in prompt
 
 
 def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
     """D-27: merger is told to read dedup-candidates and adjudicate."""
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=[tmp_path / "r.json"],
-        intent_path=tmp_path / "i.md",
-        alternatives_path=tmp_path / "a.json",
-        dedup_candidates_path=tmp_path / "dedup-candidates.json",
-    )
+    prompt = _merge_prompt(tmp_path, dedup_candidates_path=tmp_path / "dedup-candidates.json")
     assert "dedup-candidates.json" in prompt or "candidate pair" in prompt
     assert (
         "adjudication" in prompt.lower()
@@ -122,25 +119,13 @@ def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
     """Issue #731 (P2): merge prompt references synthetic ``#`` shard paths."""
     records = [tmp_path / "deep" / "stack-python#0-records.json",
                tmp_path / "deep" / "stack-python#1-records.json"]
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=records,
-        intent_path=tmp_path / "i.md",
-        alternatives_path=tmp_path / "a.json",
-        dedup_candidates_path=tmp_path / "d.json",
-    )
+    prompt = _merge_prompt(tmp_path, records)
     for r in records:
         assert str(r) in prompt
 
 
 def test_merge_prompt_tags_alternatives_items_as_wonder(tmp_path: Path) -> None:
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=[tmp_path / "r.json"],
-        intent_path=tmp_path / "i.md",
-        alternatives_path=tmp_path / "a.json",
-        dedup_candidates_path=tmp_path / "d.json",
-    )
+    prompt = _merge_prompt(tmp_path)
     assert '"wonder"' in prompt      # the lens value the agent must emit for alt items
     assert "alternatives" in prompt
 
@@ -158,13 +143,7 @@ def test_merge_prompt_demands_verbatim_source_uids(tmp_path: Path) -> None:
     deduplicated item (the multi-record case is the whole reason the field is a
     list rather than a single handle).
     """
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
-        intent_path=tmp_path / "i.md",
-        alternatives_path=tmp_path / "a.json",
-        dedup_candidates_path=tmp_path / "d.json",
-    )
+    prompt = _merge_prompt(tmp_path, [tmp_path / "stack-python-records.json"])
     assert "source_uids" in prompt
     assert "VERBATIM" in prompt
     assert "list ALL contributing" in prompt

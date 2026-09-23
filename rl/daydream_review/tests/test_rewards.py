@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -21,13 +22,18 @@ from typing import Any
 
 import pytest
 import verifiers.v1 as vf
+from conftest import FakeRuntime, passed_gate_report
 from daydream.atif import validate
 from daydream.training.harvest import assemble_scoring_inputs
-from daydream.training.reward import score_trajectory
+from daydream.training.reward import REWARD_VERSION, score_trajectory
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
+from daydream_review import rundir as rundir_mod
+from daydream_review import taskset
 from daydream_review.fixture import build_fixture_repo
+from daydream_review.rundir import DAYDREAM_EXCLUDE, RUN_DIR_FILES, candidate_diff_cmd
 from daydream_review.taskset import (
+    ROLLOUT_REWARD_VERSION,
     DaydreamReviewConfig,
     DaydreamReviewData,
     DaydreamReviewState,
@@ -37,6 +43,7 @@ from daydream_review.taskset import (
     _claimed_test_verdict,
     _review_state,
 )
+from daydream_review.verifier import seal_artifacts
 
 MODEL = "some-org/some-policy-model"
 
@@ -65,7 +72,6 @@ def _task(
 ) -> DaydreamReviewTask:
     # The load path refuses without a passed Stage-0 gate report (M4); tests
     # here exercise scoring, not the gate, so hand them a minimal passed one.
-    from conftest import passed_gate_report
 
     with passed_gate_report() as gate_path:
         taskset = DaydreamReviewTaskset(
@@ -384,8 +390,6 @@ def _seal_run(run_dir: Path, task: DaydreamReviewTask, repo_path: Path) -> Path:
     helper, hashes the archive members the harness recorded, and writes
     ``seal.json`` into *run_dir*. Returns the staged repo path.
     """
-    from daydream_review.rundir import RUN_DIR_FILES, candidate_diff_cmd
-    from daydream_review.verifier import seal_artifacts
 
     repo = _stage_repo(repo_path, task.data.head_sha, edit=_CALC_FIXED, commit=True)
     diff = subprocess.run(
@@ -580,7 +584,6 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     re-runs green under the verifier identity instead; the expected reading
     follows the host shape either way.
     """
-    from daydream_review import taskset
 
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -633,12 +636,8 @@ fixture_manifest_path: Path,
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
-    import shlex
 
-    from conftest import FakeRuntime
 
-    from daydream_review import taskset
-    from daydream_review.rundir import candidate_diff_cmd
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
@@ -1318,9 +1317,7 @@ async def test_reward_version_is_pinned(
     breakdown stamps both the rollout boundary (``reward_version``) and the
     intrinsic scorer it was evaluated against (``intrinsic_reward_version``).
     """
-    from daydream.training.reward import REWARD_VERSION
 
-    from daydream_review.taskset import ROLLOUT_REWARD_VERSION
 
     assert REWARD_VERSION == "2026.09.04-1", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
@@ -1450,8 +1447,6 @@ async def test_git_failure_at_verify_time_fails_closed(
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(fixture_manifest_path)
-    from daydream_review.rundir import RUN_DIR_FILES
-    from daydream_review.verifier import seal_artifacts
 
     present = [
         run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
@@ -1479,7 +1474,6 @@ async def test_verify_checkout_failed_diff_fails_closed(
     git apply: _prepare_verify_checkout returns None, never a partially-built
     checkout. Mirrors the rundir fail-closed contract on the unified path.
     """
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1514,7 +1508,6 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     committed, staged, AND unstaged tracked contents all match the baked head,
     so the diff must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     # --allow-empty commit: HEAD advances, committed tree identical -> genuinely empty diff
@@ -1546,8 +1539,6 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     diff (no drift between the two sites), as the verifier re-runs the suite
     against the same contract the seal binds.
     """
-    from daydream_review import taskset
-    from daydream_review.rundir import candidate_diff_cmd
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1580,7 +1571,6 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
 
 
 def test_candidate_diff_cmd_carries_hardening_flags() -> None:
-    from daydream_review.rundir import DAYDREAM_EXCLUDE, candidate_diff_cmd
 
     argv = candidate_diff_cmd("/work/repo", "deadbeef")
     assert argv == [
@@ -1595,7 +1585,6 @@ async def test_verify_checkout_repo_helper_ignored(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path, attack: str,
 ) -> None:
     """A repo-local helper that cannot run must not abort verifier-checkout."""
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1624,9 +1613,7 @@ async def test_verify_checkout_repo_helper_ignored(
 
 
 async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
-    from conftest import FakeRuntime
 
-    from daydream_review import taskset
 
     rt = FakeRuntime(exit_code=0)
     await taskset._fixes_applied(rt, "/work/repo", "deadbeef")
@@ -1639,9 +1626,7 @@ async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
 
 
 async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags() -> None:
-    from conftest import FakeRuntime
 
-    from daydream_review import taskset
 
     rt = FakeRuntime(exit_code=0)
     await taskset._protected_test_paths_unchanged(rt, "/work/repo", "deadbeef", ["tests"])
@@ -1694,8 +1679,6 @@ async def test_oracle_acceptance_matches_candidate_diff_semantics(
     both — and this test turns any future divergence into a CI failure
     instead of docstring archaeology.
     """
-    from daydream_review import rundir as rundir_mod
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, **stage_kwargs)
