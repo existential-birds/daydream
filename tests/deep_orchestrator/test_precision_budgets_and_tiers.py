@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -129,6 +129,47 @@ async def test_deep_flow_forwards_approve_on_clean(
     )
     assert exit_code == 0
     assert received == [enabled]
+
+
+_OPT_IN_FLAGS = ("precision_mode", "approve_on_clean", "scope_issue_filing")
+
+
+@pytest.mark.parametrize("flag", _OPT_IN_FLAGS)
+@pytest.mark.parametrize(
+    ("cli_tier", "file_value", "expected"),
+    [
+        pytest.param("true", None, True, id="T1-cli-true-file-absent"),
+        pytest.param("unset", None, False, id="T2-cli-default-file-absent"),
+        pytest.param("true", True, True, id="T3-cli-true-file-true"),
+        pytest.param("true", False, True, id="T4-cli-true-outranks-file-false"),
+        pytest.param("unset", True, True, id="T5-file-true-beats-cli-default"),
+        pytest.param("unset", False, False, id="T6-file-false-falls-through"),
+        pytest.param("false", True, True, id="T7-explicit-cli-false-is-unset"),
+    ],
+)
+def test_opt_in_tiers_resolve_cli_then_file(
+    flag: str, cli_tier: str, file_value: bool | None, expected: bool
+) -> None:
+    """#1225: pin the precedence rule of ``daydream/deep/settings.py:_resolve_opt_in``.
+
+    One table over all three deep-mode opt-ins: a truthy ``RunConfig`` attr (CLI tier)
+    outranks a truthy ``DaydreamFileConfig`` attr, which outranks the built-in ``False``;
+    an explicit file-config ``False`` falls through to the default rather than forcing it
+    off. T5 and T7 are the two rows that separate this truthiness rule from the
+    ``is not None`` sentinel rule of the sibling ``_resolve_config_value``: both put the
+    CLI tier at its built-in ``False`` while the file tier says ``True``. T7 constructs the
+    CLI tier as an explicit ``False`` and T5 as an unset field; because ``RunConfig``'s
+    fields are ``bool = False`` with no ``None`` sentinel, the two are indistinguishable by
+    design — which is why a CLI ``False`` cannot mask a repo that opted in. T4 covers the
+    opposite inversion (a rule where the file tier outranks an explicit CLI ``True``).
+    """
+    run_kwargs: dict[str, Any] = {"target": "/t"}
+    if file_value is not None:
+        file_kwargs: dict[str, Any] = {flag: file_value}
+        run_kwargs["file_config"] = DaydreamFileConfig(**file_kwargs)
+    if cli_tier != "unset":
+        run_kwargs[flag] = cli_tier == "true"
+    assert _resolve_opt_in(RunConfig(**run_kwargs), flag) is expected
 
 
 def test_approve_on_clean_resolves_from_file_config() -> None:
