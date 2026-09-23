@@ -13,15 +13,18 @@ from typing import Any
 import pytest
 
 from daydream import review_profile as rp
+from daydream import severity
 from daydream.deep.coverage import (
+    _strip_dot_slash,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
     diff_block_for_file,
     filter_sweepable_files,
+    resolve_per_stack_verdicts,
     write_coverage_receipts,
 )
-from daydream.hunk_index import parse_hunks, write_hunk_index
+from daydream.hunk_index import load_hunk_index, parse_hunks, write_hunk_index
 
 _DIFF = (
     "diff --git a/api.py b/api.py\n"
@@ -347,7 +350,6 @@ def test_filter_sweepable_files_from_index_with_patch_unreadable(tmp_path: Path)
     Materialize a ``.daydream`` dir with ONLY ``hunk-index.json`` (no
     ``diff.patch``) and confirm the sweep still sizes hunks from the index.
     """
-    from daydream.hunk_index import load_hunk_index
 
     dd = tmp_path / ".daydream"
     dd.mkdir()
@@ -630,7 +632,6 @@ def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path,
 
 def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
     """AC2: a clean verdict for a file with no completed read becomes not_reviewed."""
-    from daydream.deep.coverage import resolve_per_stack_verdicts
 
     declared = [
         {"path": "api.py", "lines_read": 10, "verdict": "clean"},
@@ -753,7 +754,6 @@ def test_frontier_not_credited_without_any_sibling_evidence(tmp_path: Path) -> N
 
 def test_strip_dot_slash_normalizes_once() -> None:
     """Issue #740: ``_strip_dot_slash`` is the single canonical ``./`` strip."""
-    from daydream.deep.coverage import _strip_dot_slash
 
     assert _strip_dot_slash("api.py") == "api.py"
     assert _strip_dot_slash("./api.py") == "api.py"
@@ -787,7 +787,6 @@ def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
 def test_uncovered_sweep_prompt_carries_severity_rubric(tmp_path: Path) -> None:
     """Issue #972 R1.1: the sweep reviewer assigns severities, so it gets the
     host severity rubric, appended after the profile strategy text."""
-    from daydream import severity
 
     intent = tmp_path / ".daydream" / "deep" / "intent.md"
     output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"

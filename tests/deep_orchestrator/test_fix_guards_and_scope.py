@@ -9,6 +9,11 @@ from typing import Any
 import pytest
 
 import daydream
+from daydream import git_ops as _git_ops
+from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.deep.scope_issues import _scope_edit_fingerprint, _scope_edit_marker
+from daydream.git_ops import GitError
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _scan_phase_events,
     _scan_trajectory_extra,
@@ -48,7 +53,6 @@ async def test_fix_quality_gate_clamps_invalid_thresholds(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 7): invalid thresholds resolve to the default, never the bad value."""
-    from daydream.config_file import DaydreamFileConfig
 
     target = _build_gate_target(tmp_path, "gate_clamped_thresholds")
     exit_code = await _run_quality_gate_fixture(
@@ -80,7 +84,6 @@ async def test_fix_guard_reverts_generated_migration_edit(
     mute_side_effects: Mute,
     no_ci_remote: NoCIRemote,
 ) -> None:
-    from daydream.runner import run
 
     project, migration = _migration_project(tmp_path, "migration_repo")
     bare = _bare_remote(tmp_path / "remote.git")
@@ -161,7 +164,6 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     no_ci_remote: NoCIRemote,
 ) -> None:
     """Real path: a fix writing U+201D into a changed .go comment is scrubbed pre-commit."""
-    from daydream.runner import run
 
     project = _go_quote_project(tmp_path)
     bare = _bare_remote(tmp_path / "remote.git")
@@ -211,7 +213,6 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     mute_side_effects: Mute,
 ) -> None:
     """The runner snapshots and restores a forbidden edit made by a heal turn."""
-    from daydream.runner import run
 
     project, migration = _migration_project(tmp_path, "heal_migration_repo")
     pre_migration = migration.read_bytes()
@@ -254,8 +255,6 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     mute_side_effects: Mute,
 ) -> None:
     """A forbidden generated edit cannot reach commit when restoration fails."""
-    from daydream.git_ops import GitError
-    from daydream.runner import run
 
     migration = multi_stack_target / "migrations" / "0001_init.sql"
     migration.parent.mkdir()
@@ -297,7 +296,6 @@ async def test_parallel_fix_commit_runs_once_after_all(
     mute_side_effects: Mute,
 ) -> None:
     """AC#6: commit stays serial and runs exactly once, after every parallel fix lands."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -329,7 +327,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     scope_issue_filing: bool,
 ) -> None:
     """Revert an out-of-diff edit before commit; file an issue only when opted in."""
-    from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_residual")
     bare = _add_bare_remote(target)
@@ -398,7 +395,6 @@ async def test_reverted_edit_dedups_across_runs(
 ) -> None:
     """#1051 regression: an opted-in run does not re-file an issue for a
     reverted edit whose fingerprint marker already sits on an open issue."""
-    from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_dedup")
     bare = _add_bare_remote(target)
@@ -422,8 +418,6 @@ async def test_reverted_edit_dedups_across_runs(
     # Spy on the evidence diff the filer captures pre-revert: a prior run would
     # have filed a marker over this exact patch (same path + same edit → same
     # fingerprint), so the dedup lookup serves an issue body carrying it.
-    from daydream import git_ops as _git_ops
-    from daydream.deep.scope_issues import _scope_edit_fingerprint, _scope_edit_marker
 
     recorded: list[str] = []
     _real_diff = _git_ops.diff_worktree_against
@@ -474,8 +468,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     mute_side_effects: Mute,
 ) -> None:
     """#336 real-path: a failed residual revert aborts before commit."""
-    from daydream.git_ops import GitError
-    from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_residual_fail")
     head_before = _git(target, "rev-parse", "HEAD")
@@ -514,8 +506,6 @@ async def test_fix_tool_veto_blocks_denied_write(
     mute_side_effects: Mute,
 ) -> None:
     """Built-in rules veto a deferred denied Write and record the abort/event."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -553,8 +543,6 @@ async def test_fix_tool_veto_allows_unmatched_write(
     mute_side_effects: Mute,
 ) -> None:
     """Built-in rules allow a Write whose path does not match the deny glob."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -586,8 +574,6 @@ async def test_fix_tool_veto_stops_subsequent_calls(
     mute_side_effects: Mute,
 ) -> None:
     """A vetoed first deferred Write prevents the generator's later Write."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -621,8 +607,6 @@ async def test_fix_tool_supervisor_off_writes(
     mute_side_effects: Mute,
 ) -> None:
     """With tool supervision off, the deferred Write resumes and writes."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -651,7 +635,6 @@ async def test_confirmed_intent_reaches_fix_prompt(
     mute_side_effects: Mute,
 ) -> None:
     """The confirmed author intent reaches every deep fix prompt so a fixer can't undo a deliberate decision."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)

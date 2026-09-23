@@ -10,8 +10,14 @@ import anyio
 import pytest
 
 from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.deep.detection import StackAssignment
+from daydream.config import STRUCTURE_STACK_NAME
+from daydream.deep import prompts as _prompts
+from daydream.deep import sharding
+from daydream.deep.artifacts import deep_dir as _deep_dir
+from daydream.deep.artifacts import per_stack_records_path
+from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.phases import phase_per_stack_reviews
+from daydream.phases import phase_per_stack_reviews as _phase
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.trajectory import (
@@ -71,7 +77,6 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
 async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.deep.artifacts import per_stack_records_path
 
     issue = {"id": 1, "file": "api.py", "line": 2, "description": "empty input divides by zero",
              "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
@@ -168,8 +173,6 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     # / merge consume. A regression that stops persisting records.json would
     # silently break merge while these md-path assertions still pass, so assert
     # the records artifact exists and carries the declared issues/verdicts.
-    from daydream.deep.artifacts import deep_dir as _deep_dir
-    from daydream.deep.artifacts import per_stack_records_path
 
     deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
     declared: dict[str, list[Any]] = {"issues": [], "verdicts": []}
@@ -189,9 +192,6 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural stack flows through build_structural_prompt; language stacks do not."""
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep import prompts as _prompts
-    from daydream.phases import phase_per_stack_reviews as _phase
 
     structural_calls: list[dict[str, Any]] = []
     per_stack_calls: list[dict[str, Any]] = []
@@ -293,7 +293,6 @@ async def test_per_stack_prompts_are_skill_free(
     tmp_path: Path, make_work: Callable[..., WorkContext]
 ) -> None:
     """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
-    from daydream.config import STRUCTURE_STACK_NAME
 
     backend = ScriptedBackend(events=_REVIEW_TURN)
     diff, intent, alts = _mk_context_files(tmp_path)
@@ -411,8 +410,6 @@ async def test_fanout_low_concurrency(
 
 def test_shards_carry_scope_not_skill() -> None:
     """M2: shards inherit stack name / files / frontier, never a skill field."""
-    from daydream.deep import sharding
-    from daydream.deep.detection import detect_stacks
 
     files = ["a.py", "b.py", "c.py", "d.py"]
     stacks = detect_stacks(files)

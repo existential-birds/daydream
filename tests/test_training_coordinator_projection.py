@@ -22,6 +22,7 @@ from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.gate import _split_digest
 from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks import load_v2_projection
+from tests.fixtures.training.build_projection_50 import build_projection_50
 
 SALT = "issue-1081-coordinator-salt"
 HOLDOUT_RATE = 0.2
@@ -306,7 +307,6 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     Stage-2 rows are replayable through ``run_rft`` with no fixture
     post-processing.
     """
-    from tests.fixtures.training.build_projection_50 import build_projection_50
 
     proj_dir = build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)

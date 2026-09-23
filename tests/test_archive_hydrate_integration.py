@@ -14,6 +14,8 @@ import pytest
 
 from daydream.archive import hydrate, hydrate_rules, license_enrich
 from daydream.archive.hydrate_client import FakeHub
+from daydream.archive.index import query_runs
+from daydream.archive.license_enrich import _PUBLISHED_CACHE_NAME
 from tests.fixtures.training.build_hub_snapshot import (
     PINNED_POLICY_FIXTURE,
     PINNED_REVISION,
@@ -73,7 +75,6 @@ def _config(stage: Path, policy_dir: Path | None = None) -> hydrate.HydrateHubCo
 
 
 def _index_rows(stage: Path) -> list[dict[str, object]]:
-    from daydream.archive.index import query_runs
 
     return [
         {k: v for k, v in row.items() if k not in _VOLATILE_ROW_KEYS}
@@ -87,7 +88,6 @@ class TestCleanImport:
         summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
         assert summary.verified
         # M1: the hydrated staging archive is harvest-discoverable from disk alone.
-        from daydream.archive.index import query_runs
 
         assert len(query_runs(stage)) == 3
         assert summary.dry_run_discovered == 3
@@ -130,7 +130,6 @@ class TestInterruptionResume:
         assert state.completed_sessions is not None
         summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
         assert summary.verified
-        from daydream.archive.index import query_runs
 
         assert len(query_runs(stage)) == 3  # no duplicate sessions after resume
 
@@ -158,7 +157,6 @@ class TestInterruptionResume:
         # complete the run instead of refusing the prefix as legacy.
         summary = hydrate.run_hydrate_hub(_config(tmp_path / "resume"), client=hub)
         assert summary.verified
-        from daydream.archive.index import query_runs
 
         assert len(query_runs(tmp_path / "resume")) == 3  # no duplicate sessions
 
@@ -172,7 +170,6 @@ class TestCollision:
         staged = stage / "downloads" / REVISION / "bundles" / "sess-a" / "manifest.json"
         staged.unlink()
         rerun = hydrate.run_hydrate_hub(_config(stage), client=hub)  # collision is reported, not silent
-        from daydream.archive.index import query_runs
 
         rows = [r for r in query_runs(stage) if r["session_id"] == "sess-a"]
         assert len(rows) == 1  # original intact
@@ -217,7 +214,6 @@ class _PinnedResolver:
         self.queried: list[str] = []
 
     def resolve(self, repo_slug: str, repo_commit: str | None):  # type: ignore[no-untyped-def]
-        from daydream.archive import license_enrich
 
         self.queried.append(repo_slug)
         evidence = self.results.get(repo_slug)
@@ -245,7 +241,6 @@ class _ReplayResolver:
         self.served: list[str] = []
 
     def resolve(self, repo_slug: str, repo_commit: str | None):  # type: ignore[no-untyped-def]
-        from daydream.archive import license_enrich
 
         entry = self.by_slug.get(repo_slug)
         assert entry is not None, (
@@ -263,7 +258,6 @@ class _ReplayResolver:
 
 
 def _pinned_resolver() -> _PinnedResolver:
-    from daydream.archive import license_enrich
 
     commit = "d" * 40
     return _PinnedResolver({
@@ -291,7 +285,6 @@ def run_pinned_fixture_hydration(
     ``resolver`` (default: the canned pinned resolver) is injected through the
     production ``_make_license_resolver`` seam.
     """
-    from daydream.archive import license_enrich
 
     hub = hub if hub is not None else build_pinned_snapshot()
     resolver = resolver if resolver is not None else _pinned_resolver()
@@ -342,7 +335,6 @@ class TestPinnedArchiveFixture:
         # Fresh-VM replay: identical decisions and identity from the published
         # cache + pinned inputs — the replay resolver reads the published
         # license-evidence.jsonl and is never re-queried against a live source.
-        from daydream.archive.license_enrich import _PUBLISHED_CACHE_NAME
 
         published_key = f"curated/{summary.curation_id}/{_PUBLISHED_CACHE_NAME}"
         assert published_key in hub.files  # published under the v2 prefix

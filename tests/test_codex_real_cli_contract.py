@@ -51,7 +51,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend
-from tests.harness.codex_replay import FIXTURES_DIR, make_mock_process_from_fixture
+from tests.harness.codex_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 
 REAL_GOLDEN = "real/golden.jsonl"
 REAL_GENERIC_TOOL_FAILURE = "real/generic-tool-failure.jsonl"
@@ -464,7 +464,6 @@ async def test_codex_live_smoke() -> None:
 
     # Feed the live lines through the parser and assert a non-empty stream.
     backend = CodexBackend(model="live-smoke-model")
-    from tests.harness.codex_replay import make_mock_process
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process(lines)):
         events: list[Any] = []

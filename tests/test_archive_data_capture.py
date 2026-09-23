@@ -24,11 +24,16 @@ from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from rich.console import Console
 
-from daydream import git_ops
+from daydream import artifact_visibility, git_ops
+from daydream.archive import finalize_archive_run
+from daydream.archive.index import query_runs
+from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactTreeSnapshot, manifest_tree
 from daydream.backends import (
     AgentEvent,
     DiagnosticEvent,
@@ -37,8 +42,16 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.backends.codex import CodexBackend
+from daydream.eval.analyzer import analyze_session
+from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.review_budget import ReviewLimits
+from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities
 from daydream.runner import RunConfig, run
+from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
+from daydream.trajectory import DaydreamRunFlow, RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
 from tests.harness.backend import ScriptedBackend
+from tests.harness.codex_replay import make_mock_process
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
@@ -132,7 +145,6 @@ def _install_deep_capture_backend(
 
 
 async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     before = kwargs["capture_tree_key"]()
     (target / "heal_edit.py").write_text("def healed():\n    pass\n")
@@ -481,12 +493,6 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     eval_path = run_dir / "evaluation.json"
     eval_path.unlink(missing_ok=True)
 
-    from daydream.eval.analyzer import analyze_session
-    from daydream.trajectory import (
-        RunWriteSnapshot,
-        TrajectoryDocumentSnapshot,
-        snapshot_trajectories,
-    )
 
     snapshot = RunWriteSnapshot(
         status="complete",
@@ -649,7 +655,6 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     bundle: review published, archive installed, dump copied, exit 0 (#981's
     "preserving the local run").
     """
-    from daydream.archive.index import query_runs
 
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
     _commit_scanned_file(
@@ -714,7 +719,6 @@ async def test_dump_artifacts_refuses_token_canary_in_diff(
     row, exit 1 — and the console now names the file and rule that refused,
     without echoing the credential.
     """
-    from daydream.archive.index import query_runs
 
     canary = "ghp_canaryfake123"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -757,7 +761,6 @@ async def test_dump_artifacts_refuses_multiline_pem_in_diff(
     canary on purpose: a bundle carrying both blocks on the canary alone, so a
     combined test passes with the multi-line pass unimplemented.
     """
-    from daydream.archive.index import query_runs
 
     canary = "MIIFAKEKEYMATERIALFORTESTSONLY"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -803,7 +806,6 @@ async def test_dump_refusal_reports_the_archive_error_when_the_rollback_also_fai
     destination now restorable this branch is no longer on the ordinary refusal
     path, so the rollback is forced to fail to keep the report proven.
     """
-    from daydream import artifact_visibility
 
     canary = "ghp_canaryfake123"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -868,7 +870,6 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
     """
 
     def responder(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> list[AgentEvent]:
-        from daydream.backends import ResultEvent, TextEvent
 
         pl = prompt.lower()
         # Native review prompts are skill-free (#886): dispatch on distinctive
@@ -1046,7 +1047,6 @@ def test_fix_applied_signal_selects_patch_and_verdict(
     expected_hunks_total: int,
     expected_hunks_applied: int | None,
 ) -> None:
-    from daydream.training.labeler_signals import fix_applied_signal
 
     added_lines = {"diff.patch": "reviewed = 2", "recommended.patch": "recommended = 1"}
     for name in patches:
@@ -1085,7 +1085,6 @@ def test_local_commit_applied_signal_uses_recommended_patch(
     file_contents: str,
     expected_verdict: str,
 ) -> None:
-    from daydream.training.labeler_signals import local_commit_applied_signal
 
     (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
@@ -1270,7 +1269,6 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     archive_dir: Path,
 ) -> None:
     """runner.run -> archive -> evaluation preserves all unsafe evidence."""
-    from daydream.review_budget import ReviewLimits
 
     # This telemetry fixture deliberately needs 326 events to keep its write
     # ratio below 5%. Give that fixture sufficient investigation allowance;
@@ -1377,10 +1375,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     archive_dir: Path,
 ) -> None:
     """Replay CLI drift through the real parser, log-mode runner, and archive."""
-    from unittest.mock import patch
 
-    from daydream.backends.codex import CodexBackend
-    from tests.harness.codex_replay import make_mock_process
 
     class MalformedToolBackend(StubBackend):
         async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -1794,24 +1789,6 @@ def _finalize_minimal_run(
     Only the backend seam is absent here by construction: the reducer reads the
     frozen phase events and the strict finalizer emits the manifest.
     """
-    from daydream.archive import finalize_archive_run
-    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        manifest_tree,
-    )
-    from daydream.run_snapshot import (
-        ArchiveRunSnapshot,
-        ManifestRunIdentity,
-        RunPhaseCapabilities,
-    )
-    from daydream.runner import RunConfig
-    from daydream.trajectory import (
-        DaydreamRunFlow,
-        RunWriteSnapshot,
-        TrajectoryDocumentSnapshot,
-    )
 
     target = tmp_path / f"target-{session_id}"
     target.mkdir()

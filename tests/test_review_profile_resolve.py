@@ -4,12 +4,18 @@ Precedence: explicit_path > DAYDREAM_REVIEW_PROFILE env > repo-committed
 file_config.review_profile > packaged default. Invalid higher-precedence
 sources fail naming their source, never falling through.
 """
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream import review_profile as rp
+from daydream.config_file import DaydreamFileConfig
+from daydream.runner import RunConfig
 
 
 def _write_profile(tmp_path: Path, name: Any, content: Any) -> Any:
@@ -26,7 +32,6 @@ def test_precedence_explicit_beats_env_beats_repo_beats_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.config_file import DaydreamFileConfig
     explicit = _write_profile(tmp_path, "explicit", "E")
     user = _write_profile(tmp_path, "user", "U")
     repo = _write_profile(tmp_path, "repo", "R")
@@ -37,7 +42,6 @@ def test_precedence_explicit_beats_env_beats_repo_beats_default(
 
 
 def test_env_beats_repo_and_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.config_file import DaydreamFileConfig
     user = _write_profile(tmp_path, "user", "U")
     repo = _write_profile(tmp_path, "repo", "R")
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE", str(user))
@@ -47,7 +51,6 @@ def test_env_beats_repo_and_default(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_repo_beats_default(tmp_path: Path) -> None:
-    from daydream.config_file import DaydreamFileConfig
     repo = _write_profile(tmp_path, "repo", "R")
     # A repo-committed path is confined beneath the repo root, so the repo root
     # must be supplied (as the resolver does for a real target): an absolute path
@@ -58,7 +61,6 @@ def test_repo_beats_default(tmp_path: Path) -> None:
 
 
 def test_absolute_repo_path_cannot_escape(tmp_path: Path) -> None:
-    from daydream.config_file import DaydreamFileConfig
     # The untrusted repo's committed value points outside its own root (the
     # host file is read into the profile's strategy text if allowed to resolve).
     fc = DaydreamFileConfig(review_profile=Path("/etc/host-marker.toml"))
@@ -73,7 +75,6 @@ def test_default_when_nothing_specified() -> None:
 
 
 def test_relative_repo_path_cannot_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.config_file import DaydreamFileConfig
     fc = DaydreamFileConfig(review_profile=Path("../evil.toml"))   # relative repo path
     with pytest.raises(rp.ProfileError) as e:
         rp.resolve_profile(file_config=fc, repo_root=tmp_path)
@@ -89,7 +90,6 @@ def test_invalid_explicit_fails_naming_source(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.runner import RunConfig
     p = tmp_path / "prof.toml"
     p.write_text('schema_version = 1\nname = "r"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     cfg = RunConfig(target=str(tmp_path), review_profile_path=str(p))
@@ -97,18 +97,11 @@ def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path, monkeypa
 
 
 def test_resolve_from_runconfig_happens_once_at_composition_root() -> None:
-    from daydream import review_profile as rp
-    from daydream.runner import RunConfig
     cfg = RunConfig(target="/tmp")
     resolved = rp.resolve_from_runconfig(cfg)     # seam: composition root resolves once
     assert resolved.profile.name and resolved.source_kind == "default"
 
 def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import os
-    import re
-    import subprocess
-    import sys
-    from pathlib import Path
 
     # A real git target so the run gets past workspace open and actually
     # reaches dispatch (the profile-resolution seam fires inside the deep

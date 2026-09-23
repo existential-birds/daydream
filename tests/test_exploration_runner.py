@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any, cast
 import anyio
 import pytest
 
+import daydream.exploration_runner as er
+import daydream.exploration_runner as exploration_runner
 from daydream import review_profile as rp
 from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext, FileInfo
@@ -19,6 +22,7 @@ from daydream.exploration_runner import (
     repo_scan,
     select_tier,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
     PATTERN_SCANNER_SCHEMA,
@@ -374,7 +378,6 @@ def test_parallel_tier_separates_changed_targets_from_known_context(
 
 @pytest.mark.parametrize("oversized", [False, True])
 def test_pre_scan_supplies_small_diff_without_requiring_bash(tmp_path: Path, oversized: bool) -> None:
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     if oversized:
@@ -395,7 +398,6 @@ def test_pre_scan_supplies_small_diff_without_requiring_bash(tmp_path: Path, ove
 
 
 def test_large_diff_overview_preserves_small_edits_after_large_additions() -> None:
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     large = "diff --git a/workflow.yml b/workflow.yml\n--- /dev/null\n+++ b/workflow.yml\n@@ -0,0 +1,500 @@\n"
     large += "+" + "workflow step " * 30 + "\n"
@@ -433,7 +435,6 @@ def test_test_mapper_moves_modified_tests_to_context(cwd: Path) -> None:
 
 
 def test_change_overview_byte_limit_handles_many_long_unicode_paths() -> None:
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     diff = "".join(
         f"diff --git a/{'界' * 100}/{i}.py b/{'界' * 100}/{i}.py\n"
@@ -652,7 +653,6 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-scan timeout is terminal evidence and retains only completed refs."""
-    import daydream.exploration_runner as exploration_runner
 
     async def _never_yield() -> AsyncIterator[AgentEvent]:
         await anyio.sleep_forever()
@@ -786,7 +786,6 @@ def test_exploration_prompts_mark_repository_content_untrusted(builder: Any, mar
 
 
 def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.exploration_runner as er
 
     monkeypatch.setattr(
         er,
@@ -806,7 +805,6 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: 
 
 def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fallback seeding is rename-aware: a renamed file seeds its new path, not the old one."""
-    import daydream.exploration_runner as er
 
     # Force the fallback path with a genuine static-analysis failure.
     def analyzer_failure(diff_text: str, repo_root: Path) -> list[FileInfo]:
@@ -835,9 +833,7 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pyt
 
 
 def test_pre_scan_threads_profile_strategy(tmp_path: Path) -> None:
-    import inspect
 
-    import daydream.exploration_runner as er
 
     p = rp.build_default_profile()
     strategies = {

@@ -4,12 +4,14 @@ import json
 
 import pytest
 
+from daydream.training import labeler_versions
 from daydream.training.adjudication.snapshot import (
     ANNOTATION_SNAPSHOT_SCHEMA_VERSION,
     build_canonical_record,
     record_evidence_digest,
     snapshot_id,
 )
+from daydream.training.corpus_projection.identity import record_id
 from daydream.training.harvest import _reply_evidence_digest  # session-level twin
 from daydream.training.harvest_types import HarvestEvidence
 from daydream.training.labeler_signals import (
@@ -105,14 +107,12 @@ def test_build_canonical_record_pins_identity_and_provenance() -> None:
         session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00"
     )
     # identity via corpus_projection.identity.record_id — recompute and compare, never trust a stored copy
-    from daydream.training.corpus_projection.identity import record_id
 
     assert record["record_id"] == record_id("s1", "s1-t", "s1-seg", "fp-1")
     assert record["evidence_digest"] == "d" * 32
     assert record["disposition"] == "unanswered"
     assert record["profile"]["profile_name"] == "pr_review"
     assert record["stack"] == "python"
-    from daydream.training import labeler_versions
 
     assert record["classifier_version"] == labeler_versions.REPLY_CLASSIFIER_VERSION
     assert ANNOTATION_SNAPSHOT_SCHEMA_VERSION in record["schema_version"]
@@ -154,7 +154,6 @@ def test_record_evidence_digest_matches_harvest_row_digest() -> None:
     ev_a = [{"reply_id": 1, "body_sha256": "aaa"}]
     ev_b = [{"reply_id": 2, "body_sha256": "bbb"}]
 
-    from daydream.training.adjudication.snapshot import record_evidence_digest
 
     shared = record_evidence_digest([ev_a, ev_b])
     # the harvest twin flattens PerFindingResolution evidence in recorded order

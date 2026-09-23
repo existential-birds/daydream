@@ -9,7 +9,17 @@ import pytest
 
 from daydream.agent import run_agent
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
-from daydream.review_budget import ReviewLimits, review_deadline_scope, review_limits_for_scope, review_scale_for_diff
+from daydream.deep.prompts import build_merge_prompt, build_per_stack_prompt
+from daydream.prompt_budget import SanctionedInputUnavailable, inline_context_file, prepare_sanctioned_inputs
+from daydream.review_budget import (
+    ReviewLimits,
+    review_deadline,
+    review_deadline_scope,
+    review_limits_for_scope,
+    review_scale_for_diff,
+    review_scale_for_scope,
+)
+from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -31,7 +41,6 @@ def test_large_diff_expands_review_allowances_without_changing_small_reviews() -
     assert review_scale_for_diff("x" * (64 * 1024 + 1)) == 2
 
     with review_deadline_scope(2700, diff=large, scale_deadline=True):
-        from daydream.review_budget import review_scale_for_scope
 
         assert review_scale_for_scope() == 4
         limits = review_limits_for_scope(ReviewLimits())
@@ -45,7 +54,6 @@ def test_explicit_review_deadline_remains_exact_for_large_diff(monkeypatch: pyte
     clock = FakeClock().install(monkeypatch)
     large = "+line\n" * 6_500
     with review_deadline_scope(15, diff=large, scale_deadline=False):
-        from daydream.review_budget import review_deadline
 
         assert review_deadline(discovery=False) == clock.monotonic() + 15
 
@@ -74,7 +82,6 @@ async def test_large_review_can_complete_after_old_time_and_tool_caps(
 
 
 def test_review_prompts_reuse_small_context_and_request_only_json(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_per_stack_prompt
 
     intent = tmp_path / "intent.md"
     intent.write_text("Preserve empty-batch semantics.")
@@ -230,7 +237,6 @@ async def test_hung_finalizer_is_bounded_without_canceling_sibling(tmp_path: Pat
 
 
 def test_inline_context_falls_back_without_truncating_large_or_invalid_artifacts(tmp_path: Path) -> None:
-    from daydream.prompt_budget import inline_context_file
 
     artifact = tmp_path / "context.md"
     artifact.write_text("é" * 2049)
@@ -286,7 +292,6 @@ async def test_retry_discards_failed_attempt_checkpoint_and_evidence(tmp_path: P
 
 
 async def test_finalization_revalidates_inputs_and_propagates_capture_failure(tmp_path: Path) -> None:
-    from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
 
     artifact = tmp_path / "intent.md"
     artifact.write_text("captured")
@@ -306,7 +311,6 @@ async def test_finalization_revalidates_inputs_and_propagates_capture_failure(tm
 
 
 def test_merge_prompt_retains_validated_records_from_incomplete_stacks(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_merge_prompt
 
     prompt = build_merge_prompt(
         strategy="Merge provided findings.", per_stack_records_paths=[tmp_path / "stack-python-records.json"],
@@ -318,7 +322,6 @@ def test_merge_prompt_retains_validated_records_from_incomplete_stacks(tmp_path:
 
 
 async def test_pre_rendered_inputs_become_captured_bytes_during_finalization(tmp_path: Path) -> None:
-    from daydream.prompt_budget import prepare_sanctioned_inputs
 
     artifact = tmp_path / "intent.md"
     artifact.write_text("captured")
@@ -344,7 +347,6 @@ async def test_pre_rendered_inputs_become_captured_bytes_during_finalization(tmp
 async def test_finalization_contract_excludes_discovery_and_supports_output_kinds(
     tmp_path: Path, schema: dict[str, Any] | None,
 ) -> None:
-    from daydream.review_evidence import FinalizationContext
 
     backend = ScriptedBackend(script=[
         [TextEvent(text="SPECULATIVE_NOTE"), ToolStartEvent(id="extra", name="read", input={})],
@@ -402,7 +404,6 @@ async def test_displayed_allowance_is_clamped_to_absolute_deadline(
 
 
 def test_evidence_retention_is_bounded_deduplicated_and_preserves_associations() -> None:
-    from daydream.review_evidence import FinalizationContext, ReviewEvidence
 
     evidence = ReviewEvidence(SCHEMA)
     for n in range(500):
@@ -427,7 +428,6 @@ def test_evidence_retention_is_bounded_deduplicated_and_preserves_associations()
 
 
 def test_exact_path_finalization_capture_is_bounded_and_rejects_changed_identity(tmp_path: Path) -> None:
-    from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
 
     diff = tmp_path / "diff.patch"
     diff.write_text("DIFF_BYTES\n" + "é" * 16000)
@@ -487,7 +487,6 @@ async def test_finalization_control_is_invocation_local_with_shared_backend(tmp_
 
 
 def test_finalization_preserves_native_tool_failure_and_truncation_metadata() -> None:
-    from daydream.review_evidence import FinalizationContext, ReviewEvidence
 
     evidence = ReviewEvidence(SCHEMA)
     evidence.observe(ToolStartEvent(id="read", name="read", input={"path": "src.py"}))
@@ -504,7 +503,6 @@ def test_finalization_preserves_native_tool_failure_and_truncation_metadata() ->
 
 
 def test_explicit_capture_priority_retains_task_inputs_before_large_advisories(tmp_path: Path) -> None:
-    from daydream.prompt_budget import prepare_sanctioned_inputs
 
     paths = {}
     for label, text in {
