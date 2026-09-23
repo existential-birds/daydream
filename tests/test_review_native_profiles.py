@@ -2,11 +2,20 @@
 from pathlib import Path
 
 from daydream import review_profile as rp
+from daydream.deep.coverage import build_uncovered_sweep_prompt
+from daydream.deep.prompts import (
+    build_arbiter_prompt,
+    build_generic_fallback_prompt,
+    build_merge_prompt,
+    build_supervise_prompt,
+    build_suppression_prompt,
+    build_verification_prompt,
+)
+from daydream.phases import build_alternative_review_prompt, build_intent_prompt
 from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 def test_golden_baseline_generic_fallback() -> None:
-    from daydream.deep.prompts import build_generic_fallback_prompt
     p = build_generic_fallback_prompt(
         strategy=_default_strategy("discovery.generic_fallback"),
         files=["a.js"], diff_path=Path("/d"), intent_path=Path("/i"),
@@ -19,7 +28,6 @@ def test_golden_baseline_generic_fallback() -> None:
 
 
 def test_golden_baseline_arbiter_and_merge() -> None:
-    from daydream.deep.prompts import build_arbiter_prompt, build_merge_prompt
     a = build_arbiter_prompt(strategy=_default_strategy("arbitration"),
                              arbiter_input_path=Path("/in"), diff_path=Path("/d"),
                              intent_path=Path("/i"), alternatives_path=Path("/a"),
@@ -61,13 +69,6 @@ def test_structural_strategy_owns_folded_design_review() -> None:
 
 
 def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None:
-    from daydream.deep.coverage import build_uncovered_sweep_prompt
-    from daydream.deep.prompts import (
-        build_supervise_prompt,
-        build_suppression_prompt,
-        build_verification_prompt,
-    )
-    from daydream.phases import build_alternative_review_prompt, build_intent_prompt
     sv = build_supervise_prompt(
         strategy="supervise-strategy-sentinel {supervise_input_path}",
         supervise_input_path=Path("/supervise-input.json"),

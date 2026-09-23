@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
+from daydream.improve import orchestrator as orch
 from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
@@ -461,8 +462,6 @@ def test_host_enumeration_does_not_dedup_different_directory(
 ) -> None:
     """Discriminating: a genuinely different directory is NOT collapsed —
     normalization must not widen dedup to 'same command anywhere'."""
-    from daydream.improve import orchestrator as orch
-
     host_record = {
         "id": "make-check",
         "command": "make check",

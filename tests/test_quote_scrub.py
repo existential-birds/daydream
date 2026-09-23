@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any
 
@@ -122,8 +123,6 @@ def test_scrub_driver_atomic_write_leaves_original_intact_on_failure(
 ) -> None:
     """A mid-write failure must not truncate the source file: the original
     bytes survive and no temp files are left behind (finding 3)."""
-    import os
-
     src = tmp_path / "main.go"
     src.write_text("// not \u201d\n", encoding="utf-8")
 

@@ -11,7 +11,12 @@ from typing import cast
 import anyio
 import pytest
 
+from daydream import remote_ci
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.config_file import DaydreamFileConfig
+from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
+from daydream.deep.settings import _resolve_opt_in
+from daydream.runner import RunConfig, run
 from tests.deep_orchestrator.support import (
     _batched_group_size,
     _install_accept_gate_pipeline,
@@ -24,6 +29,7 @@ from tests.deep_orchestrator.support import (
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.remote_ci import NoCIRemote
+from tests.harness.review_profile import independent_alternatives_profile
 from tests.test_deep_orchestrator import (
     _CONFIDENCE_KNOB_STACKS,
     _PRECISION_STACKS,
@@ -129,9 +135,6 @@ def test_approve_on_clean_resolves_from_file_config() -> None:
     """#343 file-config tier: with NO CLI flag but ``approve_on_clean = true`` in
     the repo config, the opt-in resolver returns True; with no opt-in anywhere
     it stays False (default off)."""
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.settings import _resolve_opt_in
-    from daydream.runner import RunConfig
 
     file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(approve_on_clean=True))
     assert _resolve_opt_in(file_only, "approve_on_clean") is True
@@ -142,9 +145,6 @@ def test_approve_on_clean_resolves_from_file_config() -> None:
 
 def test_scope_issue_filing_resolves_precedence() -> None:
     """#1056 precedence: CLI tier over file config over built-in default False."""
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.settings import _resolve_opt_in
-    from daydream.runner import RunConfig
 
     cli = RunConfig(target="/t", scope_issue_filing=True)
     assert _resolve_opt_in(cli, "scope_issue_filing") is True
@@ -217,7 +217,6 @@ async def test_run_terminates_under_fix_turn_budget(
     stop_reason: str,
 ) -> None:
     """A runaway fix records the specific tool-call or wall-clock budget that stopped it."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.phases." + budget_attr, budget_value)
@@ -242,8 +241,6 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     no_ci_remote: NoCIRemote,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget."""
-    from daydream import remote_ci
-    from daydream.runner import run
 
     _silence(monkeypatch)
     # Lower the group serial-item ceiling at the binding the orchestrator resolves
@@ -316,7 +313,6 @@ async def test_run_leaves_small_file_group_unbudgeted(
     mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: under a high ceiling the group budget is purely additive."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 20)
@@ -346,7 +342,6 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: a batched turn's OWN wall trip carries into the fallback."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     # Tiny per-invocation wall so the batched turn (scaled to N * 0.3s) trips after
@@ -409,8 +404,6 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
 ) -> None:
     """#202 real-path: N findings on ONE file collapse to a single FIX run_agent turn."""
 
-    from daydream.runner import run
-
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -459,8 +452,6 @@ async def test_environmental_failure_aborts_heal_loop(
 
     # phase_test_and_heal stays REAL so the environmental short-circuit runs.
     mute_side_effects(heal=False)
-
-    from daydream.runner import run
 
     traj = tmp_path / "trajectory.json"
     exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
@@ -575,8 +566,6 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     mute_side_effects(heal=False)
     _add_bare_remote(multi_stack_target)
 
-    from daydream.runner import run
-
     trajectory_path = (
         tmp_path / "external trajectory.json"
         if trajectory_mode == "external"
@@ -658,8 +647,6 @@ async def test_alternatives_phase_follows_diff_size(
     alternatives_run: bool,
 ) -> None:
     """Independent wonder remains tiered; the default shares structural review."""
-    from daydream.runner import run
-    from tests.harness.review_profile import independent_alternatives_profile
 
     target = cast(Path, request.getfixturevalue(target_fixture))
     stub = _install_accept_gate_pipeline(monkeypatch, target, mute_side_effects)
@@ -695,12 +682,6 @@ async def test_alternatives_phase_follows_diff_size(
 
 def test_shallow_fanout_threshold_precedence() -> None:
     """AC7: SHALLOW_FANOUT_THRESHOLD honors CLI (RunConfig) > config file > default."""
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.deep.orchestrator import (
-        DEFAULT_SHALLOW_FANOUT_THRESHOLD,
-        _shallow_fanout_threshold,
-    )
-    from daydream.runner import RunConfig
 
     # Default: no CLI field, no file_config.
     assert _shallow_fanout_threshold(RunConfig()) == DEFAULT_SHALLOW_FANOUT_THRESHOLD

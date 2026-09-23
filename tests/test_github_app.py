@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import git_ops, github_app
 from daydream.github_app import (
@@ -335,10 +338,6 @@ def test_session_dtos_hide_and_ignore_execution_credentials() -> None:
 
 
 def test_mint_jwt_is_rs256_with_expected_claims() -> None:
-    import jwt as pyjwt
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = key.private_bytes(
         serialization.Encoding.PEM,
@@ -372,8 +371,6 @@ def test_build_app_jwt_auth_uses_static_sanitized_environment() -> None:
 
 
 def _real_pem() -> str:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     return key.private_bytes(
         serialization.Encoding.PEM,
