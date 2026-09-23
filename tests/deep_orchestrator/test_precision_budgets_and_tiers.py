@@ -208,31 +208,6 @@ def test_opt_in_tiers_resolve_cli_then_file(
     assert _resolve_opt_in(RunConfig(**run_kwargs), flag) is expected
 
 
-def test_approve_on_clean_resolves_from_file_config() -> None:
-    """#343 file-config tier: with NO CLI flag but ``approve_on_clean = true`` in
-    the repo config, the opt-in resolver returns True; with no opt-in anywhere
-    it stays False (default off)."""
-
-    file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(approve_on_clean=True))
-    assert _resolve_opt_in(file_only, "approve_on_clean") is True
-
-    unset = RunConfig(target="/t")
-    assert _resolve_opt_in(unset, "approve_on_clean") is False
-
-
-def test_scope_issue_filing_resolves_precedence() -> None:
-    """#1056 precedence: CLI tier over file config over built-in default False."""
-
-    cli = RunConfig(target="/t", scope_issue_filing=True)
-    assert _resolve_opt_in(cli, "scope_issue_filing") is True
-
-    file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(scope_issue_filing=True))
-    assert _resolve_opt_in(file_only, "scope_issue_filing") is True
-
-    unset = RunConfig(target="/t")
-    assert _resolve_opt_in(unset, "scope_issue_filing") is False
-
-
 async def test_merge_resume_reruns_arbiter_when_marker_absent(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
