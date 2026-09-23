@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from daydream.runner import run
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import install_stub_backend
 
@@ -79,7 +80,6 @@ async def _drive_canary(
     drives a single deep run at the locked sharding bounds, and returns the
     ``.daydream/deep`` output dir against which both tests assert.
     """
-    from daydream.runner import run
 
     stub = install_stub_backend(monkeypatch, target)
     stub.per_stack_emit_reads = True

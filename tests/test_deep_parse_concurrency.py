@@ -14,12 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from daydream.runner import RunConfig
+from daydream.runner import RunConfig, run
 from tests.harness.stub_backend import install_stub_backend
 
 
 async def _run_deep(target: Path) -> int:
-    from daydream.runner import RunConfig, run
 
     return await run(RunConfig(target=str(target), cleanup=False))
 
@@ -31,7 +30,6 @@ async def test_shard_names_flow_through_parse_and_sort_deterministically(
 ) -> None:
     """Issue #731 (P2): synthetic ``#`` shard names ride artifact paths and the
     sorted parse/merge ordering deterministically."""
-    from daydream.runner import run
 
     install_stub_backend(monkeypatch, shard_many_python_target)
     deep = shard_many_python_target / ".daydream" / "deep"

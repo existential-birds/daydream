@@ -2,10 +2,17 @@
 
 from pathlib import Path
 
+from daydream.prompt_budget import (
+    INLINE_DIFF_BUDGET_BYTES,
+    PreparedSanctionedInput,
+    PreparedSanctionedInputs,
+    SanctionedInputTransport,
+    fits_inline_diff_budget,
+)
+
 
 def test_inline_diff_budget_uses_utf8_bytes() -> None:
     """The shared policy accepts its boundary and rejects oversized text."""
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 
     assert fits_inline_diff_budget("x" * INLINE_DIFF_BUDGET_BYTES)
     assert not fits_inline_diff_budget("x" * (INLINE_DIFF_BUDGET_BYTES + 1))
@@ -13,7 +20,6 @@ def test_inline_diff_budget_uses_utf8_bytes() -> None:
 
 
 def test_exact_phase_artifacts_do_not_restrict_scoped_repository_reads(tmp_path: Path) -> None:
-    from daydream.prompt_budget import PreparedSanctionedInput, PreparedSanctionedInputs, SanctionedInputTransport
 
     artifact = tmp_path / "intent.md"
     inputs = PreparedSanctionedInputs(

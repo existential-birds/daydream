@@ -1,5 +1,6 @@
 """Owned tracing lifecycle and event reconciliation through real SDK spans."""
 
+import inspect
 import json
 import logging
 import threading
@@ -10,27 +11,39 @@ from typing import Any
 
 import anyio
 import pytest
-from opentelemetry import trace
+from opentelemetry import context as otel_context
+from opentelemetry import metrics, trace
+from opentelemetry import trace as otel_trace
+from opentelemetry._logs import get_logger_provider
+from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
+from opentelemetry.metrics import get_meter_provider
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, StatusCode, TraceFlags
 
+import daydream.observability.spans as spans_module
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
     CostEvent,
     DiagnosticEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
+    TextChoicePart,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.config_file import load_file_config
 from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
+from daydream.observability import runtime
 from daydream.observability.config import (
     ObservabilityConfig,
     ObservabilityError,
@@ -591,7 +604,6 @@ def _seed_ambient_openllmetry_context(
     managed_prompt: str,
 ) -> list[Any]:
     """Seed ambient Traceloop decorator context exactly as its producers do."""
-    from opentelemetry import context as otel_context
 
     api_key = "opaque-prompt-key"
     tokens: list[Any] = []
@@ -610,7 +622,6 @@ def _seed_ambient_openllmetry_context(
 
 
 def _reset_ambient_openllmetry_context(tokens: list[Any]) -> None:
-    from opentelemetry import context as otel_context
 
     for token in reversed(tokens):
         otel_context.detach(token)
@@ -700,8 +711,6 @@ async def test_nested_disabled_run_shields_children_from_ambient_context() -> No
 
 @pytest.mark.anyio
 async def test_ambient_context_restored_after_exception_and_cancellation() -> None:
-    from opentelemetry import context as otel_context
-    from opentelemetry import trace as otel_trace
 
     sentinel = "ambient-restore-secret-2277"
     ambient = otel_context.attach(otel_context.set_value("workflow_name", sentinel))
@@ -728,7 +737,6 @@ async def test_ambient_context_restored_after_exception_and_cancellation() -> No
 
 @pytest.mark.anyio
 async def test_concurrent_runs_with_distinct_ambient_context_are_isolated() -> None:
-    from opentelemetry import context as otel_context
 
     registry = Registry()
     exporters: list[InMemorySpanExporter] = []
@@ -961,7 +969,6 @@ async def test_otel_service_name_overrides_service_name_resource(
 def test_repository_daydream_toml_cannot_set_resources_or_endpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.config_file import load_file_config
 
     (tmp_path / ".daydream.toml").write_text(
         "[observability]\n"
@@ -982,9 +989,6 @@ def test_repository_daydream_toml_cannot_set_resources_or_endpoints(
 
 @pytest.mark.anyio
 async def test_owned_session_installs_no_global_signals_or_instrumentors() -> None:
-    from opentelemetry import metrics, trace
-    from opentelemetry._logs import get_logger_provider
-    from opentelemetry.metrics import get_meter_provider
 
     exporter, registry = _memory_tracing()
     provider_before = trace.get_tracer_provider()
@@ -1005,9 +1009,7 @@ async def test_owned_session_installs_no_global_signals_or_instrumentors() -> No
 
 
 def test_traceloop_default_helper_is_not_invoked() -> None:
-    import inspect
 
-    from daydream.observability import runtime
 
     source = "\n".join(
         line for line in inspect.getsource(runtime).splitlines() if not line.strip().startswith(("#", '"', "'"))
@@ -1026,7 +1028,6 @@ def test_traceloop_default_helper_is_not_invoked() -> None:
 async def test_resource_secret_values_never_reach_serialized_spans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 
     monkeypatch.setenv(
         "OTEL_RESOURCE_ATTRIBUTES",
@@ -1041,7 +1042,6 @@ async def test_resource_secret_values_never_reach_serialized_spans(
     readable = exporter.get_finished_spans()
     encoded = encode_spans(readable)
     assert b"opaque-resource-secret" not in bytes(str(encoded), "utf-8")
-    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
     wire = ExportTraceServiceRequest(resource_spans=encoded.resource_spans)
     assert b"opaque-resource-secret" not in wire.SerializeToString()
@@ -1052,7 +1052,6 @@ async def test_resource_secret_values_never_reach_serialized_spans(
 
 @pytest.mark.anyio
 async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> None:
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent, TextChoicePart
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
@@ -1106,7 +1105,6 @@ async def test_generation_span_carries_session_identity_and_aliases() -> None:
     carry the same session identity keys every other span records (readback
     gate evidence: generations were orphaned without them).
     """
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
@@ -1146,8 +1144,6 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
     gate evidence: HH replay children fell back to a run-id session).
     """
 
-    from daydream.observability import runtime
-    from daydream.observability.spans import agent_scope, attempt_scope, step_scope
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
@@ -1176,7 +1172,6 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
 async def test_generation_child_billed_only_when_ledger_owner_is_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent, TextChoicePart
 
     exporter, registry = _memory_tracing()
     fabricated = {
@@ -1203,7 +1198,6 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(
         (),
         {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
     )()
-    import daydream.observability.spans as spans_module
 
     monkeypatch.setattr(spans_module, "get_current_recorder", lambda: recorder)
 

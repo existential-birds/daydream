@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
-from daydream.archive import hub
+from daydream.archive import hub, scan
+from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.runner import RunConfig
 from tests.harness.config import write_target_hub_key
 
 
@@ -55,8 +57,6 @@ def test_resolve_hub_repo_prefers_cli_then_environment(
     env_repo: str | None,
     expected: str | None,
 ) -> None:
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import RunConfig
 
     if env_repo is None:
         monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
@@ -74,8 +74,6 @@ def test_target_file_config_never_selects_hub_destination(
 ) -> None:
     """A target pyproject.toml setting trajectory_hub_repo must resolve to None:
     the file-config tier is gone and contributes nothing."""
-    from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig
 
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     write_target_hub_key(tmp_path)
@@ -302,7 +300,6 @@ def test_upload_proceeds_for_advisory_only_bundle(
         ),
         encoding="utf-8",
     )
-    from daydream.archive import scan
 
     result = scan.scan_run_dir(hf_run_dir)
     assert result.clean is False and result.blocking is False  # advisory-only bundle
