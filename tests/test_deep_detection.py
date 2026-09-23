@@ -5,10 +5,20 @@ Covers ``daydream.deep.detection.detect_stacks`` and its routing contracts.
 from pathlib import Path
 from typing import Any
 
+from daydream.config import (
+    DEFAULT_DEEP_SHARD_MAX_BYTES,
+    DEFAULT_DEEP_SHARD_MAX_FILES,
+    STRUCTURE_STACK_NAME,
+)
+from daydream.deep.dependency import build_import_graph
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.deep.prompts import inline_grounded_files
+from daydream.deep.sharding import shard_stacks
+from daydream.extensions import Registry, StackRule
+
 
 def test_stack_assignment_has_no_skill_field() -> None:
     """M9: StackAssignment carries routing metadata only, never a skill invocation."""
-    from daydream.deep.detection import StackAssignment
 
     assignment = StackAssignment(stack_name="python", files=["a.py"])
     assert not hasattr(assignment, "skill_invocation")
@@ -16,7 +26,6 @@ def test_stack_assignment_has_no_skill_field() -> None:
 
 def test_extension_routing_python() -> None:
     """D-11: .py files route to python stack."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/main.py"])
     names = {a.stack_name for a in result}
@@ -26,7 +35,6 @@ def test_extension_routing_python() -> None:
 
 def test_extension_routing_react() -> None:
     """D-11: .tsx files route to react stack."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/App.tsx"])
     assert "react" in {a.stack_name for a in result}
@@ -34,7 +42,6 @@ def test_extension_routing_react() -> None:
 
 def test_ambiguous_single_stack_shortcut() -> None:
     """D-12: single stack in diff -> ambiguous files unconditionally join it."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/app.py", "migrations/001.sql"])
     python = next(a for a in result if a.stack_name == "python")
@@ -43,7 +50,6 @@ def test_ambiguous_single_stack_shortcut() -> None:
 
 def test_mixed_frontend_and_repository_infrastructure_routes_separately() -> None:
     """Shelfspace #2826's Node/CI changes must not inflate the React review."""
-    from daydream.deep.detection import detect_stacks
 
     frontend = [
         "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
@@ -63,8 +69,6 @@ def test_mixed_frontend_and_repository_infrastructure_routes_separately() -> Non
 
 
 def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> None:
-    from daydream.deep.detection import detect_stacks
-    from daydream.extensions import Registry, StackRule
 
     registry = Registry()
     registry.add_stack(StackRule("build", ("scripts/custom.cjs",)))
@@ -84,7 +88,6 @@ def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> Non
 
 def test_ambiguous_nearest_ancestor() -> None:
     """D-12: ambiguous file routes to nearest-ancestor unambiguous stack."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(
         ["backend/api/main.py", "backend/api/queries.sql", "frontend/App.tsx"],
@@ -95,7 +98,6 @@ def test_ambiguous_nearest_ancestor() -> None:
 
 def test_equal_depth_fallthrough() -> None:
     """D-12c: equal-depth ambiguity falls through to generic."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(
         ["main.py", "App.tsx", "shared.sql"],  # .sql has no unambiguous ancestor,
@@ -106,7 +108,6 @@ def test_equal_depth_fallthrough() -> None:
 
 def test_config_default_generic() -> None:
     """D-13a: .yaml / .toml route to generic by default."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["config.yaml"])
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
@@ -115,7 +116,6 @@ def test_config_default_generic() -> None:
 
 def test_config_promotion_pyproject() -> None:
     """D-13b: pyproject.toml + .py co-change -> python."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["pyproject.toml", "src/main.py"])
     python = next(a for a in result if a.stack_name == "python")
@@ -124,7 +124,6 @@ def test_config_promotion_pyproject() -> None:
 
 def test_no_static_promotion_without_cochange() -> None:
     """D-13c: static paths alone do not promote config to a stack."""
-    from daydream.deep.detection import detect_stacks
 
     # pyproject.toml alone (no .py in diff) stays generic
     result = detect_stacks(["pyproject.toml"])
@@ -134,7 +133,6 @@ def test_no_static_promotion_without_cochange() -> None:
 
 def test_md_pinned_to_generic() -> None:
     """D-14: .md files pinned to generic even when co-changed with code."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/main.py", "README.md"])
     generic = next(a for a in result if a.stack_name == "generic")
@@ -144,7 +142,6 @@ def test_md_pinned_to_generic() -> None:
 
 def test_no_files_dropped() -> None:
     """D-15: every file is routed somewhere."""
-    from daydream.deep.detection import detect_stacks
 
     files = ["src/main.py", "README.md", "config.yaml", "Dockerfile", "src/App.tsx"]
     result = detect_stacks(files)
@@ -154,7 +151,6 @@ def test_no_files_dropped() -> None:
 
 def test_detected_stack_never_degrades_to_generic() -> None:
     """M3: D-16 removed — a detected stack never degrades to generic without a skill."""
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/lib.rs"])
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
@@ -163,8 +159,6 @@ def test_detected_stack_never_degrades_to_generic() -> None:
 
 def test_structure_stack_emitted_for_code_diff() -> None:
     """Structure stack is present on any non-docs-only code diff (skill-free)."""
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/main.py", "src/util.py"])
     structure = next((a for a in result if a.stack_name == STRUCTURE_STACK_NAME), None)
@@ -175,8 +169,6 @@ def test_structure_stack_emitted_for_code_diff() -> None:
 
 def test_structure_stack_files_are_union_across_languages() -> None:
     """Structure stack sees every changed file regardless of language."""
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep.detection import detect_stacks
 
     files = ["api/main.py", "ui/App.tsx", "infra/Dockerfile"]
     result = detect_stacks(files)
@@ -186,8 +178,6 @@ def test_structure_stack_files_are_union_across_languages() -> None:
 
 def test_structure_stack_skipped_for_docs_only_diff() -> None:
     """Structural rubric does not apply when the entire diff is docs."""
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["README.md", "CHANGELOG.md"])
     assert all(a.stack_name != STRUCTURE_STACK_NAME for a in result)
@@ -195,7 +185,6 @@ def test_structure_stack_skipped_for_docs_only_diff() -> None:
 
 def test_structure_stack_skipped_for_empty_diff() -> None:
     """Empty changed_files yields no stacks at all, including structure."""
-    from daydream.deep.detection import detect_stacks
 
     assert detect_stacks([]) == []
 
@@ -204,8 +193,6 @@ def test_structure_stack_skipped_for_empty_diff() -> None:
 
 
 def test_shard_stacks_splits_oversized_stack_by_file_count() -> None:
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(
         stack_name="python",
@@ -221,9 +208,6 @@ def test_shard_stacks_splits_oversized_stack_by_file_count() -> None:
 
 
 def test_shard_stacks_never_splits_structure_meta_stack() -> None:
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     structure = StackAssignment(
         stack_name=STRUCTURE_STACK_NAME,
@@ -234,8 +218,6 @@ def test_shard_stacks_never_splits_structure_meta_stack() -> None:
 
 
 def test_shard_stacks_deterministic_names_and_assignments() -> None:
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(stack_name="python", files=[f"src/m{i}.py" for i in range(5)])
 
@@ -248,8 +230,6 @@ def test_shard_stacks_deterministic_names_and_assignments() -> None:
 
 
 def test_shard_stacks_under_bound_returns_original_unsplit() -> None:
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(stack_name="python", files=["a.py", "b.py"])
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
@@ -259,8 +239,6 @@ def test_shard_stacks_under_bound_returns_original_unsplit() -> None:
 def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
     """Issue #731: an oversized *byte* budget forces a split even when the file
     count is within ``max_files``; the union is still exact (no drop/dup)."""
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     # The split is forced by header-inclusive block sizing: each ``diff --git``
     # block here is ~64-69 bytes (headers + one hunk line) and any two of them
@@ -284,8 +262,6 @@ def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
 def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     """Issue #731: total review tasks (shards + unsplit non-structural stacks)
     never exceeds the fan-out cap; everything is still assigned exactly once."""
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     # Two oversized stacks would each yield 6 shards = 12 tasks; cap=4.
     py = StackAssignment(stack_name="python", files=[f"p{i}.py" for i in range(12)])
@@ -303,8 +279,6 @@ def test_shard_stacks_fanout_cap_single_shard_split_never_wastes_reduction() -> 
     oversized file -- never split mid-file) is unsplit-equivalent, keeps its
     original name, and never eats a cap-reduction; the cap still holds while
     a reducible sharded stack remains."""
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     # big.py's diff block exceeds max_bytes=100 but holds a single file, so it
     # packs into exactly one shard ("never split a file").
@@ -328,8 +302,6 @@ def test_shard_stacks_fanout_cap_irreducible_when_unsplit_stacks_outnumber_cap()
     """Issue #731 fix: when the unsplit non-structural stacks alone outnumber
     the cap, no shard exists to un-split and the total necessarily exceeds it
     (files are never dropped or merged); every stack is still assigned once."""
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     stacks = [
         StackAssignment(stack_name=f"s{i}", files=[f"f{i}.py"])
@@ -349,11 +321,7 @@ def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path: Path) -> No
     order -- without graph-driven co-location the sorted-singleton fallback
     packs [a,b]/[c,d] and this assertion fails, so dropping co-location is
     caught."""
-    from pathlib import Path
 
-    from daydream.deep.dependency import build_import_graph
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     # d.py imports a.py (a resolvable edge). 4 files / max_files=2 forces the
     # shard; the {a,d} component fits one shard so d.py stays co-located with
@@ -375,8 +343,6 @@ def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path: Path) -> No
 def test_shard_stacks_fail_open_without_graph() -> None:
     """Issue #731: an empty/missing graph never drops a file; each file gets
     exactly one assignment (deterministic sorted-singleton packing)."""
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(stack_name="python",
                             files=[f"m{i}.py" for i in range(5)])
@@ -390,11 +356,7 @@ def test_shard_stacks_fail_open_without_graph() -> None:
 def test_shard_stacks_populates_bounded_frontier(tmp_path: Path) -> None:
     """Issue #731: cross-shard shared files surface as a bounded frontier,
     derived from a real ``build_import_graph`` over on-disk files."""
-    from pathlib import Path
 
-    from daydream.deep.dependency import build_import_graph
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(stack_name="python",
                             files=[f"m{i}.py" for i in range(8)])
@@ -412,9 +374,7 @@ def test_shard_stacks_populates_bounded_frontier(tmp_path: Path) -> None:
 def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
     """Issue #731: tree-sitter resolves python import edges, absolute and
     relative; unknown grammars fail open to singletons."""
-    from pathlib import Path
 
-    from daydream.deep.dependency import build_import_graph
 
     (tmp_path / "a.py").write_text("import b\n")
     (tmp_path / "b.py").write_text("x = 1\n")
@@ -432,9 +392,7 @@ def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
 def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None:
     """Issue #731: tree-sitter resolves .ts/.go/.rs import edges too, so the
     dependency graph is not inert outside python."""
-    from pathlib import Path
 
-    from daydream.deep.dependency import build_import_graph
 
     (tmp_path / "a.ts").write_text('import { b } from "./b"\n')
     (tmp_path / "b.ts").write_text("export const b = 1;\n")
@@ -452,10 +410,6 @@ def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None
 def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
     """Issue #740 AC4/AC5: a realistic 16-file ~50 KB stack splits under the DEFAULT
     bounds, and every shard's diff fits the inline budget by construction."""
-    from daydream.config import DEFAULT_DEEP_SHARD_MAX_BYTES, DEFAULT_DEEP_SHARD_MAX_FILES
-    from daydream.deep.detection import StackAssignment
-    from daydream.deep.prompts import inline_grounded_files
-    from daydream.deep.sharding import shard_stacks
 
     files = [f"src/m{i:02d}.py" for i in range(16)]
     # ~2.9 KB per hunk -> ~47 KB total changed bytes, > the 12288-byte bound.
@@ -481,7 +435,6 @@ def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
 
 
 def test_detect_stacks_registry_independent_same_scopes() -> None:
-    from daydream.deep.detection import GENERIC_STACK, detect_stacks
 
     # Same files, absent vs empty vs populated registry -> same ordered scopes.
     changed = ["a.py", "b.ts", "c.md", "d.unknownext"]

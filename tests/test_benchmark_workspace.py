@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.schema import BenchmarkManifest, CaseDocument, ImportDocument
-from daydream.benchmark.storage import load_json_strict, load_yaml_strict
-from daydream.benchmark.workspace import InitError, init_workspace
+from daydream.benchmark.storage import WorkspaceCorrupt, load_json_strict, load_yaml_strict
+from daydream.benchmark.workspace import InitError, init_workspace, validate_workspace, workspace_status
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
 
@@ -67,8 +67,6 @@ def test_init_refuses_empty_reviewer_hosts(tmp_path: Path) -> None:
 
 
 def test_status_fresh_workspace_is_empty_and_unresolved(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import init_workspace, workspace_status
-
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     st = workspace_status(root)
@@ -78,8 +76,6 @@ def test_status_fresh_workspace_is_empty_and_unresolved(tmp_path: Path) -> None:
 
 
 def test_status_surfaces_unresolved_identity(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import init_workspace, workspace_status
-
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     st = workspace_status(root)
@@ -88,8 +84,6 @@ def test_status_surfaces_unresolved_identity(tmp_path: Path) -> None:
 
 
 def test_validate_fresh_workspace_returns_2(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import init_workspace, validate_workspace
-
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     code, label = validate_workspace(root)
@@ -98,8 +92,6 @@ def test_validate_fresh_workspace_returns_2(tmp_path: Path) -> None:
 
 
 def test_validate_corrupt_manifest_returns_1(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import init_workspace, validate_workspace
-
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     (root / "benchmark.yaml").write_text("schema_version: 1\nbogus_key: true\n")
@@ -109,8 +101,6 @@ def test_validate_corrupt_manifest_returns_1(tmp_path: Path) -> None:
 
 
 def test_validate_missing_manifest_returns_1(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import init_workspace, validate_workspace
-
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     (root / "benchmark.yaml").unlink()
@@ -322,8 +312,6 @@ def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: A
 
     import yaml
 
-    from daydream.benchmark.workspace import init_workspace
-
     root = tmp_path / "ws"
     if root.exists():
         shutil.rmtree(root)   # the fixture is re-invocable (b-valid case)
@@ -342,8 +330,6 @@ def test_validate_ready_workspace_returns_0(tmp_path: Path) -> None:
     # A resolved, fully-curated workspace must be able to reach the documented
     # exit 0 ("ready") — it was previously unreachable because derive_workspace_state
     # was fed cases=[].
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     code, label = validate_workspace(root)
     assert code == 0
@@ -359,8 +345,6 @@ def test_validate_restamped_tampered_bundle_fails(tmp_path: Path) -> None:
     import hashlib
 
     import yaml
-
-    from daydream.benchmark.workspace import validate_workspace
 
     root = _write_curated_workspace(tmp_path, "ready")
     bundle = next((root / "snapshots").glob("*.bundle"))
@@ -390,9 +374,6 @@ def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
     """
     import shutil
 
-    from daydream.benchmark.storage import WorkspaceCorrupt
-    from daydream.benchmark.workspace import validate_workspace, workspace_status
-
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
     shutil.rmtree(root / "cache")
@@ -403,8 +384,6 @@ def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
 
 
 def test_validate_curating_workspace_returns_2(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "draft")
     code, label = validate_workspace(root)
     assert code == 2
@@ -413,8 +392,6 @@ def test_validate_curating_workspace_returns_2(tmp_path: Path) -> None:
 
 def test_validate_unresolved_but_ready_case_still_returns_2(tmp_path: Path) -> None:
     # Readiness of the cases does not trump an unresolved repository identity.
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready", resolved=False)
     code, label = validate_workspace(root)
     assert code == 2
@@ -422,8 +399,6 @@ def test_validate_unresolved_but_ready_case_still_returns_2(tmp_path: Path) -> N
 
 
 def test_status_derives_ready_from_curated_cases(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import workspace_status
-
     root = _write_curated_workspace(tmp_path, "ready")
     st = workspace_status(root)
     assert st.workspace_state == "ready"
@@ -436,8 +411,6 @@ def test_status_and_validate_project_changed_ready_task_spec_as_stale_without_wr
     import yaml
 
     from daydream.benchmark.schema import derive_finding_id
-    from daydream.benchmark.workspace import validate_workspace, workspace_status
-
     root = _write_curated_workspace(tmp_path, "ready")
     case_path = next((root / "cases").glob("*.yaml"))
     raw = load_yaml_strict(case_path)
@@ -459,8 +432,6 @@ def test_status_and_validate_project_changed_ready_task_spec_as_stale_without_wr
 
 def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Path) -> None:
     import yaml
-
-    from daydream.benchmark.workspace import validate_workspace, workspace_status
 
     root = _write_curated_workspace(tmp_path, "ready")
     case_path = next((root / "cases").glob("*.yaml"))
@@ -491,9 +462,6 @@ def _seed_frozen_case(ws: Any) -> Any:
 
 
 def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.storage import load_yaml_strict
-    from daydream.benchmark.workspace import init_workspace, validate_workspace
-
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
     _seed_frozen_case(ws)   # one ready case: bundle YAML + snapshots/<case>.bundle
@@ -512,8 +480,6 @@ def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -
 def test_status_reports_snapshot_state_per_case(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """``status`` surfaces each case's snapshot state + frozen head prefix."""
     from daydream.benchmark.cli import _handle_benchmark_command
-    from daydream.benchmark.workspace import init_workspace, workspace_status
-
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
     _seed_frozen_case(ws)   # one ready case (from Task 11's helper)
@@ -564,8 +530,6 @@ def test_status_and_validate_surface_typed_unreplayable_reason(
 ) -> None:
     """Public status/validate expose the reason code, never private detail."""
     from daydream import cli as top_cli
-    from daydream.benchmark.workspace import validate_workspace, workspace_status
-
     root = _write_curated_workspace(tmp_path, "ready")
     case_id = _make_case_base_drift(root)
     status = workspace_status(root)
@@ -601,8 +565,6 @@ def test_status_and_validate_surface_typed_unreplayable_reason(
 def test_validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_path: Path) -> None:
     """A marker cannot hide commit-linkage tampering in a live authoring mirror."""
     import yaml
-
-    from daydream.benchmark.workspace import validate_workspace
 
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
@@ -648,8 +610,6 @@ def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path
     """The marker plus offline bundle remains sufficient after cache cleanup."""
     import shutil
 
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
     shutil.rmtree(root / "cache" / "repository.git")
@@ -664,8 +624,6 @@ def test_portable_validation_binds_case_to_checksummed_import(
     import shutil
 
     import yaml
-
-    from daydream.benchmark.workspace import validate_workspace
 
     root = _write_curated_workspace(tmp_path, "ready")
     shutil.rmtree(root / "cache" / "repository.git")
@@ -733,8 +691,6 @@ def _write_minimal_invalid_workspace(tmp_path: Path, curation_state: Any="ready"
 
 
 def test_validate_minimal_invalid_ready_returns_1(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_minimal_invalid_workspace(tmp_path, "ready")
     code, label = validate_workspace(root)
     assert code == 1
@@ -742,9 +698,6 @@ def test_validate_minimal_invalid_ready_returns_1(tmp_path: Path) -> None:
 
 
 def test_status_rejects_minimal_invalid_case(tmp_path: Path) -> None:
-    from daydream.benchmark.storage import WorkspaceCorrupt
-    from daydream.benchmark.workspace import workspace_status
-
     root = _write_minimal_invalid_workspace(tmp_path, "ready")
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
@@ -770,8 +723,6 @@ def _restamp_import_sha(tmp_path: Path, imp_bytes: bytes) -> None:
 
 
 def test_checksum_restamped_corrupt_import_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     imp = next((root / "imports").glob("pr-*.json"))
     raw = load_json_strict(imp)
@@ -783,8 +734,6 @@ def test_checksum_restamped_corrupt_import_is_corruption(tmp_path: Path) -> None
 
 
 def test_import_missing_on_disk_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     (next((root / "imports").glob("pr-*.json"))).unlink()
     code, label = validate_workspace(root)
@@ -818,8 +767,6 @@ def _drop_ledger_entry(tmp_path: Path) -> None:
 
 
 def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     # manifest cases[] pr_number disagrees with the case doc's pull_request.number
     _mutate_manifest_case(tmp_path, pr_number=999)
@@ -828,8 +775,6 @@ def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path: Path) -> None:
 
 
 def test_case_file_not_exact_index_path_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     # manifest case_file is not exactly cases/<case_id>.yaml
     _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
@@ -838,8 +783,6 @@ def test_case_file_not_exact_index_path_is_corruption(tmp_path: Path) -> None:
 
 
 def test_case_pr_absent_from_ledger_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
     code, label = validate_workspace(root)
@@ -847,8 +790,6 @@ def test_case_pr_absent_from_ledger_is_corruption(tmp_path: Path) -> None:
 
 
 def test_orphan_import_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     (root / "imports" / "pr-000999.json").write_text('{"unindexed": true}')   # unindexed import
     code, label = validate_workspace(root)
@@ -856,8 +797,6 @@ def test_orphan_import_is_corruption(tmp_path: Path) -> None:
 
 
 def test_orphan_bundle_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     (root / "snapshots" / "pr-000999-abcdef012345.bundle").write_bytes(b"orphan")
     code, label = validate_workspace(root)
@@ -865,8 +804,6 @@ def test_orphan_bundle_is_corruption(tmp_path: Path) -> None:
 
 
 def test_referenced_bundle_missing_is_corruption(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-
     root = _write_curated_workspace(tmp_path, "ready")
     (next((root / "snapshots").glob("*.bundle"))).unlink()
     code, label = validate_workspace(root)
@@ -877,8 +814,6 @@ def test_duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
     import hashlib
 
     import yaml
-
-    from daydream.benchmark.workspace import validate_workspace
 
     root = _write_curated_workspace(tmp_path, "ready")
     # hard-link the import to the bundle path (one inode, two indexed names).
@@ -902,7 +837,6 @@ def test_status_surfaces_failed_refresh_with_good_linkage(tmp_path: Path, fake_g
     status surface reports the attempt failure distinctly and does NOT classify
     the workspace as collecting.  Task 6 (issue #813)."""
     from daydream.benchmark import github_import as gi
-    from daydream.benchmark.workspace import workspace_status
     from tests.test_benchmark_import_prs import _curate_case, _seed_preflight
 
     ws = tmp_path / "ws"

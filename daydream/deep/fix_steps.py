@@ -1026,6 +1026,37 @@ def _enforce_terminal_confinement(
     return None
 
 
+def _confinement_stop(
+    ctx: FlowContext,
+    state: FixCycleState,
+    phase: str,
+    round_number: int | None,
+    message: str,
+    error: str | None = None,
+    *,
+    warning: bool = False,
+) -> Stop:
+    """Restore protected state, report the terminal failure, and stop the flow."""
+    confinement_error = _enforce_terminal_confinement(
+        ctx,
+        state,
+        phase=phase,
+        round_number=round_number,
+    )
+    if warning:
+        print_warning(console, message)
+    elif error is not None:
+        print_error(console, message, error)
+    if confinement_error is not None:
+        label = (
+            "Test failure confinement failed"
+            if phase == "test_failure"
+            else "Fix failure confinement failed"
+        )
+        print_error(console, label, confinement_error)
+    return Stop(1)
+
+
 def _stabilization_stop(
     ctx: FlowContext,
     state: FixCycleState,
@@ -1113,16 +1144,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 run_context=ctx.run_context,
             )
         except Exception as exc:
-            confinement_error = _enforce_terminal_confinement(
-                ctx,
-                state,
-                phase="fix_failure",
-                round_number=deep_state.iteration,
-            )
-            print_error(console, "Fix failed", str(exc))
-            if confinement_error is not None:
-                print_error(console, "Fix failure confinement failed", confinement_error)
-            return Stop(1)
+            return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failed", str(exc))
     budget_prefix = "file_group_budget_exceeded:"
     exception_failures = {
         path: reason
@@ -1136,16 +1158,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
         else:
             failures_artifact.unlink(missing_ok=True)
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_failure",
-            round_number=deep_state.iteration,
-        )
-        print_error(console, "Fix failure audit failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
+        return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failure audit failed", str(exc))
     if exception_failures:
         from daydream import git_ops
 
@@ -1188,16 +1201,9 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
         )
         snapshot = capture_retained_tree(ctx.work, state)
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_failure",
-            round_number=deep_state.iteration,
+        return _confinement_stop(
+            ctx, state, "fix_failure", deep_state.iteration, "Fix scope enforcement failed", str(exc)
         )
-        print_error(console, "Fix scope enforcement failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
     deep_state.fix_round_snapshot = snapshot
     try:
         await _evaluate_quality_gate(
@@ -1232,16 +1238,9 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
             iteration=deep_state.iteration,
         )
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_failure",
-            round_number=deep_state.iteration,
+        return _confinement_stop(
+            ctx, state, "fix_failure", deep_state.iteration, "Fix quality evaluation failed", str(exc)
         )
-        print_error(console, "Fix quality evaluation failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
     return None
 
 
@@ -1320,16 +1319,9 @@ async def _step_fix_verify_authorized(
         try:
             snapshot = capture_retained_tree(ctx.work, state)
         except Exception as exc:
-            confinement_error = _enforce_terminal_confinement(
-                ctx,
-                state,
-                phase="fix_verify_failure",
-                round_number=deep_state.iteration,
+            return _confinement_stop(
+                ctx, state, "fix_verify_failure", deep_state.iteration, "Fix verification capture failed", str(exc)
             )
-            print_error(console, "Fix verification capture failed", str(exc))
-            if confinement_error is not None:
-                print_error(console, "Fix failure confinement failed", confinement_error)
-            return Stop(1)
     iteration = deep_state.iteration
     round_number = iteration if isinstance(iteration, int) else 1
     try:
@@ -1343,16 +1335,7 @@ async def _step_fix_verify_authorized(
         _persist_fix_outcomes_current(ctx, state, key, outcomes)
         _write_footprint_audit(ctx, state, key)
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_verify_failure",
-            round_number=round_number,
-        )
-        print_error(console, "Fix verification failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
+        return _confinement_stop(ctx, state, "fix_verify_failure", round_number, "Fix verification failed", str(exc))
     actionable = _actionable_verdicts(outcomes)
     if actionable and iteration not in (None, 3):
         return None
@@ -1659,27 +1642,9 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 attempts=list(result.attempts),
             )
         except Exception as exc:
-            confinement_error = _enforce_terminal_confinement(
-                ctx,
-                state,
-                phase="test_failure",
-                round_number=None,
-            )
-            print_error(console, "Test evidence failed", str(exc))
-            if confinement_error is not None:
-                print_error(console, "Test failure confinement failed", confinement_error)
-            return Stop(1)
+            return _confinement_stop(ctx, state, "test_failure", None, "Test evidence failed", str(exc))
     if not result.proceed:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="test_failure",
-            round_number=None,
-        )
-        print_warning(console, "Tests failed after fix attempt.")
-        if confinement_error is not None:
-            print_error(console, "Test failure confinement failed", confinement_error)
-        return Stop(1)
+        return _confinement_stop(ctx, state, "test_failure", None, "Tests failed after fix attempt.", warning=True)
     return await finalize_retained_tree_after_test(ctx, result)
 
 

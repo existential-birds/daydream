@@ -5,16 +5,38 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
+import daydream.agent as agent_mod
+from daydream.agent import _summarize_input, run_agent
+from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
+from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
+from daydream.trajectory import DaydreamPhase
+from daydream.ui import (
+    AgentTextRenderer,
+    format_verdict_join,
+    prompt_user,
+    render_exploration_summary,
+)
 from daydream.ui.panels import LiveToolPanelRegistry
+from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
+from daydream.ui.tools import (
+    _BASH_COMMAND_MAX_CHARS,
+    _build_tool_header,
+    _primary_tool_value,
+    format_callback_progress,
+)
+from tests.harness.backend import ScriptedBackend
 
 
 def test_format_verdict_join_renders_table_counts() -> None:
-    from rich.console import Console
 
-    from daydream.ui import format_verdict_join
 
     table = format_verdict_join(matched=[1, 2], unmatched=[3], structural=[4, 5], other=[], total=5)
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
@@ -26,10 +48,7 @@ def test_format_verdict_join_renders_table_counts() -> None:
 
 
 def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str]) -> tuple[int, object]:
-    from rich.console import Console
-    from rich.panel import Panel
 
-    from daydream.ui import AgentTextRenderer
 
     console = Console(width=width, height=height, force_terminal=True)
     renderer = AgentTextRenderer(console)
@@ -65,10 +84,7 @@ def test_agent_text_renderer_overflow_single_panel() -> None:
 
 
 def test_render_exploration_summary_shows_content_not_json() -> None:
-    from rich.console import Console
 
-    from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
-    from daydream.ui import render_exploration_summary
 
     ctx = ExplorationContext(
         affected_files=[FileInfo(path="services/library/openapi.yaml", role="modified")],
@@ -86,10 +102,7 @@ def test_render_exploration_summary_shows_content_not_json() -> None:
 
 
 def test_render_exploration_summary_empty_is_quiet() -> None:
-    from rich.console import Console
 
-    from daydream.exploration import ExplorationContext
-    from daydream.ui import render_exploration_summary
 
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
@@ -98,11 +111,8 @@ def test_render_exploration_summary_empty_is_quiet() -> None:
 
 
 def test_prompt_user_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import Mock
 
-    from rich.console import Console
 
-    from daydream.ui import prompt_user
 
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
     # Issue #126 exact repro expectation:
@@ -114,12 +124,8 @@ def test_prompt_user_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_prompt_user_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import Mock
 
-    from rich.console import Console
 
-    from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
-    from daydream.ui import prompt_user
 
     sentinel = Mock(side_effect=AssertionError("input() must not be called"))
     monkeypatch.setattr("builtins.input", sentinel)
@@ -130,18 +136,14 @@ def test_prompt_user_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch
 
 
 def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.MonkeyPatch) -> None:
-    from rich.console import Console
 
-    from daydream.ui import prompt_user
 
     monkeypatch.setattr("builtins.input", lambda: "y")
     assert prompt_user(Console(), "Confirm?", default="n") == "y"
 
 
 def test_parse_background_task_id_from_launch_string() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
@@ -157,9 +159,7 @@ def test_parse_background_task_id_from_launch_string() -> None:
 
 
 def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
     reg.create("c1", "Bash", {"command": "pytest", "block": True, "timeout": 120000})
@@ -170,7 +170,6 @@ def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
 
 def test_bash_panel_command_truncation_shows_ellipsis() -> None:
     """A >200-char Bash command is cut with an explicit marker, never silently."""
-    from daydream.ui.tools import _build_tool_header
 
     header = _build_tool_header("Bash", {"command": "x" * 250}, quiet_mode=False)
     text = header.plain
@@ -184,7 +183,6 @@ def test_bash_panel_command_truncation_shows_ellipsis() -> None:
 
 
 def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
-    from rich.console import Console
 
     c = Console(file=StringIO(), record=True)
     panel = reg.get(tool_use_id)
@@ -194,9 +192,7 @@ def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
 
 
 def test_taskoutput_header_leads_with_label_demotes_id() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "Bash", {"command": "x", "run_in_background": True, "description": "Run tests"})
@@ -208,9 +204,7 @@ def test_taskoutput_header_leads_with_label_demotes_id() -> None:
 
 
 def test_taskoutput_header_unknown_id_falls_back_to_bare_id() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
@@ -219,9 +213,7 @@ def test_taskoutput_header_unknown_id_falls_back_to_bare_id() -> None:
 
 
 def test_taskcreate_header_shows_subject_and_body() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "details here"})
@@ -230,9 +222,7 @@ def test_taskcreate_header_shows_subject_and_body() -> None:
 
 
 def test_taskupdate_resolves_subject_and_shows_status() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
@@ -243,9 +233,7 @@ def test_taskupdate_resolves_subject_and_shows_status() -> None:
 
 
 def test_tasklist_header_omits_empty_id_suffix() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "TaskList", {})
@@ -255,9 +243,7 @@ def test_tasklist_header_omits_empty_id_suffix() -> None:
 
 
 def test_taskoutput_result_shows_output_snippet() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
 
     # quiet_mode=False so the result body renders (quiet mode suppresses result
     # output entirely); R8 is about the rendered TaskOutput result snippet.
@@ -273,10 +259,7 @@ def test_taskoutput_result_shows_output_snippet() -> None:
 
 
 def test_task_prompt_truncation_uses_named_limit() -> None:
-    from rich.console import Console
 
-    from daydream.ui import LiveToolPanelRegistry
-    from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "Task", {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))})
@@ -288,8 +271,6 @@ def test_task_prompt_truncation_uses_named_limit() -> None:
 
 def _taskoutput_backend() -> Any:
     """Build a backend stream containing a background task and its final output."""
-    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from tests.harness.backend import ScriptedBackend
 
     return ScriptedBackend(
         events=[
@@ -321,11 +302,7 @@ def _taskoutput_backend() -> Any:
 
 async def test_run_agent_renders_taskoutput_with_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Render TaskOutput with its task label while hiding mechanical arguments."""
-    from rich.console import Console
 
-    import daydream.agent as agent_mod
-    from daydream.agent import run_agent
-    from daydream.trajectory import DaydreamPhase
 
     rec = Console(file=StringIO(), record=True, width=120)
     monkeypatch.setattr(agent_mod, "console", rec)
@@ -338,10 +315,7 @@ async def test_run_agent_renders_taskoutput_with_label(tmp_path: Path, monkeypat
 
 
 async def test_run_agent_callback_path_labels_taskoutput(tmp_path: Path) -> None:
-    from rich.text import Text
 
-    from daydream.agent import run_agent
-    from daydream.trajectory import DaydreamPhase
 
     backend = _taskoutput_backend()
     lines: list[Text] = []
@@ -360,12 +334,7 @@ async def test_run_agent_callback_path_labels_taskoutput(tmp_path: Path) -> None
 
 async def test_run_agent_callback_coalesces_streaming_text_deltas(tmp_path: Path) -> None:
     """Token-sized text deltas render as one parallel-fix narration line."""
-    from rich.text import Text
 
-    from daydream.agent import run_agent
-    from daydream.backends import ResultEvent, TextEvent
-    from daydream.trajectory import DaydreamPhase
-    from tests.harness.backend import ScriptedBackend
 
     backend = ScriptedBackend(
         events=[
@@ -397,12 +366,7 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     Regression: the old blind ``next(iter(args.values()))`` surfaced a leading
     ``replace_all`` flag as ``"Edit False"`` instead of the file being edited.
     """
-    from rich.text import Text
 
-    from daydream.agent import run_agent
-    from daydream.backends import ResultEvent, ToolStartEvent
-    from daydream.trajectory import DaydreamPhase
-    from tests.harness.backend import ScriptedBackend
 
     backend = ScriptedBackend(
         events=[
@@ -435,7 +399,6 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
 
 def test_primary_tool_value_bash_prefers_command() -> None:
     """Bash primary arg is `command` (required, always present) over `description`."""
-    from daydream.ui.tools import _primary_tool_value
 
     value, key = _primary_tool_value("Bash", {"command": "git diff --stat", "description": "Show changes"})
     assert (value, key) == ("git diff --stat", "command")
@@ -452,11 +415,8 @@ def test_format_callback_progress_bash_shows_command() -> None:
     invariant the panel header and --log summary hold, so the callback line cannot
     print a secret the other surfaces would redact.
     """
-    from io import StringIO
 
-    from rich.console import Console
 
-    from daydream.ui.tools import format_callback_progress
 
     line = format_callback_progress("Bash", {"command": "git diff --stat", "description": "Show changes"}, None)
     c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
@@ -480,7 +440,6 @@ def test_format_callback_progress_redacts_only_bash_commands() -> None:
     must not rewrite the operator's own /home/<user>/ paths into [REDACTED_USER]
     markers or chew grep patterns into [REDACTED_CREDENTIAL].
     """
-    from daydream.ui.tools import format_callback_progress
 
     edit_line = format_callback_progress(
         "Edit",
@@ -503,12 +462,8 @@ def test_format_callback_progress_redacts_only_bash_commands() -> None:
 
 def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     """Issue #1108 acceptance oracle: same input renders the command on all three surfaces."""
-    from io import StringIO
 
-    from rich.console import Console
 
-    from daydream.agent import _summarize_input
-    from daydream.ui.tools import _build_tool_header, format_callback_progress
 
     args: dict[str, object] = {"command": "git diff --stat"}
     header = _build_tool_header("Bash", args, quiet_mode=True)
@@ -530,7 +485,6 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     # Cap equality: the three surfaces truncate at the shared constant, so the
     # panel and --log copies can never silently desync (the #1108 oracle pins
     # key consistency; this pins cap consistency too).
-    from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS
 
     long_command = "b" * (_BASH_COMMAND_MAX_CHARS + 25)
     long_header = _build_tool_header("Bash", {"command": long_command}, quiet_mode=True)
@@ -548,7 +502,6 @@ def test_bash_header_preserves_operator_cd_prefix() -> None:
     context and make 'cd backend && pytest' vs 'cd frontend && pytest'
     display identically.
     """
-    from daydream.ui.tools import _build_tool_header
 
     header = _build_tool_header("Bash", {"command": "cd /app && echo hello"})
     assert "cd /app && echo hello" in header.plain
@@ -556,7 +509,6 @@ def test_bash_header_preserves_operator_cd_prefix() -> None:
 
 def test_shell_header_shows_cd_stripped_display_variant() -> None:
     """S1: Codex ('shell') renders the cd-stripped display variant, not the stored replayable value."""
-    from daydream.ui.tools import _build_tool_header
 
     header = _build_tool_header("shell", {"command": "cd /app && echo hello"})
     assert "echo hello" in header.plain
@@ -565,21 +517,18 @@ def test_shell_header_shows_cd_stripped_display_variant() -> None:
 
 def test_log_summary_shows_cd_stripped_display_variant() -> None:
     """S1 parity: --log (_summarize_input) shows the cd-stripped variant for Codex ('shell')."""
-    from daydream.agent import _summarize_input
 
     assert _summarize_input({"command": "cd /app && echo hello"}, "shell") == "echo hello"
 
 
 def test_log_summary_preserves_operator_cd_prefix() -> None:
     """--log keeps the operator-authored cd prefix for Claude/Pi Bash commands (issue #336)."""
-    from daydream.agent import _summarize_input
 
     assert _summarize_input({"command": "cd /app && echo hello"}, "Bash") == "cd /app && echo hello"
 
 
 def test_callback_progress_cd_split_matches_live_surfaces() -> None:
     """format_callback_progress splits the same way: cd-strip Codex 'shell' only."""
-    from daydream.ui.tools import format_callback_progress
 
     bash_line = format_callback_progress("Bash", {"command": "cd /app && echo hello"}, None)
     assert "cd /app && echo hello" in bash_line.plain
