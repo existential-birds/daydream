@@ -30,6 +30,7 @@ from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import current_run_context
 from daydream.runner import RunConfig
+from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
 
@@ -86,13 +87,7 @@ def _stub_run_loop_deep(
 @pytest.fixture
 def silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence Rich panels emitted from the runner so test output stays clean."""
-    for name in (
-        "print_phase_hero",
-        "print_info",
-        "print_success",
-        "print_dim",
-    ):
-        monkeypatch.setattr(f"daydream.runner.{name}", lambda *a, **kw: None)
+    silence_module_console(monkeypatch, "daydream.runner")
 
 
 @pytest.fixture

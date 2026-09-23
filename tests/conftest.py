@@ -495,40 +495,44 @@ def install_backend(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], objec
     return _install
 
 
-@pytest.fixture
-def silence_console(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+def silence_module_console(
+    monkeypatch: pytest.MonkeyPatch, module: str, *, keep: tuple[str, ...] = ()
+) -> None:
     """No-op every ``print_*`` UI helper bound into a module, plus its ``console``.
 
     Real-path tests silence terminal output so assertions read against state
-    rather than scraped rendering. Done by hand this is a 7-line
-    ``for name in (...)`` loop, re-inlined at 41 sites with a different subset of
-    names each time — and a subset that goes stale whenever a phase starts
-    calling one more helper.
-
-    Discovers the names off the module instead of hardcoding them, so it cannot
-    drift. Tests that *assert* on a specific helper's output pass it in
-    ``keep`` (or spy on it after calling this) — silencing the thing under
-    observation would hide the assertion.
+    rather than scraped rendering. Discovers the names off the module instead of
+    hardcoding them, so it cannot drift. Tests that *assert* on a specific
+    helper's output pass it in ``keep`` (or spy on it after calling this) —
+    silencing the thing under observation would hide the assertion.
 
     Args:
         module: Dotted module path whose bound UI names to silence, e.g.
             ``"daydream.phases"``.
         keep: Names to leave untouched, for helpers a test spies on.
     """
+    mod = importlib.import_module(module)
+    for name in dir(mod):
+        if not name.startswith("print_") or name in keep:
+            continue
+        if callable(getattr(mod, name, None)):
+            monkeypatch.setattr(f"{module}.{name}", lambda *a, **kw: None)
+    if "console" not in keep and hasattr(mod, "console"):
+        monkeypatch.setattr(
+            f"{module}.console", type("C", (), {"print": lambda *a, **kw: None})()
+        )
+
+
+@pytest.fixture
+def silence_console(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Fixture form of :func:`silence_module_console`.
+
+    Returns a callable so tests can silence one module per call:
+    ``silence_console("daydream.phases")``.
+    """
 
     def _silence(module: str, *, keep: tuple[str, ...] = ()) -> None:
-        import importlib
-
-        mod = importlib.import_module(module)
-        for name in dir(mod):
-            if not name.startswith("print_") or name in keep:
-                continue
-            if callable(getattr(mod, name, None)):
-                monkeypatch.setattr(f"{module}.{name}", lambda *a, **kw: None)
-        if "console" not in keep and hasattr(mod, "console"):
-            monkeypatch.setattr(
-                f"{module}.console", type("C", (), {"print": lambda *a, **kw: None})()
-            )
+        silence_module_console(monkeypatch, module, keep=keep)
 
     return _silence
 

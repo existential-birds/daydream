@@ -21,13 +21,13 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.conftest import silence_module_console
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -483,33 +483,14 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
 # Misc: silence Rich UI noise + answer interactive prompts.
 
 
-_UI_FUNCS: tuple[str, ...] = (
-    "print_stage_progress",
-    "print_preflight_notice",
-    "print_phase_hero",
-    "print_info",
-    "print_success",
-    "print_warning",
-    "print_error",
-    "print_dim",
-    "print_issues_table",
-    "print_iteration_divider",
-    "print_menu",
-    "print_fix_progress",
-    "print_fix_complete",
-)
-
-
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    noop: Callable[..., None] = lambda *a, **kw: None  # noqa: E731
     for module in (
         "daydream.deep.orchestrator",
         "daydream.phases",
         "daydream.runner",
         "daydream.pr_review",
     ):
-        for name in _UI_FUNCS:
-            monkeypatch.setattr(f"{module}.{name}", noop, raising=False)
+        silence_module_console(monkeypatch, module)
 
 
 def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:

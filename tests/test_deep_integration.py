@@ -11,6 +11,7 @@ import pytest
 
 from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
+from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 
 
@@ -201,60 +202,16 @@ class _DeepMockBackend(ScriptedBackend):
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence noisy UI helpers at their current production owners."""
-    noop = lambda *a, **kw: None  # noqa: E731 -- terse silencer
-    targets = {
-        "daydream.deep.orchestrator": (
-            "print_preflight_notice",
-            "print_info",
-            "print_warning",
-            "print_error",
-        ),
-        "daydream.deep.review_steps": (
-            "print_stage_progress",
-            "print_phase_hero",
-            "print_warning",
-            "print_error",
-            "print_dim",
-        ),
-        "daydream.deep.merge_steps": (
-            "print_stage_progress",
-            "print_info",
-            "print_warning",
-            "print_error",
-        ),
-        "daydream.deep.diagram_steps": (
-            "print_info",
-            "print_success",
-            "print_warning",
-            "print_error",
-        ),
-        "daydream.deep.fix_steps": (
-            "print_info",
-            "print_success",
-            "print_warning",
-            "print_error",
-            "print_verification_summary",
-        ),
-        "daydream.phases": (
-            "print_phase_hero",
-            "print_info",
-            "print_success",
-            "print_warning",
-            "print_error",
-            "print_dim",
-            "print_issues_table",
-        ),
-        "daydream.runner": (
-            "print_phase_hero",
-            "print_info",
-            "print_success",
-            "print_error",
-            "print_dim",
-        ),
-    }
-    for module, names in targets.items():
-        for name in names:
-            monkeypatch.setattr(f"{module}.{name}", noop)
+    for module in (
+        "daydream.deep.orchestrator",
+        "daydream.deep.review_steps",
+        "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps",
+        "daydream.deep.fix_steps",
+        "daydream.phases",
+        "daydream.runner",
+    ):
+        silence_module_console(monkeypatch, module)
 
 
 def _wire_mocks(monkeypatch: pytest.MonkeyPatch, backend: _DeepMockBackend) -> None:
