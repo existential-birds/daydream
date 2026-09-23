@@ -39,7 +39,6 @@ from daydream.backends import (
     codex,
     effective_fanout_concurrency,
 )
-from daydream.backends import codex as codex_backend
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
@@ -1749,7 +1748,7 @@ async def test_parser_coverage_is_bounded_redacted_and_precedes_result(
 def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
     label = "x" * 54 + " ghp_" + "y" * 12
 
-    bounded = codex_backend._bounded_diagnostic_label(label)
+    bounded = codex._bounded_diagnostic_label(label)
 
     assert len(bounded) <= 64
     assert "ghp_" not in bounded
