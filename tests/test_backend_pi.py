@@ -63,7 +63,7 @@ from daydream.config import DEFAULT_PI_MODEL
 from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
-from tests.harness.fake_cli_process import BlockingStdout, ImmediateStdout, LimitAwareStdout, blocking_cli_process
+from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.stub_backend import force_interactive as _force_interactive
@@ -684,47 +684,17 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend keep reading their own process."""
-    backend = PiBackend(model="glm-5.2")
-
-    first_proc = blocking_cli_process(
-        ImmediateStdout(
-            [
-                '{"type":"session","sessionId":"s1"}',
-                '{"type":"agent_start"}',
-                '{"type":"turn_start"}',
-                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}',
-                '{"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"stop"}}',
-                '{"type":"agent_end","messages":[]}',
-            ]
-        )
+    await assert_concurrent_streams_isolated(
+        PiBackend(model="glm-5.2"),
+        [
+            '{"type":"session","sessionId":"s1"}',
+            '{"type":"agent_start"}',
+            '{"type":"turn_start"}',
+            '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}',
+            '{"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"stop"}}',
+            '{"type":"agent_end","messages":[]}',
+        ],
     )
-    second_stdout = BlockingStdout()
-    second_proc = blocking_cli_process(second_stdout)
-    procs = iter([first_proc, second_proc])
-
-    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        return next(procs)
-
-    async def consume_second() -> list[object]:
-        return [event async for event in backend.execute(Path("/tmp"), "second")]
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        first_iter = backend.execute(Path("/tmp"), "first")
-        assert isinstance(await anext(first_iter), RequestEvent)
-        first_event = await anext(first_iter)
-        assert isinstance(first_event, TextEvent)
-
-        second_task = asyncio.create_task(consume_second())
-        await second_stdout.entered.wait()
-
-        try:
-            turn_end = await anext(first_iter)
-            assert isinstance(turn_end, TurnEndEvent)
-            next_first_event = await anext(first_iter)
-            assert isinstance(next_first_event, CostEvent)
-        finally:
-            second_stdout.release.set()
-            await second_task
 
 
 @pytest.mark.parametrize(

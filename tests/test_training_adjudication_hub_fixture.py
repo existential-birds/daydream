@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+from daydream.archive.hydrate import HubConcurrentUpdateError
+from tests.fixtures.training.build_hub_snapshot import AnnotationsHub, build_publication_hubs
 
 
 def _mapping(root: Path, payloads: dict[str, bytes]) -> dict[str | Path, Path]:
@@ -33,7 +34,6 @@ def test_annotation_hub_initial_revision_is_content_addressed_and_branch_pinned(
 
 
 def test_publication_hubs_are_separate_durable_stores_with_packaged_pins() -> None:
-    from tests.fixtures.training.build_hub_snapshot import build_publication_hubs
 
     hubs = build_publication_hubs()
     assert hubs.source is not hubs.annotations
@@ -66,7 +66,6 @@ def test_annotation_hub_atomic_commit_preserves_pinned_trees_and_logs(tmp_path: 
 
 
 def test_annotation_hub_stale_parent_has_no_tree_commit(tmp_path: Path) -> None:
-    from daydream.archive.hydrate import HubConcurrentUpdateError
 
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     before = hub.repo_info("main").sha
@@ -84,7 +83,6 @@ def test_annotation_hub_stale_parent_has_no_tree_commit(tmp_path: Path) -> None:
 def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(
     tmp_path: Path, stage: str,
 ) -> None:
-    from daydream.archive.hydrate import HubConcurrentUpdateError
 
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     base = hub.repo_info("main").sha

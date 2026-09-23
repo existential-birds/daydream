@@ -10,14 +10,13 @@ import anyio
 import pytest
 
 from daydream.backends import AgentEvent
-from daydream.runner import RunConfig
+from daydream.runner import RunConfig, run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.review_profile import independent_alternatives_profile as _independent_alternatives
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
 async def _run_deep(target: Path) -> int:
-    from daydream.runner import RunConfig, run
 
     return await run(RunConfig(target=str(target), cleanup=False, review_profile=_independent_alternatives()))
 
@@ -35,7 +34,6 @@ async def test_tool_heavy_wonder_is_bounded_and_publishes_incomplete_review(
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A backend ignoring the finalization instruction cannot keep investigating."""
-    from daydream.runner import run
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -62,7 +60,6 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A wonder turn outliving the per-stack fan-out still writes a valid trajectory."""
-    from daydream.runner import run
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -88,7 +85,6 @@ async def test_budget_truncated_wonder_keeps_review_results(
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A budget stop preserves completed stack findings and finishes the review."""
-    from daydream.runner import run
 
     silence(monkeypatch)
     monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
