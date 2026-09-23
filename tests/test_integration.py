@@ -1,7 +1,6 @@
 """Integration tests for the full review-fix-test flow."""
 import asyncio
 import json
-import os
 import re
 import shlex
 import threading
@@ -38,6 +37,7 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.processes import wait_for_process_group_exit
 from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha
 
 # ANSI escape code pattern for stripping terminal colors
@@ -654,19 +654,6 @@ async def _wait_for_remote_ci_pids(
     raise AssertionError("blocking remote CI process did not publish process ids")
 
 
-async def _wait_for_process_group_exit(pgid: int) -> None:
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            # EPERM means the pgid was recycled by a foreign-uid process,
-            # i.e. our same-uid group exited.
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"remote CI process group {pgid} survived cancellation")
-
-
 def _live_deep_dir(artifact_runtime_root: Path) -> Path:
     """Locate the P10 private-live deep dir of the run's one active session.
 
@@ -1014,7 +1001,7 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
         finally:
             _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
             if pids is not None:
-                await _wait_for_process_group_exit(pids["direct"])
+                await wait_for_process_group_exit(pids["direct"])
 
     verdict = json.loads(verdict_path.read_text())
     assert verdict["status"] == "cancelled"
