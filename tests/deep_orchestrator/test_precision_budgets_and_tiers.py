@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast, get_type_hints
 
 import anyio
 import pytest
@@ -131,29 +132,80 @@ async def test_deep_flow_forwards_approve_on_clean(
     assert received == [enabled]
 
 
-def test_approve_on_clean_resolves_from_file_config() -> None:
-    """#343 file-config tier: with NO CLI flag but ``approve_on_clean = true`` in
-    the repo config, the opt-in resolver returns True; with no opt-in anywhere
-    it stays False (default off)."""
+TABLED_OPT_IN_FLAGS = ("precision_mode", "approve_on_clean", "scope_issue_filing")
 
-    file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(approve_on_clean=True))
-    assert _resolve_opt_in(file_only, "approve_on_clean") is True
+# Boolean settings mirrored on both config dataclasses that deliberately do NOT use the
+# truthiness opt-in rule. Every entry carries the reason it is exempt.
+OPT_IN_GUARD_EXEMPTIONS: dict[str, str] = {
+    "deep_shard_enabled": (
+        "sentinel tiers with an explicit False authoritative and a diff-driven default; "
+        "pinned by test_deep_shard_enabled_default_off"
+    ),
+}
 
-    unset = RunConfig(target="/t")
-    assert _resolve_opt_in(unset, "approve_on_clean") is False
+
+def _mirrored_boolean_names(run_config: type, file_config: type) -> set[str]:
+    """Names whose declared type includes ``bool`` on both config surfaces."""
+    run_bools = {name for name, hint in get_type_hints(run_config).items() if "bool" in str(hint)}
+    file_bools = {name for name, hint in get_type_hints(file_config).items() if "bool" in str(hint)}
+    return run_bools & file_bools
 
 
-def test_scope_issue_filing_resolves_precedence() -> None:
-    """#1056 precedence: CLI tier over file config over built-in default False."""
+def test_mirrored_boolean_opt_ins_are_tabled_or_exempt() -> None:
+    """#1225: a boolean mirrored on both config surfaces must join the opt-in table or carry an exemption reason."""
+    mirrored = _mirrored_boolean_names(RunConfig, DaydreamFileConfig)
+    assert set(OPT_IN_GUARD_EXEMPTIONS) <= mirrored, "stale exemption: name is no longer mirrored on both surfaces"
+    untabled = mirrored - set(OPT_IN_GUARD_EXEMPTIONS)
+    assert untabled == set(TABLED_OPT_IN_FLAGS), (
+        f"mirrored boolean opt-ins neither tabled nor exempt: {sorted(untabled)}"
+    )
 
-    cli = RunConfig(target="/t", scope_issue_filing=True)
-    assert _resolve_opt_in(cli, "scope_issue_filing") is True
 
-    file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(scope_issue_filing=True))
-    assert _resolve_opt_in(file_only, "scope_issue_filing") is True
+def test_mirrored_boolean_names_reads_declared_types() -> None:
+    """The guard's derivation is real: a shared bool is found; a file-only bool and a non-bool are not."""
+    probe_run = dataclasses.make_dataclass("_ProbeRun", [("shared_flag", bool, False)])
+    probe_file = dataclasses.make_dataclass(
+        "_ProbeFile", [("shared_flag", bool | None, None), ("file_only", bool, False), ("count", int, 0)]
+    )
+    assert _mirrored_boolean_names(probe_run, probe_file) == {"shared_flag"}
 
-    unset = RunConfig(target="/t")
-    assert _resolve_opt_in(unset, "scope_issue_filing") is False
+
+@pytest.mark.parametrize("flag", TABLED_OPT_IN_FLAGS)
+@pytest.mark.parametrize(
+    ("cli_tier", "file_value", "expected"),
+    [
+        pytest.param("true", None, True, id="T1-cli-true-file-absent"),
+        pytest.param("unset", None, False, id="T2-cli-default-file-absent"),
+        pytest.param("true", True, True, id="T3-cli-true-file-true"),
+        pytest.param("true", False, True, id="T4-cli-true-outranks-file-false"),
+        pytest.param("unset", True, True, id="T5-file-true-beats-cli-default"),
+        pytest.param("unset", False, False, id="T6-file-false-falls-through"),
+        pytest.param("false", True, True, id="T7-explicit-cli-false-is-unset"),
+    ],
+)
+def test_opt_in_tiers_resolve_cli_then_file(
+    flag: str, cli_tier: str, file_value: bool | None, expected: bool
+) -> None:
+    """#1225: pin the precedence rule of ``daydream/deep/settings.py:_resolve_opt_in``.
+
+    One table over all three deep-mode opt-ins: a truthy ``RunConfig`` attr (CLI tier)
+    outranks a truthy ``DaydreamFileConfig`` attr, which outranks the built-in ``False``;
+    an explicit file-config ``False`` falls through to the default rather than forcing it
+    off. T5 and T7 are the two rows that separate this truthiness rule from the
+    ``is not None`` sentinel rule of the sibling ``_resolve_config_value``: both put the
+    CLI tier at its built-in ``False`` while the file tier says ``True``. T7 constructs the
+    CLI tier as an explicit ``False`` and T5 as an unset field; because ``RunConfig``'s
+    fields are ``bool = False`` with no ``None`` sentinel, the two are indistinguishable by
+    design — which is why a CLI ``False`` cannot mask a repo that opted in. T4 covers the
+    opposite inversion (a rule where the file tier outranks an explicit CLI ``True``).
+    """
+    run_kwargs: dict[str, Any] = {"target": "/t"}
+    if file_value is not None:
+        file_kwargs: dict[str, Any] = {flag: file_value}
+        run_kwargs["file_config"] = DaydreamFileConfig(**file_kwargs)
+    if cli_tier != "unset":
+        run_kwargs[flag] = cli_tier == "true"
+    assert _resolve_opt_in(RunConfig(**run_kwargs), flag) is expected
 
 
 async def test_merge_resume_reruns_arbiter_when_marker_absent(

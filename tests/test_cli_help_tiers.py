@@ -14,8 +14,8 @@ def test_precision_flag_activates_precision_mode() -> None:
     """#232: ``--precision`` is the activation path into RunConfig.precision_mode.
 
     Absent the flag the field stays ``False`` (byte-identical default); with it,
-    the field is ``True`` so the deep orchestrator's ``_precision_mode`` resolver
-    runs the suppression pass.
+    the field is ``True`` so the ``deep.settings._resolve_opt_in`` helper runs
+    the suppression pass.
     """
     assert _parse_args(["/t"]).precision_mode is False
     assert _parse_args(["--precision", "/t"]).precision_mode is True

@@ -207,7 +207,7 @@ class RunConfig:
     # Default False => byte-identical behavior; no out-of-scope issue is filed
     # unless a repo explicitly opts in. Precedence: CLI --file-scope-issues >
     # [tool.daydream] scope_issue_filing > default False (resolved by
-    # _scope_issue_filing).
+    # _resolve_opt_in(config, "scope_issue_filing")).
     scope_issue_filing: bool = False
     flow_name: str | None = None
     improve_effort: str = "standard"
