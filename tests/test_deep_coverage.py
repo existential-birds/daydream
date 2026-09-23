@@ -48,12 +48,15 @@ _DIFF = (
 )
 
 
-def _write_fork_calls(run_dir: Path, name: str, calls: list[dict[str, Any]]) -> None:
-    """Write one completed sibling step whose tool calls are all completed.
+def _write_fork_calls(
+    run_dir: Path, name: str, calls: list[dict[str, Any]], *, include_results: bool = True
+) -> None:
+    """Write one sibling step carrying *calls* as its tool calls.
 
-    Each tool call carries a matching ``observation.results[].source_call_id``
-    so the sweep counts it as coverage (a call without a ToolResult observation
-    is treated as interrupted and does NOT cover the file).
+    With *include_results* (default) each tool call carries a matching
+    ``observation.results[].source_call_id`` so the sweep counts it as coverage;
+    without it the step has no ``observation`` (an interrupted call, which does
+    NOT cover the file).
     """
     trajectories_dir = run_dir / "trajectories"
     trajectories_dir.mkdir(parents=True, exist_ok=True)
@@ -69,19 +72,11 @@ def _write_fork_calls(run_dir: Path, name: str, calls: list[dict[str, Any]]) -> 
             }
         )
         results.append({"source_call_id": call_id, "content": "file content"})
+    step: dict[str, Any] = {"step_id": "s0", "tool_calls": tool_calls}
+    if include_results:
+        step["observation"] = {"results": results}
     (trajectories_dir / name).write_text(
-        json.dumps(
-            {
-                "session_id": run_dir.name,
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": tool_calls,
-                        "observation": {"results": results},
-                    }
-                ],
-            }
-        )
+        json.dumps({"session_id": run_dir.name, "steps": [step]})
     )
 
 
@@ -121,27 +116,11 @@ def _write_interrupted_read_fork(run_dir: Path, name: str, read_paths: list[str]
     ToolResultEvent): the file was not actually read, so the sweep must treat
     it as uncovered (fail-open: it gets swept, never skipped).
     """
-    trajectories_dir = run_dir / "trajectories"
-    trajectories_dir.mkdir(parents=True, exist_ok=True)
-    (trajectories_dir / name).write_text(
-        json.dumps(
-            {
-                "session_id": run_dir.name,
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "tool_call_id": f"read-{i}",
-                                "function_name": "Read",
-                                "arguments": {"file_path": path},
-                            }
-                            for i, path in enumerate(read_paths)
-                        ],
-                    }
-                ],
-            }
-        )
+    _write_fork_calls(
+        run_dir,
+        name,
+        [{"function_name": "Read", "arguments": {"file_path": path}} for path in read_paths],
+        include_results=False,
     )
 
 
