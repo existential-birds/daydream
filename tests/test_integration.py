@@ -1,6 +1,7 @@
 """Integration tests for the full review-fix-test flow."""
 import asyncio
 import json
+import json as _json
 import re
 import threading
 import time
@@ -12,7 +13,8 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from daydream import git_ops
+from daydream import git_ops, remote_ci
+from daydream.agent import run_agent
 from daydream.artifact_visibility import ArtifactSession
 from daydream.backends import (
     AgentEvent,
@@ -23,8 +25,14 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.pr_review import ReviewRenderers
-from daydream.run_context import RunContext
+from daydream.backends.codex import CodexBackend
+from daydream.deep import fix_steps
+from daydream.deep.artifacts import deep_dir, per_stack_records_path
+from daydream.exploration import ExplorationContext
+from daydream.phases import phase_alternative_review
+from daydream.pr_review import PRInfo, ReviewRenderers
+from daydream.remote_ci import RemoteCITarget, pending_remote_ci_verdict, write_remote_ci_handoff
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
@@ -38,6 +46,9 @@ from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.processes import wait_for_process_group_exit
 from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha, write_pre_push_sha_hook
+from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
+from tests.test_deep_orchestrator import _install_stub_backend, _silence
+from tests.test_runner import _fix_item, _seed_fix_resume
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -73,8 +84,6 @@ async def render_agent(
     Returns the output with ANSI codes INTACT -- the border/styling assertions
     read them. Callers comparing plain text pass the result to ``strip_ansi``.
     """
-    from daydream.agent import run_agent
-    from daydream.run_context import InteractionPolicy, RunContext
 
     output = StringIO()
     extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
@@ -102,8 +111,6 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
         ResultEvent(structured_output=None, continuation=None),
     ]
 
-    from daydream.agent import run_agent
-    from daydream.run_context import InteractionPolicy, RunContext
 
     output = StringIO()
     monkeypatch.setattr(
@@ -335,7 +342,6 @@ async def test_shallow_staged_fix_preflight_preserves_review_evidence_and_git_st
 
     assert exit_code == 1
     output = capfd.readouterr().out
-    from daydream.deep import fix_steps
 
     console_file = getattr(fix_steps, "console").file
     if isinstance(console_file, StringIO):
@@ -746,7 +752,6 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     ci_variant: str,
 ) -> None:
     """Old green evidence cannot satisfy a new push that registers later."""
-    from daydream import remote_ci
 
     project, remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
@@ -829,7 +834,6 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
     fake_gh: FakeGh,
 ) -> None:
     """A host interrupt stays distinct after its cancelled handoff is persisted."""
-    from daydream import remote_ci
 
     project, remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
@@ -903,11 +907,6 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     resume: bool,
 ) -> None:
     """Cancellation reaps the real gh process before durable operator state."""
-    from daydream.remote_ci import (
-        RemoteCITarget,
-        pending_remote_ci_verdict,
-        write_remote_ci_handoff,
-    )
 
     project, _remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
@@ -935,7 +934,6 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     unrelated = deep / "operator-notes.json"
     unrelated.write_bytes(b'{"keep":"operator notes"}\n')
     if resume:
-        from tests.test_runner import _fix_item, _seed_fix_resume
 
         _seed_fix_resume(project, [_fix_item()])
     _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
@@ -1384,7 +1382,6 @@ async def test_run_comment_full_flow(
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
     """Integration test: full --comment flow through the deep pipeline."""
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
 
@@ -1438,7 +1435,6 @@ async def test_run_comment_resolves_pr_through_real_cli_boundary(
     pr_number: int | None,
 ) -> None:
     """Production runner, PR assembly, and posting use one explicit checkout."""
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _two_commit_repo(tmp_path, "api.py", "print('hello')", "print('world')", "feat/test")
     head = _git(tmp_path, "rev-parse", "HEAD")
@@ -1493,7 +1489,6 @@ async def test_run_comment_pr_lookup_failure_and_absence_exit_nonzero(
     outcome: str,
 ) -> None:
     """Both lookup modes fail closed without attempting a review POST."""
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
     if outcome == "malformed_head":
@@ -1596,7 +1591,6 @@ async def test_run_comment_missing_pr_exits_nonzero(
     only ``pr_review.find_open_pr`` is mocked to report no PR, so the missing-PR
     warning path runs production code end to end.
     """
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
 
@@ -1623,8 +1617,6 @@ async def test_run_comment_submission_failure_exits_nonzero(
     Only the external gh process is configured to fail; everything else (the review
     pipeline, ``_post``, classification, payload build) runs production code.
     """
-    from daydream.pr_review import PRInfo
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
 
@@ -1666,8 +1658,6 @@ async def test_run_loop_submission_failure_warns_and_continues(
     run. The post gate is approved (interactive prompt path), the fix gate
     declines, and the run still exits 0 with the report written.
     """
-    from daydream.pr_review import PRInfo
-    from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
 
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
 
@@ -1724,8 +1714,6 @@ async def test_run_populates_exploration_context(
     and asserts the wired consequence: ``config.exploration_context`` is set and
     the per-stack review receives the on-disk ``exploration_dir``.
     """
-    from daydream.exploration import ExplorationContext
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     (multi_stack_target / "extra.py").write_text("VALUE = 2\n")
     _git(multi_stack_target, "add", ".")
@@ -1748,9 +1736,7 @@ async def test_run_populates_exploration_context(
         captured["exploration_dir"] = kwargs.get("exploration_dir")
         # Issue #745: reviewers write PER_STACK_RECORD_SCHEMA records files that
         # the loader requires; the fake must do the same or the run stops.
-        import json as _json
 
-        from daydream.deep.artifacts import deep_dir, per_stack_records_path
 
         dd = deep_dir(
             work.repo, session=artifact_session, allow_standalone=allow_standalone
@@ -1778,7 +1764,6 @@ async def test_run_populates_exploration_context(
 @pytest.mark.asyncio
 async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
     """CodexBackend.execute() refuses agents= with NotImplementedError."""
-    from daydream.backends.codex import CodexBackend
 
     backend = CodexBackend(model="fixture-model")
     with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
@@ -1795,7 +1780,6 @@ async def test_alternative_review_surfaces_confidence_and_rationale(
     list that must carry the schema-enforced confidence/rationale fields per
     QUAL-02.
     """
-    from daydream.phases import phase_alternative_review
 
     enriched_trust_issue = {
         "id": 1,

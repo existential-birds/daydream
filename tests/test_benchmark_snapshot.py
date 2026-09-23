@@ -13,15 +13,21 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream import git_ops
+from daydream.benchmark import snapshot, storage
+from daydream.benchmark import snapshot as sn
+from daydream.benchmark.schema import case_id_for
+from daydream.benchmark.storage import recover_startup
 from daydream.git_ops import GitError
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import seed_pr_origin, seeded_commit, write_and_stage
+from tests.harness.transaction_faults import TransactionFaultDriver
 
 # real-git seed helpers (deterministic commit SHAs)
 
@@ -60,7 +66,6 @@ def _primed_mirror(
     pr_number: int = 1,
 ) -> Path:
     """Bring up the shared mirror and prime it with the base tip and PR head(s)."""
-    from daydream.benchmark import snapshot as sn
 
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
     sn.fetch_base_tip(tmp_path, "o/r", base_tip, origin)
@@ -159,7 +164,6 @@ def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) ->
     If either probe fails, mirror handling must be revised (or the decision
     re-routed to the spec) before any anchor task runs.
     """
-    from daydream.benchmark import snapshot as sn
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -227,7 +231,6 @@ def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
     """A path that exists in the authoring tree derives to itself -- the
     authoring commit is present and ``cat-file`` succeeds, so no rename trace
     (and no ``mapped_sha`` consultation) is needed."""
-    from daydream.benchmark import snapshot
 
     origin, authoring_sha, head_sha = _seed_anchor_origin(tmp_path)
     snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -239,7 +242,6 @@ def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
 def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
     """A path absent from the authoring tree whose head name is the ``R`` dest
     of a mirror rename trace resolves to the authoring-time (old) name."""
-    from daydream.benchmark import snapshot
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
     snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -254,7 +256,6 @@ def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
     exact rename dest fails ``path-unavailable`` -- even when the diff does
     contain rename candidates (the two-R-row diff must not be resolved by
     picking among the candidates)."""
-    from daydream.benchmark import snapshot
 
     anchor_origin, anchor_auth, anchor_head = _seed_anchor_origin(tmp_path, pr=1)
     snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[anchor_head], origin_url=anchor_origin)
@@ -278,7 +279,6 @@ def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
 
 
 def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     mirror = tmp_path / "cache" / "repository.git"
@@ -295,7 +295,6 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
 
 
 def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE3, explicit_shas=[_SHA_HEAD])
@@ -309,7 +308,6 @@ def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
 
 
 def test_resolve_base_and_trees(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -325,7 +323,6 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
 
 
 def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -338,8 +335,6 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
 
 
 def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
-    from daydream.benchmark import storage
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -358,9 +353,7 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
 
 
 def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path) -> None:
-    import os
 
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -381,7 +374,6 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
     mirror whose effective core.abbrev is widened past the clone's. Failing-by-
     construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
     default, so validate_offline_clone raises a digest mismatch."""
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
@@ -396,7 +388,6 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
 
 
 def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     mirror = tmp_path / "mirror.git"
@@ -418,7 +409,6 @@ def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkey
 
 
 def test_offline_clone_validates(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -439,7 +429,6 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
     rejects every structurally-distinct tampered bundle shape (extra ref,
     extra reachable commit, wrong parent, wrong tree) while a valid bundle
     passes all probes."""
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -511,7 +500,6 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
 
 
 def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -536,7 +524,6 @@ def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
 def test_changed_paths_rejects_malformed_nul_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes
 ) -> None:
-    from daydream.benchmark import snapshot as sn
 
     monkeypatch.setattr(
         git_ops,
@@ -548,7 +535,6 @@ def test_changed_paths_rejects_malformed_nul_records(
 
 
 def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     drifted, bundle = sn.freeze_one(
@@ -571,7 +557,6 @@ def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path)
 
 
 def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     ready, bundle = sn.freeze_one(
@@ -590,8 +575,6 @@ def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path) -> None:
 
 
 def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
-    from daydream.benchmark.schema import case_id_for
 
     origin = _seed_origin(tmp_path)
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -629,7 +612,6 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
 def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
     """The forced +{base_tip} refspec lets two PRs with unrelated, non-fast-forward
     base tips both freeze ready in one shared mirror (regression for defect 3)."""
-    from daydream.benchmark import snapshot as sn
 
     origin, dev_tip, pr2_head = _seed_two_pr_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -650,7 +632,6 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
     """Acceptance (a): a base branch advanced past the PR fork records the true
     merge base as original_base_sha and the selected base tip as
     requested_base_sha — two distinct SHAs."""
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -668,7 +649,6 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
 def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
     """A base-tip fetch failure classifies ``base_unreachable``; a PR-head fetch
     failure classifies ``head_unreachable`` — never collapsed to one reason."""
-    from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
     # base-tip ref absent on the origin (only base1..3 + refs/pull/1/head exist)
@@ -696,8 +676,6 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
     ``manifest`` keeps the complete after-state, and ``transactions/`` is left
     empty after recovery.
     """
-    from daydream.benchmark.storage import recover_startup
-    from tests.harness.transaction_faults import TransactionFaultDriver
 
     for boundary in ("journal", "data", "manifest"):
         case_dir = tmp_path / "cases"
@@ -770,8 +748,6 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
 
 
 def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
-    from daydream.benchmark import storage
 
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=base, explicit_shas=[head])
@@ -806,7 +782,6 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: 
 
 def _clone_offline(bundle: Path, workdir: Path) -> Path:
     """Clone *bundle* into a fresh temp dir (network-disabled local source)."""
-    import tempfile
 
     workdir.mkdir(parents=True, exist_ok=True)
     clone = tempfile.mkdtemp(prefix="e2e-", dir=str(workdir))
@@ -857,7 +832,6 @@ def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path)
     the anchor delta (with parseable path columns and binary detection). If any
     probe's output shape deviates on a plain bare mirror, the extraction helper
     design must be revised before Task 1."""
-    from daydream.benchmark import snapshot as sn
 
     origin, authoring_sha, unrelated_sha, head_sha = _seed_facts_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -959,7 +933,6 @@ def _anchor(path: str | None, start: int | None, end: int | None,
 
 
 def _delta_mirror(tmp_path: Path) -> tuple[Path, str, str, dict[str, str]]:
-    from daydream.benchmark import snapshot as sn
 
     origin, base, orphan, heads = _seed_delta_origin(tmp_path)
     m = sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -971,7 +944,6 @@ def _delta_mirror(tmp_path: Path) -> tuple[Path, str, str, dict[str, str]]:
 
 
 def test_commit_relation_classifies_ancestor_head_and_non_ancestor(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
     assert sn.commit_relation(m, heads["edit"], heads["edit"]) == "at_head"
@@ -980,7 +952,6 @@ def test_commit_relation_classifies_ancestor_head_and_non_ancestor(tmp_path: Pat
 
 
 def test_commit_relation_unavailable_on_missing_object(tmp_path: Path) -> None:
-    from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
     assert sn.commit_relation(m, heads["edit"], "f" * 40) == "unavailable"
@@ -989,7 +960,6 @@ def test_commit_relation_unavailable_on_missing_object(tmp_path: Path) -> None:
 def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationless(
     tmp_path: Path,
 ) -> None:
-    from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
     # intersecting edit to the anchored range -> changed
@@ -1017,7 +987,6 @@ def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationles
 def test_anchor_delta_unavailable_on_git_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
 
@@ -1036,7 +1005,6 @@ def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(
     name-status/numstat classification via diff_cache: only the per-path -U0
     probe remains per-record, and the cached classification classifies each
     record exactly as an uncached probe would."""
-    from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
     probes: list[list[str]] = []
