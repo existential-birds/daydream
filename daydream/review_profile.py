@@ -125,7 +125,7 @@ class Suppression:
     """Bounded pipeline section: precision-mode suppression (R2).
 
     Mirrors the production opt-in default: the suppression pass is OFF by
-    default (issue #232 precision mode; ``orchestrator._precision_mode``).
+    default (issue #232 precision mode; ``deep.settings._resolve_opt_in``).
     """
 
     enabled: bool = False
