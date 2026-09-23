@@ -315,7 +315,7 @@ def test_malformed_override_falls_back_to_default(
 def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pi responses preempt the wall; tools and codex retain the long window.
 
-    Pi's response stream is live while the model generates, so five minutes of
+    Pi's response stream is live while the model generates, so ten minutes of
     silence is a stall. Codex generations and output-silent tools can legitimately
     remain quiet much longer and must still be bounded by the phase wall budget.
     """
@@ -323,6 +323,7 @@ def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
+    assert DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S == 600.0
     assert (
         DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
         < DEFAULT_WALL_BUDGET_S
