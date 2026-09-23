@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream.config_file import load_file_config
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _scan_phase_events,
 )
+from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
     MakeConfig,
@@ -312,9 +314,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: the pre-scan summary renders as a readable panel, not raw JSON."""
-    from rich.console import Console
 
-    from tests.harness.review_profile import independent_exploration_profile
 
     # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
     # runs and its conventions reach the rendered summary).

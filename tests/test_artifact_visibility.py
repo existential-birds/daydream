@@ -51,6 +51,7 @@ from daydream.artifact_visibility import (
 from daydream.artifact_visibility import (
     open_artifact_session as _open_artifact_session,
 )
+from daydream.deep.artifacts import check_deep_artifacts
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
@@ -754,7 +755,6 @@ async def test_artifact_session_detaches_routes_and_restores_public_bytes(
 
 
 async def test_artifact_session_preserves_resume_mtimes_across_publication_and_reopen(source: Path) -> None:
-    from daydream.deep.artifacts import check_deep_artifacts
 
     deep = source / ".daydream" / "deep"
     deep.mkdir(parents=True)

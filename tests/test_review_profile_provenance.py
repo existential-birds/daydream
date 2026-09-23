@@ -8,6 +8,7 @@ manifest (optional fields, omitted on legacy), and the SQLite run projection
 import sqlite3
 from pathlib import Path
 
+from daydream.archive import _schema
 from daydream.archive import manifest as m
 from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -68,7 +69,6 @@ def test_legacy_manifest_without_profile_fields_still_serializes() -> None:
 
 
 def test_sqlite_projection_has_profile_columns_and_migration() -> None:
-    from daydream.archive import _schema
 
     ddl = _schema._CREATE_TABLE  # the runs CREATE TABLE constant
     assert "profile_digest TEXT" in ddl
