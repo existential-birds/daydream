@@ -157,6 +157,13 @@ def _finding(
     }
 
 
+def _inline_finding(title: str, *, severity: str = "high") -> dict[str, Any]:
+    """An inline ``a.py:3`` finding; every default but title/severity is fixed."""
+    return _finding(
+        "a" * 64, path="a.py", line=3, placement="inline", title=title, severity=severity
+    )
+
+
 def _write_artifact(
     path: Path,
     findings: list[dict[str, Any]],
@@ -351,13 +358,7 @@ def artifact_on_disk(tmp_path: Path) -> Path:
     return _write_artifact(
         tmp_path / "findings.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Inline finding",
-            ),
+            _inline_finding("Inline finding"),
             _finding(
                 "b" * 64, path="b.py", line=None, placement="body", title="Body finding"
             ),
@@ -401,13 +402,7 @@ def test_post_findings_ignores_artifact_run_info_sha(
     artifact = _write_artifact(
         tmp_path / "findings.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Inline finding",
-            )
+            _inline_finding("Inline finding")
         ],
         run_info=(
             "run from commit "
@@ -585,14 +580,7 @@ def test_post_findings_approve_on_clean_reflects_finding_severity(
     artifact = _write_artifact(
         tmp_path / "f.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Finding",
-                severity=severity,
-            ),
+            _inline_finding("Finding", severity=severity),
         ],
     )
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
@@ -616,14 +604,7 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(
     artifact = _write_artifact(
         tmp_path / "f.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Nit",
-                severity="low",
-            ),
+            _inline_finding("Nit", severity="low"),
         ],
     )
     fake_gh.serve_prior_threads(
@@ -646,14 +627,7 @@ def test_post_findings_all_matched_no_approve_without_flag(
     artifact = _write_artifact(
         tmp_path / "f.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Nit",
-                severity="low",
-            ),
+            _inline_finding("Nit", severity="low"),
         ],
     )
     fake_gh.serve_prior_threads(
@@ -735,13 +709,7 @@ def test_post_findings_drops_forged_diagram_grounding_attestation(
     artifact = _write_artifact(
         git_repo / "f.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Already posted",
-            )
+            _inline_finding("Already posted")
         ],
         diagrams=payload,
         head_sha=head_sha,
@@ -1261,13 +1229,7 @@ def test_post_findings_matched_high_blocks_approval(
     artifact = _write_artifact(
         tmp_path / "f.json",
         [
-            _finding(
-                "a" * 64,
-                path="a.py",
-                line=3,
-                placement="inline",
-                title="Old high finding",
-            ),
+            _inline_finding("Old high finding"),
             _finding(
                 "b" * 64,
                 path="b.py",

@@ -60,7 +60,8 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
     """Build a real local bare origin whose base/head are the PR's SHAs.
 
     The feature head adds ``feature.py`` with exactly *lines* lines. Returns
-    ``(origin_url, base_sha, head_sha)``.
+    ``(origin_url, base_sha, head_sha)``. Callers seed identity (
+    ``_seed_preflight``) first; this only adds the canned PR header.
     """
     origin_url, base_sha, head_sha = seed_pr_origin(
         tmp_path,
@@ -69,13 +70,6 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
         feature_body="".join(f"LINE {i}\n" for i in range(1, lines + 1)),
         feature_message=f"feature{number}",
         number=number,
-    )
-    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE",
-               "defaultBranchRef": {"name": "main"}},
     )
     header = _pr_header(number, base_sha=base_sha, head_sha=head_sha)
     fake_gh.set_response("GET", f"repos/o/r/pulls/{number}", header)
@@ -124,27 +118,37 @@ def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
 
 
-def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[Path, str, str]:
-    """Seed a genuine frozen ``ready`` workspace for one imported PR.
-
-    Builds a real bare origin, runs the real import (freezing a ready snapshot
-    + bundle), accepts the first exact-acceptable candidate, and final-attests
-    the case ready. Returns ``(ws, case_id, head_sha)``.
-    """
-    from daydream.benchmark import curation as cu
+def _import_case(
+    tmp_path: Path, fake_gh: FakeGh, *, number: int, lines: int = 3,
+    ws: Path | None = None, with_candidate: bool = True,
+) -> tuple[Path, str, str]:
+    """Import one PR into a fresh (or given) workspace; returns (ws, case_id, head_sha)."""
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
-    _SEED_SEQ["n"] += 1
-    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
-    _seed_preflight(fake_gh, number=101)
-    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=101, lines=lines)
-    _seed_candidate(fake_gh, number=101, head_sha=head_sha)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    if ws is None:
+        _SEED_SEQ["n"] += 1
+        ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
+        init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
+    _seed_preflight(fake_gh, number=number)
+    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=number, lines=lines)
+    if with_candidate:
+        _seed_candidate(fake_gh, number=number, head_sha=head_sha)
+    assert gi.run_import_prs(ws, pr_numbers=[number], heads=[], origin_url=origin_url) == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id = raw["cases"][0]["case_id"]
+    case_id: str = next(c["case_id"] for c in raw["cases"] if c["pr_number"] == number)
+    return ws, case_id, head_sha
+
+
+def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[Path, str, str]:
+    """Seed a genuine frozen ``ready`` workspace for one imported PR.
+
+    Returns ``(ws, case_id, head_sha)``.
+    """
+    from daydream.benchmark import curation as cu
+
+    ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, lines=lines)
     candidate = next(
         c for c in cu.get_case(ws, case_id)["candidates"]
         if c["exact_acceptable"]
@@ -161,18 +165,8 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh: FakeGh, *, ready: bool = True
     ready; with *ready* False it stays a clean-attested draft.
     """
     from daydream.benchmark import curation as cu
-    from daydream.benchmark import github_import as gi
-    from daydream.benchmark.storage import load_yaml_strict
-    from daydream.benchmark.workspace import init_workspace
 
-    _SEED_SEQ["n"] += 1
-    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
-    _seed_preflight(fake_gh, number=101)
-    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=101, lines=3)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id = raw["cases"][0]["case_id"]
+    ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, with_candidate=False)
     cu.attest_clean(ws, case_id)
     if ready:
         _mark_ready(ws, case_id, head_sha)
@@ -185,15 +179,8 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines:
     Returns the second case id.
     """
     from daydream.benchmark import curation as cu
-    from daydream.benchmark import github_import as gi
-    from daydream.benchmark.storage import load_yaml_strict
 
-    _seed_preflight(fake_gh, number=102)
-    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, number=102, lines=lines)
-    _seed_candidate(fake_gh, number=102, head_sha=head_sha)
-    assert gi.run_import_prs(ws, pr_numbers=[102], heads=[], origin_url=origin_url) == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id: str = next(c["case_id"] for c in raw["cases"] if c["pr_number"] == 102)
+    _, case_id, head_sha = _import_case(tmp_path, fake_gh, number=102, lines=lines, ws=ws)
     candidate = next(
         c for c in cu.get_case(ws, case_id)["candidates"]
         if c["exact_acceptable"]
