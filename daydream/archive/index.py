@@ -151,6 +151,16 @@ def normalize_as_of(value: str) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def readonly_connection(archive_dir: Path) -> sqlite3.Connection:
+    """Read a checkpointed index without schema changes or SQLite sidecars."""
+    db_path = archive_dir / "index.db"
+    if db_path.with_name(db_path.name + "-wal").exists():
+        raise ValueError(f"index {db_path} has an uncheckpointed WAL; checkpoint before reading")
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     """Open the index database, creating schema if needed.
 
@@ -629,6 +639,7 @@ def reviewer_set_penalty_prior(
     before_valid_at: str,
     exclude_session: str,
     repo_slug: str | None = None,
+    readonly: bool = False,
 ) -> tuple[float | None, int]:
     """Return the pooled mean penalty over prior runs sharing a reviewer (C4).
 
@@ -703,7 +714,7 @@ def reviewer_set_penalty_prior(
             WHERE _rn = 1
             """
 
-    conn = _get_connection(archive_dir)
+    conn = readonly_connection(archive_dir) if readonly else _get_connection(archive_dir)
     try:
         cursor = conn.execute(sql, params)
         rows = cursor.fetchall()

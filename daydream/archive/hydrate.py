@@ -902,6 +902,26 @@ def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
     return raw
 
 
+def _manifest_index_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Decode producer manifest blocks into index fields, retaining flat legacy input."""
+    valid = {f.name for f in dataclass_fields(Manifest)} - {"daydream"}
+    fields = {key: value for key, value in data.items() if key in valid}
+    for block_name in ("run", "git", "code_context", "pr", "metrics", "outcome"):
+        block = data.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        aliases = {
+            "run": {"flow": "run_flow"},
+            "pr": {"number": "pr_number", "repo": "pr_repo"},
+            "outcome": {"labels": "outcome_labels"},
+        }.get(block_name, {})
+        for key, value in block.items():
+            field_name = aliases.get(key, key)
+            if field_name in valid:
+                fields[field_name] = json.dumps(value) if field_name == "outcome_labels" else value
+    return fields
+
+
 def rebuild_index(stage: Path) -> None:
     """Index every admitted derivative under ``stage/runs/`` (issue #982 M6).
 
@@ -922,15 +942,10 @@ def rebuild_index(stage: Path) -> None:
             raise HydrationError(
                 redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
             )
-        valid = {f.name for f in dataclass_fields(Manifest)}
-        rewritten = {"archive_path", "source_path", "remote_url", "repo_slug"}
         # ``daydream`` provenance is a nested dict in produced manifests; the
         # index expects the executable-provenance object, so it is dropped from
         # the hydrated rebuild (never coerced into a Manifest field).
-        kwargs = {
-            k: v for k, v in data.items()
-            if k in valid and k not in rewritten and k != "daydream"
-        }
+        kwargs = _manifest_index_fields(data)
         raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():
             slug, canonical = normalize_remote_url(raw_url)
@@ -2468,7 +2483,6 @@ def verify_publication(
     # a failed verification can never leave a published "complete" marker.
 
     # 3. Rescan every published batch (clean-room) and rebuild the scratch index.
-    valid = {f.name for f in dataclass_fields(Manifest)}
     for batch in doc["batches"]:
         if batch["status"] != "admitted":
             continue
@@ -2504,7 +2518,7 @@ def verify_publication(
         data = _read_manifest_dict(batch_dir)
         if data is None:
             raise VerificationError(redact_text(f"verify: batch {sid!r} has an unreadable manifest"))
-        kwargs = {k: v for k, v in data.items() if k in valid and k != "daydream"}
+        kwargs = _manifest_index_fields(data)
         kwargs["archive_path"] = str(batch_dir)
         raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():

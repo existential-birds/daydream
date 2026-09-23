@@ -21,6 +21,7 @@ from daydream.training.adjudication.export import EXPORT_KEYS
 from daydream.training.adjudication.observations import (
     group_observations_by_record,
     load_observations,
+    prior_adjudications,
 )
 from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication
 from daydream.training.adjudication.preview import _load_sessions
@@ -48,7 +49,10 @@ def build_export_entries(
     ``evidence_digest``), sorted by ``record_id``. Raises digest drift, a
     missing ledger, and unknown record ids.
     """
-    items = build_queue(_load_sessions(index_root)[0])
+    observations = load_observations(observations_path) if observations_path is not None else []
+    items = build_queue(
+        _load_sessions(index_root)[0], prior_observations=prior_adjudications(observations),
+    )
     by_record_id = {str(item["record_id"]): item for item in items}
 
     if not ledger_path.is_file():
@@ -83,7 +87,6 @@ def build_export_entries(
             drifted,
         )
 
-    observations = load_observations(observations_path) if observations_path is not None else []
     grouped = group_observations_by_record(
         observations, {str(item["record_id"]) for item in items}, "adjudicate export"
     )
