@@ -38,7 +38,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.deep.records import record_uid
+from daydream.deep.records import record_uid, stack_name_from_uid
 from daydream.eval.analyzer import _records_issues_or_empty
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
@@ -865,8 +865,6 @@ class StubBackend:
                 # Issue #742: fresh-run records files carry the dict shape
                 # {"issues": [...], "verdicts": [...]}; normalize to the
                 # bare issues list (legacy files stay bare lists).
-                from daydream.deep.records import record_uid
-
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
@@ -913,8 +911,6 @@ class StubBackend:
             # collapsed (tiny-diff / shallow, where the only stack is
             # ``generic``) has no python/react record to cite, so the lookup
             # falls back to the first stack present rather than emitting ``[]``.
-            from daydream.deep.records import stack_name_from_uid
-
             lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)]
             leads_by_stack = {stack_name_from_uid(uid): uid for uid in reversed(lead_uids)}
 

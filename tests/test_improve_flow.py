@@ -589,7 +589,7 @@ async def test_unborn_improve_cancellation_cleans_snapshot(
     )
 
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(run, make_config(repo, flow_name="improve"))
+        tasks.start_soon(_run_improve, make_config, repo)
         await started.wait()
         tasks.cancel_scope.cancel()
 
@@ -628,10 +628,7 @@ async def test_audit_dispatch_interval_cancelling_two_blocked_auditors(
 
     backend = install_capable_improve_backend(monkeypatch, BlockingAuditBackend())
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(
-            run,
-            make_config(improve_monorepo_target, flow_name="improve"),
-        )
+        tasks.start_soon(_run_improve, make_config, improve_monorepo_target)
         await two_started.wait()
         tasks.cancel_scope.cancel()
 
