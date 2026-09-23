@@ -15,10 +15,8 @@ change appends a fresh generation, M8), and emits ``annotations.jsonl`` from the
 (M5). Digest drift raises :class:`AnnotationDriftError` **before any write**
 (fail-closed-then-requeue, M5).
 
-Unlike ``adjudication/harvest.py`` this path does not touch
-``training/harvest.py``'s GitHub-facing signals: the #980 semantic evidence
-was already collected into the index at materialization; canonical harvest
-only re-verifies it against the preview pin.
+Production bronze is re-read through the same read-only semantic builder as
+preview, including fresh GitHub evidence, before any canonical write.
 """
 
 from __future__ import annotations
@@ -203,7 +201,10 @@ def run_canonical_harvest(
     }
 
     # Fail-closed drift gate: verify BEFORE any write.
-    drifted: list[str] = []
+    materialized_ids = {str(record["record_id"]) for record in materialized}
+    if len(materialized_ids) != len(materialized):
+        raise ValueError("materialized snapshot contains duplicate finding identities")
+    drifted = sorted(set(fresh_by_record_id) - materialized_ids)
     for record in materialized:
         record_id = str(record["record_id"])
         fresh = fresh_by_record_id.get(record_id)
@@ -243,10 +244,18 @@ def run_canonical_harvest(
             record["conflicting"] = True
         if record_id in grouped:
             resolved = effective_adjudication(grouped[record_id])
+            if resolved["evidence_digest"] == str(record["evidence_digest"]):
+                if resolved["conflict"]:
+                    record["conflicting"] = True
+                if resolved["review_required"] and resolved["role"] in HUMAN_ROLES:
+                    record["review_required"] = True
+                    record["disposition"] = _CONFLICTED_DISPOSITION
             if (
                 resolved["role"] in HUMAN_ROLES
                 and resolved["evidence_digest"] == str(record["evidence_digest"])
                 and resolved["disposition"] in DECISIVE_DISPOSITIONS
+                and not resolved["conflict"]
+                and not resolved["review_required"]
             ):
                 record["disposition"] = resolved["disposition"]
                 record["human_labeler"] = resolved["labeler"]
@@ -269,6 +278,10 @@ def run_canonical_harvest(
             if fresh is not None:
                 record["disposition"] = str(fresh["disposition"])
         record["evidence_after_as_of"] = _evidence_after_as_of(record, pin.get("as_of"))
+        record["resolutions"] = [
+            {**resolution, "disposition": record["disposition"]}
+            for resolution in record.get("resolutions") or []
+        ]
         if record["evidence_after_as_of"]:
             flagged_after_as_of.append(record_id)
         merged_records.append(record)
@@ -355,6 +368,10 @@ def run_canonical_harvest(
         if record.get("conflicting"):
             row = dict(record)
             row["disposition"] = _CONFLICTED_DISPOSITION
+            row["resolutions"] = [
+                {**resolution, "disposition": _CONFLICTED_DISPOSITION}
+                for resolution in record.get("resolutions") or []
+            ]
             return row
         return record
 

@@ -20,6 +20,7 @@ from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError, RepoInfo, resolve_source_revision
 from daydream.json_utils import canonical_json as _canonical
+from daydream.training.adjudication.observations import load_observations, prior_adjudications
 from daydream.training.adjudication.queue import build_queue
 
 __all__ = ["preview_ledger_digest", "run_preview"]
@@ -92,7 +93,9 @@ def _load_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
     return sessions, index_revision
 
 
-def run_preview(index_root: Path, ledger_path: Path) -> dict[str, Any]:
+def run_preview(
+    index_root: Path, ledger_path: Path, *, observations_path: Path | None = None,
+) -> dict[str, Any]:
     """Preview the adjudication queue over the hydrated index at ``index_root``.
 
     Builds the queue (deterministic, ``record_id``-ordered), computes each
@@ -116,8 +119,9 @@ def run_preview(index_root: Path, ledger_path: Path) -> dict[str, Any]:
     from daydream.training.adjudication.materialize import index_sessions
 
     sessions, index_revision = index_sessions(index_root)
+    prior = prior_adjudications(load_observations(observations_path)) if observations_path else None
     items = [
-        {k: item[k] for k in _ITEM_KEYS} for item in build_queue(sessions)
+        {k: item[k] for k in _ITEM_KEYS} for item in build_queue(sessions, prior_observations=prior)
     ]
     ledger: dict[str, Any] = {
         "index_revision": index_revision,

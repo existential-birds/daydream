@@ -34,12 +34,12 @@ deterministic adjudication queue:
   fresh local destination.
 - ``import-local-observations`` — read-only import of surviving local
   archive/backup roots' immutable ``label_observations`` histories:
-  read-only inventory, identity linkage against the roots' run metadata,
+  read-only inventory, identity linkage against the pinned hydrated index,
   content-digest dedupe, version gate, run-level classification,
   reason-coded accounting (bucket sum == source row count), and — unless
   ``--dry-run`` — an append-only merge into the ``--archive-dir`` archive
-  (the hydrated stage's index.db — the single merge target) followed by
-  fail-closed redaction + secret scan. ``--json`` prints the
+  and the finding-level ``observations.jsonl`` store after fail-closed
+  redaction + secret scan. ``--json`` prints the
   digest-stable import report (also written to
   ``--state-dir/import-report.json`` on a real run, alongside
   ``import-ledger.json``). Dry-run writes nothing (S2).
@@ -47,7 +47,7 @@ deterministic adjudication queue:
 Every handler returns an int exit code (never calls ``sys.exit`` itself);
 argparse converts malformed invocations into ``SystemExit(2)``. Unknown
 record ids and missing state files fail closed with exit 1, naming the
-offending identifier. No handler mutates anything outside ``--state-dir``.
+offending identifier. Writes use each verb's explicit output/archive paths.
 """
 
 from __future__ import annotations
@@ -70,17 +70,19 @@ from daydream.archive.importer import (
     redact_metadata_value,
     run_pure_import,
 )
-from daydream.archive.index import _get_connection
+from daydream.archive.index import _get_connection, readonly_connection
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
+from daydream.training.adjudication.local_history import project_local_history
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import (
     _DISPOSITIONS,
     append_observation,
     load_observations,
+    prior_adjudications,
 )
 from daydream.training.adjudication.precedence import HUMAN_ROLES, has_rater_conflict
 from daydream.training.adjudication.preview import run_preview
@@ -145,14 +147,16 @@ def _resolved_record_ids(
     since been reopened by digest drift) does not count as resolved — the
     reopened item stays in the open set.
     """
-    human_by_record: dict[str, str] = {}
-    for obs in observations:
-        if obs.get("role") in HUMAN_ROLES:
-            human_by_record[str(obs["record_id"])] = str(obs["evidence_digest"])
+    prior = prior_adjudications(observations)
     resolved: set[str] = set()
     for item in queue:
         record_id = str(item["record_id"])
-        if human_by_record.get(record_id) == str(item["evidence_digest"]):
+        judgment = prior.get(record_id)
+        if (
+            judgment is not None and judgment["role"] in HUMAN_ROLES
+            and judgment["evidence_digest"] == str(item["evidence_digest"])
+            and not judgment["conflict"] and not judgment["review_required"]
+        ):
             resolved.add(record_id)
     return resolved
 
@@ -405,12 +409,7 @@ def handle_build(argv: list[str]) -> int:
         print_error(create_console(), "adjudicate build failed", str(exc))
         return 1
     observations = load_observations(args.state_dir / _OBSERVATIONS_FILENAME)
-    prior: dict[str, Mapping[str, Any]] = {}
-    for obs in observations:
-        # Include model-suggested observations so build_queue can propagate
-        # their stored review-required flag onto the rebuilt item (show then
-        # renders the item as needing review).
-        prior[str(obs["record_id"])] = obs
+    prior = prior_adjudications(observations)
     try:
         items = build_queue(raw, prior_observations=prior)
     except ValueError as exc:
@@ -542,7 +541,10 @@ def handle_export(argv: list[str]) -> int:
         # or the observations change" path with AdjudicationDriftError instead
         # of being the documented recovery (run_preview compares against the
         # prior ledger and overwrites it).
-        preview = run_preview(args.index_root, ledger_path)
+        preview = run_preview(
+            args.index_root, ledger_path,
+            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
+        )
         if preview["drifted_record_ids"]:
             print(
                 f"preview drift: {len(preview['drifted_record_ids'])} record(s) changed "
@@ -900,7 +902,7 @@ _IMPORT_VERSION_COLUMNS = (
 def _inventory_import_root(root: Path) -> dict[str, Any]:
     """Read-only inventory of one archive/backup root (M1, Assumption 4).
 
-    Opens ``root/index.db`` in ``mode=ro`` (the source is never written),
+    Opens checkpointed ``root/index.db`` immutably (no WAL/SHM sidecars),
     reads every ``label_observations`` row ordered by ``observed_at`` ASC,
     fills version columns missing from a legacy schema with ``"legacy"``, and
     enriches each row with its run's ``repo_slug``/``base_sha``/``head_sha``
@@ -922,7 +924,7 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
             f"archive root {root} has no index.db; not a daydream archive/backup root"
         )
     source_digest = hashlib.sha256(db_path.read_bytes()).hexdigest()
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = readonly_connection(root)
     try:
         conn.row_factory = sqlite3.Row
         tables = {
@@ -1062,8 +1064,7 @@ def _inventory_import_roots(
     ``--json`` callers pass ``None`` to keep stdout machine-readable).
 
     Returns:
-        ``{"inventories", "sources", "runs_by_session",
-        "repo_slug_sha_lookup"}``.
+        ``{"inventories", "sources", "runs_by_session"}``.
 
     Raises:
         ValueError/sqlite3.Error/OSError: Any inventory failure (missing
@@ -1072,7 +1073,6 @@ def _inventory_import_roots(
     inventories: list[list[dict[str, Any]]] = []
     sources: list[dict[str, Any]] = []
     runs_by_session: dict[str, dict[str, Any]] = {}
-    repo_slug_sha_lookup: dict[tuple[str, str, str], Any] = {}
     for root in roots:
         inventory = _inventory_import_root(root)
         inventories.append(inventory["rows"])
@@ -1085,15 +1085,6 @@ def _inventory_import_roots(
         )
         for session_id, run in inventory["runs"].items():
             runs_by_session.setdefault(session_id, run)
-            repo_slug, base_sha, head_sha = (
-                run.get("repo_slug"),
-                run.get("base_sha"),
-                run.get("head_sha"),
-            )
-            if repo_slug and base_sha and head_sha:
-                repo_slug_sha_lookup.setdefault(
-                    (str(repo_slug), str(base_sha), str(head_sha)), session_id
-                )
         if console is not None:  # per-root progress (S3)
             console.print(
                 f"import: inventoried {len(inventory['rows'])} label_observations(s) "
@@ -1103,7 +1094,6 @@ def _inventory_import_roots(
         "inventories": inventories,
         "sources": sources,
         "runs_by_session": runs_by_session,
-        "repo_slug_sha_lookup": repo_slug_sha_lookup,
     }
 
 
@@ -1168,9 +1158,6 @@ def _load_import_index_runs(
     backup never grants unrelated producer runs membership in the pinned
     curation, and seeding these rows never creates observation history.
     """
-    if (index_root / _SESSIONS_FILENAME).is_file():
-        return {}
-
     db_path = index_root / "index.db"
     if not db_path.is_file():
         return {}
@@ -1191,6 +1178,18 @@ def _load_import_index_runs(
             + ", ".join(missing)
         )
     return {session_id: available[session_id] for session_id in sorted(eligible)}
+
+
+def _pinned_identity_lookup(
+    runs: Mapping[str, Mapping[str, Any]],
+) -> dict[tuple[str, str, str], str]:
+    """Only unique identities in the pinned curation may link a backup row."""
+    candidates: dict[tuple[str, str, str], list[str]] = {}
+    for session_id, row in runs.items():
+        slug, base, head = (row.get(key) for key in ("repo_slug", "base_sha", "head_sha"))
+        if slug and base and head:
+            candidates.setdefault((str(slug), str(base), str(head)), []).append(session_id)
+    return {key: sessions[0] for key, sessions in candidates.items() if len(sessions) == 1}
 
 
 def _hydrated_identity_index(
@@ -1509,16 +1508,18 @@ def handle_import_local_observations(argv: list[str]) -> int:
         index_runs_by_session = _load_import_index_runs(args.index_root, sessions)
         hydrated_index = _hydrated_identity_index(sessions, args.index_root)
         projector_findings = _projector_findings_map(
-            sessions, inventory["runs_by_session"]
+            sessions, index_runs_by_session
         )
         result = run_pure_import(
             inventory["inventories"],
             hydrated_index=hydrated_index,
-            repo_slug_sha_lookup=inventory["repo_slug_sha_lookup"],
+            repo_slug_sha_lookup=_pinned_identity_lookup(index_runs_by_session),
             projector_findings=projector_findings,
             unmatched_identity_less=True,
         )
         linked_rows = _link_imported_rows(result)
+        # Validate the finding projection before either canonical store writes.
+        imported_judgments, finding_decisions = project_local_history(linked_rows, sessions)
         # Dry-run still exercises the merge's fail-closed drift gate, but the
         # planned appends are counted, never written (S2). The real path runs
         # the redaction + secret scan and the drift / malformed-row gate
@@ -1535,6 +1536,12 @@ def handle_import_local_observations(argv: list[str]) -> int:
                 index_runs_by_session,
             )
         )
+        if not args.dry_run:
+            imported_judgments, finding_decisions = project_local_history(
+                merge_state["scan"]["payload"], sessions,
+            )
+            for judgment in imported_judgments:
+                append_observation(args.state_dir / _OBSERVATIONS_FILENAME, judgment)
     except _ImportGateError as exc:
         print_error(
             console,
@@ -1550,6 +1557,8 @@ def handle_import_local_observations(argv: list[str]) -> int:
         inventory["sources"], result, dry_run=bool(args.dry_run), merge_state=merge_state,
         identity_summary=_identity_summary(result),
     )
+    report["finding_decisions"] = finding_decisions
+    report["finding_observations"] = len(imported_judgments)
     if args.publish:
         try:
             report["publish"] = _publish_import_state(

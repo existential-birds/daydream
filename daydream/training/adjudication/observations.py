@@ -37,7 +37,8 @@ _REQUIRED_FIELDS = (
 )
 
 
-def _validate(obs: Mapping[str, Any]) -> None:
+def validate_observation(obs: Mapping[str, Any]) -> None:
+    """Validate a judgment before planning or appending observation state."""
     for field in _REQUIRED_FIELDS:
         if field not in obs:
             raise ValueError(f"observation missing required field: {field}")
@@ -77,7 +78,7 @@ def append_observation(path: Path, obs: Mapping[str, Any]) -> None:
     Validation happens before any bytes are written, so a failed append leaves
     the file byte-identical. Never rewrites or deletes existing lines.
     """
-    _validate(obs)
+    validate_observation(obs)
     if obs["role"] == "model-suggested":
         # Model-suggested labels are always review-required; the writer forces
         # the flag so callers cannot omit or clear it.
@@ -98,6 +99,16 @@ def load_observations(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def prior_adjudications(observations: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Resolve complete per-finding history for queue visibility and reopening."""
+    from daydream.training.adjudication.precedence import effective_adjudication
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for observation in observations:
+        grouped.setdefault(str(observation["record_id"]), []).append(observation)
+    return {record_id: effective_adjudication(rows) for record_id, rows in grouped.items()}
 
 
 def group_observations_by_record(

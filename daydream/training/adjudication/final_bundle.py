@@ -358,7 +358,7 @@ def build_final_bundle(
     publishes: the caller feeds the directory to
     :func:`daydream.training.adjudication.publish.publish_final_annotation_bundle`.
 
-    - ``annotations.jsonl`` / ``sessions.jsonl``: copied byte-for-byte from the
+    - ``annotations.jsonl`` / ``sessions.jsonl``: both copied byte-for-byte from the
       materialization dir (missing file raises ``FileNotFoundError`` naming it).
     - ``label-observations.jsonl``: the archive's immutable per-session
       observation history (``archive.index.label_observation_history``) for
@@ -431,14 +431,13 @@ def build_final_bundle(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. annotations.jsonl + sessions.jsonl: verbatim copies of the canonical
-    #    materialized artifacts (already canonical JSONL — re-serializing
-    #    would be a second code path for the same bytes).
+    # 1. Both consumer views use the canonical merged records. Copying preview
+    #    sessions here would discard imported/human decisions for projection.
     _write_bundle_file(
         out_dir, _ANNOTATIONS_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
     )
     _write_bundle_file(
-        out_dir, _SESSIONS_OUT_FILENAME, (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes()
+        out_dir, _SESSIONS_OUT_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
     )
     _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_path.read_bytes())
     _write_bundle_file(out_dir, _POLICY_BINDING_FILENAME, policy_binding)

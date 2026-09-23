@@ -126,8 +126,12 @@ class TestWriterCharacterization:
         with _umask(0o022):
             build_final_bundle(index_root=index_root, materialize_dir=mat,
                                archive_dir=archive_dir, out_dir=out)
-        for name in ("annotations.jsonl", "sessions.jsonl", "preview-manifest.json"):
-            assert (out / name).read_bytes() == (mat / name).read_bytes(), name
+        for name, source in (
+            ("annotations.jsonl", "annotations.jsonl"),
+            ("sessions.jsonl", "annotations.jsonl"),
+            ("preview-manifest.json", "preview-manifest.json"),
+        ):
+            assert (out / name).read_bytes() == (mat / source).read_bytes(), name
         assert (out / "coverage-report.json").read_bytes().endswith(b"\n")
         for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
                      "coverage-report.json", "lineage.json", "preview-manifest.json",

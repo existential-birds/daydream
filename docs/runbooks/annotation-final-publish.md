@@ -17,7 +17,7 @@ You need:
 - the exact lowercase 40-hex source revision;
 - the checked-in production license policy;
 - Hub credentials in your environment; and
-- `GITHUB_TOKEN` in your environment if license enrichment must query GitHub.
+- GitHub credentials for semantic review-comment evidence (and license enrichment).
 
 Never put credentials in a URL, command argument, state file, or manifest.
 The commands below use these placeholders:
@@ -58,11 +58,51 @@ checkpoint.
 
 ### Materialize and adjudicate the preview
 
-Materialize the preview snapshot from the pinned hydrated index:
+Materialize the first semantic preview directly from the pinned hydrated
+index, including an archive with empty `label_observations`. This command
+collects current GitHub review replies with the canonical harvester's semantic
+builder and writes `sessions.jsonl` and `preview-manifest.json` under the output
+directory. Production trajectories need no `resolutions` field. Accepted,
+rejected, conflicting, unanswered, and missing findings all remain in the
+snapshot; a merged PR or a reply alone never establishes acceptance.
 
 ```bash
 daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-dir /tmp/snapshot --curation-id <curation-id> --sanitized-hub-commit <source-revision> --source-hub-commit <source-revision> --archive-index-digest <archive-index-digest> --evidence-observed-at <evidence-observed-at>
 ```
+
+The input index and bronze files stay unchanged. Preview neither prepares
+missing base SHAs nor writes response-cache or harvest-completion markers.
+`corpus harvest --dry-run` likewise leaves these inputs unchanged, but prints
+only a summary; use `adjudicate materialize` to produce the preview artifacts.
+A failed session, exhausted rate limit, or unmappable finding fails the command
+before it emits a partial snapshot. Checkpoint an active SQLite WAL before
+preview or import; these commands deliberately do not checkpoint it for you.
+
+### Import surviving observation history
+
+Before building the queue, inspect surviving local history against the pinned
+hydrated index:
+
+```bash
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/daydream-hydrate --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --dry-run --json
+```
+
+Apply the same import after inspecting its reason-coded accounting:
+
+```bash
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/daydream-hydrate --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state
+```
+
+Session identity comes from the pinned curation, never the backup's own
+inventory. Exact fingerprint, record identity, and evidence-digest matches
+append finding judgments to `/tmp/state/observations.jsonl`, which queue,
+precedence, harvest, and publication share. The source remains read-only;
+linked SQLite generations are preserved in the target index. Run-level-only,
+ambiguous, unknown-fingerprint, and stale-evidence rows remain reason-coded
+in `import-report.json` / `import-ledger.json`. Legacy versions require review,
+and conflicting raters remain unresolved until an explicit adjudicator decision.
+
+### Build the queue and adjudicate
 
 Build the queue and preview ledger, then record human decisions:
 
@@ -81,14 +121,14 @@ daydream corpus adjudicate label --state-dir /tmp/state --batch 10 --disposition
 Repeat `label` with the appropriate disposition, rationale, and labeler until
 the coverage report shows the intended adjudication state.
 
-### Import surviving observation history
+### Checkpoint imported SQLite history
 
 If a local archive or backup contains additional `label_observations`, merge
 it into the hydrated archive and publish the resulting SQLite history with
 the state checkpoint:
 
 ```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --publish --manifest /tmp/snapshot/preview-manifest.json --hub-repo org/annotation-snapshot
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/daydream-hydrate --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --publish --manifest /tmp/snapshot/preview-manifest.json --hub-repo org/annotation-snapshot
 ```
 
 The import keeps the source archive read-only, merges into the hydrated
@@ -150,6 +190,16 @@ if [ -f /tmp/state/index.db ]; then
 fi
 daydream corpus adjudicate harvest-snapshot --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir "$ANNOTATION_ARCHIVE_DIR" --state-dir /tmp/state
 ```
+
+Canonical harvest reacquires current semantic evidence through the same
+read-only builder and checks the complete finding population against the
+preview before appending anything. Unchanged evidence retains identical
+record IDs and evidence digests. Changed replies, missing findings, or newly
+recorded findings fail closed with a nonzero exit: materialize again and
+review the affected judgments before retrying. Imported human judgments
+override automatic dispositions only when identity, evidence, and version
+gates pass; conflicts remain non-gold. Final publication includes the complete
+append-only observation history.
 
 Validate the complete final bundle without contacting the Hub:
 

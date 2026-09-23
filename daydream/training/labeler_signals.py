@@ -761,7 +761,10 @@ def per_finding_resolution_signal(
         comment_id = threads.comment_id_by_fingerprint.get(fingerprint)
         if comment_id is None:
             resolutions.append(
-                PerFindingResolution(fingerprint=fingerprint, comment_id=None, disposition="missing")
+                PerFindingResolution(
+                    fingerprint=fingerprint, comment_id=None, disposition="missing",
+                    evidence_digest=reply_evidence_digest([]),
+                )
             )
             continue
         replies = threads.replies_by_comment.get(comment_id, [])
