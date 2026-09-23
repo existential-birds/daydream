@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from daydream.archive import hydrate, license_enrich
+from daydream.archive.index import label_observation_history
+from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.materialize import run_materialize
@@ -20,13 +22,14 @@ from daydream.training.adjudication.publish import (
     publish_annotation_state,
     resume_annotation_state,
 )
+from daydream.training.corpus_projection.bundle import _verify_sha256sums
+from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
 from tests.fixtures.training.build_hub_snapshot import build_publication_hubs
 
 
 def test_full_annotation_pipeline_survives_vm_loss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.training.adjudication import cli as adjudication_cli
 
     hubs = build_publication_hubs()
     source = hubs.source
@@ -95,7 +98,6 @@ def test_full_annotation_pipeline_survives_vm_loss(
         observations_path=fresh / "observations.jsonl")
     assert harvest["appended_sessions"] == 3
     assert harvest["human_adjudicated"] == 1
-    from daydream.archive.index import label_observation_history
 
     for session_id in ("sess-a", "sess-b", "sess-c"):
         assert len(label_observation_history(stage, session_id)) == 1
@@ -126,7 +128,6 @@ def test_full_annotation_pipeline_survives_vm_loss(
         "--curation-id", curation_id, "--snapshot-id", success["final_snapshot_id"],
         "--revision", success_commit["sha"], "--destination", str(clean),
     ]) == 0
-    from daydream.training.corpus_projection.bundle import _verify_sha256sums
 
     _verify_sha256sums(clean, "")  # raises on any corruption
 
@@ -136,10 +137,6 @@ def test_full_annotation_pipeline_survives_vm_loss(
     # (decisive + evidence); task-only findings never reach corpus.jsonl —
     # the projector routes them to adjudication-report.json (D8) and
     # summary["total"] counts emitted records only.
-    from daydream.training.corpus_projection.projector import (
-        BuildFrozenCorpusConfig,
-        build_frozen_corpus,
-    )
 
     summary = build_frozen_corpus(BuildFrozenCorpusConfig(
         out_dir=tmp_path / "corpus-out", bundle_dir=stage / "curated" / curation_id,

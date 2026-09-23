@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
+import anyio
 import pytest
 
 from daydream.backends._subprocess import (
@@ -124,7 +126,6 @@ async def test_transport_idle_timeout_fires_on_silent_stream(monkeypatch: pytest
 
 async def test_transport_teardown_is_idempotent_and_group_signalling() -> None:
     """Double terminate() must not raise, and the grandchild dies with the group."""
-    import os
 
     t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _GROUP_HOLDER_CLI])
     await t.start()
@@ -147,9 +148,7 @@ async def test_transport_cancel_all_is_shielded() -> None:
     ``finally`` teardown (cancel_all) must run to completion despite the still-
     cancelled scope.
     """
-    import os
 
-    import anyio
 
     t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _GROUP_HOLDER_CLI])
     await t.start()

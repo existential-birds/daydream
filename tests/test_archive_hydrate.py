@@ -11,9 +11,24 @@ from typing import Any
 import httpx
 import pytest
 from huggingface_hub.errors import HfHubHTTPError
+from jsonschema import Draft202012Validator
 
-from daydream.archive import hydrate, hydrate_rules, license_enrich
+import daydream.git_ops as git_ops
+from daydream.archive import hydrate, hydrate_rules, license_enrich, sanitize
+from daydream.archive.hydrate import admission_summary_buckets
 from daydream.archive.hydrate_client import FakeHub
+from daydream.archive.hydrate_rules import (
+    EXCLUSION_CODES,
+    REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    derive_curation_id,
+    derive_pre_identity_curation_id,
+)
+from daydream.archive.index import query_runs
+from daydream.archive.manifest import Manifest
+from daydream.archive.provenance import ExecutableProvenance
+from daydream.archive.scan import scan_run_dir
+from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
+from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
 
 
 def _write_policy(tmp_path: Path) -> str:
@@ -63,7 +78,6 @@ class TestCurationManifestSchema:
     FIXTURE = Path(__file__).parent / "fixtures" / "training" / "curation-manifest-fixture.json"
 
     def _validate(self, instance: dict[str, object]) -> None:
-        from jsonschema import Draft202012Validator
 
         Draft202012Validator(json.loads(self.SCHEMA.read_text())).validate(instance)
 
@@ -345,7 +359,6 @@ class TestHydrateRules:
         assert hydrate_rules.derive_pre_identity_curation_id(**base) not in ids
 
     def test_derive_curation_id_binds_policy_inputs(self) -> None:
-        from daydream.archive.hydrate_rules import derive_curation_id
         base: dict[str, object] = {
             "source_commit": "a" * 40,
             "policy_digest": "d" * 64,
@@ -368,7 +381,6 @@ class TestHydrateRules:
         ]:
             assert derive_curation_id(**{**base, key: value}) != cid  # type: ignore[arg-type]
         # Historical ids are untouched: existing prefixes keep the old derivation.
-        from daydream.archive.hydrate_rules import derive_pre_identity_curation_id
         lhs = rhs = ("a" * 40, "1", "1", "1")
         assert derive_pre_identity_curation_id(*lhs) == derive_pre_identity_curation_id(*rhs)
 
@@ -709,7 +721,6 @@ class _StaticResolver:
     """Test seam for :class:`RepoLicenseResolver`: every repo resolves to MIT."""
 
     def resolve(self, repo_slug: str, repo_commit: str | None) -> Any:  # noqa: ANN201
-        from daydream.archive import license_enrich
 
         return license_enrich.EnrichedEvidence(
             spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
@@ -721,11 +732,6 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     manifest vs via enrichment must yield identical decisions and identical
     published manifest rows — the gate proves the two evidence supply paths
     agree under one contract."""
-    from daydream.archive import license_enrich
-    from daydream.training.corpus_projection.license import (
-        load_license_policy,
-        resolve_repo_decision,
-    )
 
     stage = tmp_path / "stage"
     _seed_admitted_runs(stage, [
@@ -808,7 +814,6 @@ class TestResolutionMap:
         assert "gitlab.com" not in json.dumps(cmap)  # redacted from published metadata
 
     def test_no_clone_during_hydration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import daydream.git_ops as git_ops
 
         def boom(*a: object, **k: object) -> None:
             raise AssertionError("hydration must not clone")
@@ -887,7 +892,6 @@ class TestIngestAndIndex:
         row_dir = stage / "runs" / "sess-a"
         assert row_dir.is_dir()
         # index row carries staging-local paths only
-        from daydream.archive.index import query_runs
         hydrate.rebuild_index(stage)
         rows = query_runs(stage)
         assert len(rows) == 1
@@ -910,7 +914,6 @@ class TestIngestAndIndex:
         assert bad[0].reason_code == "secrets_scan_dirty"
         # never visible to the index / harvest
         hydrate.rebuild_index(stage)
-        from daydream.archive.index import query_runs
         assert all(row["session_id"] != "sess-bad" for row in query_runs(stage))
         assert (stage / "quarantine" / "sess-bad").exists()
 
@@ -950,8 +953,6 @@ class TestIngestAndIndex:
 
     def test_produced_nested_manifest_indexed_without_crash(self, tmp_path: Path) -> None:
         """Real manifests nest git.* and carry a nested daydream provenance dict."""
-        from daydream.archive.manifest import Manifest
-        from daydream.archive.provenance import ExecutableProvenance
 
         manifest = Manifest(
             session_id="sess-real",
@@ -970,7 +971,6 @@ class TestIngestAndIndex:
         results = hydrate.ingest_bundles(stage, revision="a" * 40)
         assert [r.status for r in results] == ["admitted"]
         hydrate.rebuild_index(stage)  # must not raise: nested daydream dict is dropped
-        from daydream.archive.index import query_runs
         rows = [r for r in query_runs(stage) if r["session_id"] == "sess-real"]
         assert len(rows) == 1
         assert rows[0]["repo_slug"] == "octo/nested-repo"  # nested git.remote_url read
@@ -1085,7 +1085,6 @@ def _publish_verifiable_curation(
 
     Returns ``(hub, stage, curation_id, output_commit_sha)``.
     """
-    from daydream.archive import sanitize
 
     curation_id = "cur-" + "0" * 16
     prefix = f"curated/{curation_id}/"
@@ -1154,7 +1153,6 @@ def test_verify_publication_admits_advisory_only_batch(
         dry_run_admitted=1, source_commit="a" * 40,
     )
     assert verified == 1
-    from daydream.archive.scan import scan_run_dir
 
     rescan = scan_run_dir(stage / "_verify" / "batches" / "sess-a")
     assert rescan.clean is False and rescan.blocking is False  # advisory-only
@@ -1229,10 +1227,8 @@ class TestPrefixBindingGate:
     def test_legacy_prefix_without_binding_record_fails_closed(self, tmp_path: Path) -> None:
         """A pre-v2 legacy prefix (published batches, no binding record, no
         resume ledger) is never republished under the new scheme."""
-        from tests.fixtures.training.build_hub_snapshot import build_snapshot
 
         hub = build_snapshot()  # fixture snapshot with admitted sessions
-        from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION
 
         summary = self._run(tmp_path, hub, _write_policy(tmp_path), revision=SNAPSHOT_REVISION)
         cid = summary.curation_id
@@ -1277,7 +1273,6 @@ class TestDedupeAndLedger:
         # the admitted derivative is the restored baseline, byte for byte
         restored = stage / "runs" / "sess-a" / "manifest.json"
         assert restored.read_bytes() == baseline_manifest
-        from daydream.archive.index import query_runs
         assert len(query_runs(stage)) == 1  # one session row, never overwritten
 
     def test_idempotent_rerun_no_duplicates(self, tmp_path: Path) -> None:
@@ -1286,7 +1281,6 @@ class TestDedupeAndLedger:
         assert first.admitted == 1 and first.collisions == 0
         second = hydrate.dedupe_admitted(stage, revision="a" * 40)  # same content re-run
         assert second.admitted == 1 and second.collisions == 0
-        from daydream.archive.index import query_runs
         assert len(query_runs(stage)) == 1  # no duplicate rows
 
     def test_identity_collision_quarantined(self, tmp_path: Path) -> None:
@@ -1308,7 +1302,6 @@ class TestDedupeAndLedger:
         assert result.collisions == 1
         assert (stage / "quarantine" / "sess-a.conflict").exists() or \
             result.collision_ids == ["sess-a"]
-        from daydream.archive.index import query_runs
         rows = [r for r in query_runs(stage) if r["session_id"] == "sess-a"]
         assert len(rows) == 1  # original retained, never overwritten
 
@@ -1566,7 +1559,6 @@ def _identity_for(
     """Thin test helper: stages the pipeline stages the identity depends on
     (enrich -> gate) and then calls the production post-gate binding
     derivation exactly as ``run_hydrate_hub`` does — never a reimplementation."""
-    from daydream.archive import license_enrich
     revision = "a" * 40
 
     class FakeResolver:
@@ -1613,11 +1605,6 @@ def test_curation_id_changes_with_policy_binding(tmp_path: Path) -> None:
 
 
 def test_repo_commit_unresolved_is_a_license_bucket_code() -> None:
-    from daydream.archive.hydrate import admission_summary_buckets
-    from daydream.archive.hydrate_rules import (
-        EXCLUSION_CODES,
-        REASON_CODE_REPO_COMMIT_UNRESOLVED,
-    )
     assert REASON_CODE_REPO_COMMIT_UNRESOLVED == "repo_commit_unresolved"
     assert REASON_CODE_REPO_COMMIT_UNRESOLVED in EXCLUSION_CODES
     buckets = admission_summary_buckets([("s1", REASON_CODE_REPO_COMMIT_UNRESOLVED)])

@@ -7,6 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from daydream import git_ops
+from daydream.deep.artifacts import deep_dir
+from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
+from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.runner import run
+from daydream.workspace import WorkContext
 from tests.deep_orchestrator.support import (
     _fresh_uid_run,
     _high_record,
@@ -94,7 +100,6 @@ async def test_uncovered_sweep_stamps_its_own_record_uids(
     mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: the uncovered-file sweep identifies its own records."""
-    from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
     # A second file no reviewer reads, with a hunk large enough to clear the
@@ -333,7 +338,6 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """#1111 real-path: an invented uid is discarded; the finding is not."""
-    from daydream.deep.artifacts import deep_dir
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -377,7 +381,6 @@ async def test_unattributable_merge_source_uids_degrade_to_empty_list(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """#1111 real-path: null / missing / wrong-typed provenance ships as ``[]``."""
-    from daydream.deep.artifacts import deep_dir
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -412,7 +415,6 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
     mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: the tiny-diff bypass attributes items to their records."""
-    from daydream.deep.artifacts import deep_dir
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -443,7 +445,6 @@ async def test_structural_fold_survivor_inherits_both_provenances(
     delegated: bool,
 ) -> None:
     """Either fold direction preserves both record identities and the structural severity."""
-    from daydream.deep.artifacts import deep_dir
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -490,7 +491,6 @@ async def test_dropped_speculative_sidecar_records_item_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: the evidence gate's sidecar records what it deleted."""
-    from daydream.deep.artifacts import deep_dir
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -619,10 +619,6 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
     scratch_is_related: bool,
 ) -> None:
     """Unrelated/protected bytes invalidate evidence without entering the patch."""
-    from daydream import git_ops
-    from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.workspace import WorkContext
 
     repo = tmp_path / "retained"
     _init_repo(repo)
@@ -684,10 +680,6 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
 
 def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
     """Commit selection is HEAD-relative even though evidence stays run-relative."""
-    from daydream import git_ops
-    from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.workspace import WorkContext
 
     repo = tmp_path / "preexisting-retained"
     _init_repo(repo)

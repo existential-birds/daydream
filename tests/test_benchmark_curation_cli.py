@@ -13,6 +13,9 @@ from typing import Any
 import pytest
 import yaml
 
+from daydream.benchmark import cli
+from daydream.benchmark import curation as cu
+from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.storage import load_yaml_strict
 from tests.harness.fake_gh import FakeGh
 from tests.test_benchmark_curation import _seed_ready_case
@@ -23,8 +26,6 @@ def test_cli_curate_apply_gold_writes_0600_and_never_ready(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.cli import _handle_benchmark_command
 
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
@@ -54,7 +55,6 @@ def test_cli_curate_apply_gold_malformed_fragment_clean_exit(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A malformed fragment (missing required keys) maps to exit 1, no traceback."""
-    from daydream.benchmark.cli import _handle_benchmark_command
 
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     frag_path = tmp_path / "gold.yaml"
@@ -71,7 +71,6 @@ def test_cli_curate_apply_gold_malformed_fragment_clean_exit(
 
 
 def test_curate_on_tty_dispatches_to_tui(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.benchmark import cli
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     called: dict[str, Any] = {}
@@ -90,7 +89,6 @@ def test_curate_non_tty_keeps_guidance_and_exit_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import cli
     ws, case, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
     rc = cli._handle_benchmark_command(["curate", str(ws), "--case", case])
@@ -98,7 +96,6 @@ def test_curate_non_tty_keeps_guidance_and_exit_1(
 
 
 def test_is_interactive_tty_detects_stdin_and_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.benchmark import cli
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     assert cli._is_interactive_tty() is True

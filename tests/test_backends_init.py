@@ -16,6 +16,16 @@ from daydream.backends import (
     ResultEvent,
     create_backend,
 )
+from daydream.backends.codex import CodexBackend
+from daydream.backends.pi import PiBackend
+from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from tests.harness.claude_sdk import (
+    MockAssistantMessage,
+    MockResultMessage,
+    MockTextBlock,
+    patch_claude_sdk,
+    scripted_client,
+)
 
 
 def test_continuation_token_fields() -> None:
@@ -25,7 +35,6 @@ def test_continuation_token_fields() -> None:
 
 
 def test_create_backend_claude_default_uses_config_constant() -> None:
-    from daydream.config import DEFAULT_CLAUDE_MODEL
     backend = create_backend("claude")
     assert isinstance(backend, ClaudeBackend)
     assert backend.model == DEFAULT_CLAUDE_MODEL
@@ -38,8 +47,6 @@ def test_create_backend_claude_custom_model() -> None:
 
 
 def test_create_backend_codex_default_uses_config_constant() -> None:
-    from daydream.backends.codex import CodexBackend
-    from daydream.config import DEFAULT_CODEX_MODEL
     backend = create_backend("codex")
     assert isinstance(backend, CodexBackend)
     assert backend.model == DEFAULT_CODEX_MODEL
@@ -47,7 +54,6 @@ def test_create_backend_codex_default_uses_config_constant() -> None:
 
 def test_create_backend_codex_custom_model() -> None:
     backend = create_backend("codex", model="o3-pro")
-    from daydream.backends.codex import CodexBackend
     assert isinstance(backend, CodexBackend)
     assert backend.model == "o3-pro"
 
@@ -59,7 +65,6 @@ def test_create_backend_invalid_raises() -> None:
 
 def test_pi_backend_concise_fix_prompts_true() -> None:
     """PiBackend requests concise fix prompts by default (GLM verbosity suppression)."""
-    from daydream.backends.pi import PiBackend
     backend = PiBackend(model="glm-5.2")
     assert backend.concise_fix_prompts is True
 
@@ -69,13 +74,6 @@ async def test_create_backend_claude_execute_accepts_agents_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A factory-created real backend accepts agents=None at the SDK boundary."""
-    from tests.harness.claude_sdk import (
-        MockAssistantMessage,
-        MockResultMessage,
-        MockTextBlock,
-        patch_claude_sdk,
-        scripted_client,
-    )
 
     captured: dict[str, Any] = {}
     patch_claude_sdk(
@@ -97,7 +95,6 @@ async def test_create_backend_claude_execute_accepts_agents_none(
 
 def test_create_backend_forwards_reasoning_effort_to_every_driver() -> None:
     """Each configured backend carries the resolved reasoning effort."""
-    from daydream.backends import create_backend
 
     for name in ("claude", "codex", "pi"):
         backend: Any = create_backend(name, reasoning_effort="max")
@@ -105,7 +102,6 @@ def test_create_backend_forwards_reasoning_effort_to_every_driver() -> None:
 
 
 def test_create_backend_without_reasoning_effort_leaves_it_unset() -> None:
-    from daydream.backends import create_backend
 
     for name in ("claude", "codex", "pi"):
         assert cast(Any, create_backend(name)).reasoning_effort is None, name

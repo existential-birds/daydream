@@ -9,7 +9,15 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.runner import run
+import daydream.deep.orchestrator as orch_mod
+from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.deep import orchestrator as deep_orchestrator
+from daydream.deep.orchestrator import STEPS
+from daydream.deep.prompts import bound_deep_diff
+from daydream.eval.analyzer import analyze_coverage, load_trajectories
+from daydream.extensions.api import EXTENSION_API_VERSION
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+from daydream.runner import RunConfig, run
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
     _install_uncovered_sweep_stub,
@@ -45,9 +53,6 @@ def _spy_bound_deep_diff(
     called_with: list[str] | None = None,
 ) -> None:
     """Patch ``orch_mod.bound_deep_diff`` to record each bounded result."""
-    import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import bound_deep_diff
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
         if called_with is not None:
@@ -107,7 +112,6 @@ async def test_cleanup_keeps_report_on_findings_out_run(
     make_config: MakeConfig,
 ) -> None:
     """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``."""
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     _silence_gate_noise(monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
@@ -255,7 +259,6 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Push the diff over the byte budget with a large committed file.
     big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
@@ -301,7 +304,6 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
 ) -> None:
     """A multi-file over-budget diff whose trailing block is dropped keeps the diff.patch pointer in the
     intent/wonder prompts."""
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # aaa.py sorts FIRST in the byte-ordered git diff and its block is
     # retained; zzz.py's block alone exceeds the budget and arrives after a
@@ -346,7 +348,6 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL."""
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
     (multi_stack_target / "big.py").write_text(big + "\n")
@@ -398,7 +399,6 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
 ) -> None:
     """The sweep extracts blocks from the FULL diff.patch, not the bounded ctx.data['diff'], so sweep targets
     cannot diverge from the coverage set."""
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Push the in-memory diff over the budget with a file that sorts FIRST in
     # git's byte-ordered diff: its oversize block is kept whole by the bound,
@@ -484,7 +484,6 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
 
 def test_deep_flow_has_no_feedback_prefix() -> None:
     """M2: the registered deep flow has no feedback-only prefix."""
-    from daydream.deep.orchestrator import STEPS
 
     names = {step.name for step in STEPS}
     assert not names & {"fetch-feedback", "parse-feedback", "fix-items", "commit-push", "respond-feedback"}
@@ -492,8 +491,6 @@ def test_deep_flow_has_no_feedback_prefix() -> None:
 
 def test_no_feedback_mode_resolver() -> None:
     """M2: `_resolve_mode` cannot return `feedback`; no feedback runner exists."""
-    from daydream.deep import orchestrator as deep_orchestrator
-    from daydream.runner import RunConfig
 
     assert not hasattr(deep_orchestrator, "_run_feedback_flow")
     config = RunConfig(target="/tmp", pr_number=7)
@@ -501,8 +498,6 @@ def test_no_feedback_mode_resolver() -> None:
 
 
 def test_extension_api_version_is_six_and_alternatives_step_is_gone() -> None:
-    from daydream.deep.orchestrator import STEPS
-    from daydream.extensions.api import EXTENSION_API_VERSION
 
     assert EXTENSION_API_VERSION == 6
     names = [s.name for s in STEPS]
@@ -624,7 +619,6 @@ async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
 ) -> None:
     """AC (issue #309): the sweep reviews an uncovered file, its finding is an ordinary merged finding, coverage
     stats improve, and the report surfaces coverage."""
-    from daydream.eval.analyzer import analyze_coverage, load_trajectories
 
     target = _uncovered_sweep_target(tmp_path)
     _silence(monkeypatch)

@@ -16,20 +16,37 @@ from typing import Any
 import anyio
 import pytest
 
+from daydream.agent import run_agent
+from daydream.archive import finalize_archive_run
+from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+from daydream.artifact_visibility import (
+    ArtifactEvidenceProvenance,
+    ArtifactTreeSnapshot,
+    DestinationDelivery,
+    OutputLabel,
+    RoutedDestination,
+    _manifest,
+)
 from daydream.atif import Step
-from daydream.backends import AgentEvent
+from daydream.atif import validate as atif_validate
+from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
+from daydream.cli import _parse_args
+from daydream.config_file import load_file_config
 from daydream.run_snapshot import (
     ArchiveRunSnapshot,
     ManifestRunIdentity,
     RunPhaseCapabilities,
 )
+from daydream.runner import RunConfig, run
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
+    LifecycleReasonCode,
     RunWriteSnapshot,
     TrajectoryRecorder,
     now_iso,
 )
+from tests.harness.backend import ScriptedBackend
 from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
@@ -61,8 +78,6 @@ async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
     shard_many_python_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real caught backend failure emits closed codes, not its private message."""
-    from daydream.runner import RunConfig, run
-    from daydream.trajectory import LifecycleReasonCode
 
     target = shard_many_python_target
     backend = _SecretFailureBackend(target)
@@ -157,13 +172,6 @@ def _finalize_strict_archive(
     The tree handed over is attested after every stage, so ``target`` must not
     contain the archive directory itself.
     """
-    from daydream.archive import finalize_archive_run
-    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        _manifest,
-    )
 
     session_id = recorder.session_id
     finalize_archive_run(
@@ -265,7 +273,6 @@ def _upload_fixture(
     fields (e.g. a file config parsed after those files exist). The returned
     list holds one ``(run_dir, repo_id, session_id)`` tuple per upload attempt.
     """
-    from daydream.runner import RunConfig
 
     uploaded: list[tuple[Any, ...]] = []
 
@@ -292,11 +299,6 @@ def _upload_fixture(
 
 def _findings_route(live_root: Path) -> Any:
     """The registered ``--findings-out`` route the strict bundle relocates."""
-    from daydream.artifact_visibility import (
-        DestinationDelivery,
-        OutputLabel,
-        RoutedDestination,
-    )
 
     private = live_root / ".explicit" / "0000" / "findings.json"
     private.parent.mkdir(parents=True, exist_ok=True)
@@ -326,7 +328,6 @@ def _make_round_trip_fixture(
     ``run_eval`` turns on the real deterministic eval pass (production default),
     so the archived bundle carries a genuine ``evaluation.json`` whose metrics
     the manifest projection reads."""
-    from daydream.runner import RunConfig
 
     target = tmp_path / "frozen"
     target.mkdir()
@@ -530,7 +531,6 @@ async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
 # CLI --no-archive flag
 def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--no-archive sets config.archive to False."""
-    from daydream.cli import _parse_args
 
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--no-archive"])
     config = _parse_args()
@@ -540,7 +540,6 @@ def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 # CLI --no-eval flag
 def test_cli_no_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--no-eval opts out: sets config.run_eval to False."""
-    from daydream.cli import _parse_args
 
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--no-eval"])
     config = _parse_args()
@@ -550,7 +549,6 @@ def test_cli_no_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 # CLI defaults for archive and eval
 def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without --no-archive or --no-eval, archive=True and run_eval=True (eval on by default)."""
-    from daydream.cli import _parse_args
 
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake"])
     config = _parse_args()
@@ -604,7 +602,6 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     Covers the bare unconfigured case plus a target checkout setting the key in
     pyproject.toml or .daydream.toml — the ignored key never reaches the
     uploader even with HF_TOKEN present."""
-    from daydream.config_file import load_file_config
 
     if set_hf_token:
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
@@ -670,7 +667,6 @@ async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     finalized into its own archive root here: the mid-flight partial (whose
     documents must all share one cutoff, and whose still-running forks read as
     malformed invocations) and the completed run (whose forks have closed)."""
-    from daydream.runner import RunConfig
 
     target = tmp_path / "frozen"
     target.mkdir()
@@ -779,11 +775,6 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
 ) -> None:
     """A structured tool call under a sensitive key is redacted identically in the
     live trajectory and the archived copy; both pass the ATIF validator."""
-    from daydream.agent import run_agent
-    from daydream.atif import validate as atif_validate
-    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from daydream.runner import RunConfig
-    from tests.harness.backend import ScriptedBackend
 
     sentinel = "opaque-test-only-sentinel"
     target_dir = tmp_path / "project"

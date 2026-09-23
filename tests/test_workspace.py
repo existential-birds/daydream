@@ -8,13 +8,19 @@ mocking — every code path runs against actual git.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import secrets
+import shutil
 import subprocess
+import sys
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
 
+import anyio
 import pytest
 from rich.console import Console
 
@@ -132,7 +138,6 @@ def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "m
 
 
 def _secrets_token() -> str:
-    import secrets
 
     return secrets.token_hex(3)
 
@@ -561,7 +566,6 @@ async def test_open_workspace_retires_unrecognized_legacy_entry_with_warning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Stray junk in the daydream-owned legacy namespace is retired, not fatal."""
-    import logging
 
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
@@ -1128,8 +1132,6 @@ async def test_audit_workspace_redacts_diff_base_probe_failures(
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
 ) -> None:
-    import shutil
-    import sys
 
     repo, _ = _make_repo_with_origin(tmp_path)
     head = _git(repo, "rev-parse", "HEAD")
@@ -1192,8 +1194,6 @@ async def test_audit_workspace_rejects_missing_cloned_diff_base_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An external Git fault removes only the cloned merge-base object."""
-    import shutil
-    import sys
 
     repo, _ = _make_repo_with_origin(tmp_path)
     common = _git(repo, "rev-parse", "HEAD")
@@ -1363,7 +1363,6 @@ async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path, failure
 
 @pytest.mark.anyio
 async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> None:
-    import anyio
 
     repo, _ = _make_repo_with_origin(tmp_path)
     captured: Path | None = None
@@ -1382,7 +1381,6 @@ async def test_audit_workspace_cleanup_failure_preserves_primary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, primary: bool,
     cleanup_error: type[Exception],
 ) -> None:
-    import tempfile
 
     repo, _ = _make_repo_with_origin(tmp_path)
     cleanups: list[Path] = []
@@ -1408,7 +1406,6 @@ async def test_audit_workspace_cleanup_failure_preserves_primary(
 async def test_audit_workspace_preparation_failure_cleans_temporary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tempfile
 
     repo, _ = _make_repo_with_origin(tmp_path)
     outside = tmp_path / "outside"

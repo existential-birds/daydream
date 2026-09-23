@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import copy
 import json
+import json as _json
+import time
 
 import pytest
 
+from daydream import trajectory as traj_mod
 from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
+from daydream.atif.models.content import ImageSource
 from daydream.trajectory import Redactor, now_iso, redact_structured_text, redact_value
 
 
@@ -219,7 +223,6 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """REDA-05: when an internal regex raises, the field becomes [REDACTION_FAILED] — never raw."""
-    from daydream import trajectory as traj_mod
 
     class _BoomPattern:
         def sub(self, *_args: object, **_kwargs: object) -> str:
@@ -284,7 +287,6 @@ def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the recursive native walk raises, that key falls back to [REDACTION_FAILED]."""
-    from daydream import trajectory as traj_mod
 
     def _boom(value: object, sensitive: bool = False) -> object:
         raise RuntimeError("boom")
@@ -393,7 +395,6 @@ def test_redactor_failure_mode_wipes_all_text_bearing_fields(
 
 def test_redactor_scrubs_text_content_parts() -> None:
     """Text parts in a multimodal message must be redacted; image parts left intact."""
-    from daydream.atif.models.content import ImageSource
 
     parts = [
         ContentPart(type="text", text="key=sk-test-secret123abc"),
@@ -663,7 +664,6 @@ def test_redactor_preserves_structural_separator_after_bare_value() -> None:
     keeps its structure (issue: '{"token": null, "count": 3}' lost its comma)."""
     out = redact_structured_text('{"token": null, "count": 3}')
     assert out == '{"token": "[REDACTED_CREDENTIAL]", "count": 3}'
-    import json as _json
 
     assert _json.loads(out)  # still parseable as JSON
 
@@ -757,7 +757,6 @@ def test_redactor_sensitive_suffix_scan_is_linear() -> None:
     a tight bound (mirrors ``test_large_diagnostic_formatting_completes_quickly``).
     The value is one only the structured pass redacts, so the marker proves
     the pair after the long run was still found and redacted."""
-    import time
 
     text = "a" * 200_000 + "=x token=opaque-test-only-sentinel"
     start = time.perf_counter()
@@ -777,7 +776,6 @@ def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
     the run (the length bound cannot fire on separators), so 100K separators
     took ~180s. 10s is a generous deterministic ceiling, not a tight bound.
     """
-    import time
 
     seps = "_" * 100_000
 

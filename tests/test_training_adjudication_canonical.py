@@ -14,6 +14,9 @@ import pytest
 from daydream.archive.index import _get_connection, label_observation_history
 from daydream.training.adjudication.canonical import AnnotationDriftError, run_canonical_harvest
 from daydream.training.adjudication.materialize import run_materialize
+from daydream.training.adjudication.snapshot import record_evidence_digest
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import project_findings
 from tests.harness.adjudication import make_hydrated_sqlite_index
 
 _PIN = {
@@ -93,7 +96,6 @@ def test_canonical_harvest_appends_label_observation_exactly_once(tmp_path: Path
     stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
     assert stored and stored[0]["evidence_digest"] == "d" * 32
     # session-level digest matches the shared serializer's (K5 spike)
-    from daydream.training.adjudication.snapshot import record_evidence_digest
     assert row["reply_evidence_digest"] == record_evidence_digest(
         [stored[0]["evidence"]]
     )
@@ -229,7 +231,6 @@ def _seed_decisive_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Path) -> None:
     root, archive, mat = _materialized(tmp_path)
-    from daydream.training.corpus_projection.identity import record_id
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
     obs.write_text(json.dumps({
@@ -394,7 +395,6 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     ``evidence_sha`` is what prevents the archived rubric from going stale
     while ``annotations.jsonl`` is re-emitted from the new overlay (M14)."""
     root, archive, mat = _materialized(tmp_path)
-    from daydream.training.corpus_projection.identity import record_id
 
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
@@ -500,7 +500,6 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     evidence-digest drift gate but must not emit decisive labels: the conflict
     verdict is re-derived from the fresh sessions at harvest time, never
     trusted from the materialized snapshot's flags (issue #336 item 2)."""
-    from daydream.archive.index import _get_connection
 
     root = tmp_path / "hydrated"
     conn = _get_connection(root)
@@ -564,7 +563,6 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
     conflict: the precedence merge clears the ``conflicting`` flag so the
     resolution is not suppressed to non-gold, and the archive row projects the
     decisive label (issue #336 item 7 -- a human override is never ignored)."""
-    from daydream.training.corpus_projection.identity import record_id
 
     root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
     mat = tmp_path / "mat"
@@ -604,7 +602,6 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     with a decisive disposition + evidence -- the same gate canonical.py
     applies to the archive labels column, enforced where ``classify_tier``
     flows into the projected record."""
-    from daydream.training.corpus_projection.projector import project_findings
 
     root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
     mat = tmp_path / "mat"

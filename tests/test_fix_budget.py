@@ -21,6 +21,7 @@ from daydream.config import (
 )
 from daydream.config_file import load_file_config
 from daydream.file_group_budget import FileGroupBudget
+from tests.harness.fake_clock import FakeClock
 from tests.harness.trajectory import make_recorder
 
 # -- FileGroupBudget -------------------------------------------------------
@@ -62,7 +63,6 @@ def test_item_limit_takes_precedence_over_wall() -> None:
 def test_group_budget_deadline_and_remaining_track_the_injected_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     budget = FileGroupBudget(max_wall_seconds=600.0, max_serial_items=6)
@@ -80,7 +80,6 @@ def test_group_budget_deadline_and_remaining_track_the_injected_clock(
 async def test_group_budget_event_records_the_ceiling_and_group_elapsed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     recorder = make_recorder(tmp_path)

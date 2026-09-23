@@ -28,7 +28,12 @@ import pytest
 
 from daydream import git_ops
 from daydream.config import DIAGRAM_MAX_NODES
+from daydream.deep import diagram_steps
+from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
+from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
+from daydream.runner import run
 from tests.harness import diagram_repos as dr
+from tests.harness.diagram_repos import build_large_cross_module_repo
 from tests.harness.diagram_repos import load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
@@ -88,7 +93,6 @@ def diagram_run(
         inline_transport: bool = False,
         **config_overrides: Any,
     ) -> tuple[int, StubBackend]:
-        from daydream.runner import run
 
         stub = install_stub_backend(monkeypatch, target, enable_exploration=inline_transport)
         stub.diagram_specs = specs or {}
@@ -195,7 +199,6 @@ async def test_diagram_only_posts_a_marked_issue_comment(
     comments = _issue_comments(fake_gh)
     assert len(comments) == 1
     body = comments[0]["body"]
-    from daydream.pr_review import parse_diagram_markers
 
     assert parse_diagram_markers(body) == [(kind, git_ops.head_sha(target))]
     assert heading in body
@@ -222,7 +225,6 @@ async def test_second_diagram_run_minimizes_only_its_own_kind(
     monkeypatch.setenv("DAYDREAM_BOT_HANDLE", "daydream")
 
     head = git_ops.head_sha(target)
-    from daydream.pr_review import diagram_marker
 
     fake_gh.serve_prior_issue_comments(
         [
@@ -310,7 +312,6 @@ async def test_nothing_eligible_posts_an_explanatory_comment(
     assert exit_code == 0
     body = _issue_comments(fake_gh)[0]["body"]
     assert "No grounded diagram was eligible for this pull request" in body
-    from daydream.pr_review import parse_diagram_markers
 
     assert parse_diagram_markers(body) == []
     assert all(
@@ -453,7 +454,6 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A rendered spec that fails its schema is rejected before any network call."""
-    from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 
     artifact_path = tmp_path / "bad.json"
     write_findings_artifact(
@@ -488,7 +488,6 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(
 
 
 def test_phase_b_rejects_rendered_source_claims_without_grounding_attestations() -> None:
-    from daydream.pr_review import validate_diagram_payload
 
     payload = {
         "results": {
@@ -531,7 +530,6 @@ def test_phase_b_rejects_rendered_source_claims_without_grounding_attestations()
 
 
 def test_phase_b_rejects_over_cap_specs_before_rendering() -> None:
-    from daydream.pr_review import validate_diagram_payload
 
     nodes = [
         {
@@ -612,7 +610,6 @@ async def test_advisory_overflow_in_diagram_only_mode_exits_zero(
     ``omitted`` rather than ``rendered``. That is not a failure, which is exactly
     what this test is about — do not assert on the rendered mermaid here.
     """
-    from tests.harness.diagram_repos import build_large_cross_module_repo
 
     target = build_large_cross_module_repo(tmp_path)
     _serve_pr(fake_gh, target)
@@ -633,7 +630,6 @@ async def test_advisory_overflow_with_a_real_failure_still_exits_one(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
 ) -> None:
     """The advisory diagnostic must not mask a genuine authoring failure."""
-    from tests.harness.diagram_repos import build_large_cross_module_repo
 
     target = build_large_cross_module_repo(tmp_path)
     _serve_pr(fake_gh, target)
@@ -655,7 +651,6 @@ async def test_findings_artifact_carries_the_advisory_omission_diagnostic(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
 ) -> None:
     """The operator-readable artifact says which advisory inputs were dropped."""
-    from tests.harness.diagram_repos import build_large_cross_module_repo
 
     target = build_large_cross_module_repo(tmp_path)
     _serve_pr(fake_gh, target)
@@ -725,7 +720,6 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A returned failed result follows the same diagram-only exit path."""
-    from daydream.deep import diagram_steps
 
     async def _return_failure(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {
@@ -938,7 +932,6 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     Without this the blocks would exist in ``review-output.md`` but silently
     vanish from the PR whenever the two-phase CI path is used.
     """
-    from daydream.runner import run
 
     for module in (
         "daydream.deep.orchestrator",

@@ -7,6 +7,7 @@ import pytest
 
 from daydream.archive import sanitize
 from daydream.archive import scan as scan_module
+from daydream.training.corpus_projection.bundle import BundleError, load_curated_bundle
 
 
 def _seed_bronze_bundle(
@@ -211,10 +212,6 @@ def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
     """M17 successor: the projection layer's admission boundary refuses a
     bundle whose batch rows are not all ``admitted`` — a quarantined
     (secret-carrying) batch can never reach a projected record."""
-    from daydream.training.corpus_projection.bundle import (
-        BundleError,
-        load_curated_bundle,
-    )
 
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()
@@ -248,7 +245,6 @@ def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
 def test_import_bundle_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
     """M17 successor (fail-closed): an affected bronze bundle with no
     released derivative is quarantined at ingest — never imported raw."""
-    from daydream.archive import sanitize
 
     archive_dir = tmp_path / "archive"
     run_dir = _seed_bronze_bundle(

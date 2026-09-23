@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from daydream import git_ops
+from daydream.archive import sanitize, scan
 from daydream.archive.index import (
     append_label_observation,
     label_observation_history,
@@ -38,8 +39,18 @@ from daydream.training.harvest import (
 from daydream.training.harvest import (
     build_annotation as _build_annotation,
 )
-from daydream.training.harvest_types import HarvestRow
-from daydream.training.reward import score_trajectory
+from daydream.training.harvest_types import HarvestEvidence, HarvestRow
+from daydream.training.labeler_signals import (
+    CommentResolutionSignal,
+    FixAppliedSignal,
+    LocalCommitAppliedSignal,
+    PerFindingResolution,
+    PRMergeSignal,
+    resolution_from_dict,
+    resolution_to_dict,
+)
+from daydream.training.reward import RewardWeights, ScoringInputs, score_trajectory
+from daydream.training.rubric import Rubric
 from daydream.ui import create_console
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit
@@ -641,7 +652,6 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
     # PR-less row -> reviewer_logins == [], prior query never consulted, and the
     # local verdict is withheld from the posterior axis: a local commit is not a
     # maintainer acting in a PR, so the label is kept but has_posterior is False.
-    from daydream.training.labeler_signals import LocalCommitAppliedSignal
 
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = _local_row(run_dir, "s_local", grounding_rate=1.0)
@@ -669,7 +679,6 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
 def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A score whose captured default weights no longer match the canonical
     # constant is marked custom, so publication must refuse it.
-    from daydream.training.reward import RewardWeights
 
     monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights(is_default=True))
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
@@ -729,7 +738,6 @@ def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path) 
     Drives the real harvest → reward path: assemble_scoring_inputs reads the
     indexed ``grounding_rate`` and score_trajectory flags the axis present.
     """
-    from daydream.training.reward import score_trajectory
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -2103,7 +2111,6 @@ def test_token_never_in_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 def test_hub_import_rejects_unsanitized_affected_bundle(tmp_path: Path) -> None:
     """M18: an affected (credential-bearing) incoming bundle with no released
     derivative is quarantined locally and skipped — never imported raw."""
-    from daydream.archive import sanitize
 
     archive_dir = tmp_path / "archive"
     incoming = archive_dir / "incoming" / "s1"
@@ -2120,7 +2127,6 @@ def test_hub_import_rejects_unsanitized_affected_bundle(tmp_path: Path) -> None:
 
 
 def test_hub_import_accepts_clean_bundle_in_place(tmp_path: Path) -> None:
-    from daydream.archive import sanitize
 
     archive_dir = tmp_path / "archive"
     incoming = archive_dir / "incoming" / "s2"
@@ -2144,7 +2150,6 @@ def test_hub_import_accepts_advisory_only_bundle(
     shape, not a credential, so it is reported value-free and the bundle is
     imported in place.
     """
-    from daydream.archive import sanitize, scan
 
     archive_dir = tmp_path / "archive"
     incoming = archive_dir / "incoming" / "s3"
@@ -2175,11 +2180,6 @@ def test_hub_import_accepts_advisory_only_bundle(
 
 
 def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
-    from daydream.training.labeler_signals import (
-        PerFindingResolution,
-        resolution_from_dict,
-        resolution_to_dict,
-    )
 
     r = PerFindingResolution(
         fingerprint="fp-1", comment_id=7, disposition="accepted",
@@ -2191,7 +2191,6 @@ def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
 
 def test_harvest_row_preserves_absent_and_empty_fingerprints() -> None:
     """The typed ingress retains the legacy distinction used by signal assembly."""
-    from daydream.training.harvest_types import HarvestRow
 
     common = {"session_id": "s1", "archive_path": "/tmp/archive"}
     absent = HarvestRow.from_mapping(common, row_number=1)
@@ -2203,16 +2202,6 @@ def test_harvest_row_preserves_absent_and_empty_fingerprints() -> None:
 
 def test_harvest_evidence_detaches_nested_signals_with_canonical_rubric() -> None:
     """Acquired evidence owns nested records before the pure reducer receives it."""
-    from daydream.training.harvest_types import HarvestEvidence
-    from daydream.training.labeler_signals import (
-        CommentResolutionSignal,
-        FixAppliedSignal,
-        PerFindingResolution,
-        PRMergeSignal,
-        resolution_to_dict,
-    )
-    from daydream.training.reward import ScoringInputs
-    from daydream.training.rubric import Rubric
 
     verdicts: list[dict[str, Any]] = [{"verdict": "consistent", "detail": {"source": "original"}}]
     commits = ["a1"]
@@ -2252,7 +2241,6 @@ def test_harvest_evidence_detaches_nested_signals_with_canonical_rubric() -> Non
     assert evidence.rubric.to_dict() == expected
 
 def test_per_finding_resolution_from_dict_fails_closed() -> None:
-    from daydream.training.labeler_signals import resolution_from_dict
 
     with pytest.raises(ValueError, match="fingerprint"):
         resolution_from_dict({"disposition": "accepted", "evidence_digest": "d" * 32})
@@ -2265,13 +2253,6 @@ def test_per_finding_resolution_from_dict_fails_closed() -> None:
 def test_rubric_to_dict_carries_full_per_finding_resolutions() -> None:
     """Req 1/3: the SQLite blob must carry fingerprints + evidence + digests,
     not labels only — the materializer's sole per-finding source."""
-    from daydream.training.labeler_signals import (
-        CommentResolutionSignal,
-        FixAppliedSignal,
-        PerFindingResolution,
-        PRMergeSignal,
-    )
-    from daydream.training.rubric import Rubric
 
     r = PerFindingResolution(fingerprint="fp-1", comment_id=7, disposition="accepted",
                              evidence=[{"reply_id": 1}], evidence_digest="d" * 32)

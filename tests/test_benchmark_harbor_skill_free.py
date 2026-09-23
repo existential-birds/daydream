@@ -13,7 +13,11 @@ from typing import Any
 
 import pytest
 
+from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import entrypoint
+from daydream.benchmark.harbor import package as pkg
+from daydream.benchmark.harbor import run as run_mod
+from daydream.benchmark.harbor import verifier_core as vc
 
 
 def test_parse_reviewer_environment_maps_pi_without_mutating_parent(
@@ -157,7 +161,6 @@ def test_host_reviewer_host_resolution_is_backend_aware() -> None:
     # A claude operator configuring only ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
     # (no pi-era DAYDREAM_REVIEW_BASE_URL) must resolve the reviewer host from
     # ANTHROPIC_BASE_URL; the pi default keeps its existing behavior/error.
-    from daydream.benchmark.harbor import run as run_mod
 
     assert run_mod._reviewer_host_from_env({
         "DAYDREAM_REVIEW_BACKEND": "claude",
@@ -215,8 +218,6 @@ def test_host_preflight_accepts_allowlisted_claude_proxy_without_pi_var(
     # allowed_hosts passes preflight with no pi-era DAYDREAM_REVIEW_BASE_URL
     # set (regression: "cannot resolve reviewer host: missing
     # DAYDREAM_REVIEW_BASE_URL" blocked the documented claude surface).
-    from daydream.benchmark.harbor import package as pkg
-    from daydream.benchmark.harbor import run as run_mod
 
     ws = _seed_host_ws(tmp_path, ["claude-proxy.internal"])
 
@@ -238,8 +239,6 @@ def test_host_preflight_blocks_non_allowlisted_claude_proxy(tmp_path: Path) -> N
     # A proxy ANTHROPIC_BASE_URL outside the compiled reviewer allowed_hosts
     # must be rejected host-side, before any paid review starts (previously it
     # passed setup+preflight and failed only in-container at the SDK call).
-    from daydream.benchmark.harbor import package as pkg
-    from daydream.benchmark.harbor import run as run_mod
 
     ws = _seed_host_ws(tmp_path, ["review.example"])
 
@@ -264,8 +263,6 @@ def test_host_run_gate_threads_claude_credentials_into_supervisor_env(
     # The host-side run gate env snapshot must carry the ANTHROPIC_* reviewer
     # credentials (previously it forwarded only DAYDREAM_REVIEW_*/JUDGE_*), so
     # run.py can resolve ANTHROPIC_BASE_URL for the claude backend.
-    from daydream.benchmark.cli import _handle_benchmark_command
-    from daydream.benchmark.harbor import run as run_mod
 
     monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
@@ -331,7 +328,6 @@ def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.M
     assert config.run_eval is False
     assert config.file_config is not None
 
-    from daydream.benchmark.harbor import verifier_core as vc
 
     loaded = json.loads(artifact.read_text())
     assert loaded["case_id"] == "case-python"
@@ -397,7 +393,6 @@ def test_entrypoint_env_has_no_skill_dirs(tmp_path: Path, monkeypatch: pytest.Mo
     assert rc == 0
     assert seen["skill_dir"] is None
 
-    from daydream.benchmark.harbor import verifier_core as vc
 
     loaded = json.loads(artifact.read_text())
     assert loaded["case_id"] == "case-noskill"

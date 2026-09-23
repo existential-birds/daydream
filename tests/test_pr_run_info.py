@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+import daydream.pr_run_info as provider
 from daydream.artifact_visibility import (
     ArtifactSession,
     open_artifact_session,
@@ -316,7 +317,6 @@ def test_pricing_or_render_failure_returns_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daydream.pr_run_info as provider
 
     def fail(
         _trajectories: Any,
@@ -342,7 +342,6 @@ def test_price_lookup_failure_returns_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daydream.pr_run_info as provider
 
     def fail() -> dict[str, Any]:
         raise RuntimeError("private prices path")

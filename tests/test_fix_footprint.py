@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
 import json
 import os
 import shutil
@@ -11,12 +13,15 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 
 from daydream import git_ops
+from daydream.backends import AgentEvent, Backend, ResultEvent
 from daydream.deep.scope_issues import enforce_authorized_fix_footprint
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, WorktreeRollbackSnapshot
+from daydream.phases import _restore_round_index_after_fanout, phase_fix_parallel
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
     canonicalize_repository_file_path,
@@ -243,7 +248,6 @@ def test_accepted_retarget_is_audited_without_widening_policy(tmp_path: Path) ->
 def test_footprint_treats_reviewed_git_names_separately_from_model_paths(
     git_repo: Path, reviewed_path: str,
 ) -> None:
-    import errno
 
     try:
         _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
@@ -652,11 +656,7 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
     git_repo: Path,
 ) -> None:
     """Real fix dispatch uses a join barrier before the one complete index restore."""
-    import anyio
 
-    from daydream.backends import AgentEvent, Backend, ResultEvent
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.phases import phase_fix_parallel
 
     _seed(git_repo, {"a.py": b"A = 1\n", "b.py": b"B = 1\n"})
     round_index = git_ops.snapshot_index(git_repo)
@@ -731,11 +731,7 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
 async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_index(
     git_repo: Path,
 ) -> None:
-    import anyio
 
-    from daydream.backends import AgentEvent, Backend, ResultEvent
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.phases import phase_fix_parallel
 
     _seed(git_repo, {"a.py": b"A = 1\n"})
     round_index = git_ops.snapshot_index(git_repo)
@@ -794,9 +790,7 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
 async def test_fanout_cancellation_and_index_restore_failure_are_both_reported(
     git_repo: Path,
 ) -> None:
-    import asyncio
 
-    from daydream.phases import _restore_round_index_after_fanout
 
     _seed(git_repo, {"a.py": b"A = 1\n"})
     index = git_ops.snapshot_index(git_repo)

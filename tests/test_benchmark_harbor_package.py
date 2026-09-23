@@ -16,6 +16,7 @@ from daydream.benchmark.harbor import build
 from daydream.benchmark.harbor import package as pkg
 from daydream.benchmark.harbor.build import TEMPLATE_VERSION
 from tests.harness.fake_gh import FakeGh
+from tests.test_benchmark_harbor_build import _harbor_tree_bytes, _seed_clean_workspace, _seed_ready_workspace
 
 
 def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,7 +51,6 @@ def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
 
 def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) -> None:
 
-    import pytest
 
 
     ver = importlib.metadata.version("daydream")
@@ -74,7 +74,6 @@ def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) ->
 
 def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.MonkeyPatch) -> None:
 
-    import pytest
 
     pytest.importorskip("harbor")
 
@@ -115,7 +114,6 @@ def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
 
 
 def test_render_task_toml_fails_closed_on_empty_or_missing_hosts() -> None:
-    import pytest
 
 
     bad_cases: tuple[dict[str, Any], ...] = (
@@ -132,7 +130,6 @@ def test_render_task_toml_fails_closed_on_empty_or_missing_hosts() -> None:
 
 def test_render_task_toml_normalizes_and_sorts_hosts() -> None:
 
-    import pytest
 
 
     doc = tomllib.loads(pkg.render_task_toml(
@@ -279,7 +276,6 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
 
     from harbor.utils.env import resolve_env_vars
 
-
     # Judge: anthropic selected -> CLAUDE_CODE_OAUTH_TOKEN must be optional.
     for var in (
         "DAYDREAM_JUDGE_API_KEY", "DAYDREAM_JUDGE_BASE_URL",
@@ -313,7 +309,6 @@ def test_render_job_config_still_requires_selection_vars(
 
     from harbor.utils.env import resolve_env_vars
 
-
     monkeypatch.delenv("DAYDREAM_JUDGE_PROVIDER", raising=False)
     monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
     job = yaml.safe_load(pkg.render_job_config(oracle=False))
@@ -323,7 +318,6 @@ def test_render_job_config_still_requires_selection_vars(
 
 def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    from tests.test_benchmark_harbor_build import _harbor_tree_bytes, _seed_ready_workspace
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     ver = importlib.metadata.version("daydream")
@@ -347,9 +341,7 @@ def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: Fa
 
 def test_build_harbor_refuses_without_ready_workspace(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    import pytest
 
-    from tests.test_benchmark_harbor_build import _seed_clean_workspace
 
     ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)
     ver = importlib.metadata.version("daydream")
@@ -362,7 +354,6 @@ def test_build_harbor_refuses_without_ready_workspace(tmp_path: Path, fake_gh: F
 
 def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch: pytest.MonkeyPatch) -> None:
 
-    import pytest
 
 
     def absent(distribution: Any) -> None:
@@ -376,16 +367,15 @@ def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch: 
 
 def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.models.job.config import JobConfig
+
     try:
         from harbor.models.task import Task
     except ImportError:  # Harbor exposes task as a namespace package in some wheels.
         from harbor.models.task.task import Task
 
-    from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     ver = importlib.metadata.version("daydream")
@@ -415,10 +405,8 @@ def test_templates_and_lock_readable_via_importlib_resources() -> None:
 
 def test_audit_execution_proofs_harbor_gated(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    import pytest
 
     pytest.importorskip("harbor")
-    from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     root = Path(__file__).resolve().parents[1]
     wheels = tmp_path / "wheels"

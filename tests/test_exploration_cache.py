@@ -18,7 +18,11 @@ from pathlib import Path
 
 import pytest
 
+from daydream import exploration as exploration_mod
+from daydream.artifact_visibility import _atomic_json, _manifest, _manifest_payload
+from daydream.exploration import exploration_cache_key
 from daydream.review_profile import ResolvedProfile, build_default_profile
+from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
@@ -47,7 +51,6 @@ def _drift_cached_key_between_runs(
     simulation must drift BOTH and refresh the canonical manifest — leaving a
     consistent state the next run reads as a stale/corrupt/missing cache key.
     """
-    from daydream.artifact_visibility import _atomic_json, _manifest, _manifest_payload
 
     roots = [entry for entry in artifact_runtime_root.iterdir() if entry.is_dir()]
     assert len(roots) == 1, f"expected exactly one workspace state root, got {roots}"
@@ -74,7 +77,6 @@ def _specialist_profile() -> ResolvedProfile:
 
 
 async def _run_deep(target: Path, *, custom_exploration: bool = True) -> int:
-    from daydream.runner import RunConfig, run
 
     exclude = target / ".git" / "info" / "exclude"
     exclude.write_text(f"{exclude.read_text()}\n.daydream/\n.review-output.md\n")
@@ -212,7 +214,6 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unignored Daydream output alone does not make a rebuilt cache ineligible."""
-    from daydream.runner import RunConfig, run
 
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
@@ -238,7 +239,6 @@ async def test_cache_version_change_invalidates_cache(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A cache-format bump forces a real second-run pre-scan."""
-    from daydream import exploration as exploration_mod
 
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
@@ -313,8 +313,6 @@ def test_cache_key_is_sensitive_to_every_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each of head, diff, tier, and the format version changes the key."""
-    from daydream import exploration as exploration_mod
-    from daydream.exploration import exploration_cache_key
 
     base = exploration_cache_key("sha1", "diff", "standard")
     assert base == exploration_cache_key("sha1", "diff", "standard")
@@ -331,7 +329,6 @@ def test_cache_key_is_sensitive_to_every_component(
 
 def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
     """Shifting content across the newline boundary changes the key."""
-    from daydream.exploration import exploration_cache_key
 
     assert exploration_cache_key("a", "b", "standard") != exploration_cache_key(
         "a\nb", "", "standard"
@@ -339,7 +336,6 @@ def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
 
 
 def test_cache_key_distinguishes_exploration_strategy_identity() -> None:
-    from daydream.exploration import exploration_cache_key
 
     default = {"exploration.pattern_scan": "packaged conventions"}
     custom = {"exploration.pattern_scan": "custom conventions"}

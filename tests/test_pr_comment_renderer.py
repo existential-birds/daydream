@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 import daydream
+import daydream.pr_comment_renderer as renderer
 from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import (
     _PHASE_LABELS,
@@ -302,7 +303,6 @@ def test_value_and_path_renderers_are_byte_identical() -> None:
 def test_value_renderer_does_not_read_ambient_user_prices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daydream.pr_comment_renderer as renderer
 
     def fail() -> dict[str, ModelPrice]:
         raise AssertionError("value renderer read ambient pricing")
@@ -362,7 +362,6 @@ def test_path_renderer_skips_price_lookup_when_no_document_is_valid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daydream.pr_comment_renderer as renderer
 
     malformed = tmp_path / "malformed.json"
     malformed.write_text("{not json", encoding="utf-8")

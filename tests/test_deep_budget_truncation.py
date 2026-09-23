@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
 
-from daydream.runner import RunConfig
+from daydream.backends import AgentEvent, ToolStartEvent
+from daydream.config_file import DaydreamFileConfig
+from daydream.runner import RunConfig, run
+from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.stub_backend import install_stub_backend, silence
+from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline
 
 
 def _test_step_stop_reasons(run_root: Path, traj: Path) -> list[str]:
@@ -40,7 +45,6 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A truncated per-stack review is recorded as a failure, not a success."""
-    from daydream.runner import run
 
     silence(monkeypatch)
     monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
@@ -69,7 +73,6 @@ async def test_runaway_test_turn_is_bounded_and_reaches_abort(
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A hung test turn is capped, so the run reaches the heal/abort path."""
-    from daydream.runner import run
 
     silence(monkeypatch)
     monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
@@ -97,15 +100,7 @@ async def test_review_budget_stop_emits_partial_findings(
     budget: str,
 ) -> None:
     """Real agent budget stops cannot strand completed findings before Phase B."""
-    from collections.abc import AsyncIterator
-    from typing import Any
 
-    from daydream.backends import AgentEvent, ToolStartEvent
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
-    from tests.harness.stub_backend import StubBackend
-    from tests.test_deep_orchestrator import _pin_findings_pr
 
     fake = FakeClock().install(monkeypatch)
     fragments = {
@@ -174,8 +169,6 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., RunConfig],
 ) -> None:
-    from daydream.runner import run
-    from tests.test_deep_orchestrator import _pin_findings_pr
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, tiny_diff_target)
@@ -193,13 +186,7 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
 async def test_partial_checkpoint_survives_publication_and_merge_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
-    from collections.abc import AsyncIterator
-    from typing import Any
 
-    from daydream.backends import AgentEvent, ToolStartEvent
-    from daydream.runner import run
-    from tests.harness.stub_backend import StubBackend
-    from tests.test_deep_orchestrator import _pin_findings_pr
 
     class CheckpointBackend(StubBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -233,8 +220,6 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
 async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
-    from daydream.runner import run
-    from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline
 
     silence(monkeypatch)
     backend = install_stub_backend(monkeypatch, multi_stack_target)
