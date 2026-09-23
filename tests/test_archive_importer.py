@@ -749,24 +749,7 @@ def test_drift_fails_closed_before_any_write(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
-    good: dict[str, Any] = {"session_id": SID, "source": "auto", "observed_at": _OBSERVED_A}
-    row = dict(good)
-    row.update(
-        labels=["accepted"],
-        pr_state=None,
-        labeler_version="980-rubric-r2",
-        evidence_sha="e" * 64,
-        rubric_json=None,
-        valid_at=None,
-        reward_version=None,
-        reward_json=None,
-        composite_reward=None,
-        reviewer_logins=None,
-        has_posterior=0,
-        labeler_policy_version="980-policy-r1",
-        reply_classifier_version=None,
-        reply_evidence_digest=None,
-    )
+    row = _auto_observation_row()
     tampered = _row_with_digest(row)
     tampered["labels"] = ["smuggled"]
     with pytest.raises(ValueError, match=SID):
@@ -846,25 +829,7 @@ def test_bad_timestamp_fails_closed_before_any_write(
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
-    row: dict[str, Any] = {
-        "session_id": SID,
-        "source": "auto",
-        "observed_at": _OBSERVED_A,
-        "labels": ["accepted"],
-        "pr_state": None,
-        "labeler_version": "980-rubric-r2",
-        "evidence_sha": "e" * 64,
-        "rubric_json": None,
-        "valid_at": None,
-        "reward_version": None,
-        "reward_json": None,
-        "composite_reward": None,
-        "reviewer_logins": None,
-        "has_posterior": 0,
-        "labeler_policy_version": "980-policy-r1",
-        "reply_classifier_version": None,
-        "reply_evidence_digest": None,
-    }
+    row = _auto_observation_row()
     row[field] = bad_value
     with pytest.raises(ValueError, match=SID):
         merge_imported_observations(target, [_row_with_digest(row)])
@@ -943,25 +908,7 @@ def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path) -> 
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
-    row: dict[str, Any] = {
-        "session_id": SID,
-        "source": "auto",
-        "observed_at": _OBSERVED_A,
-        "labels": ["accepted"],
-        "pr_state": None,
-        "labeler_version": "980-rubric-r2",
-        "evidence_sha": "e" * 64,
-        "rubric_json": None,
-        "valid_at": None,
-        "reward_version": None,
-        "reward_json": None,
-        "composite_reward": None,
-        "reviewer_logins": None,
-        "has_posterior": 0,
-        "labeler_policy_version": STALE_LEGACY,
-        "reply_classifier_version": None,
-        "reply_evidence_digest": None,
-    }
+    row = _auto_observation_row(labeler_policy_version=STALE_LEGACY)
     merged = merge_imported_observations(target, [_row_with_digest(row)])
     assert merged["appended"] == 1
     hist = label_observation_history(target, SID)
@@ -996,6 +943,30 @@ def _metadata_row(**overrides: Any) -> dict[str, Any]:
         "reviewer_logins": None,
         "has_posterior": 0,
         "labeler_policy_version": STALE_LEGACY,
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _auto_observation_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "session_id": SID,
+        "source": "auto",
+        "observed_at": _OBSERVED_A,
+        "labels": ["accepted"],
+        "pr_state": None,
+        "labeler_version": "980-rubric-r2",
+        "evidence_sha": "e" * 64,
+        "rubric_json": None,
+        "valid_at": None,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": "980-policy-r1",
         "reply_classifier_version": None,
         "reply_evidence_digest": None,
     }
