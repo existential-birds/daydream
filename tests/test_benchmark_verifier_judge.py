@@ -8,6 +8,8 @@ selection, oracle parity, and end-to-end ``run_verifier`` — all with an
 injected fake HTTP client against ``tmp_path``.
 """
 import asyncio
+import hashlib as _h
+import hashlib as _mh
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -384,7 +386,6 @@ class _CountingClient:
 
 
 def _gold_list(n: int = 2, *, case_id: str = "case-x", locationless: bool = False) -> list[dict[str, Any]]:
-    import hashlib as _h
     out = []
     for i in range(n):
         f = {"title": f"t{i}", "body": "b", "severity": "high",
@@ -406,7 +407,6 @@ def _write_metadata(
     head_ref: str = "head",
     source_case_id: str | None = None,
 ) -> None:
-    import hashlib as _h
     meta = {
         "schema_version": 1,
         "case_id": case_id,
@@ -637,7 +637,6 @@ def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path
     # derived content-only. Back-scoring it must not fail on the missing field
     # or on a digest mismatch: the verifier falls back to the legacy content
     # digest when ``source_case_id`` is absent.
-    import hashlib as _h
     sr = sr_module
     gold = []
     for title in ("t0", "t1"):
@@ -651,7 +650,6 @@ def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path
     gold_path = tmp_path / "golden-review.json"
     gold_path.write_text(json.dumps(gold))
     # deliberately legacy: no ``source_case_id`` key in the metadata
-    import hashlib as _mh
     meta = {
         "schema_version": 1,
         "case_id": "legacy",
@@ -934,7 +932,6 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module: Any
              "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
     payload = "\x1f".join(["c", str(gold[0]["title"]), str(gold[0]["body"]), str(gold[0]["severity"]),
                             str(gold[0]["path"]), str(gold[0]["start_line"]), str(gold[0]["end_line"])])
-    import hashlib as _h
     gold[0]["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
     gold_path.write_text(json.dumps(gold))
     _write_metadata(gold_path, case_id="c", base_ref="b", head_ref="h")

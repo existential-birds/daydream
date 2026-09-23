@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,8 @@ from daydream.test_execution import (
     canonical_test_command,
     run_test_command,
 )
+from daydream.trajectory import DaydreamPhase
+from tests.harness.trajectory import make_recorder
 
 
 def _pid_alive(pid: int) -> bool:
@@ -68,7 +71,6 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
 
 
 def test_canonical_command_from_cli_overrides_config() -> None:
-    from types import SimpleNamespace
 
     cfg = SimpleNamespace(test_command="pytest -x")  # config value
     run = SimpleNamespace(test_command="/cli/cmd")  # CLI wins
@@ -76,7 +78,6 @@ def test_canonical_command_from_cli_overrides_config() -> None:
 
 
 def test_canonical_command_from_config_when_cli_unset() -> None:
-    from types import SimpleNamespace
 
     cfg = SimpleNamespace(test_command="uv run pytest -n auto")
     run = SimpleNamespace(test_command=None)
@@ -84,7 +85,6 @@ def test_canonical_command_from_config_when_cli_unset() -> None:
 
 
 def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
-    from types import SimpleNamespace
 
     cfg = SimpleNamespace(test_command=None)
     run = SimpleNamespace(test_command=None)
@@ -140,8 +140,6 @@ async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
     """Issue #726 task 12: with a trajectory recorder active, the host runner
     emits phase events distinguishable as ``test-execution``, carrying a
     ``duration_ms`` and a ``stop_reason`` in {completed, timed_out}."""
-    from daydream.trajectory import DaydreamPhase
-    from tests.harness.trajectory import make_recorder
 
     rec = make_recorder(tmp_path)
     async with rec:
@@ -159,8 +157,6 @@ async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
 
 
 async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
-    from daydream.trajectory import DaydreamPhase
-    from tests.harness.trajectory import make_recorder
 
     rec = make_recorder(tmp_path)
     async with rec:

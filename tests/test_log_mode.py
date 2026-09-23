@@ -16,10 +16,13 @@ from __future__ import annotations
 import io
 import sys
 from collections.abc import Callable
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
+from daydream.agent import _LogRedactingConsole, _print_log, _summarize_input, _summarize_output
+from daydream.agent import console as phases_console
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -31,7 +34,10 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.cli import _parse_args
+from daydream.phases import _emit_failure_handoff
+from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import RunConfig, run
+from daydream.ui.tools import _primary_tool_value
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
@@ -203,7 +209,6 @@ def test_log_mode_rendering(
 def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     """A token straddling the 200-char summary boundary is redacted, not truncated
     into an unmatchable fragment. Redact-after-slice would leak the raw 'ghp_'."""
-    from daydream.agent import _summarize_input
 
     # The space before the token is REQUIRED: `_API_KEY_PATTERN` anchors on `\b`,
     # so a token glued directly after a word char is never matchable and the test
@@ -218,7 +223,6 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
 
     # Same boundary check on the output summary: a token straddling the [:200]
     # first-line cut must be caught before strip/first-line/slice.
-    from daydream.agent import _summarize_output
 
     out = _summarize_output("x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10)
     assert "ghp_" not in out
@@ -227,8 +231,6 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
 
 def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
     """`--log` summary and callback line key Bash from the shared _PRIMARY_TOOL_ARG table."""
-    from daydream.agent import _summarize_input
-    from daydream.ui.tools import _primary_tool_value
 
     args: dict[str, object] = {"command": "git diff --stat", "description": "Show changes"}
     assert _summarize_input(args, "Bash") == "git diff --stat"
@@ -243,7 +245,6 @@ def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
     must not shadow the short ``subject`` the generic fallback surfaces (mirrors
     ``_derive_task_label``'s subject-before-description ordering).
     """
-    from daydream.agent import _summarize_input
 
     args: dict[str, object] = {
         "subject": "Add rate limiting",
@@ -263,7 +264,6 @@ def test_log_mode_summaries_redact_structured_credentials() -> None:
     paths (``_summarize_input`` / ``_summarize_output`` / ``_print_log``), so a
     flat-only redactor would print the secret in --log mode.
     """
-    from daydream.agent import _print_log, _summarize_input, _summarize_output
 
     # Nested assignment under a sensitive key: flat redaction leaks the token.
     out = _summarize_input({"command": "the config: token=opaque-test-12345"}, "Bash")
@@ -276,8 +276,6 @@ def test_log_mode_summaries_redact_structured_credentials() -> None:
     assert "[REDACTED" in out
 
     # And the direct _print_log emitter on a command with a structured pair.
-    import io
-    from contextlib import redirect_stdout
 
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -290,8 +288,6 @@ def test_log_mode_console_redacts_string_payloads() -> None:
     """phases.py imports agent's module-level console; in --log mode that
     console redacts string payloads, so phase/UI output (e.g. the failure
     handoff body) cannot bypass the log-mode redaction boundary."""
-    from daydream.agent import _LogRedactingConsole
-    from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 
     sentinel = REDACTION_SENTINEL
     buffer = io.StringIO()
@@ -347,9 +343,6 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
     with a credential-bearing summarizer body under --log mode must not leak the
     raw token to stdout. The console-level _LogRedactingConsole boundary is the
     mechanism (RD-1); this proves it on the real handoff path."""
-    from daydream.agent import console as phases_console
-    from daydream.phases import _emit_failure_handoff
-    from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 
     # False-pass trap: the module console phases.py binds MUST be the redacting
     # console, otherwise a passing test would mean nothing.

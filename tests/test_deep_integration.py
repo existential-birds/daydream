@@ -9,8 +9,26 @@ from typing import Any
 
 import pytest
 
+import daydream.phases as phases_mod
 from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
+from daydream.deep import detection as _detection
+from daydream.deep.detection import StackAssignment
+from daydream.deep.prompts import (
+    CONFIG_FLOW_TRACE_INSTRUCTION,
+    CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
+    TRUST_MODEL_INSTRUCTION,
+)
+from daydream.exploration import ExplorationContext
+from daydream.phases import (
+    phase_alternative_review,
+    phase_commit_push,
+    phase_fix,
+    phase_test_and_heal,
+    phase_understand_intent,
+)
+from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WIRE_CONTRACT_RUST_INSTRUCTION
+from daydream.runner import RunConfig, run
 from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 
@@ -241,8 +259,6 @@ async def _run_deep(
     tiny-diff collapse (which would absorb the generic bucket into the single
     rust assignment and suppress the generic-fallback prompt).
     """
-    from daydream.exploration import ExplorationContext
-    from daydream.runner import RunConfig, run
 
     _wire_mocks(monkeypatch, backend)
 
@@ -302,13 +318,6 @@ def test_phase_primitives_unmodified() -> None:
     ``backend`` first, ``work`` second — base resolution happens once at
     workspace open time and is threaded through every phase.
     """
-    from daydream.phases import (
-        phase_alternative_review,
-        phase_commit_push,
-        phase_fix,
-        phase_test_and_heal,
-        phase_understand_intent,
-    )
 
     # Other primitives: first two params are (backend, work).
     for fn in (
@@ -327,7 +336,6 @@ def test_phase_primitives_unmodified() -> None:
         )
 
     # D-39 negative guard: no "v2" or "_deep_" wrappers crept in.
-    import daydream.phases as phases_mod
 
     leaked = [
         name
@@ -343,8 +351,6 @@ async def test_deep_default_backend_line_is_phase_agnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#647: the 'Default backend' status line never shows a review override."""
-    from daydream.exploration import ExplorationContext
-    from daydream.runner import RunConfig, run
 
     backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     _wire_mocks(monkeypatch, backend)
@@ -387,9 +393,6 @@ async def test_structural_meta_stack_flows_end_to_end(
     (structure stack not emitted, records not partitioned out and appended,
     section not rendered) the corresponding assertion below fails.
     """
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep import detection as _detection
-    from daydream.deep.detection import StackAssignment
 
     detected_stacks: list[StackAssignment] = []
     real_detect = _detection.detect_stacks
@@ -452,11 +455,6 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     each of the three built-in stack builders, so
     all three gate assignments are exercised in a single real run.
     """
-    from daydream.deep.prompts import (
-        CONFIG_FLOW_TRACE_INSTRUCTION,
-        CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
-        TRUST_MODEL_INSTRUCTION,
-    )
 
     backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -541,10 +539,6 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
     delivered. Disabling the collapse restores the full pipeline so the rust
     per-stack and generic-fallback prompts both reach the backend seam.
     """
-    from daydream.prompts.wire_contract import (
-        WIRE_CONTRACT_GENERIC_INSTRUCTION,
-        WIRE_CONTRACT_RUST_INSTRUCTION,
-    )
 
     backend = _DeepMockBackend(rust_wire_target, cost_usd=0.0123)
     exit_code = await _run_deep(

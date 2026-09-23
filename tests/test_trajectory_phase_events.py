@@ -28,14 +28,17 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     compute_timing_summary,
     get_current_recorder,
+    maybe_fork,
     phase_scope,
 )
+from tests.harness import diagram_repos as dr
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.test_deep_orchestrator import _install_stub_backend, _merge_item, _pin_findings_pr, _silence
 
 
 def _snapshot_document(path: Path, payload: dict[str, Any]) -> TrajectoryDocumentSnapshot:
@@ -522,7 +525,6 @@ async def test_subtrajectory_step_ids_track_multiple_invocations(
 
 async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> None:
     """Fork siblings register subtrajectory entries on the parent (issue #212)."""
-    from daydream.trajectory import maybe_fork
 
     rec = make_recorder(tmp_path)
     async with rec:
@@ -602,7 +604,6 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One actual run proves fan-out, overlap, diagrams and frozen archive totals."""
-    from tests.harness import diagram_repos as dr
 
     target = dr.build_both_signals_repo(tmp_path)
     backend = _OverlappingReviewBackend(target)
@@ -1027,7 +1028,6 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     the trajectory's ``extra["phase_events"]`` must carry the deep review
     boundary. Asserts the on-disk trajectory JSON + manifest.
     """
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -1076,7 +1076,6 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
     mute_side_effects: Any,
 ) -> None:
     """Accepted deep fix gate records fix/test/verify timing events."""
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -1120,11 +1119,6 @@ async def test_parallel_fix_registers_subtrajectories(
     ``recorder.fork()`` path. Asserts multiple ``fix`` entries appear in
     ``extra["subtrajectories"]``.
     """
-    from tests.test_deep_orchestrator import (
-        _install_stub_backend,
-        _merge_item,
-        _silence,
-    )
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -1170,11 +1164,6 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     the fix cycle's fix/test/verify must never run (and must not appear in the
     recorded phase events or manifest timings).
     """
-    from tests.test_deep_orchestrator import (
-        _install_stub_backend,
-        _pin_findings_pr,
-        _silence,
-    )
 
     _silence(monkeypatch)
     mute_side_effects()

@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 import yaml
 
+from daydream.benchmark import curation as cu
+from daydream.benchmark import github_import as gi
 from daydream.benchmark import snapshot, storage
 from daydream.benchmark import storage as _storage
 from daydream.benchmark.cli import _handle_benchmark_command
@@ -120,7 +122,6 @@ _SEED_SEQ = {"n": 0}
 
 def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
     """Mark *case_id* ready with the freshly-rendered task-spec digest."""
-    from daydream.benchmark import curation as cu
 
     task_spec_sha256 = hashlib.sha256(
         build.render_task_spec(
@@ -136,7 +137,6 @@ def _import_case(
     ws: Path | None = None, with_candidate: bool = True,
 ) -> tuple[Path, str, str]:
     """Import one PR into a fresh (or given) workspace; returns (ws, case_id, head_sha)."""
-    from daydream.benchmark import github_import as gi
 
     if ws is None:
         _SEED_SEQ["n"] += 1
@@ -157,7 +157,6 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) ->
 
     Returns ``(ws, case_id, head_sha)``.
     """
-    from daydream.benchmark import curation as cu
 
     ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, lines=lines)
     candidate = next(
@@ -175,7 +174,6 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh: FakeGh, *, ready: bool = True
     With *ready* True (default), the clean-attested case is also final-attested
     ready; with *ready* False it stays a clean-attested draft.
     """
-    from daydream.benchmark import curation as cu
 
     ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, with_candidate=False)
     cu.attest_clean(ws, case_id)
@@ -189,7 +187,6 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines:
 
     Returns the second case id.
     """
-    from daydream.benchmark import curation as cu
 
     _, case_id, head_sha = _import_case(tmp_path, fake_gh, number=102, lines=lines, ws=ws)
     candidate = next(
@@ -610,8 +607,6 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
 ) -> None:
 
 
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark import github_import as gi
 
     marker = finding_marker("f" * 64)
     raw_body = f"\n{marker}\n## Cache race\nProtect the shared cache.\n{marker}\n"
@@ -882,7 +877,6 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, 
 
 
 def test_compile_never_refetches_live_pr_text(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.benchmark import github_import as gi
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
 
     def boom(*a: Any, **k: Any) -> None:
@@ -1202,7 +1196,6 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: 
 
 
 def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
 
     ws, included_case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     excluded_case_id = _seed_second_ready_case(ws, tmp_path, fake_gh)
@@ -1437,7 +1430,6 @@ def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_
 
 def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock1 = build.compile_workspace(ws)
     # mutate the instruction-relevant input (PR title), re-render, re-approve, recompile

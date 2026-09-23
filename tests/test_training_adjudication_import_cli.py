@@ -18,7 +18,13 @@ from typing import Any
 import pytest
 
 from daydream import cli
-from daydream.archive.index import append_label_observation, readonly_connection, upsert_run
+from daydream.archive.hydrate import PublicDestinationError
+from daydream.archive.importer import REDACTED_PATH
+from daydream.archive.index import _get_connection, append_label_observation, readonly_connection, upsert_run
+from daydream.training.adjudication import cli as adjudication_cli
+from daydream.training.adjudication.cli import handle_adjudicate
+from daydream.training.adjudication.publish import publish_annotation_state, resume_annotation_state
+from tests.fixtures.training.build_hub_snapshot import build_annotations_hub
 from tests.harness.trajectory import make_manifest
 
 _OBSERVED = "2026-04-30T00:00:00+00:00"
@@ -459,8 +465,6 @@ def test_publish_then_resume_reproduces_queue_and_report(
     """--publish composes publish_annotation_state after the merge + redaction
     gate (M8), and a fresh-VM resume from the Hub checkpoint reproduces the
     identical queue + report (AC5). Only the Hub client is faked."""
-    from daydream.training.adjudication.publish import resume_annotation_state
-    from tests.fixtures.training.build_hub_snapshot import build_annotations_hub
 
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -468,7 +472,6 @@ def test_publish_then_resume_reproduces_queue_and_report(
     manifest = _write_manifest(tmp_path)
 
     hub = build_annotations_hub(curation_id="cur-import", snapshot_id="e" * 64)
-    from daydream.training.adjudication import cli as adjudication_cli
 
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
     rc = cli._handle_corpus_command(
@@ -553,9 +556,6 @@ def test_publish_refuses_non_private_before_any_write(
     """A non-private destination is refused before any byte is written (M17):
     exit 1, the refusal named on stderr/stdout, and zero uploads (the hub
     keeps only its seeded manifest)."""
-    from daydream.archive.hydrate import PublicDestinationError
-    from daydream.training.adjudication.publish import publish_annotation_state
-    from tests.fixtures.training.build_hub_snapshot import build_annotations_hub
 
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -563,7 +563,6 @@ def test_publish_refuses_non_private_before_any_write(
     manifest = _write_manifest(tmp_path)
 
     hub = build_annotations_hub(curation_id="cur-import", snapshot_id="e" * 64, private=False)
-    from daydream.training.adjudication import cli as adjudication_cli
 
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
     rc = cli._handle_corpus_command(
@@ -592,7 +591,6 @@ def test_publish_refuses_non_private_before_any_write(
 
 
 def test_publish_rejects_dry_run_and_missing_manifest() -> None:
-    from daydream.training.adjudication.cli import handle_adjudicate
 
     with pytest.raises(SystemExit) as exc:
         handle_adjudicate(
@@ -611,7 +609,6 @@ def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.Captur
     """The merge commits the redaction scan's payload, never the unredacted
     originals: a credential-bearing rubric_json (absolute local path) reaches
     the state archive only in its redacted form (M9)."""
-    from daydream.archive.importer import REDACTED_PATH
 
     src = tmp_path / "src"
     _seed_session(
@@ -690,7 +687,6 @@ def test_cli_import_non_iso_stamp_fails_closed(tmp_path: Path, capsys: pytest.Ca
 
 
 def test_cli_missing_archive_root_exits_2() -> None:
-    from daydream.training.adjudication.cli import handle_adjudicate
 
     with pytest.raises(SystemExit) as exc:
         handle_adjudicate(["import-local-observations", "--state-dir", "/tmp/x"])
@@ -698,7 +694,6 @@ def test_cli_missing_archive_root_exits_2() -> None:
 
 
 def test_cli_unknown_subverb_exits_2() -> None:
-    from daydream.training.adjudication.cli import handle_adjudicate
 
     with pytest.raises(SystemExit) as exc:
         handle_adjudicate(["import-local-observations-typo", "--archive-root", "/tmp"])
@@ -730,7 +725,6 @@ def test_cli_import_links_against_hydrated_index_and_merges_into_archive_dir(
     against the pinned hydrated index, validates exact finding identity
     against the projected findings, and appends into the hydrated
     --archive-dir index.db — never the state-dir index."""
-    from daydream.archive.index import _get_connection
 
     src = tmp_path / "backup"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -800,7 +794,6 @@ def test_cli_import_report_shows_mapping_summary(
 
 
 def test_cli_import_missing_identity_flags_exit_2() -> None:
-    from daydream.training.adjudication.cli import handle_adjudicate
 
     with pytest.raises(SystemExit) as exc:
         handle_adjudicate(

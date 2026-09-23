@@ -1,11 +1,14 @@
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from daydream.archive.hydrate import HubUnavailableError
-from daydream.training.adjudication.materialize import run_materialize
+from daydream.archive.index import append_label_observation
+from daydream.training.adjudication.cli import _hydrated_identity_index
+from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly, run_materialize
 from daydream.trajectory import run_directory, run_document_path
 from tests.harness.adjudication import make_hydrated_sqlite_index
 from tests.test_training_adjudication_canonical import _PIN, _index
@@ -132,7 +135,6 @@ def _make_labels_only_rubric(root: Path) -> None:
     shape (only ``per_finding_outcomes``, no ``per_finding_resolutions``) —
     exactly what the import path appends verbatim from a surviving old archive
     (``Rubric.to_dict`` before 7a2b580, ``docs`` commit 23c02d4)."""
-    import sqlite3
 
     labels_only = json.dumps({"per_finding_outcomes": ["accepted"]})
     conn = sqlite3.connect(str(root / "index.db"))
@@ -181,8 +183,6 @@ def test_materialize_serves_legacy_labels_only_rows_from_trajectory(tmp_path: Pa
 
 def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> None:
     """The hydrated-index readers address `<index_root>/runs/<sid>/trajectory.json` via the surface."""
-    from daydream.training.adjudication.cli import _hydrated_identity_index
-    from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly
 
     root = _hydrated_sqlite_index(tmp_path)
     _make_labels_only_rubric(root)
@@ -234,7 +234,6 @@ def test_materialize_serves_human_labeled_session_from_trajectory(tmp_path: Path
     never flags the session conflicting (issue #336 item 3)."""
     root = _hydrated_sqlite_index(tmp_path)
     _seed_legacy_trajectory(root)
-    from daydream.archive.index import append_label_observation
 
     append_label_observation(
         root,
@@ -300,7 +299,6 @@ def test_materialize_fails_loudly_on_uncheckpointed_wal(tmp_path: Path) -> None:
     silently skip them and serve fewer sessions with no error — the guard must
     fail loudly instead of serving a partial snapshot."""
     root = _hydrated_sqlite_index(tmp_path)
-    import sqlite3
     # Simulate the crash window: a fresh writer commits rows into the WAL but
     # has not closed (checkpointed) yet.
     conn = sqlite3.connect(str(root / "index.db"))

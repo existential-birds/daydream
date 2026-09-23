@@ -11,6 +11,7 @@ import json
 import shutil
 import subprocess
 import sys
+import types
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -19,14 +20,17 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import verifier_core
+from daydream.benchmark.harbor import build, candidate, verifier_core
+from daydream.benchmark.harbor import verifier_core as vc
+from daydream.benchmark.harbor.build import _copy_assets
+from daydream.benchmark.harbor.package import template_text
+from daydream.hunk_index import range_distance as hunk_range_distance
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
 def copied_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    from daydream.benchmark.harbor.build import _copy_assets
 
     _copy_assets(tmp_path)
     path = tmp_path / "tests" / "verifier_core.py"
@@ -108,7 +112,6 @@ def test_public_content_parser_requires_exact_keys(
 
 
 def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType) -> None:
-    from daydream.benchmark.harbor import build, candidate
 
     key = "case-validation-parity"
     merged = {"file": "src/cache.py", "line": 3, "description": "Tenant omitted",
@@ -181,7 +184,6 @@ def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -
     Keeps the subprocess contract/flag surface (``-i``/``-o``, timeout, returncode
     assertion) in one place; returns ``(out, parsed_result)``.
     """
-    from daydream.benchmark.harbor import build
 
     metric_path = tmp_path / "metric.py"
     metric_path.write_bytes(build.render_metric())
@@ -199,7 +201,6 @@ def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -
 
 
 def test_copy_assets_emits_canonical_verifier_core_bytes(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor.build import _copy_assets
 
     out = dict(_copy_assets(tmp_path))
     source = REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
@@ -261,7 +262,6 @@ def test_rendered_metric_matches_host_on_representative_rows(tmp_path: Path) -> 
     """The rendered metric, run via ``uv run --script`` over JSONL that mixes
     clean scored rows with malformed/null/shape-wrong rows, must produce exactly
     what the canonical ``verifier_core.aggregate_metrics`` computes in-process."""
-    from daydream.benchmark.harbor import verifier_core
 
     clean = _reward_row(tp=2, fp=0, fn=1, reward=0.8, clean=False)
     rows = "\n".join([json.dumps(clean), "null", "not-json", "[]", json.dumps(clean)])
@@ -274,7 +274,6 @@ def test_rendered_metric_matches_host_on_representative_rows(tmp_path: Path) -> 
 
 
 def test_location_tolerance_meets_floor() -> None:
-    from daydream.benchmark.harbor import verifier_core as vc
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
 
 
@@ -283,8 +282,6 @@ def test_range_distance_cannot_drift_from_hunk_index() -> None:
     primitive in ``daydream/hunk_index.py`` (its documented source of truth,
     ``verifier_core.py``/``hunk_index.py``): benchmark location-tier scoring
     must never silently diverge from the product's near-line notion."""
-    from daydream.benchmark.harbor import verifier_core as vc
-    from daydream.hunk_index import range_distance as hunk_range_distance
 
     cases: list[tuple[int, int, int]] = [
         (1, 5, 10),   # below the range -> distance to the start boundary
@@ -307,7 +304,6 @@ def test_render_metric_loads_colocated_canonical_and_matches_host(
 ) -> None:
     """The rendered metric must obtain aggregate_metrics by loading the colocated
     canonical verifier_core.py from the stage root — not from a spliced body."""
-    from daydream.benchmark.harbor import build, verifier_core
 
     stage = tmp_path / "stage"
     stage.mkdir()
@@ -316,8 +312,6 @@ def test_render_metric_loads_colocated_canonical_and_matches_host(
         Path(verifier_core.__file__),
         stage / "verifier_core.py",
     )
-    import sys
-    import types
 
     prior_verifier_core = sys.modules.get("verifier_core", _MISSING)
     mod = types.ModuleType("metric")
@@ -332,7 +326,6 @@ def test_render_metric_loads_colocated_canonical_and_matches_host(
 
 
 def test_metric_template_has_no_helper_duplicates_or_markers() -> None:
-    from daydream.benchmark.harbor.package import template_text
 
     text = template_text("metric.py")
     for banned in (
@@ -384,7 +377,6 @@ def test_aggregate_metrics_axis_absent_is_zero_pairs_not_raise() -> None:
 def test_deployed_scoring_surfaces_are_stdlib_only_and_daydream_free() -> None:
     """Both deployed scoring surfaces — the rendered metric and the colocated
     canonical copy — must stay stdlib-only and free of any ``daydream`` import."""
-    from daydream.benchmark.harbor import build
 
     metric_text = build.render_metric().decode("utf-8")
     canonical = (REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_text()
@@ -398,7 +390,6 @@ def test_deployed_canonical_copy_exposes_score_review_surface(tmp_path: Path) ->
     """``score_review.py`` consumes (``VerifierError``, ``Verdict``, ``validate_exact_keys``,
     ``validate_candidate_artifact``, ``score_review``, ``derive_candidate_id``) from the
     deployed canonical file; the copy emitted by ``_copy_assets`` must define each."""
-    from daydream.benchmark.harbor.build import _copy_assets
 
     out = dict(_copy_assets(tmp_path))
     deployed = tmp_path / "tests" / "verifier_core.py"
@@ -407,8 +398,6 @@ def test_deployed_canonical_copy_exposes_score_review_surface(tmp_path: Path) ->
         REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
     )
 
-    import sys
-    import types
 
     # dataclasses resolves cls.__module__ via sys.modules at decoration time,
     # so register the namespace as a module before exec (P1 spike pitfall).

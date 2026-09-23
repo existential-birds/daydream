@@ -61,6 +61,7 @@ from tests.test_deep_orchestrator import (
     _install_stub_backend,
     _silence,
 )
+from tests.test_improve_plans import _repo
 
 
 def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +145,6 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     ``acme/multi_stack`` proves provenance is attributed to the target — the
     benchmark-harness pattern that regressed before the fix.
     """
-    import json
 
     _silence(monkeypatch)
     _silence_cli_and_runner(monkeypatch)
@@ -272,8 +272,6 @@ def test_non_tty_auto_enables_non_interactive(
 def test_cli_main_prune_reanchor_removes_and_exits_0(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.harness.git_helpers import git
-    from tests.test_improve_plans import _repo
 
     repo, _ = _repo(tmp_path)
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
@@ -291,7 +289,6 @@ def test_cli_main_prune_reanchor_removes_and_exits_0(
 def test_cli_main_prune_reanchor_rejects_name_exits_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.test_improve_plans import _repo
 
     repo, _ = _repo(tmp_path)
     _silence(monkeypatch)
@@ -315,8 +312,6 @@ def test_cli_main_list_reanchor_lists_and_exits_0(
     stub backend is needed; the observable outcome is the exit code and the
     printed worktree names.
     """
-    from tests.harness.git_helpers import git
-    from tests.test_improve_plans import _repo
 
     repo, _ = _repo(tmp_path)
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
@@ -337,7 +332,6 @@ def test_cli_main_list_reanchor_empty_exits_0(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An empty re-anchor set still exits 0 — listing nothing is not an error."""
-    from tests.test_improve_plans import _repo
 
     repo, _ = _repo(tmp_path)
     _silence(monkeypatch)
@@ -700,7 +694,6 @@ def _install_chained_failure_backend(
     outer: BaseException | None = None,
 ) -> None:
     """Install a ScriptedBackend that raises a CodexError chained to a GitError."""
-    from daydream.backends.codex import CodexError
 
     if outer is None:
         outer = CodexError("failed to create disposable read-only checkout")

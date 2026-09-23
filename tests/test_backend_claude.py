@@ -1,25 +1,46 @@
 """Tests for ClaudeBackend."""
+import hashlib
 import json
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
+from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+from claude_agent_sdk._internal.query import Query
+from claude_agent_sdk._internal.transport import Transport
+from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+from claude_agent_sdk.types import AgentDefinition
 
 from daydream.backends import (
+    BackendExecutionInput,
     ClaudeRequestConfig,
     ContinuationToken,
     CostEvent,
     RequestEvent,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
     effective_fanout_concurrency,
 )
-from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
+from daydream.backends.claude import (
+    ClaudeAgentError,
+    ClaudeBackend,
+    MaxTurnsError,
+    _is_background_bash,
+    _is_dangerous_command,
+    _is_read_only_command,
+    _read_only_guard,
+    _RunLocalClaudeSDKClient,
+    _RunLocalSubprocessCLITransport,
+)
+from daydream.config import TEST_WALL_BUDGET_S
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -37,7 +58,6 @@ from tests.harness.claude_sdk import (
 async def test_artifact_visibility_protocol_sdk_query_observes_exact_options_and_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hashlib
 
     target = (tmp_path / "model cwd with spaces").resolve()
     target.mkdir()
@@ -104,13 +124,7 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
     monkeypatch: pytest.MonkeyPatch,
     version_admission_delay_s: float,
 ) -> None:
-    import anyio
-    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
-    from daydream.backends.claude import (
-        _RunLocalClaudeSDKClient,
-        _RunLocalSubprocessCLITransport,
-    )
 
     capture = tmp_path / "native-env.jsonl"
     cli = tmp_path / "claude"
@@ -223,7 +237,6 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
 async def test_claude_backend_injected_environment_reaches_sdk_options_and_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     captured: dict[str, Any] = {}
     base_client = scripted_client(
@@ -429,7 +442,6 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     ``subtype="error_max_turns"`` (``result`` is None, so the detail falls back
     to the subtype).
     """
-    from daydream.backends.claude import MaxTurnsError
 
     patch_sdk(
         scripted_client(
@@ -493,7 +505,6 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
 ])
 def test_read_only_bash_guard_decision(cmd: Any, allowed: Any) -> None:
     """The read-only Bash allowlist predicate allows inspection, denies mutation/chains."""
-    from daydream.backends.claude import _is_read_only_command
 
     assert _is_read_only_command(cmd) is allowed
 
@@ -524,7 +535,6 @@ def test_read_only_bash_guard_decision(cmd: Any, allowed: Any) -> None:
 ])
 def test_is_dangerous_command(cmd: Any, dangerous: Any) -> None:
     """The always-on dangerous-command predicate flags root-scans and catastrophic deletes."""
-    from daydream.backends.claude import _is_dangerous_command
 
     assert _is_dangerous_command(cmd) is dangerous
 
@@ -630,7 +640,6 @@ async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk:
 @pytest.mark.asyncio
 async def test_read_only_guard_denies_mutation_allows_inspection() -> None:
     """The registered guard callback denies Write and non-read-only Bash, allows read-only Bash."""
-    from daydream.backends.claude import _read_only_guard
 
     deny_write = cast(dict[str, Any], await _read_only_guard(
         {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
@@ -657,7 +666,6 @@ async def test_read_only_guard_deny_reason_uses_shared_guard_wording() -> None:
     """The guard is shared (diagnostic subagents, failure summarizer, exploration
     specialists), so its deny reasons must say 'read-only guard', not the stale
     'read-only summarizer'."""
-    from daydream.backends.claude import _read_only_guard
 
     deny_bash = cast(
         dict[str, Any],
@@ -683,7 +691,6 @@ async def test_read_only_guard_deny_reason_uses_shared_guard_wording() -> None:
 @pytest.mark.asyncio
 async def test_execute_passes_agents_dict_to_options(patch_sdk: Any) -> None:
     """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
-    from claude_agent_sdk.types import AgentDefinition
 
     captured: dict[str, Any] = {}
     patch_sdk(_capturing_client(captured))
@@ -790,7 +797,6 @@ async def test_structured_output_tool_result_is_suppressed(patch_sdk: Any) -> No
 @pytest.mark.asyncio
 async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: Any) -> None:
     """One TurnEndEvent per AssistantMessage, after that message's events."""
-    from daydream.backends import TurnEndEvent
 
     events = await _drive_claude_backend_to_list(
         messages=[
@@ -1071,9 +1077,6 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(
 async def test_audit_guard_round_trips_through_real_sdk_query_protocol(
     tmp_path: Path,
 ) -> None:
-    import anyio
-    from claude_agent_sdk._internal.query import Query
-    from claude_agent_sdk._internal.transport import Transport
 
     class MemoryTransport(Transport):
         def __init__(self) -> None:
@@ -1225,10 +1228,6 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import anyio
-    from claude_agent_sdk._internal.transport.subprocess_cli import (
-        SubprocessCLITransport,
-    )
 
     root = tmp_path / "audit"
     root.mkdir()
@@ -1418,7 +1417,6 @@ async def test_execute_disables_cli_background_tasks_and_lifts_bash_ceiling(patc
     lifted to the host's largest per-turn wall budget so a slow suite has no
     reason to be backgrounded in the first place.
     """
-    from daydream.config import TEST_WALL_BUDGET_S
 
     captured: dict[str, Any] = {}
     patch_sdk(_capturing_client(captured))
@@ -1491,7 +1489,6 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
 )
 def test_is_background_bash(payload: Any, background: bool) -> None:
     """Only a Bash payload with a truthy ``run_in_background`` is a background call."""
-    from daydream.backends.claude import _is_background_bash
 
     assert _is_background_bash(payload) is background
 
@@ -1561,7 +1558,6 @@ async def test_request_event_requires_multi_or_dynamic_for_nonempty_agents(
 
 async def _drive_with_agents(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Drive execute with a nonempty agents mapping and collect the events."""
-    from claude_agent_sdk.types import AgentDefinition
 
     captured: dict[str, Any] = {}
     patch_claude_sdk(monkeypatch, _capturing_client(captured))

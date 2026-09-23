@@ -8,6 +8,17 @@ from typing import Any
 
 import pytest
 
+from daydream import runner
+from daydream.atif import validate as atif_validate
+from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.deep.detection import detect_stacks
+from daydream.deep.orchestrator import (
+    _collapse_stacks_for_shallow,
+    _collapse_stacks_for_tiny_diff,
+    _single_stack_agent_count,
+    total_agent_count,
+)
+from daydream.runner import RunConfig, run
 from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,
@@ -47,14 +58,6 @@ def test_collapse_stacks_preserves_scope_and_reduces_fanout(
     expected_stack: str | None,
 ) -> None:
     """Tiny and shallow runs combine language scopes while retaining structure."""
-    from daydream.deep.detection import detect_stacks
-    from daydream.deep.orchestrator import (
-        _collapse_stacks_for_shallow,
-        _collapse_stacks_for_tiny_diff,
-        _single_stack_agent_count,
-        total_agent_count,
-    )
-    from daydream.runner import RunConfig
 
     stacks = detect_stacks(files)
     if mode in {"tiny", "disabled"}:
@@ -87,7 +90,6 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     mute_side_effects: Mute,
 ) -> None:
     """AC2 (real-path): a ≤2-file two-language diff collapses the fan-out."""
-    from daydream.runner import run
 
     # Run BOTH repos through the identical harness so the count comparison is a
     # paired observation, not an absolute threshold.
@@ -163,7 +165,6 @@ async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    from daydream.runner import run
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -206,7 +207,6 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
 ) -> None:
     """AC5 (real-path): per-stack review prompts contain inlined diff hunks and NO ``Read it directly`` / diff_path
     instruction."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     shared_calls = _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
@@ -256,7 +256,6 @@ async def test_ac6_single_stack_merged_items_carry_structural_lens(
     mute_side_effects: Mute,
 ) -> None:
     """AC6: tiny-diff single-stack writer tags structural items ``lens="structural"``."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
@@ -283,7 +282,6 @@ async def test_ac_fix_resume_on_tiny_diff(
     mute_side_effects: Mute,
 ) -> None:
     """Issue #172 risk: ``--start-at fix`` resume on a tiny diff works."""
-    from daydream.runner import run
 
     # Phase 1: produce merged-items.json via a full tiny-diff run.
     _silence(monkeypatch)
@@ -314,8 +312,6 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     make_config: MakeConfig,
 ) -> None:
     """A registered host-only merge retains its output through real finalization."""
-    from daydream import runner
-    from daydream.atif import validate as atif_validate
 
     target = tmp_path / "host-only-merge"
     target.mkdir()
@@ -413,7 +409,6 @@ async def test_ac_merge_resume_on_tiny_diff(
 ) -> None:
     """Issue #172: ``--start-at merge`` resume on a tiny diff routes to the single-stack merge writer, not the
     multi-stack merge agent."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -468,7 +463,6 @@ async def test_evidence_gate_drops_speculative_finding(
 ) -> None:
     """Issue #227 (AC2/AC3/AC6): the structural evidence gate keeps an evidenced finding but drops a speculative
     one before it reaches merged-items.json."""
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -526,7 +520,6 @@ async def test_evidence_gate_all_speculative_yields_empty(
 ) -> None:
     """Issue #227 (AC5, N=1): a single-stack run whose only findings are all speculative writes an EMPTY
     merged-items.json without crashing and records every drop -- never a silent success."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -576,7 +569,6 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
     """Issue #227 (findings 3/5): a structural (host-tagged, whole-file) finding with ``line: 0`` and colon-free
     evidence SURVIVES the gate -- the structural lens is high-conviction by construction and must not be
     demoted."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -625,7 +617,6 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
 ) -> None:
     """Issue #227 (findings 4/6): a resume that drops 0 findings clears a stale ``dropped-speculative.json`` left
     by a prior run, so the sidecar cannot report phantom drops to eval/benchmark/human auditors."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)

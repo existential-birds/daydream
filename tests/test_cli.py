@@ -5,23 +5,35 @@ import signal
 import subprocess
 import sys
 import time
+from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
+from rich.console import Console
 
+from daydream import cli, remote_ci
 from daydream.atif import validate as atif_validate
-from daydream.cli import _parse_args, _parse_improve_args
+from daydream.cli import _build_harvest_parser, _build_main_parser, _parse_args, _parse_improve_args
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
+from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
+from tests.test_deep_orchestrator import _install_stub_backend, _silence
+from tests.test_integration import (
+    _FULL_FLOW_ISSUE,
+    _finish_remote_ci_fake,
+    _remote_ci_push_project,
+    _seed_remote_ci_pr,
+    _start_remote_ci_fake_after_push,
+    _WorktreeMutatingBackend,
+)
 
 
 def test_signal_handler_flushes_before_backend_registry_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream import cli
 
     events: list[str] = []
 
@@ -429,7 +441,6 @@ def test_feedback_subcommand_is_unknown(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The removed feedback command is rejected before review dispatch."""
-    from daydream import cli
 
     called = False
 
@@ -454,7 +465,6 @@ def test_feedback_subcommand_is_unknown(
 
 
 def test_phase_subtitles_include_wonder() -> None:
-    from daydream.ui import PHASE_SUBTITLES
     assert "WONDER" in PHASE_SUBTITLES
     assert len(PHASE_SUBTITLES["WONDER"]) >= 2
 
@@ -473,22 +483,12 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Explicit argv drives the real review adapter from a different cwd."""
-    from daydream import cli
-    from tests.test_integration import (
-        _FULL_FLOW_ISSUE,
-        _finish_remote_ci_fake,
-        _remote_ci_push_project,
-        _seed_remote_ci_pr,
-        _start_remote_ci_fake_after_push,
-        _WorktreeMutatingBackend,
-    )
 
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
     _seed_remote_ci_pr(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
     seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome=remote_outcome
     )
-    from daydream import remote_ci
 
     monkeypatch.setattr(
         remote_ci,
@@ -553,12 +553,8 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
 
 
 def test_print_issues_table_renders() -> None:
-    from io import StringIO
-    from typing import cast
 
-    from rich.console import Console
 
-    from daydream.ui import NEON_THEME, print_issues_table
 
     test_console = Console(file=StringIO(), theme=NEON_THEME, force_terminal=True)
     issues = [
@@ -914,7 +910,6 @@ def test_signal_flushes_all_runner_recorders(
 
 
 def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from daydream import cli
 
     def interrupted(*args: Any, **kwargs: Any) -> Any:
         raise BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])])
@@ -926,7 +921,6 @@ def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyP
 
 
 def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from daydream import cli
 
     failure = BaseExceptionGroup("task group", [KeyboardInterrupt(), RuntimeError("sibling failed")])
 
@@ -942,7 +936,6 @@ def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest
 
 def test_harvest_parser_accepts_repo_clone_root() -> None:
     """--repo-clone-root is parsed and forwarded to HarvestConfig."""
-    from daydream.cli import _build_harvest_parser
 
     parser = _build_harvest_parser()
     args = parser.parse_args(["--repo-clone-root", "/tmp/clones"])
@@ -951,7 +944,6 @@ def test_harvest_parser_accepts_repo_clone_root() -> None:
 
 def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     """--repo-clone-root defaults to None (derived from cache_dir at runtime)."""
-    from daydream.cli import _build_harvest_parser
 
     parser = _build_harvest_parser()
     args = parser.parse_args([])
@@ -979,7 +971,6 @@ def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatc
 
 
 def test_cli_stack_selector_and_skill_rejected() -> None:
-    from daydream.cli import _build_main_parser
 
     p = _build_main_parser()
     args = p.parse_args(["--stack", "python", "/tmp"])
@@ -991,7 +982,6 @@ def test_cli_stack_selector_and_skill_rejected() -> None:
 
 
 def test_runconfig_uses_stack_terminology() -> None:
-    from daydream.runner import RunConfig
 
     cfg = RunConfig(target="/tmp", stack="go")
     assert cfg.stack == "go"
@@ -1003,8 +993,6 @@ def test_real_cli_stack_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real entrypoint runs a selected stack and rejects the removed alias."""
-    from daydream import cli
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
