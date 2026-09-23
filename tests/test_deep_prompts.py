@@ -6,6 +6,9 @@ from typing import Any, TypedDict
 
 import pytest
 
+from daydream import review_profile as rp
+from daydream import severity
+from daydream.deep.coverage import build_uncovered_sweep_prompt, diff_block_for_file
 from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,
     CONFIG_FLOW_TRACE_INSTRUCTION,
@@ -14,9 +17,12 @@ from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
     TEST_QUALITY_RUBRIC_INSTRUCTION,
     TRUST_MODEL_INSTRUCTION,
+    VERIFICATION_PROTOCOL_INSTRUCTION,
+    _diff_blocks_for_files,
     bound_deep_diff,
     build_arbiter_prompt,
     build_diagram_repair_prompt,
+    build_fix_verify_prompt,
     build_flowchart_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
@@ -25,9 +31,15 @@ from daydream.deep.prompts import (
     build_structural_prompt,
     build_supervise_prompt,
     build_suppression_prompt,
+    build_verification_prompt,
+    inline_grounded_files,
 )
+from daydream.exploration_runner import count_changed_files
+from daydream.extensions import Registry
+from daydream.extensions.builtins import _register_builtin_prompts, register_builtins
+from daydream.phases import build_alternative_review_prompt
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from tests.harness.review_profile import default_strategy as _default_strategy
 
@@ -193,7 +205,6 @@ def test_merge_prompt_requires_one_path_per_item(tmp_path: Path) -> None:
 
 def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) -> None:
     """Structural reviewer sees the whole change — no 'Focus ONLY on these files' clause."""
-    from daydream.deep.prompts import build_structural_prompt
 
     prompt = build_structural_prompt(
         strategy=_default_strategy("discovery.structural"),
@@ -214,7 +225,6 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
 
 def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> None:
     """AC5: structural reviewer is pointed at affected_files.md instead of discarding the dir."""
-    from daydream.deep.prompts import build_structural_prompt
 
     exploration_dir = tmp_path / "exploration"
     prompt = build_structural_prompt(
@@ -245,7 +255,6 @@ def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> No
 def test_merge_prompt_does_not_request_structural_findings(tmp_path: Path) -> None:
     """Structural findings are appended by the host (phase_cross_stack_merge) in
     Python, NOT requested via prose; the agent is told not to emit them itself."""
-    from daydream.deep.prompts import build_merge_prompt
 
     prompt = build_merge_prompt(
         strategy=_default_strategy("merge"),
@@ -298,7 +307,6 @@ def test_bound_deep_diff_under_budget_is_byte_identical() -> None:
 
 def test_bound_deep_diff_keeps_whole_blocks_up_to_budget() -> None:
     """Must-have #2: over cap → only whole blocks retained; each byte-identical."""
-    from daydream.deep.coverage import diff_block_for_file
 
     body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
     diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
@@ -341,8 +349,6 @@ def test_bound_deep_diff_marker_is_parse_safe() -> None:
     assert info.marker is not None
     assert out.startswith("# daydream: deep diff truncated:")
     # count_changed_files / _diff_changed_files / diff_block_for_file ignore the marker.
-    from daydream.deep.coverage import diff_block_for_file
-    from daydream.exploration_runner import count_changed_files
 
     assert count_changed_files(out) == 2
     assert diff_block_for_file(out, "a.py") == diff_block_for_file(diff, "a.py")
@@ -353,7 +359,6 @@ def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
     """AC4 helper: ``_diff_blocks_for_files`` returns only the blocks for the
     requested files (post-state path match), concatenated as-is.
     """
-    from daydream.deep.prompts import _diff_blocks_for_files
 
     out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py"])
     assert out is not None
@@ -377,7 +382,6 @@ def test_diff_blocks_for_files_refuses_partial_inline_for_mixed_stack() -> None:
     dropped -- the caller then falls back to the diff_path pointer so the
     reviewer never silently reviews a partial hunk set.
     """
-    from daydream.deep.prompts import _diff_blocks_for_files
 
     body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
     diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
@@ -403,8 +407,6 @@ def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
     ``INLINE_DIFF_BUDGET_BYTES``, the helper returns ``None`` so the caller
     keeps the path pointer (the agent is told to Read diff.patch directly).
     """
-    from daydream.deep.prompts import _diff_blocks_for_files
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Synthesize a diff whose single matching block exceeds the budget.
     huge_line = "x" * (INLINE_DIFF_BUDGET_BYTES + 64)
@@ -420,7 +422,6 @@ def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
 
 def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
     """AC4 no-match fallback: files not in the diff → None (caller keeps pointer)."""
-    from daydream.deep.prompts import _diff_blocks_for_files
 
     out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["nonexistent.py"])
     assert out is None
@@ -432,7 +433,6 @@ def test_generic_fallback_prompt_inlines_hunks_and_drops_read_instruction(
     """AC4 (unit): generic-fallback prompt with ``inline_diff`` supplied contains
     the inlined hunks, NOT the ``Read it directly`` instruction or diff_path.
     """
-    from daydream.deep.prompts import _diff_blocks_for_files
 
     p = _paths(tmp_path)
     inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["App.tsx"])
@@ -453,7 +453,6 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
     its repo-wide Read/Grep/Bash freedom (the structural lens roams beyond
     the diff by design). Fix B does not touch the structural / arbiter prompts.
     """
-    from daydream.deep.prompts import build_structural_prompt
 
     p = _paths(tmp_path)
     out = build_structural_prompt(
@@ -502,8 +501,6 @@ def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) 
 
 
 def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_verification_prompt
-    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
     out = build_verification_prompt(
         strategy=_default_strategy("verification"),
@@ -517,7 +514,6 @@ def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
 def test_review_prompt_includes_verification_protocol(tmp_path: Path, builder: str) -> None:
-    from daydream.deep.prompts import VERIFICATION_PROTOCOL_INSTRUCTION
 
     prompt = _review_prompt(builder, tmp_path)
     assert VERIFICATION_PROTOCOL_INSTRUCTION in prompt
@@ -531,7 +527,6 @@ def test_review_prompt_includes_verification_protocol(tmp_path: Path, builder: s
 
 
 def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> None:
-    from daydream.deep.prompts import build_verification_prompt
 
     items = [{"id": "1", "file": "x.py", "line": 10, "description": "Test finding"}]
     out = build_verification_prompt(
@@ -574,7 +569,6 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
 @pytest.mark.parametrize("name", ["per-stack", "structural", "generic-fallback", "arbiter", "merge"])
 def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     """#279: the precedence rule appears only when a fresh PR body was ingested."""
-    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
     assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)
@@ -589,7 +583,6 @@ def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: P
     The schema reaches every backend via ``output_schema``, and the host writes
     the verdicts file, so both blocks were pure duplication.
     """
-    from daydream.deep.prompts import build_verification_prompt
 
     items = [
         {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
@@ -617,7 +610,6 @@ def test_verification_prompt_advertises_full_read_only_bash_allowlist(tmp_path: 
     """The verifier's advertised Bash commands must be rendered from the enforced
     single source — never a hand-written partial list — and must not instruct a
     shell command the read-only guard denies."""
-    from daydream.deep.prompts import build_verification_prompt
 
     items = [
         {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
@@ -657,8 +649,6 @@ def test_review_prompt_can_omit_alternatives(tmp_path: Path, builder: str) -> No
 
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
     """The authoritative-intent upgrade survives include_alternatives=False."""
-    from daydream.deep.prompts import build_per_stack_prompt
-    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
     p = _paths(tmp_path)
     without = build_per_stack_prompt(
@@ -848,7 +838,6 @@ def test_cross_file_instructions_contain_no_banned_words() -> None:
 
 def test_inline_grounded_files_when_blocks_fit() -> None:
     """Issue #731: files whose hunks inline are inline-grounded (evidence)."""
-    from daydream.deep.prompts import inline_grounded_files
 
     diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+'x'\n"
             "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n")
@@ -857,14 +846,12 @@ def test_inline_grounded_files_when_blocks_fit() -> None:
 
 def test_inline_grounded_files_empty_when_over_budget_or_absent() -> None:
     """Issue #731: a file with no resolvable diff block is not grounded."""
-    from daydream.deep.prompts import inline_grounded_files
 
     assert inline_grounded_files("", ["ghost.py"]) == set()  # no block -> not grounded
 
 
 def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
     """Issue #731: frontier files surface as cross-shard interface reads."""
-    from daydream.deep.prompts import build_per_stack_prompt
 
     p = _paths(tmp_path)
     prompt = build_per_stack_prompt(
@@ -880,12 +867,6 @@ def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
 
 def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Path) -> None:
     """Key Decision 1: a clean verdict also requires a same-turn read, in all four builders."""
-    from daydream.deep.coverage import build_uncovered_sweep_prompt
-    from daydream.deep.prompts import (
-        build_generic_fallback_prompt,
-        build_per_stack_prompt,
-        build_structural_prompt,
-    )
     p = _paths(tmp_path)
     prompts = [
         build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"),
@@ -909,7 +890,6 @@ def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Pa
 
 def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
     """Key Decision 5: MAY Read is replaced by the sweep's read-first obligation."""
-    from daydream.deep.prompts import build_generic_fallback_prompt, build_per_stack_prompt
     p = _paths(tmp_path)
     per_stack = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"), stack_name="python",
@@ -926,7 +906,6 @@ def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
 
 def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> None:
     """Must-Have 5: assigned files are an inclusion obligation, not an exclusion bound."""
-    from daydream.deep.prompts import build_per_stack_prompt
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"), stack_name="python",
@@ -942,7 +921,6 @@ def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> N
 
 def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp_path: Path) -> None:
     """Bounded-context exploration pointers never carry the assigned-source mandate."""
-    from daydream.deep.prompts import build_per_stack_prompt
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"), stack_name="python",
@@ -965,8 +943,6 @@ def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp
 
 
 def test_per_stack_prompt_uses_profile_strategy_and_no_skill() -> None:
-    from daydream import review_profile as rp
-    from daydream.deep.prompts import build_per_stack_prompt
     strategy = rp.build_default_profile().strategies["discovery.per_stack"].content
     p = build_per_stack_prompt(
         strategy=strategy, stack_name="python", files=["a.py"],
@@ -980,8 +956,6 @@ def test_per_stack_prompt_uses_profile_strategy_and_no_skill() -> None:
 
 
 def test_structural_prompt_uses_profile_strategy_and_no_skill() -> None:
-    from daydream import review_profile as rp
-    from daydream.deep.prompts import build_structural_prompt
     strategy = rp.build_default_profile().strategies["discovery.structural"].content
     p = build_structural_prompt(
         strategy=strategy, files=["a.py", "b.ts"], diff_path=Path("/d"),
@@ -997,7 +971,6 @@ def test_structural_prompt_uses_profile_strategy_and_no_skill() -> None:
 
 
 def _rubric_assigning_prompts(tmp_path: Path) -> list[str]:
-    from daydream.phases import build_alternative_review_prompt
 
     p = _paths(tmp_path)
     per_stack = build_per_stack_prompt(
@@ -1026,7 +999,6 @@ def _rubric_assigning_prompts(tmp_path: Path) -> list[str]:
 
 def test_every_assigning_prompt_carries_severity_rubric(tmp_path: Path) -> None:
     """R1.1: every prompt that assigns a severity embeds the host rubric."""
-    from daydream import severity
 
     for prompt in _rubric_assigning_prompts(tmp_path):
         assert severity.SEVERITY_RUBRIC in prompt
@@ -1034,7 +1006,6 @@ def test_every_assigning_prompt_carries_severity_rubric(tmp_path: Path) -> None:
 
 def test_rubric_is_high_definition_not_a_prohibition() -> None:
     """R1.2: the rubric defines all three levels in checkable terms, high first."""
-    from daydream import severity
 
     rubric = severity.SEVERITY_RUBRIC
     assert "high" in rubric and "medium" in rubric and "low" in rubric
@@ -1044,7 +1015,6 @@ def test_rubric_is_high_definition_not_a_prohibition() -> None:
 
 def test_rubric_after_strategy_text(tmp_path: Path) -> None:
     """R1.4: the host rubric lands after the profile strategy text."""
-    from daydream import severity
 
     for prompt, strategy_stage in (
         (0, "discovery.per_stack"),
@@ -1100,7 +1070,6 @@ def _adjudication_prompts(tmp_path: Path) -> dict[str, str]:
 )
 def test_adjudication_prompts_reference_severity_rubric(builder: str, tmp_path: Path) -> None:
     """R1.3: each adjudication restatement prompt cites the shared severity rubric."""
-    from daydream import severity
 
     prompt = _adjudication_prompts(tmp_path)[builder]
     assert severity.SEVERITY_RUBRIC in prompt or "severity rubric" in prompt
@@ -1436,8 +1405,6 @@ def test_diagram_prompts_without_exploration_keep_the_content_boundary(builder: 
 
 def test_diagram_prompt_names_are_registered() -> None:
     """Both prompt names resolve through the built-in registry (docs/extensions.md)."""
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     reg = Registry()
     register_builtins(reg)
@@ -1450,8 +1417,6 @@ def test_diagram_prompt_names_are_registered() -> None:
 def test_registry_diagram_prompt_override_accepts_inline_kwargs(tmp_path: Path) -> None:
     """Issue #1123 planning spike: the builtins override of diagram_sequence must
     pass new inline kwargs through the registry indirection unchanged."""
-    from daydream.extensions.builtins import _register_builtin_prompts
-    from daydream.extensions.registry import Registry
 
     reg = Registry()
     _register_builtin_prompts(reg)
@@ -1471,7 +1436,6 @@ def test_registry_diagram_prompt_override_accepts_inline_kwargs(tmp_path: Path) 
 
 def test_fix_verify_prompt_audits_complete_retained_patch_and_all_findings(tmp_path: Path) -> None:
     """The compatible prompt contract is stage-neutral and final-tree aware."""
-    from daydream.deep.prompts import build_fix_verify_prompt
 
     prompt = build_fix_verify_prompt(
         items=[{"id": 1, "description": "fix it", "file": "a.py", "line": 1}],
