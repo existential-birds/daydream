@@ -8,12 +8,16 @@ from pathlib import Path
 import anyio
 import pytest
 
+from daydream.backends.pi import PiError
+from daydream.config_file import load_file_config
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _batched_group_size,
     _scan_phase_events,
     _scan_trajectory_extra,
     _single_fix_calls_for,
 )
+from tests.harness.fake_clock import FakeClock
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -31,9 +35,6 @@ async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
     mute_side_effects: Mute,
 ) -> None:
     """(15a) retry backoff + backend time for one invocation cannot exceed the budget."""
-    from daydream.backends.pi import PiError  # same import as tests/test_agent_retry.py:22
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
@@ -66,8 +67,6 @@ async def test_run_cuts_a_single_item_group_at_the_group_deadline(  # (15b)
     mute_side_effects: Mute,
 ) -> None:
     """(15b) A one-call group is cut at the GROUP deadline, and the turn is not progress."""
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
@@ -103,8 +102,6 @@ async def test_run_cuts_a_batched_group_at_the_group_deadline(  # (15c/15f)
     mute_side_effects: Mute,
 ) -> None:
     """(15c/15f) remaining < scaled call budget: the batch dies at the group deadline, zero fallback."""
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
@@ -140,8 +137,6 @@ async def test_run_serial_fallback_runs_under_the_same_group_deadline(  # (15d)
     mute_side_effects: Mute,
 ) -> None:
     """A batched failure (not a deadline) falls back per-finding, cut at the SAME deadline."""
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
@@ -181,8 +176,6 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
     mute_side_effects: Mute,
 ) -> None:
     """One group's deadline stop leaves the sibling group's work intact."""
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
@@ -232,10 +225,6 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """The file-config value reaches every run_agent call the fix group owns."""
-    from daydream.backends.pi import PiError
-    from daydream.config_file import load_file_config
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
@@ -294,9 +283,6 @@ async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_comple
     make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """A run-scoped circuit bounds the fix fan-out's ladders; a completed sibling is not restarted."""
-    from daydream.backends.pi import PiError
-    from daydream.runner import run
-    from tests.harness.fake_clock import FakeClock
 
     _silence(monkeypatch)
     fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
