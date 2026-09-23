@@ -20,6 +20,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.runner import RunConfig, run
 from daydream.trajectory import (
     DaydreamPhase,
     PhaseEvent,
@@ -601,7 +602,6 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One actual run proves fan-out, overlap, diagrams and frozen archive totals."""
-    from daydream.runner import RunConfig, run
     from tests.harness import diagram_repos as dr
 
     target = dr.build_both_signals_repo(tmp_path)
@@ -720,7 +720,6 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     no_ci_remote: NoCIRemote,
 ) -> None:
     """A failed batch plus serial fallback stays one exact FIX child document."""
-    from daydream.runner import run
 
     target = multi_stack_target
     origin = bare_remote(tmp_path / "origin.git")
@@ -941,6 +940,22 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     assert evaluation["timing"]["agent_completeness"] == completeness
 
 
+async def _run_and_read_trajectory(config: RunConfig, traj: Path) -> dict[str, Any]:
+    exit_code = await run(config)
+    assert exit_code == 0
+    assert traj.exists(), "run must write the trajectory to disk"
+    data: dict[str, Any] = json.loads(traj.read_text(encoding="utf-8"))
+    assert atif_validate(data, validate_images=False) is True
+    return data
+
+
+def _read_phase_timings(tmp_path: Path) -> Any:
+    manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
+    assert manifest_files, "manifest.json not written"
+    manifest = json.loads(manifest_files[0].read_text())
+    return manifest["metrics"]["phase_timings"]
+
+
 async def test_shallow_run_emits_phase_events_and_subtrajectories(
     feature_branch_repo: Path,
     tmp_path: Path,
@@ -949,7 +964,6 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     mute_side_effects: Any,
 ) -> None:
     """Shallow single-pass run writes trajectory and manifest timing data."""
-    from daydream.runner import RunConfig, run
 
     issue = {
         "id": 1,
@@ -981,12 +995,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
         assume="yes",  # accept the fix gate so the fix/test cycle runs
         trajectory_path=traj,
     )
-    exit_code = await run(config)
-    assert exit_code == 0
-
-    assert traj.exists(), "shallow run must write the trajectory to disk"
-    data = json.loads(traj.read_text(encoding="utf-8"))
-    assert atif_validate(data, validate_images=False) is True
+    data = await _run_and_read_trajectory(config, traj)
 
     # Phase events: the deep-shallow spine's review and the fix's test must
     # appear (the parse-<stack> stage was removed with issue #745).
@@ -1000,11 +1009,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     assert all(s["started_at"] and s["ended_at"] for s in subs), "subtrajectory missing complete timestamps"
 
     # Manifest: phase_timings appears in the metrics block.
-    archive_dir = tmp_path / "archive"
-    manifest_files = list(archive_dir.rglob("manifest.json"))
-    assert manifest_files, "manifest.json not written"
-    manifest = json.loads(manifest_files[0].read_text())
-    assert manifest["metrics"]["phase_timings"] is not None
+    assert _read_phase_timings(tmp_path) is not None
 
 
 async def test_deep_run_emits_phase_events_and_manifest_timings(
@@ -1029,7 +1034,6 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
 
     mute_side_effects()
 
-    from daydream.runner import RunConfig, run
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
@@ -1038,12 +1042,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
         trajectory_path=traj,
         cleanup=False,
     )
-    exit_code = await run(config)
-    assert exit_code == 0
-
-    assert traj.exists(), "deep run must write the trajectory to disk"
-    data = json.loads(traj.read_text(encoding="utf-8"))
-    assert atif_validate(data, validate_images=False) is True
+    data = await _run_and_read_trajectory(config, traj)
 
     # Phase events: the per-stack review stage (DEEP) must appear.
     events = data["extra"].get("phase_events", [])
@@ -1061,11 +1060,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     assert all(s["started_at"] and s["ended_at"] for s in subs), f"subtrajectory missing timestamps: {subs!r}"
 
     # Manifest: phase_timings carries the deep bucket.
-    archive_dir = tmp_path / "archive"
-    manifest_files = list(archive_dir.rglob("manifest.json"))
-    assert manifest_files, "manifest.json not written"
-    manifest = json.loads(manifest_files[0].read_text())
-    phase_timings = manifest["metrics"]["phase_timings"]
+    phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None
     assert "deep" in phase_timings, f"deep missing from manifest phase_timings: {phase_timings!r}"
     # Declined gate still records the phases reached before fix/test/verify. The
@@ -1088,7 +1083,6 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
 
     mute_side_effects()
 
-    from daydream.runner import RunConfig, run
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
@@ -1097,12 +1091,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
         trajectory_path=traj,
         cleanup=False,
     )
-    exit_code = await run(config)
-    assert exit_code == 0
-
-    assert traj.exists(), "deep run must write the trajectory to disk"
-    data = json.loads(traj.read_text(encoding="utf-8"))
-    assert atif_validate(data, validate_images=False) is True
+    data = await _run_and_read_trajectory(config, traj)
 
     # The longest phases -- fix/test/verify -- only run past an accepted gate.
     events = data["extra"].get("phase_events", [])
@@ -1111,10 +1100,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
         assert phase in event_phases, f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
 
     # Manifest: phase_timings must carry every wrapped deep phase.
-    manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
-    assert manifest_files, "manifest.json not written"
-    manifest = json.loads(manifest_files[0].read_text())
-    phase_timings = manifest["metrics"]["phase_timings"]
+    phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None
     for phase in ("intent", "verify", "fix", "test", "deep"):
         assert phase in phase_timings, f"{phase} missing from deep phase_timings: {phase_timings!r}"
@@ -1150,7 +1136,6 @@ async def test_parallel_fix_registers_subtrajectories(
 
     mute_side_effects()
 
-    from daydream.runner import RunConfig, run
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
@@ -1159,12 +1144,7 @@ async def test_parallel_fix_registers_subtrajectories(
         trajectory_path=traj,
         cleanup=False,
     )
-    exit_code = await run(config)
-    assert exit_code == 0
-
-    assert traj.exists(), "deep run must write the trajectory to disk"
-    data = json.loads(traj.read_text(encoding="utf-8"))
-    assert atif_validate(data, validate_images=False) is True
+    data = await _run_and_read_trajectory(config, traj)
 
     subs = data["extra"].get("subtrajectories", [])
     fix_subs = [s for s in subs if s["phase"] == "fix"]
@@ -1201,7 +1181,6 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     _pin_findings_pr(monkeypatch, multi_stack_target)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    from daydream.runner import RunConfig, run
 
     findings_out = tmp_path / "findings.json"
     traj = tmp_path / "trajectory.json"
@@ -1215,13 +1194,8 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
         cleanup=False,
     )
 
-    exit_code = await run(config)
-    assert exit_code == 0
+    data = await _run_and_read_trajectory(config, traj)
     assert findings_out.is_file(), "review mode must emit the findings artifact"
-
-    assert traj.exists(), "review run must write the trajectory to disk"
-    data = json.loads(traj.read_text(encoding="utf-8"))
-    assert atif_validate(data, validate_images=False) is True
 
     # Default design review is part of the structural deep phase.
     events = data["extra"].get("phase_events", [])
@@ -1237,10 +1211,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
 
     # Manifest: phase_timings must be non-null (was null before the fix) and
     # carry the wrapped review phases.
-    manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
-    assert manifest_files, "manifest.json not written"
-    manifest = json.loads(manifest_files[0].read_text())
-    phase_timings = manifest["metrics"]["phase_timings"]
+    phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None, "review flow phase_timings must not be null"
     for phase in ("intent", "deep"):
         assert phase in phase_timings, f"{phase} missing from review phase_timings: {phase_timings!r}"
