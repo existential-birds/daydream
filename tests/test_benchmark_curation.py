@@ -70,7 +70,6 @@ def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candida
     comment so the case has one exact-acceptable candidate.
     """
     from daydream.benchmark import github_import as gi
-    from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
     _SEED_SEQ["n"] += 1
@@ -113,7 +112,6 @@ def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -
     Returns ``(ws, case_id, head_sha)``.
     """
     from daydream.benchmark import github_import as gi
-    from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
     _SEED_SEQ["n"] += 1
@@ -221,7 +219,6 @@ def test_spike_head_file_line_count_from_mirror(tmp_path: Path, fake_gh: FakeGh)
 
 
 def test_accept_candidate_produces_historical_derived_finding(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     view = cu.get_case(ws, case_id)
     cand = next(c for c in view["candidates"] if c["exact_acceptable"])
@@ -241,7 +238,6 @@ def test_accept_candidate_produces_historical_derived_finding(tmp_path: Path, fa
     assert raw["curation"]["state"] == "draft"           # accept on draft stays draft
 
 def test_add_finding_is_authored_and_replace_is_edited(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
 
     cu.add_finding(ws, case_id, title="New concern", body="fresh wording",
@@ -267,7 +263,6 @@ def test_add_finding_is_authored_and_replace_is_edited(tmp_path: Path, fake_gh: 
     assert f2["finding_id"] == derive_finding_id(f2, case_id=case_id)
 
 def test_non_candidate_evidence_is_citable_and_excludable(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     src = "github:review:100"   # a pure approval, NOT a candidate
     cu.exclude_evidence(ws, case_id, src, reason="duplicate")
@@ -278,7 +273,6 @@ def test_non_candidate_evidence_is_citable_and_excludable(tmp_path: Path, fake_g
 
 
 def test_add_edited_findings_split_one_source_into_two(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     cu.add_edited_findings(ws, case_id, atoms=[
         {"title": "Split A", "body": "first atom", "severity": "high",
@@ -294,7 +288,6 @@ def test_add_edited_findings_split_one_source_into_two(tmp_path: Path, fake_gh: 
 
 
 def test_add_edited_findings_merge_many_sources_into_one(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     cu.add_edited_findings(ws, case_id, atoms=[{
         "title": "Merged", "body": "combined", "severity": "medium",
@@ -307,7 +300,6 @@ def test_add_edited_findings_merge_many_sources_into_one(tmp_path: Path, fake_gh
 
 
 def test_add_edited_findings_rejects_atom_without_sources_and_unknown(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     with pytest.raises(cu.CurationError):
         cu.add_edited_findings(ws, case_id, atoms=[{"title": "X", "body": "y", "source_ids": []}])
@@ -318,7 +310,6 @@ def test_add_edited_findings_rejects_atom_without_sources_and_unknown(tmp_path: 
 
 
 def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     view = cu.get_case(ws, case_id)
     src = view["candidates"][0]["source_id"]
@@ -339,7 +330,6 @@ def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path: Path
 
 
 def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id,
         next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
@@ -361,8 +351,6 @@ def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path: Path, fa
 
 
 def test_mark_ready_clean_attested_empty_yields_ready(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import validate_workspace
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold
     cu.attest_clean(ws, case_id)
@@ -376,8 +364,6 @@ def test_mark_ready_clean_attested_empty_yields_ready(tmp_path: Path, fake_gh: F
 
 
 def test_mark_ready_empty_not_clean_attested_still_raises(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold, NOT attested
     with pytest.raises(cu.CurationError):
         cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
@@ -386,8 +372,6 @@ def test_mark_ready_empty_not_clean_attested_still_raises(tmp_path: Path, fake_g
 
 
 def test_mark_ready_clean_wrong_sha_is_non_mutating(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     cu.attest_clean(ws, case_id)
     with pytest.raises(cu.StaleStateError):
@@ -398,7 +382,6 @@ def test_mark_ready_clean_wrong_sha_is_non_mutating(tmp_path: Path, fake_gh: Fak
 
 
 def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     # put the case in ready + attested with one historical finding
     cu.accept_candidate(ws, case_id,
@@ -416,7 +399,6 @@ def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path: Path, fake_gh
 
 
 def test_exclude_and_reinclude_case_transitions(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     snap_status = cu.get_case(ws, case_id)["snapshot"]["status"]  # "ready"
     assert snap_status == "ready"
@@ -441,7 +423,6 @@ def test_exclude_and_reinclude_case_transitions(tmp_path: Path, fake_gh: FakeGh)
 
 
 def test_apply_gold_fragment_strips_forged_fields_and_never_ready(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     src = cand["source_id"]
@@ -476,7 +457,6 @@ def test_stable_curation_types_exported() -> None:
 
 
 def test_stale_case_edit_stays_stale_and_re_attests(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
     # force the case into stale + attested (simulating a refresh that flipped ready->stale)
@@ -497,7 +477,6 @@ def test_stale_case_edit_stays_stale_and_re_attests(tmp_path: Path, fake_gh: Fak
 
 
 def test_reject_before_persistence_leaves_file_unchanged(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -527,7 +506,6 @@ def test_reject_before_persistence_leaves_file_unchanged(tmp_path: Path, fake_gh
 
 
 def test_list_cases_and_head_file_line_count(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4)
 
     cases = cu.list_cases(ws)
@@ -543,14 +521,12 @@ def test_list_cases_and_head_file_line_count(tmp_path: Path, fake_gh: FakeGh) ->
 
 
 def test_list_cases_evidence_count_counts_all_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     row = next(r for r in cu.list_cases(ws) if r["case_id"] == case_id)
     assert row["evidence_count"] == 5   # 2 candidates + approval + reply + conversation
 
 
 def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
 
     cases = cu.list_cases(ws)
@@ -571,7 +547,6 @@ def test_list_cases_ready_mirror_failure_returns_stats_from_bundle(tmp_path: Pat
     """Deliberate behavior flip (issue #814): a ready case whose shared bare
     mirror is deleted still returns change stats — the reads come from a
     disposable clone of the frozen bundle, never the mirror."""
-    from daydream.benchmark import curation as cu
     ws, _, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     import shutil
     shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
@@ -584,8 +559,6 @@ def test_corrupt_bundle_path_fails_clean_with_curation_error(tmp_path: Path, fak
     read-only bundle-clone paths with the curated CurationError contract, never
     the storage WorkspaceCorrupt family — list_cases (and the TUI) and
     validate_case's location-vs-head read catch only CurationError."""
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     # a located historical finding makes validate_case read the frozen head tree
@@ -618,7 +591,6 @@ def test_curate_and_validate_after_mirror_removal(tmp_path: Path, fake_gh: FakeG
     and ``validate_workspace`` fidelity is bundle-based too."""
     import shutil
 
-    from daydream.benchmark import curation as cu
     from daydream.benchmark.workspace import validate_workspace
 
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
@@ -649,7 +621,6 @@ def test_bundle_clone_reused_across_findings_and_calls(
     every list_cases/validate_case call re-cloned. The reuse cache must serve
     all of them from a single clone per bundle file.
     """
-    from daydream.benchmark import curation as cu
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     real_run_git = git_ops._run_git
@@ -674,7 +645,6 @@ def test_bundle_clone_reused_across_findings_and_calls(
 
 
 def test_get_case_exposes_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
     ev = {e["source_id"]: e for e in view["evidence"]}
@@ -687,7 +657,6 @@ def test_get_case_exposes_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) ->
 
 
 def test_get_case_attaches_evidence_projection(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
 
     view = cu.get_case(ws, case_id)
@@ -744,7 +713,6 @@ def test_curation_projection_shows_authoring_commit_and_reason(tmp_path: Path, f
     # comment onto the head, but its strict authoring anchor points at the
     # original commit) must project the anchor's commit and the fixed
     # not_exact_reason verbatim, never the re-anchored id.
-    from daydream.benchmark import curation as cu
 
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     _reanchor_frozen_inline(ws, case_id, authoring_commit="b" * 40)
@@ -760,7 +728,6 @@ def test_curation_projection_shows_authoring_commit_and_reason(tmp_path: Path, f
 def test_curation_view_never_mutates_files(tmp_path: Path, fake_gh: FakeGh) -> None:
     """get_case (and its projection join) is strictly read-only: neither the
     case YAML nor the import JSON it joins against may change a byte."""
-    from daydream.benchmark import curation as cu
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
@@ -773,7 +740,6 @@ def test_curation_view_never_mutates_files(tmp_path: Path, fake_gh: FakeGh) -> N
 
 
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     cu.validate_case(ws, case_id)                     # raises if the case is invalid
 
@@ -843,7 +809,6 @@ def _spawn_worker(args: list[str]) -> subprocess.Popen[str]:
 
 
 def test_concurrent_accept_and_add_do_not_lose_updates(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     procs = [_spawn_worker(["accept", str(ws), case_id, src])]
@@ -859,7 +824,6 @@ def test_concurrent_accept_and_add_do_not_lose_updates(tmp_path: Path, fake_gh: 
 
 
 def test_concurrent_excludes_serialize_to_single_row(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
     # Mixed concurrent mutations on one case: 3 idempotent excludes of the same
@@ -888,7 +852,6 @@ def test_concurrent_clean_attestation_serializes(tmp_path: Path, fake_gh: FakeGh
 
 
 def test_concurrent_adds_then_final_readiness_lands(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     procs = [_spawn_worker(["add", str(ws), case_id, f"r-{i}"]) for i in range(3)]
     for p in procs:
@@ -903,7 +866,6 @@ def test_concurrent_adds_then_final_readiness_lands(tmp_path: Path, fake_gh: Fak
 
 
 def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
     cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # acquires + releases the lock
@@ -915,7 +877,6 @@ def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path: Path, fake_
 
 
 def test_read_only_paths_run_concurrent_with_a_writer(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     lock_path = ws / ".benchmark.lock"
     # A writer holds the flock for a long window (30s) — far longer than any
@@ -951,7 +912,6 @@ def test_read_only_paths_run_concurrent_with_a_writer(tmp_path: Path, fake_gh: F
 
 
 def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     from tests.harness.transaction_faults import TransactionFaultDriver
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -980,7 +940,6 @@ def test_stale_state_error_is_exported_curation_subtype() -> None:
 
 
 def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     cu.accept_candidate(ws, case_id, src)
@@ -1015,7 +974,6 @@ def test_curation_ready_requires_task_spec_sha256() -> None:
 def test_task_spec_approved_at_is_stripped_before_validation(
     tmp_path: Path, fake_gh: FakeGh
 ) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
@@ -1031,8 +989,6 @@ def test_task_spec_approved_at_is_stripped_before_validation(
 
 
 def test_mark_ready_records_task_spec_digest_and_approved_at(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id, next(
         c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
@@ -1054,9 +1010,7 @@ def test_mark_ready_derives_task_spec_digest_when_omitted(tmp_path: Path, fake_g
     """
     import hashlib
 
-    from daydream.benchmark import curation as cu
     from daydream.benchmark.harbor import build
-    from daydream.benchmark.storage import load_yaml_strict
 
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id, next(
@@ -1070,8 +1024,6 @@ def test_mark_ready_derives_task_spec_digest_when_omitted(tmp_path: Path, fake_g
     assert cur["task_spec_sha256"] == expected
 
 def test_mark_ready_wrong_sha_noop_leaves_approval_unset(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id, next(
         c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
@@ -1083,8 +1035,6 @@ def test_mark_ready_wrong_sha_noop_leaves_approval_unset(tmp_path: Path, fake_gh
 
 
 def test_mutation_invalidates_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id, next(
         c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
@@ -1099,10 +1049,7 @@ def test_mutation_invalidates_task_spec_approval(tmp_path: Path, fake_gh: FakeGh
 
 def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
     """R14: approve, decline, wrong-SHA no-op, mutation invalidation, stale recovery, clean."""
-    import yaml
 
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import load_yaml_strict
     # findings case: approve
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id, next(
@@ -1247,7 +1194,6 @@ def test_pr_author_reply_signal_respects_real_thread_identity() -> None:
     identity for a thread-less record is its REST reply chain top; records
     outside any chain are unreachable from any reply.
     """
-    from daydream.benchmark import curation as cu
 
     def rec(source_id: str, kind: str, db_id: int, node_id: str, created: str,
             login: str, *, thread_id: str | None = None,
