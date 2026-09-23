@@ -16,8 +16,11 @@ from typing import Any, cast
 
 import pytest
 
+from daydream import _tree_sitter_safety as safety
+from daydream.artifact_visibility import ArtifactEvidenceProvenance
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
+from daydream.eval import analyzer as analyzer_mod
 from daydream.eval.analyzer import (
     _agent_label,
     _files_read,
@@ -27,6 +30,7 @@ from daydream.eval.analyzer import (
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
+    analyze_exploration_utilization,
     analyze_findings,
     analyze_grounding,
     analyze_location,
@@ -44,6 +48,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     TrajectoryRecorder,
+    redact_text,
     run_directory,
     run_document_path,
     sibling_document_path,
@@ -500,7 +505,6 @@ def _artifact_provenance(
     session_id: str = "session-id",
 ) -> Any:
     """Construct exact current-owner provenance without assuming a default root."""
-    from daydream.artifact_visibility import ArtifactEvidenceProvenance
 
     live = private_base / workspace_key / "runs" / session_id / "live"
     return ArtifactEvidenceProvenance(
@@ -628,7 +632,6 @@ def test_artifact_evidence_never_earns_backend_coverage_or_grounding(
 
 def test_artifact_evidence_in_primary_and_redacted_rationale_is_rejected() -> None:
     """Exact raw/redacted owner paths stay visible but cannot earn grounding."""
-    from daydream.trajectory import redact_text
 
     public_source = Path("/Users/alice/project")
     daydream_dir = public_source / ".daydream"
@@ -684,7 +687,6 @@ def test_external_exploration_counts_only_current_owner_and_safe_relative_paths(
     tmp_path: Path,
 ) -> None:
     """Exploration utilization shares the exact owner-bound path classifier."""
-    from daydream.eval.analyzer import analyze_exploration_utilization
 
     public_source, daydream_dir, provenance = _owned_source(tmp_path)
     private_live = provenance.live_root
@@ -829,7 +831,6 @@ def test_analyze_session_redacts_artifact_primary_from_entire_result(
     tmp_path: Path,
 ) -> None:
     """A private primary citation never survives in serialized evaluation."""
-    from daydream.trajectory import redact_text
 
     public_source = tmp_path / "source"
     public_source.mkdir()
@@ -871,7 +872,6 @@ def test_analyze_session_redacts_artifact_primary_from_entire_result(
 
 
 def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
-    from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
         "main": None,
@@ -901,7 +901,6 @@ def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
 
 
 def test_exploration_utilization_counts_bash_mediated_reads() -> None:
-    from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
         "main": None,
@@ -1661,7 +1660,6 @@ def test_quality_candidate_empty_set_returns_empty_without_enumeration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An explicitly empty candidate set reports zero files without walking the workspace."""
-    from daydream.eval import analyzer as analyzer_mod
 
     ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n"})
 
@@ -2238,7 +2236,6 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(
     analysis by raising the typed guard error — the orchestrator's fail-open
     wrapper converts that into (None, reason); it must not silently skip.
     """
-    from daydream import _tree_sitter_safety as safety
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     # The factory is lru_cached; clear it so the guard inside the cached body
@@ -2255,7 +2252,6 @@ def test_analyze_quality_unchanged_on_good_install(
     """#1087 (M5): the guard is a no-op on valid installs — behavior identical
     to pre-regression, including the parser cache being consulted.
     """
-    from daydream import _tree_sitter_safety as safety
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.25.2")
     ws = _quality_workspace(tmp_path, {"mod.py": "def f():\n    return 1\n"})
@@ -2273,7 +2269,6 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     analyze_session -- the rest of the evaluation (and evaluation.json)
     survives instead of the typed escape dropping the whole run.
     """
-    from daydream import _tree_sitter_safety as safety
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     ws = _quality_workspace(

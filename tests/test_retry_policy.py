@@ -7,13 +7,16 @@ production retry branch consumes it.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
 
-from daydream.agent import _ToolSupervisorFailure
+from daydream.agent import _coerce_retry_recovery_allowance, _ToolSupervisorFailure
+from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiError
-from daydream.retry_policy import FailureClass, classify_failure
+from daydream.config_file import _coerce_retry_recovery_allowance as file_coerce
+from daydream.retry_policy import FailureClass, classify_failure, decode_retry_recovery_allowance, derive_retry_summary
 
 
 def test_tool_policy_veto_is_permanent_and_never_retryable() -> None:
@@ -115,7 +118,6 @@ def test_plain_exception_is_not_retryable() -> None:
 
 def test_derive_retry_summary_ignores_deadline_only_stops() -> None:
     """A deadline stop's attempts/backend_s are useful work, not retry overhead."""
-    from daydream.retry_policy import derive_retry_summary
 
     events = [
         {
@@ -155,7 +157,6 @@ def test_derive_retry_summary_ignores_deadline_only_stops() -> None:
 
 def test_derive_retry_summary_is_none_when_only_a_deadline_stopped() -> None:
     """No retry-ladder stop means no summary, so a legacy manifest stays byte-identical."""
-    from daydream.retry_policy import derive_retry_summary
 
     events = [
         {
@@ -206,7 +207,6 @@ def test_classify_failure_never_raises_on_non_string_category_or_message() -> No
 )
 def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | None) -> None:
     """One decode rule: numeric strings accepted, everything invalid refused."""
-    from daydream.retry_policy import decode_retry_recovery_allowance
 
     assert decode_retry_recovery_allowance(raw) == expected
 
@@ -218,11 +218,6 @@ def test_every_allowance_source_decodes_with_the_same_rule() -> None:
     their own copy of the rule -- with three different warning texts and a real
     drift hazard -- so agreement is pinned here rather than assumed.
     """
-    from daydream.agent import _coerce_retry_recovery_allowance
-    from daydream.backends import BackendExecutionInput
-    from daydream.config_file import (
-        _coerce_retry_recovery_allowance as file_coerce,
-    )
 
     for raw in (5, 0, 42.5, "42", "0", True, False, -1, "-1", "nonsense", None):
         argument = _coerce_retry_recovery_allowance(raw, "retry_recovery_allowance_s")
@@ -241,9 +236,7 @@ def test_a_refused_allowance_warning_names_the_source_and_the_value(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """One shared warning shape: the source, the raw value, and no restated bound."""
-    import logging
 
-    from daydream.agent import _coerce_retry_recovery_allowance
 
     with caplog.at_level(logging.WARNING):
         assert _coerce_retry_recovery_allowance(-1, "retry_recovery_allowance_s") is None

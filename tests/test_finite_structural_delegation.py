@@ -1,10 +1,12 @@
 """Finite primary reviews may own the default structural lens explicitly."""
 
+import copy
 import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.backends.pi import PiBackend
@@ -12,7 +14,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.deep.finite_review import FiniteResult, FiniteReview
 from daydream.deep.prompts import build_per_stack_prompt
 from daydream.extensions import Registry
-from daydream.phases import phase_per_stack_reviews
+from daydream.phases import PER_STACK_RECORD_SCHEMA, phase_per_stack_reviews
 from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION, build_default_profile
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
@@ -181,11 +183,8 @@ async def test_structural_delegation_requires_complete_default_primary_packets(
 async def test_delegated_findings_route_by_lens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], mode: str,
 ) -> None:
-    import copy
 
-    import anyio
 
-    from daydream.phases import PER_STACK_RECORD_SCHEMA
 
     scopes = {"python": ["api.py"], "react": ["web.ts"]}
     for files in scopes.values():

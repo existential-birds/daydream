@@ -3,10 +3,12 @@ drive the CI training dry run (issue #1093, task 9)."""
 
 from pathlib import Path
 
+from daydream.training.coordinator import PipelineConfig, run_pipeline
+from daydream.training.stacks import load_v2_projection
+
 
 def test_committed_projection_fixture_passes_loader_gates(tmp_path: Path) -> None:
     """The committed fixture must load via the canonical projection loader."""
-    from daydream.training.stacks import load_v2_projection
 
     projection = load_v2_projection(
         Path("tests/fixtures/training/projection-50"), allow_copyleft=frozenset()
@@ -16,7 +18,6 @@ def test_committed_projection_fixture_passes_loader_gates(tmp_path: Path) -> Non
 
 
 def test_pipeline_dry_run_over_committed_fixture(tmp_path: Path) -> None:
-    from daydream.training.coordinator import PipelineConfig, run_pipeline
 
     manifest = run_pipeline(
         PipelineConfig(

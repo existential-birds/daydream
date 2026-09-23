@@ -35,6 +35,7 @@ Integration tests run the full deep pipeline through ``runner.run``.
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -42,7 +43,16 @@ from typing import Any, cast
 import pytest
 
 from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.phases import phase_cross_stack_merge
+from daydream.deep.artifacts import (
+    _load_failures,
+    dedup_candidates_path,
+    deep_dir,
+    merged_items_path,
+    merged_report_path,
+    per_stack_failures_path,
+)
+from daydream.deep.merge_steps import _drop_cross_stack_duplicates
+from daydream.phases import CrossStackMergeError, phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.stub_backend import install_stub_backend, silence
@@ -108,10 +118,7 @@ def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
 
 def test_load_failures_defaults_and_filters() -> None:
     """F3: the shared ``_load_failures`` loader parses or degrades to {}."""
-    import tempfile
-    from pathlib import Path
 
-    from daydream.deep.artifacts import _load_failures, per_stack_failures_path
 
     with tempfile.TemporaryDirectory() as td:
         dd = Path(td) / ".daydream" / "deep"
@@ -147,7 +154,6 @@ async def test_merge_salvage_applies_dedup_prefilter(
     pre-filter; otherwise the partial merged-items.json carries duplicates into
     the resume verifier and fix gate.
     """
-    from daydream.deep.artifacts import deep_dir, merged_items_path
 
     silence(monkeypatch)
     mute_side_effects()
@@ -238,7 +244,6 @@ def _merge_text_backend(text: str, structured: Any) -> ScriptedBackend:
 
 async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """R1: a bare-list result is normalized + merged, not treated as a failure."""
-    from daydream.deep.artifacts import deep_dir, merged_items_path
 
     args = _merge_args(tmp_path)
     await phase_cross_stack_merge(
@@ -279,7 +284,6 @@ async def test_merge_raises_structured_error_on_str(
     merge_text: Any,
 ) -> None:
     """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
-    from daydream.phases import CrossStackMergeError
 
     args = _merge_args(tmp_path)
     with pytest.raises(CrossStackMergeError) as excinfo:
@@ -295,7 +299,6 @@ async def test_merge_raises_structured_error_on_str(
 
 async def test_merge_accepts_bare_list_end_to_end(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """R7(i): a bare-list merge result is merged and the run succeeds."""
-    from daydream.deep.artifacts import deep_dir, merged_items_path
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -329,12 +332,6 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     merge_str: Any,
 ) -> None:
     """R2/R3/R4/R5/S1/S2: a str merge writes partial items + failure record, stops resumably."""
-    from daydream.deep.artifacts import (
-        deep_dir,
-        merged_items_path,
-        merged_report_path,
-        per_stack_failures_path,
-    )
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -379,7 +376,6 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     merge_str: Any,
 ) -> None:
     """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
-    from daydream.deep.artifacts import deep_dir, merged_items_path
 
     silence(monkeypatch)
     mute_side_effects()
@@ -478,7 +474,6 @@ async def test_merge_salvage_keeps_a_side_when_three_stacks_share_id_and_file(
     here on the uid the surviving item still carries, because the three findings
     are otherwise byte-identical and nothing else can tell them apart.
     """
-    from daydream.deep.artifacts import dedup_candidates_path, deep_dir, merged_items_path
 
     silence(monkeypatch)
     mute_side_effects()
@@ -544,8 +539,6 @@ def test_merge_salvage_keeps_both_sides_of_a_pre_uid_dedup_pair(
     finding the pair existed to preserve, so both sides are kept and the
     un-applied pair is named on the console instead of silently swallowed.
     """
-    from daydream.deep.artifacts import dedup_candidates_path
-    from daydream.deep.merge_steps import _drop_cross_stack_duplicates
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True)
@@ -605,7 +598,6 @@ async def test_merge_salvage_partial_items_carry_source_uids(
     reaches the partial write -- the salvage applies that pre-filter itself,
     having no merge agent to adjudicate the pairs.
     """
-    from daydream.deep.artifacts import deep_dir, merged_items_path
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)

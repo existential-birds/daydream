@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from daydream.backends import ResultEvent, TextEvent
+from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.prompts import build_merge_prompt
 from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
@@ -88,7 +89,6 @@ async def test_phase_cross_stack_merge_returns_output_path(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """D-24: merged report path is work.repo / REVIEW_OUTPUT_FILE."""
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     backend = ScriptedBackend(events=_MERGE_TURN)
     result = await phase_cross_stack_merge(

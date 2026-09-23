@@ -2,7 +2,6 @@
 import asyncio
 import json
 import re
-import shlex
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -38,7 +37,7 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.processes import wait_for_process_group_exit
-from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha
+from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha, write_pre_push_sha_hook
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -433,28 +432,9 @@ def _start_remote_ci_fake_after_push(
     """Let the real pre-push hook publish the new SHA to the external fake."""
     sha_path = hook_marker.with_name(hook_marker.name + " sha")
     ready_path = hook_marker.with_name(hook_marker.name + " ready")
-    hook = project / ".git" / "hooks" / "pre-push"
-    if hook.exists():
-        raise AssertionError(f"refusing to replace existing pre-push hook: {hook}")
-    sha_temp_prefix = f"{sha_path}.tmp"
-    hook.write_text(
-        "#!/bin/sh\n"
-        "read local_ref local_sha remote_ref remote_sha\n"
-        f"printf '%s\\n' ran > {shlex.quote(str(hook_marker))}\n"
-        f"sha_tmp={shlex.quote(sha_temp_prefix)}.$$\n"
-        "cleanup_sha_tmp() { rm -f \"$sha_tmp\"; }\n"
-        "trap cleanup_sha_tmp EXIT HUP INT TERM\n"
-        "printf '%s\\n' \"$local_sha\" > \"$sha_tmp\"\n"
-        f"mv \"$sha_tmp\" {shlex.quote(str(sha_path))}\n"
-        "trap - EXIT HUP INT TERM\n"
-        "i=0\n"
-        f"while [ ! -f {shlex.quote(str(ready_path))} ]; do\n"
-        "  i=$((i + 1))\n"
-        "  [ \"$i\" -lt 3000 ] || exit 91\n"
-        "  sleep 0.01\n"
-        "done\n"
+    write_pre_push_sha_hook(
+        project, sha_path=sha_path, ready_path=ready_path, marker=hook_marker
     )
-    hook.chmod(0o755)
     errors: list[BaseException] = []
     stop = threading.Event()
 

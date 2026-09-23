@@ -10,8 +10,11 @@ from typing import Any
 
 import pytest
 
+import daydream.hunk_index as hunk_index
 from daydream import git_ops, pr_comment_renderer, pr_review
-from daydream.findings import ArtifactFinding
+from daydream.extensions import Registry, SummaryContext
+from daydream.extensions.builtins import register_builtins
+from daydream.findings import ArtifactFinding, load_findings_artifact
 from daydream.git_ops import GitError
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
@@ -27,13 +30,17 @@ from daydream.pr_review import (
     classify,
     default_render_finding,
     default_render_summary,
+    diagram_marker,
     extract_anchors,
+    parse_diagram_markers,
     parse_finding_markers,
     parsed_issues_from_items,
     resolve_review_renderers,
     snap_to_hunk,
 )
+from daydream.reconcile import PriorDiagramComment
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.runner import RunConfig, _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
@@ -86,8 +93,6 @@ def test_finding_and_summary_markdown_is_byte_stable() -> None:
 
 
 def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     reg = Registry()
     register_builtins(reg)
@@ -103,8 +108,6 @@ def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -
 
 
 def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     def boom(finding: Any, ctx: Any) -> str:
         raise RuntimeError("boom")
@@ -136,8 +139,6 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_c
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
     pr: PRInfo
 ) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     def summary_renderer(ctx: Any) -> Any:
         rows = [
@@ -166,8 +167,6 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
 
 
 def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     reg = Registry()
     register_builtins(reg)
@@ -188,8 +187,6 @@ def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
 def test_summary_renderer_falls_back_and_warns_on_error(
     pr: PRInfo, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     def boom(ctx: Any) -> str:
         raise RuntimeError("kaboom")
@@ -307,7 +304,6 @@ def test_parse_hunks() -> None:
 
 
 def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.hunk_index as hunk_index
 
     calls = {"n": 0}
     real = hunk_index.parse_hunks
@@ -842,8 +838,6 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
     lookup: str, include_empty_slug: bool,
 ) -> None:
     """Both gh lookup routes preserve validated head identity through export."""
-    from daydream.findings import load_findings_artifact
-    from daydream.runner import RunConfig, _emit_findings_from_items
 
     row, base, head = _local_pr_row(git_repo)
     row["headRepository"] = {"id": "R_fixture", "name": "shelfspace-mono"}
@@ -1903,7 +1897,6 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
 
 def test_diagram_marker_round_trip() -> None:
     """The hidden marker is invisible in rendered markdown and parses back exactly."""
-    from daydream.pr_review import diagram_marker, parse_diagram_markers
 
     body = "\n\n".join(
         [
@@ -1932,8 +1925,6 @@ def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
 def test_diagram_replacement_post_failure_keeps_prior_comment(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from daydream.git_ops import GitError
-    from daydream.reconcile import PriorDiagramComment
 
     calls: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
@@ -1967,7 +1958,6 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
 def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from daydream.reconcile import PriorDiagramComment
 
     calls: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
@@ -2042,8 +2032,6 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
     belong inside the summary body), so a renderer that ignores ``ctx.diagrams``
     drops them -- which is exactly what docs/extensions.md warns about.
     """
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     seen: list[str | None] = []
 
@@ -2102,8 +2090,6 @@ def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
 def test_payload_uses_only_explicit_renderers_and_run_info(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.extensions import Registry, SummaryContext
-    from daydream.extensions.builtins import register_builtins
 
     seen: list[SummaryContext] = []
 

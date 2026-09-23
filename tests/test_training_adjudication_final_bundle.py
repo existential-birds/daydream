@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from daydream.archive.hydrate_rules import derive_curation_id
+from daydream.archive.index import _get_connection
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.final_bundle import (
@@ -22,7 +23,12 @@ from daydream.training.adjudication.final_bundle import (
     final_snapshot_id,
 )
 from daydream.training.adjudication.materialize import run_materialize
+from daydream.training.adjudication.publish import publish_final_annotation_bundle
+from daydream.training.corpus_projection.bundle import load_curated_bundle
+from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
+from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
 _SOURCE = "b" * 40
@@ -64,7 +70,6 @@ def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str,
     """Index + archive + materialize-dir fixture whose index carries one
     ``accepted``, one ``rejected``, and one ``unanswered`` finding (the same
     seed shape as the canonical-harvest decisive fixture)."""
-    from daydream.archive.index import _get_connection
 
     root = tmp_path / "index"
     root.mkdir(exist_ok=True)
@@ -128,7 +133,6 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     # The human adjudication state the final bundle's report must see: alice
     # accepts the s1 finding (the same shape the CLI `label` verb records).
-    from daydream.training.corpus_projection.identity import record_id
 
     obs_path = tmp_path / "observations.jsonl"
     obs_path.write_text(json.dumps({
@@ -242,8 +246,6 @@ def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path
         build_final_bundle(
             index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
         )
-    from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 
     hub = AnnotationsHub(repo_id="org/private-annotations")
     with pytest.raises(ValueError, match="exactly the seven semantic files"):
@@ -291,7 +293,6 @@ def test_build_final_bundle_refuses_non_empty_out_dir(tmp_path: Path) -> None:
     out = tmp_path / "final-bundle"
     out.mkdir()
     (out / "stale.txt").write_text("stale", encoding="utf-8")
-    import pytest
 
     with pytest.raises(ValueError, match="final-bundle"):
         build_final_bundle(
@@ -305,7 +306,6 @@ def test_build_final_bundle_fails_closed_on_missing_materialized_outputs(
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
     empty = tmp_path / "empty-mat"
     empty.mkdir()
-    import pytest
 
     with pytest.raises(FileNotFoundError, match="annotations.jsonl"):
         build_final_bundle(
@@ -402,8 +402,6 @@ def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: 
 
 
 def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Path) -> None:
-    from daydream.training.corpus_projection.bundle import load_curated_bundle
-    from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 
     index_root, out = _built_final_bundle(tmp_path)
     sums = "".join(

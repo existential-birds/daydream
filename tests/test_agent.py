@@ -3,6 +3,7 @@
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import replace as dataclass_replace
 from io import StringIO
 from pathlib import Path
 from types import FrameType
@@ -11,7 +12,12 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from daydream import prompt_budget
 from daydream.agent import (
+    _RedactedSupervisorError,
+    _run_agent,
+    _scrubbed_supervisor_error,
+    _ToolSupervisorFailure,
     is_environmental_failure,
     run_agent,
 )
@@ -140,7 +146,6 @@ async def test_run_agent_unregisters_backend_after_exception(tmp_path: Path) -> 
 
 async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) -> None:
     """A signal between registration and execution must not retain a backend."""
-    from daydream.agent import _run_agent
 
     class InjectedInterrupt(BaseException):
         pass
@@ -304,7 +309,6 @@ def test_revalidate_skips_rehash_when_identity_unchanged(
     ``(dev, ino, size, mtime_ns)`` identity still matches, a retry attempt
     must not re-read or re-hash the payload (#1162 efficiency item).
     """
-    from daydream import prompt_budget
 
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("captured", encoding="utf-8")
@@ -346,7 +350,6 @@ def test_revalidate_fails_closed_when_captured_file_vanishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A missing captured input is re-captured and surfaces the real error."""
-    from daydream import prompt_budget
 
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("captured", encoding="utf-8")
@@ -381,9 +384,7 @@ def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
     push the running aggregate past the cap — the skip path raises exactly
     like an over-budget fresh capture would, without re-reading the file.
     """
-    from dataclasses import replace as dataclass_replace
 
-    from daydream import prompt_budget
 
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("captured", encoding="utf-8")
@@ -515,10 +516,6 @@ def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
     and for types overriding __str__/__repr__, and must preserve the
     retryable discriminator on the reconstruction path too.
     """
-    from daydream.agent import (
-        _RedactedSupervisorError,
-        _scrubbed_supervisor_error,
-    )
 
     credential = "ZAI_API_KEY=credential-shaped-supervisor-value"
 
@@ -570,11 +567,6 @@ def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
     fail-closed handlers run, so a hostile ``__str__`` aborted construction and
     escaped as its own error. The scrubber and the wrapper must both survive it.
     """
-    from daydream.agent import (
-        _RedactedSupervisorError,
-        _scrubbed_supervisor_error,
-        _ToolSupervisorFailure,
-    )
 
     # Scrubber: no raise; fail-closed stand-in carrying only the type name.
     stand_in = _scrubbed_supervisor_error(ExplodingStrError("secret-shaped-payload"))
@@ -602,7 +594,6 @@ async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
     must print the scrubbed "Extension Failure" panel and propagate the
     redacted stand-in instead.
     """
-    from daydream.agent import _RedactedSupervisorError
 
     output = StringIO()
     monkeypatch.setattr("daydream.agent.console", Console(file=output, force_terminal=False))

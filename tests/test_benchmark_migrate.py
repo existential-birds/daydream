@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import uuid
 from copy import deepcopy
 from pathlib import Path
@@ -8,10 +9,14 @@ from typing import Any
 import pytest
 import yaml
 
+from daydream import cli as top_cli
 from daydream.benchmark import migrate, schema, storage
+from daydream.benchmark.cli import _handle_benchmark_command
+from daydream.benchmark.schema import _schema_ready
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import write_and_stage
+from tests.harness.transaction_faults import TransactionFaultDriver
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
 _HEAD_HEX = "0123456789abcdef0123456789abcdef01234567"
@@ -201,7 +206,6 @@ def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path: Path) -> Non
     assert f["finding_id"] == schema.derive_finding_id(f, case_id=case_id)  # now case-scoped
     assert f["title"] == title and f["provenance"]["kind"] == "authored"    # authored content preserved
     # migrated doc fully validates
-    from daydream.benchmark.schema import _schema_ready
     schema.CaseDocument.model_validate(_schema_ready(raw))
 
 
@@ -224,7 +228,6 @@ def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Pat
     assert raw["snapshot"]["requested_base_sha"] == requested_tip
     assert raw["snapshot"]["original_base_sha"] == merge_base
     assert raw["snapshot"]["base_resolution"] == "merge_base_v1"
-    from daydream.benchmark.schema import _schema_ready
     schema.CaseDocument.model_validate(_schema_ready(raw))  # no longer corrupt
 
 
@@ -252,7 +255,6 @@ def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Pat
     assert raw["snapshot"]["original_base_sha"] == merge_base
     assert raw["snapshot"]["base_resolution"] == "merge_base_v1"
     assert [f["finding_id"] for f in raw["curation"]["findings"]] == finding_ids
-    from daydream.benchmark.schema import _schema_ready
     schema.CaseDocument.model_validate(_schema_ready(raw))
 
     second = migrate.migrate_workspace(ws)              # idempotent
@@ -347,7 +349,6 @@ def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(
 def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from daydream import cli as top_cli
 
     parent = tmp_path / "workspace parent with spaces"
     parent.mkdir()
@@ -381,7 +382,6 @@ def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(
 def test_upgrade_cli_reports_invalid_unchanged_v2_without_rewriting(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from daydream import cli as top_cli
 
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     case_path = _write_legacy_unreplayable_case(
@@ -423,7 +423,6 @@ def test_migrate_ready_provenance_failure_is_atomic(
     tmp_path: Path, failure: str
 ) -> None:
     """A failed proof reports the case and leaves its v1 bytes unchanged."""
-    import shutil
 
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     case_path = ws / "cases" / f"{case_id}.yaml"
@@ -445,7 +444,6 @@ def test_migrate_ready_provenance_failure_is_atomic(
 
 def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: Path) -> None:
     """Imported legacy snapshots have no trees to verify and keep their candidate."""
-    import shutil
 
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     case_path = ws / "cases" / f"{case_id}.yaml"
@@ -472,7 +470,6 @@ def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: 
 
 def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The ``upgrade`` verb drives migrate_workspace through the CLI seam (exit 0)."""
-    from daydream.benchmark.cli import _handle_benchmark_command
 
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
 
@@ -495,7 +492,6 @@ def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.
 
 def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An errored case surfaces on stderr and yields exit code 1."""
-    from daydream.benchmark.cli import _handle_benchmark_command
 
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
@@ -511,7 +507,6 @@ def test_migrate_heals_interrupted_journal_under_lock(tmp_path: Path) -> None:
     other locked writer) so a crashed curator journal is healed before it reads;
     and its transaction op_id must be flat so no residue is left that bricks a
     later recover_startup with WorkspaceCorrupt."""
-    from tests.harness.transaction_faults import TransactionFaultDriver
 
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     path = ws / "cases" / f"{case_id}.yaml"
