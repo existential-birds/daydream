@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 
 import anyio
 import pytest
@@ -131,10 +132,45 @@ async def test_deep_flow_forwards_approve_on_clean(
     assert received == [enabled]
 
 
-_OPT_IN_FLAGS = ("precision_mode", "approve_on_clean", "scope_issue_filing")
+TABLED_OPT_IN_FLAGS = ("precision_mode", "approve_on_clean", "scope_issue_filing")
+
+# Boolean settings mirrored on both config dataclasses that deliberately do NOT use the
+# truthiness opt-in rule. Every entry carries the reason it is exempt.
+OPT_IN_GUARD_EXEMPTIONS: dict[str, str] = {
+    "deep_shard_enabled": (
+        "sentinel tiers with an explicit False authoritative and a diff-driven default; "
+        "pinned by test_deep_shard_enabled_default_off"
+    ),
+}
 
 
-@pytest.mark.parametrize("flag", _OPT_IN_FLAGS)
+def _mirrored_boolean_names(run_config: type, file_config: type) -> set[str]:
+    """Names whose declared type includes ``bool`` on both config surfaces."""
+    run_bools = {name for name, hint in get_type_hints(run_config).items() if "bool" in str(hint)}
+    file_bools = {name for name, hint in get_type_hints(file_config).items() if "bool" in str(hint)}
+    return run_bools & file_bools
+
+
+def test_mirrored_boolean_opt_ins_are_tabled_or_exempt() -> None:
+    """#1225: a boolean mirrored on both config surfaces must join the opt-in table or carry an exemption reason."""
+    mirrored = _mirrored_boolean_names(RunConfig, DaydreamFileConfig)
+    assert set(OPT_IN_GUARD_EXEMPTIONS) <= mirrored, "stale exemption: name is no longer mirrored on both surfaces"
+    untabled = mirrored - set(OPT_IN_GUARD_EXEMPTIONS)
+    assert untabled == set(TABLED_OPT_IN_FLAGS), (
+        f"mirrored boolean opt-ins neither tabled nor exempt: {sorted(untabled)}"
+    )
+
+
+def test_mirrored_boolean_names_reads_declared_types() -> None:
+    """The guard's derivation is real: a shared bool is found; a file-only bool and a non-bool are not."""
+    probe_run = dataclasses.make_dataclass("_ProbeRun", [("shared_flag", bool, False)])
+    probe_file = dataclasses.make_dataclass(
+        "_ProbeFile", [("shared_flag", bool | None, None), ("file_only", bool, False), ("count", int, 0)]
+    )
+    assert _mirrored_boolean_names(probe_run, probe_file) == {"shared_flag"}
+
+
+@pytest.mark.parametrize("flag", TABLED_OPT_IN_FLAGS)
 @pytest.mark.parametrize(
     ("cli_tier", "file_value", "expected"),
     [
