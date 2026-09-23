@@ -6,7 +6,6 @@ Field values, nullable defaults, and the union/export surface all live here;
 field defaults twice.
 
 Covers Plan 02-02 of phase 02-recorder-core-event-enrichment-mapping:
-
 - Every event dataclass carries a ``timestamp: str`` field defaulted via
   ``now_iso()`` (Pitfall 2 single source of truth).
 - The ``MetricsEvent`` dataclass exists and uses the EVNT-02 verbatim
@@ -19,13 +18,13 @@ Covers Plan 02-02 of phase 02-recorder-core-event-enrichment-mapping:
 - ``MetricsEvent`` is part of the ``AgentEvent`` TypeAlias union and is
   exported in ``__all__``.
 """
-
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
 
+from daydream import backends
 from daydream.backends import (
     AgentEvent,
     ClaudeRequestConfig,
@@ -48,7 +47,13 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    _admit_identity_label,
+    _admit_native_unix_ms,
+    _new_generation_id,
+    unix_ms_to_ns,
 )
+from daydream.backends.pi import _PI_READ_ONLY_TOOLS
+from daydream.observability.spans import _admit_observed_identity_list
 
 
 def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
@@ -201,8 +206,6 @@ def test_metrics_event_is_accepted_by_agent_event_union() -> None:
 
 
 def test_metrics_event_in_all_export() -> None:
-    from daydream import backends
-
     assert "MetricsEvent" in backends.__all__
 
 
@@ -224,7 +227,6 @@ def test_diagnostic_event_has_fresh_metadata_and_is_exported() -> None:
     assert second.metadata == {}
     assert isinstance(first, AgentEvent)
 
-    from daydream import backends
 
     assert "DiagnosticEvent" in backends.__all__
 
@@ -384,8 +386,6 @@ def test_arbitrary_persona_and_toolset_labels_have_no_field() -> None:
 
 def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
     """Model labels admit namespace slashes; reject controls/bidi/paths/secrets."""
-    from daydream.backends import _admit_identity_label
-
     # Ordinary namespace spellings pass unchanged.
     for safe in (
         "opus",
@@ -432,8 +432,6 @@ def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
 
 def test_provider_label_bound_is_128() -> None:
     """Provider labels admit up to 128 scalar values and reject beyond."""
-    from daydream.backends import _admit_identity_label
-
     admitted, diagnostic = _admit_identity_label("p" * 128, max_chars=128, context="provider")
     assert admitted == "p" * 128 and diagnostic is None
     admitted, diagnostic = _admit_identity_label("p" * 129, max_chars=128, context="provider")
@@ -443,8 +441,6 @@ def test_provider_label_bound_is_128() -> None:
 
 def test_native_unix_ms_validation_bounds_and_conversion() -> None:
     """Native ms: bool/float/string rejected, bounded, exact ns multiplication."""
-    from daydream.backends import _admit_native_unix_ms, unix_ms_to_ns
-
     # Exact producer shape converts by multiplication only.
     ms, diagnostic = _admit_native_unix_ms(1788690314289)
     assert ms == 1788690314289 and diagnostic is None
@@ -471,8 +467,6 @@ def test_native_unix_ms_validation_bounds_and_conversion() -> None:
 
 def test_observed_identity_lists_whole_overflow_omission() -> None:
     """A 17-entry model list omits the entire list with a fixed overflow code."""
-    from daydream.observability.spans import _admit_observed_identity_list
-
     admitted, diagnostic = _admit_observed_identity_list(
         [f"model-{i}" for i in range(16)],
         max_chars=256,
@@ -504,8 +498,6 @@ def test_observed_identity_lists_whole_overflow_omission() -> None:
 
 def test_pi_selected_tools_count_derives_from_read_only_tool_constant() -> None:
     """The Pi read-only tool count derives from the argv tool list, not a copy."""
-    from daydream.backends.pi import _PI_READ_ONLY_TOOLS
-
     assert len(_PI_READ_ONLY_TOOLS.split(",")) == 4
     assert _PI_READ_ONLY_TOOLS == "read,find,ls,grep"
 
@@ -553,8 +545,6 @@ def test_generation_lifecycle_events_are_in_the_agent_event_union() -> None:
 
 def test_generation_ids_are_host_invocation_local_uuids() -> None:
     """Minted IDs are UUID-shaped and distinct per call (never provider IDs)."""
-    from daydream.backends import _new_generation_id
-
     first = _new_generation_id()
     second = _new_generation_id()
     assert first != second

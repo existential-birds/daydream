@@ -8,6 +8,13 @@ import pytest
 from pydantic import ValidationError
 
 import daydream.benchmark.schema as schema
+from daydream import severity
+from daydream.benchmark.harbor.build import (
+    ASSIGNMENT_TEXT,
+    render_task_spec,
+    task_spec_approval,
+    task_spec_digest,
+)
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
@@ -15,10 +22,13 @@ from daydream.benchmark.schema import (
     EvidenceRecord,
     Finding,
     ImportDocument,
+    PrioritizationFacts,
     Provenance,
     PullRequestEntry,
     PullRequestMeta,
+    Source,
     TransitionError,
+    _ImportRepository,
     case_id_for,
     classify_validation,
     derive_finding_id,
@@ -29,6 +39,7 @@ from daydream.benchmark.schema import (
     validate_case_transition,
     validate_pr_transition,
 )
+from daydream.pr_review import finding_marker
 
 
 def test_pyyaml_is_a_base_runtime_dependency() -> None:
@@ -110,9 +121,7 @@ def test_manifest_rejects_non_github_hostname() -> None:
 
 
 def test_source_repository_id_is_nonblank_opaque_string() -> None:
-    from pydantic import ValidationError
 
-    from daydream.benchmark.schema import Source
 
     s = Source(provider="github", hostname="github.com", repository="o/r",
                repository_id="R_kgDOABC123")
@@ -128,8 +137,6 @@ def test_source_repository_id_is_nonblank_opaque_string() -> None:
 
 
 def test_import_repository_id_is_opaque_string() -> None:
-    from daydream.benchmark.schema import _ImportRepository
-
     r = _ImportRepository(id="R_kgDOABC123", name_with_owner="o/r", visibility="private")
     assert r.id == "R_kgDOABC123"
     # numeric-only ids (Pydantic would otherwise coerce int->str) must not model;
@@ -733,8 +740,6 @@ def test_title_bound_is_unicode_characters_not_bytes() -> None:
 
 
 def test_finding_severity_accepts_every_canonical_level_and_rejects_unknown() -> None:
-    from daydream import severity
-
     for level in severity.CANONICAL_LEVELS:
         raw = _valid_case_dict()
         finding = raw["curation"]["findings"][0]
@@ -753,8 +758,6 @@ def test_finding_severity_accepts_every_canonical_level_and_rejects_unknown() ->
 def test_finding_severity_declares_no_inline_level_literal() -> None:
     """A second inline literal cannot follow a declaration change, so the field must
     be typed by the shared vocabulary alias (spec requirement 4)."""
-    from daydream import severity
-
     source = (Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "schema.py").read_text()
     assert "SeverityLevel" in source
     # Whitespace/quote-insensitive so an alternate spelling or re-wrap of the inline
@@ -816,8 +819,6 @@ def test_v1_legacy_case_loads_without_digest_check() -> None:
 
 
 def test_historical_daydream_marker_cannot_be_gold() -> None:
-    from daydream.pr_review import finding_marker
-
     raw = _valid_case_dict()
     body = "looks fine"
     finding = {
@@ -842,9 +843,6 @@ def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None
     deterministic render digest so the legacy case validates (and later
     compiles) instead of surfacing as corrupt.
     """
-    import daydream.benchmark.schema as schema
-    from daydream.benchmark.harbor.build import ASSIGNMENT_TEXT, render_task_spec
-
     raw = _valid_case_dict()
     del raw["curation"]["task_spec_sha256"]                # legacy pre-approval workspace
     prepared = schema._schema_ready(raw)
@@ -855,8 +853,6 @@ def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None
 
 
 def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled() -> None:
-    import daydream.benchmark.schema as schema
-
     raw = _valid_case_dict()
     raw["curation"]["task_spec_sha256"] = None
 
@@ -870,8 +866,6 @@ def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled() -> None:
 
 @pytest.mark.parametrize("digest", ["", "zzz", "a" * 63, "a" * 65, "g" * 64, "A" * 64])
 def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str) -> None:
-    import daydream.benchmark.schema as schema
-
     raw = _valid_case_dict()
     raw["curation"]["task_spec_sha256"] = digest
     prepared = schema._schema_ready(raw)
@@ -882,8 +876,6 @@ def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str) -> 
 
 
 def test_task_spec_approval_reports_nonready_current_and_stale() -> None:
-    from daydream.benchmark.harbor.build import task_spec_approval, task_spec_digest
-
     raw = _valid_case_dict()
     raw["curation"]["state"] = "draft"
     assert task_spec_approval(raw).state == "not-required"
@@ -1045,8 +1037,6 @@ def test_case_document_accepts_additive_prioritization_key() -> None:
 
 
 def test_case_prioritization_facts_shape() -> None:
-    from daydream.benchmark.schema import CaseDocument, PrioritizationFacts
-
     facts = PrioritizationFacts.model_validate(
         {
             "extraction_version": 1,

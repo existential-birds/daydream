@@ -2,24 +2,33 @@
 
 Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flow.
 """
-
 import json
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from daydream.archive import (
+    ArchiveFinalizationError,
+    _copy_snapshot_bundle,
     _project_documents,
     _read_fix_quality_gate,
+    _read_recommended_capture,
+    _schema,
+    finalize_archive_run,
     get_archive_dir,
+    index,
+    pipeline,
 )
 from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
+    _CREATE_TABLE,
+    SCHEMA_VERSION,
     append_label_observation,
     canonical_utc_iso,
     label_observation_history,
@@ -36,6 +45,9 @@ from daydream.archive.manifest import (
     archive_recorder_provenance_from_snapshot,
     build_manifest_from_snapshot,
 )
+from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+from daydream.archive.provenance import ExecutableProvenance
+from daydream.archive.scan import SEVERITY_BLOCKING, Finding, ScanResult
 from daydream.artifact_visibility import (
     ArtifactEvidenceProvenance,
     ArtifactTreeSnapshot,
@@ -44,13 +56,17 @@ from daydream.artifact_visibility import (
     RoutedDestination,
     _manifest,
 )
+from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.remote_ci import (
     CIObservation,
     PRCIBinding,
+    RemoteCILimits,
+    RemoteCISnapshot,
     RemoteCITarget,
     RemoteCIVerdict,
     RequiredContext,
     RequiredPolicy,
+    evaluate_remote_ci,
     write_remote_ci_verdict,
 )
 from daydream.run_snapshot import (
@@ -59,7 +75,7 @@ from daydream.run_snapshot import (
     RunPhaseCapabilities,
     RunProfileIdentity,
 )
-from daydream.runner import RunConfig
+from daydream.runner import RunConfig, run
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -72,7 +88,9 @@ from daydream.trajectory import (
     run_document_path,
     sibling_document_path,
 )
-from tests.harness.trajectory import make_manifest
+from tests.harness.backend import ScriptedBackend
+from tests.harness.improve_backend import install_improve_stub
+from tests.harness.trajectory import make_manifest, make_recorder
 
 MakeConfig = Callable[..., RunConfig]
 InstallBackend = Callable[[object], object]
@@ -143,7 +161,6 @@ def _write_snapshot(
 @dataclass
 class _MockRecorder:
     """The recorder identity fields a frozen snapshot is stamped from."""
-
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
     path: Path = Path("/nonexistent/trajectory.json")
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
@@ -194,8 +211,6 @@ def _strict_archive(
     directory itself — ``finalize_archive_run`` re-attests the tree after every
     stage and a write inside it would (correctly) be read as tampering.
     """
-    from daydream.archive import finalize_archive_run
-
     finalize_archive_run(
         run=_archive_snapshot(write_snapshot, run_flow=run_flow, identity=identity),
         artifacts=ArtifactTreeSnapshot(
@@ -549,9 +564,6 @@ async def test_improve_archive_real_path_omits_fix_test_backend(
     mocked via the ``create_backend`` seam. The archived manifest drops
     ``fix_backend``/``test_backend`` and the SQLite runs row stores NULL.
     """
-    from daydream.runner import run
-    from tests.harness.improve_backend import install_improve_stub
-
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     install_improve_stub(monkeypatch, improve_monorepo_target)
 
@@ -579,10 +591,6 @@ async def test_custom_flow_archive_real_path_omits_fix_test_backend(
     recorder; only the backend is mocked. The custom flow is extension-defined,
     so its pipeline has no fix/test step and the archive must not invent labels.
     """
-    from daydream.backends import ResultEvent, TextEvent
-    from daydream.runner import run
-    from tests.harness.backend import ScriptedBackend
-
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
@@ -925,8 +933,6 @@ def test_runs_columns_migrate_existing_db(
     tmp_path: Path, fields: dict[str, Any], old_version: int,
 ) -> None:
     """Each additive migration preserves legacy rows and accepts new values."""
-    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
-
     legacy_ddl = "\n".join(
         line for line in _CREATE_TABLE.splitlines()
         if not any(line.strip().startswith(f"{field} ") for field in fields)
@@ -1186,8 +1192,6 @@ def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path) -> None:
 
 
 def test_read_recommended_capture_requires_matching_session(tmp_path: Path) -> None:
-    from daydream.archive import _read_recommended_capture
-
     cap = {"session_id": "sess-42", "capture_point": "post_test"}
     p = tmp_path / ".daydream" / "deep" / "recommended-capture.json"
     p.parent.mkdir(parents=True)
@@ -1199,8 +1203,6 @@ def test_read_recommended_capture_requires_matching_session(tmp_path: Path) -> N
 
 
 def test_read_recommended_capture_absent_is_none(tmp_path: Path) -> None:
-    from daydream.archive import _read_recommended_capture
-
     assert _read_recommended_capture(tmp_path, "sess-42") is None
 
 
@@ -1292,8 +1294,6 @@ def _assemble_bundle(
     destinations: tuple[RoutedDestination, ...] = (),
 ) -> None:
     """Run the production bundle assembler over one frozen tree + snapshot."""
-    from daydream.archive import _copy_snapshot_bundle
-
     snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(recorder)
     _copy_snapshot_bundle(
         run=_archive_snapshot(snapshot, run_flow=recorder.run_flow),
@@ -1489,8 +1489,6 @@ def test_dump_artifacts_refuses_credential_bearing_bundle(
     strict finalizer refuses closed: neither the ``--dump-artifacts``
     destination nor the archive receives the dirty bundle, and the failure never
     echoes the credential (M11)."""
-    from daydream.archive import ArchiveFinalizationError
-
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
     dest.mkdir()
@@ -1897,8 +1895,6 @@ def test_same_microsecond_collision_keeps_clean_iso_timestamps(
     """Two appends frozen to the same microsecond must both persist with parseable
     ISO 8601 observed_at values, and an exact-boundary as_of must include the
     boundary row (the contract the ~uuid suffix used to break)."""
-    from datetime import datetime, timezone
-
     frozen = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
 
     class _FrozenDatetime(datetime):
@@ -1963,8 +1959,6 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     is migrated/recreated on the next connection: runs gains has_posterior via
     ALTER, the stale label_observations is dropped+recreated with both new
     columns, and PRAGMA user_version reaches SCHEMA_VERSION (8)."""
-    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
-
     db_path = tmp_path / "index.db"
     conn = sqlite3.connect(str(db_path))
     # Pre-v4 runs schema (DDL minus has_posterior); label_observations lacks posterior cols.
@@ -2286,9 +2280,6 @@ def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
 
 async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -> None:
     """Manifest totals are whole-run: the fork's tokens/cost are folded in."""
-    from daydream.backends import MetricsEvent, ResultEvent, TextEvent
-    from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
-
     snapshots: list[RunWriteSnapshot] = []
     recorder = TrajectoryRecorder(
         path=tmp_path / ".daydream" / "runs" / "sess-fold" / "trajectory.json",
@@ -2336,7 +2327,6 @@ async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -
 
 
 def test_manifest_splits_status_from_pipeline() -> None:
-    from daydream.archive.provenance import ExecutableProvenance
     m = Manifest(
         session_id="s-1", status="complete", archive_status="complete",
         pipeline_status="failed", phase_states={
@@ -2509,8 +2499,6 @@ def _derive_push_remote_states(
     pr_repo: str | None = "example/project",
     pr_number: int | None = 42,
 ) -> dict[str, dict[str, Any]]:
-    from daydream.archive import pipeline
-
     return pipeline.derive_phase_states(
         target,
         phase_events=events or [],
@@ -2529,8 +2517,6 @@ def _derive_push_remote_states(
 def test_current_session_test_push_and_remote_success_are_distinct(
     tmp_path: Path, remote_status: str
 ) -> None:
-    from daydream.archive import pipeline
-
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status=remote_status)
@@ -2549,8 +2535,6 @@ def test_current_session_test_push_and_remote_success_are_distinct(
 
 
 def test_current_session_remote_required_failure_fails_pipeline(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
-
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status="failed")
@@ -2562,8 +2546,6 @@ def test_current_session_remote_required_failure_fails_pipeline(tmp_path: Path) 
 
 
 def test_archive_cancellation_precedes_remote_failure(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
-
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status="failed")
     states = _derive_push_remote_states(tmp_path)
@@ -2576,8 +2558,6 @@ def test_archive_cancellation_precedes_remote_failure(tmp_path: Path) -> None:
     ["pending", "missing", "unavailable", "timed_out", "superseded", "cancelled"],
 )
 def test_incomplete_remote_statuses_are_partial(tmp_path: Path, remote_status: str) -> None:
-    from daydream.archive import pipeline
-
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status=remote_status)
 
@@ -2808,8 +2788,6 @@ def test_remote_archive_rejects_noncanonical_commit_sha(
 
 
 def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
-
     events = [_phase_event(DaydreamPhase.PUSH)]
     _write_push_verdict(tmp_path, status="failed")
     states = _derive_push_remote_states(tmp_path, events=events)
@@ -2824,8 +2802,6 @@ def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Pa
 
 
 def test_successful_push_without_current_remote_terminal_is_partial(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
-
     _write_push_verdict(tmp_path)
     states = _derive_push_remote_states(tmp_path)
 
@@ -2870,8 +2846,6 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
     make_config: MakeConfig,
 ) -> None:
     """A real archived verdict preserves the evaluator's nonblocking advisory."""
-    from daydream.remote_ci import RemoteCILimits, RemoteCISnapshot, evaluate_remote_ci
-
     target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="advisory-pending-session")
     config = make_config(
@@ -3032,8 +3006,6 @@ def test_archive_no_ci_retains_empty_strict_policy(
     tmp_path: Path, discovery_seconds: float
 ) -> None:
     """Strictness alone does not declare a required CI context."""
-    from daydream.remote_ci import RemoteCILimits, RemoteCISnapshot, evaluate_remote_ci
-
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status="no_ci")
     artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
@@ -3263,8 +3235,6 @@ def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifac
     The strict finalizer is handed no recorder at all — the live recorder built
     here records no phase event, and the archived states come only from the
     frozen snapshot's mapping rows."""
-    from tests.harness.trajectory import make_recorder
-
     target = _frozen_target(tmp_path)
     recorder = make_recorder(target, run_flow=DaydreamRunFlow.NORMAL)
     phase_events = [
@@ -3341,8 +3311,6 @@ def _merge_events(
 def test_current_merge_event_controls_pipeline_status(
     tmp_path: Path, status: str, artifact: str | None, payload: Any,
 ) -> None:
-    from daydream.archive import pipeline
-
     if artifact is not None:
         _write_deep(tmp_path, artifact, payload)
 
@@ -3364,8 +3332,6 @@ def test_current_merge_event_controls_pipeline_status(
 def test_stale_merge_event_failure_does_not_override_current_success(
     tmp_path: Path,
 ) -> None:
-    from daydream.archive import pipeline
-
     states = pipeline.derive_phase_states(
         tmp_path,
         phase_events=[
@@ -3416,8 +3382,6 @@ def test_malformed_current_merge_event_is_unknown(
     tmp_path: Path,
     events: list[dict[str, Any]],
 ) -> None:
-    from daydream.archive import pipeline
-
     states = pipeline.derive_phase_states(
         tmp_path,
         phase_events=events,
@@ -3437,8 +3401,6 @@ def test_malformed_current_merge_event_is_unknown(
 def test_current_merge_event_rejects_non_scalar_kind(
     tmp_path: Path, malformed_kind: Any,
 ) -> None:
-    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
-
     events = _merge_events("current", "succeeded")
     events[1]["event"] = malformed_kind
     states = derive_phase_states(
@@ -3452,8 +3414,6 @@ def test_current_merge_event_rejects_non_scalar_kind(
 def test_missing_current_merge_event_never_uses_stale_success_artifact(
     tmp_path: Path,
 ) -> None:
-    from daydream.archive import pipeline
-
     _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
     states = pipeline.derive_phase_states(
         tmp_path,
@@ -3486,8 +3446,6 @@ def test_legacy_merge_artifact_fallback_is_strict(
     items_payload: Any,
     expected: dict[str, Any],
 ) -> None:
-    from daydream.archive import pipeline
-
     if failure_payload is not None:
         _write_deep(tmp_path, "per-stack-failures.json", failure_payload)
     _write_deep(tmp_path, "merged-items.json", items_payload)
@@ -3512,8 +3470,6 @@ def test_legacy_merge_invalid_utf8_is_unknown(
     tmp_path: Path,
     artifact_name: str,
 ) -> None:
-    from daydream.archive import pipeline
-
     deep = tmp_path / ".daydream" / "deep"
     deep.mkdir(parents=True)
     (deep / artifact_name).write_bytes(b"\xff")
@@ -3693,8 +3649,6 @@ def test_archive_rejects_a_sibling_document_from_another_session(
 
     The root passes provenance validation, so the refusal has to come from the
     bundle projection — and it must leave no partially assembled archive."""
-    from daydream.archive import ArchiveFinalizationError
-
     target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="current-session")
     root = _write_snapshot(recorder).documents[0]
@@ -3747,7 +3701,6 @@ def test_project_documents_destinations_are_the_layout_surface(tmp_path: Path) -
 def test_merge_failed_discriminates_on_merge_key_not_merged_items(
     tmp_path: Path,
 ) -> None:
-    from daydream.archive import pipeline
     _write_deep(tmp_path, "merged-items.json", {"items": []})
     _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
@@ -3756,14 +3709,12 @@ def test_merge_failed_discriminates_on_merge_key_not_merged_items(
 
 
 def test_merge_succeeded_when_items_and_no_merge_key(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
     _write_deep(tmp_path, "merged-items.json", {"items": []})
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
     assert states["merge"]["status"] == "succeeded"
 
 
 def test_test_failed_from_verdict(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
     _write_deep(
         tmp_path,
         "test-verdict.json",
@@ -3779,8 +3730,6 @@ def test_test_failed_from_verdict(tmp_path: Path) -> None:
 def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(
     tmp_path: Path,
 ) -> None:
-    from daydream.archive import pipeline
-
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "prior", "passed": True})
     states = pipeline.derive_phase_states(
         tmp_path, phase_events=[], session_id="current"
@@ -3794,8 +3743,6 @@ def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(
 def test_matching_stabilization_failure_overrides_green_test_pipeline(
     tmp_path: Path,
 ) -> None:
-    from daydream.archive import pipeline
-
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
     _write_deep(
         tmp_path,
@@ -3826,8 +3773,6 @@ def test_matching_stabilization_failure_overrides_green_test_pipeline(
 def test_stale_or_malformed_stabilization_failure_is_neutral(
     tmp_path: Path, payload: Any
 ) -> None:
-    from daydream.archive import pipeline
-
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
     _write_deep(tmp_path, "stabilization-failed.json", payload)
 
@@ -3870,21 +3815,18 @@ def test_archive_manifest_fails_matching_stabilization_session(
 
 
 def test_test_absent_when_no_verdict(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
     assert states["test"]["ran"] is False
     assert states["test"]["status"] == "absent"
 
 
 def test_fix_partial_from_failures(tmp_path: Path) -> None:
-    from daydream.archive import pipeline
     _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
     assert states["fix"]["status"] == "partial"
 
 
 def test_pipeline_status_precedence() -> None:
-    from daydream.archive import pipeline
     # cancelled beats everything when archive partial with no fix failures
     assert pipeline.derive_pipeline_status("partial", None,
         {"merge": {"ran": True, "status": "succeeded"},
@@ -3929,7 +3871,6 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
     # session-agnostic merge/fix/test artifacts in target_dir/.daydream/deep;
     # a non-deep flow run afterwards must NOT inherit them as its own pipeline
     # state -- the phases it does not run read absent regardless of disk.
-    from daydream.archive import pipeline
     _write_deep(tmp_path, "merged-items.json", {"items": []})
     _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
     _write_deep(tmp_path, "test-verdict.json", {"passed": False})
@@ -3974,7 +3915,6 @@ def test_merge_failed_archives_failed_pipeline(
 
 
 def test_schema_additive_columns_and_migration(tmp_path: Path) -> None:
-    from daydream.archive import _schema
     db = tmp_path / "index.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE runs (session_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'complete')")
@@ -3988,10 +3928,6 @@ def test_schema_additive_columns_and_migration(tmp_path: Path) -> None:
 
 
 def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
-    from daydream.archive import index
-    from daydream.archive.manifest import Manifest
-    from daydream.archive.provenance import ExecutableProvenance
-
     m = Manifest(
         session_id="s-2",
         status="complete",
@@ -4272,11 +4208,6 @@ def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(
     tmp_path: Path,
 ) -> None:
     """The production manifest identity comes only from validated root bytes."""
-    from daydream.archive.manifest import (
-        archive_recorder_provenance_from_snapshot,
-        build_manifest_from_snapshot,
-    )
-
     session_id = "frozen-pr-session"
     snapshot = _manifest_write_snapshot(
         session_id=session_id,
@@ -4389,8 +4320,6 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The host finalizer cannot infer success from the legacy fail-open wrapper."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-
     session_id = "strict-session"
     arguments = _finalizer_arguments(
         tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),
@@ -4412,8 +4341,6 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
     mutate: bool,
 ) -> None:
     """A code-running consumer cannot make archive bytes and manifest disagree."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-
     session_id = "strict-mutated-evidence"
     frozen = tmp_path / "frozen"
     receipt = frozen / ".daydream" / "deep" / "test-verdict.json"
@@ -4469,8 +4396,6 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(
     callee, before anything reached the Hub, so failing finalization here would
     discard a completed review without containing anything extra.
     """
-    from daydream.archive import finalize_archive_run
-
     session_id = "strict-upload"
     arguments = _finalizer_arguments(
         tmp_path, session_id,
@@ -4499,8 +4424,6 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A frozen tree mutated after finalization starts is caught before the external upload."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-
     session_id = "strict-upload-mutated"
     arguments = _finalizer_arguments(
         tmp_path, session_id,
@@ -4532,9 +4455,6 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A refused secret scan publishes neither an archive nor dump bytes."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.archive.scan import SEVERITY_BLOCKING, Finding, ScanResult
-
     session_id = "strict-dump"
     arguments = _finalizer_arguments(
         tmp_path, session_id,

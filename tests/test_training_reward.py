@@ -2,17 +2,22 @@
 
 Covers golden-locked formula, posterior false-positive axis, and weight overrides.
 """
-
 from __future__ import annotations
 
+import builtins
 from typing import cast
 
 import pytest
 
+from daydream.training import harvest as harvest_mod
 from daydream.training.reward import (
+    DEFAULT_WEIGHTS,
     REWARD_VERSION,
     PosteriorBreakdown,
+    RewardBreakdown,
+    RewardWeights,
     ScoringInputs,
+    _weights_fingerprint,
     score_trajectory,
 )
 
@@ -51,7 +56,6 @@ def test_missing_correctness_axis_renormalizes_over_grounding() -> None:
 
 
 def test_weights_are_overridable_and_change_composite_predictably() -> None:
-    from daydream.training.reward import RewardWeights
     base_len = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
                              grounding_rate=None, format_valid=True, length=10000)
     # length=10000 → len_norm saturates at 1.0; only w_len differs between calls.
@@ -72,7 +76,6 @@ def test_outcome_applies_posterior_penalty_golden(
     expected_posterior_cost: float,
 ) -> None:
     """Expose posterior penalties separately from the intrinsic composite score."""
-    from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
                       grounding_rate=0.5, format_valid=True, length=4000),
@@ -85,7 +88,6 @@ def test_outcome_applies_posterior_penalty_golden(
 
 
 def test_accepted_outcome_has_zero_penalty_and_all_six_fields() -> None:
-    from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
                       grounding_rate=0.8, format_valid=True, length=3000),
@@ -99,7 +101,6 @@ def test_accepted_outcome_has_zero_penalty_and_all_six_fields() -> None:
 
 
 def test_unknown_or_absent_posterior_leaves_axis_none_and_score_unchanged() -> None:
-    from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
     args = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
                          grounding_rate=0.5, format_valid=True, length=4000)
     unknown = score_trajectory(args, pr_feedback="unknown")
@@ -129,7 +130,6 @@ def test_posterior_penalty_cannot_outrank_correctness_signal() -> None:
 
 
 def test_composite_is_pure_intrinsic_posterior_is_sibling() -> None:
-    from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
     inp = ScoringInputs([{"verdict": "consistent"}, {"verdict": "uncertain"}], 0.5, True, 4000)
     base = score_trajectory(inp)                       # no label → intrinsic
     labeled = score_trajectory(inp, pr_feedback="rejected")
@@ -143,7 +143,6 @@ def test_composite_is_pure_intrinsic_posterior_is_sibling() -> None:
 
 
 def test_score_trajectory_does_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
-    import builtins
     monkeypatch.setattr(builtins, "open", lambda *a, **k: (_ for _ in ()).throw(AssertionError("I/O!")))
     rb = score_trajectory(ScoringInputs([{"verdict": "consistent"}], 0.5, True, 100),
                           pr_feedback="rejected")
@@ -151,7 +150,6 @@ def test_score_trajectory_does_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_zero_sum_present_credit_weights_raises_value_error() -> None:
-    from daydream.training.reward import RewardWeights
     weights = RewardWeights(w_correctness=0.0, w_grounding=0.0)
     inputs = ScoringInputs(
         verifier_verdicts=[{"verdict": "consistent"}],
@@ -166,7 +164,6 @@ def test_zero_sum_present_credit_weights_raises_value_error() -> None:
 def test_same_function_scores_producer_and_eval_caller_paths() -> None:
     # Guard that harvest.py's bound score_trajectory is the same object as the
     # canonical one from daydream.training.reward — not a stale copy or wrapper.
-    import daydream.training.harvest as harvest_mod
     harvest_fn = getattr(harvest_mod, "score_trajectory")
     assert harvest_fn is score_trajectory
     inp = ScoringInputs([{"verdict": "consistent"}], 0.7, True, 500)
@@ -177,7 +174,6 @@ def test_same_function_scores_producer_and_eval_caller_paths() -> None:
 
 
 def test_default_weights_flagged_and_overrides_fingerprint_stably() -> None:
-    from daydream.training.reward import DEFAULT_WEIGHTS, RewardWeights, _weights_fingerprint
     assert DEFAULT_WEIGHTS.is_default is True
     assert RewardWeights(w_fp=0.5).is_default is False
     assert _weights_fingerprint(RewardWeights(w_fp=0.5)) == _weights_fingerprint(RewardWeights(w_fp=0.5))
@@ -205,7 +201,6 @@ def test_posterior_cost_is_absolute_surprise_from_prior() -> None:
 
 
 def test_reward_version_stamp_default_vs_custom() -> None:
-    from daydream.training.reward import REWARD_VERSION, RewardWeights, _weights_fingerprint
     inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
     assert score_trajectory(inp).reward_version == REWARD_VERSION
     custom = RewardWeights(w_fp=0.5)

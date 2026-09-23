@@ -17,6 +17,7 @@ from daydream.backends._transport import (
     StdinMode,
     TransportExitError,
 )
+from tests.harness.processes import wait_for_process_group_gone
 
 LIMIT = 2**16
 
@@ -105,32 +106,6 @@ _GROUP_HOLDER_CLI = (
 )
 
 
-async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
-    """Await *pgid*'s disappearance (mirrors tests/test_subprocess_lifecycle.py).
-
-    A group-signal kill reaps the direct child synchronously, but a grandchild
-    reparented to PID 1 lingers as a zombie until init reaps it — and a zombie
-    still answers ``killpg(pgid, 0)``. Polling until the group is gone makes
-    the assertion deterministic: the observable outcome is "no process remains
-    in the group", not "the group vanished by the next instruction".
-    """
-    import asyncio as _asyncio
-    import os as _os
-
-    loop = _asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    while True:
-        try:
-            _os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            # EPERM means the pgid was recycled by a foreign-uid process,
-            # i.e. our same-uid group exited.
-            return
-        if loop.time() > deadline:
-            raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")
-        await _asyncio.sleep(0.01)
-
-
 async def test_transport_idle_timeout_fires_on_silent_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stream that goes silent for the window raises StreamStalledError.
 
@@ -161,7 +136,7 @@ async def test_transport_teardown_is_idempotent_and_group_signalling() -> None:
     await t.terminate()
     await t.terminate()  # double-call must not raise
     assert t.returncode is not None
-    await _wait_for_group_gone(pgid)  # grandchild must be gone too
+    await wait_for_process_group_gone(pgid)  # grandchild must be gone too
 
 
 async def test_transport_cancel_all_is_shielded() -> None:
@@ -191,4 +166,4 @@ async def test_transport_cancel_all_is_shielded() -> None:
         await consume()
     assert scope.cancelled_caught  # cancel fired while lines() was pending
     assert t.returncode is not None
-    await _wait_for_group_gone(pgid)
+    await wait_for_process_group_gone(pgid)

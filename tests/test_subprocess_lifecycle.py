@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from daydream.backends._subprocess import terminate_process
+from tests.harness.processes import wait_for_process_group_gone
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
@@ -60,7 +61,7 @@ async def test_terminate_process_kills_whole_group() -> None:
 
     await terminate_process(proc)
 
-    await _wait_for_group_gone(pgid)
+    await wait_for_process_group_gone(pgid)
 
 
 async def test_terminate_process_releases_fds() -> None:
@@ -89,7 +90,7 @@ async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
     await cancel_processes(procs)
 
     for pgid in pgids:
-        await _wait_for_group_gone(pgid)
+        await wait_for_process_group_gone(pgid)
     await _wait_for_fd_count(base)
 
 
@@ -112,42 +113,13 @@ async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
         await asyncio.sleep(0.01)
 
 
-async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
-    """Await *pgid*'s disappearance (a readiness wait, not a fixed sleep).
-
-    A group-signal kill reaps the direct child synchronously, but a grandchild
-    reparented to PID 1 lingers as a zombie until init reaps it — and a zombie
-    still answers ``killpg(pgid, 0)``. Asserting ``ProcessLookupError`` in the
-    same event-loop tick as the kill therefore races the kernel's reap: on a
-    loaded host (CI runners, parallel suites) the window is wide enough to fail
-    intermittently. Polling until the group is gone makes the assertion
-    deterministic — the observable outcome is "no process remains in the group",
-    not "the group vanished by the next instruction". The loop exits the moment
-    ``killpg`` raises ProcessLookupError or PermissionError (a recycled pgid);
-    the timeout is a failure bound, not a synchronization delay (same contract
-    as ``_wait_for_file``).
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    while True:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            # EPERM means the pgid was recycled by a foreign-uid process,
-            # i.e. our same-uid group exited.
-            return
-        if loop.time() > deadline:
-            raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")
-        await asyncio.sleep(0.01)
-
-
 async def _wait_for_fd_count(base: int, *, timeout_s: float = 30.0) -> None:
     """Await the fd count's return to *base* (a readiness wait, not a fixed sleep).
 
     The transport close releases the pipe fds, but the release lands in the
     event loop's connection_lost processing — asserting equality in the same
     tick as teardown races the loop on a loaded host (CI runners, parallel
-    suites), the same failure mode ``_wait_for_group_gone`` documents. Polling
+    suites), the same failure mode ``wait_for_process_group_gone`` documents. Polling
     until the count returns makes the assertion deterministic; the loop exits
     the moment the baseline is reached and the timeout is a failure bound, not
     a synchronization delay.
@@ -260,5 +232,5 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
                 pass
 
     assert pgid is not None
-    await _wait_for_group_gone(pgid)
+    await wait_for_process_group_gone(pgid)
     await _wait_for_fd_count(base_fds)
