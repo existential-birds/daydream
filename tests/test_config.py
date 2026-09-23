@@ -3,13 +3,13 @@ from typing import Any
 
 import pytest
 
+from daydream import config
 from daydream.config import (
     AUDIT_CATEGORIES,
     DEEP_PHASE_DEFAULT_EFFORT,
     DEFAULT_DIAGRAM_MIN_BRANCH_POINTS,
     DEFAULT_DIAGRAM_MIN_CODE_FILES,
     DEFAULT_DIAGRAM_MIN_MODULES,
-    DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
     DIAGRAM_KINDS,
     DIAGRAM_LABEL_CAP_EDGE,
@@ -26,8 +26,6 @@ from daydream.config import (
     IMPROVE_PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
-    REASONING_EFFORT_LEVELS,
-    STACK_CHOICES,
     STRUCTURE_STACK_NAME,
 )
 
@@ -56,7 +54,6 @@ IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
 
 def test_no_pr_feedback_skill_constants() -> None:
     """M7/M8: no PR-feedback skill constants remain in config."""
-    from daydream import config
 
     assert not hasattr(config, "PR_FEEDBACK_FETCH_SKILL")
     assert not hasattr(config, "PR_FEEDBACK_RESPOND_SKILL")
@@ -73,20 +70,6 @@ def test_audit_categories_match_playbook() -> None:
         "dx",
         "docs",
     }
-
-
-def test_stack_choices_are_neutral_stack_names() -> None:
-    """M1: STACK_CHOICES names built-in scopes, never skill strings."""
-    assert STACK_CHOICES == (
-        "python",
-        "react",
-        "elixir",
-        "go",
-        "rust",
-        "ios",
-    )
-    for stack in STACK_CHOICES:
-        assert "/" not in stack and ":" not in stack
 
 
 def test_quick_effort_tier_uses_high_confidence_core_categories() -> None:
@@ -206,10 +189,10 @@ def test_merged_table_is_the_union_of_its_two_halves() -> None:
 
 def test_phase_default_effort_levels_are_valid_for_every_driver() -> None:
     """Only the five levels every driver accepts may appear in the table."""
-    assert REASONING_EFFORT_LEVELS == ("low", "medium", "high", "xhigh", "max")
+    levels = ("low", "medium", "high", "xhigh", "max")
     for backend, table in PHASE_DEFAULT_EFFORT.items():
         for phase, level in table.items():
-            assert level in REASONING_EFFORT_LEVELS, f"{backend}/{phase}={level}"
+            assert level in levels, f"{backend}/{phase}={level}"
 
 
 def test_deep_phase_effort_tier_assignments() -> None:
@@ -256,12 +239,6 @@ def test_plan_write_is_pinned_to_the_top_model_tier(backend: Any) -> None:
 
 def test_default_pi_model_is_nous_deepseek_flash() -> None:
     assert DEFAULT_PI_MODEL == "deepseek/deepseek-v4-flash-0731"
-
-
-def test_default_exploration_model_matches_claude_phase_default() -> None:
-    # EXPLORE precedent: DEFAULT_EXPLORATION_MODEL is the fallback when no flag
-    # is set and table lookup misses; keep it consistent with the table for Claude.
-    assert DEFAULT_EXPLORATION_MODEL == PHASE_DEFAULT_MODELS["claude"]["exploration"]
 
 
 def test_structure_constant_is_scope_metadata_not_a_skill() -> None:

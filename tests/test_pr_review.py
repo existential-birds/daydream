@@ -10,11 +10,15 @@ from typing import Any
 
 import pytest
 
+import daydream.hunk_index as hunk_index
 from daydream import git_ops, pr_comment_renderer, pr_review
-from daydream.findings import ArtifactFinding
+from daydream.extensions import Registry, SummaryContext
+from daydream.extensions.builtins import register_builtins
+from daydream.findings import ArtifactFinding, load_findings_artifact
 from daydream.git_ops import GitError
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
+    InlineReviewComment,
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
@@ -26,13 +30,17 @@ from daydream.pr_review import (
     classify,
     default_render_finding,
     default_render_summary,
+    diagram_marker,
     extract_anchors,
+    parse_diagram_markers,
     parse_finding_markers,
     parsed_issues_from_items,
     resolve_review_renderers,
     snap_to_hunk,
 )
+from daydream.reconcile import PriorDiagramComment
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.runner import RunConfig, _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
@@ -41,6 +49,12 @@ gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed
 
 SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
 BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summary)
+
+
+def _inline(path: str = "a.py", line: int = 10, body: str = "x") -> InlineReviewComment:
+    """One typed inline comment, the shape ``_ClassifiedIssues.inline`` holds."""
+    return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
+
 
 def _recording_fake_submit(
     captured: dict[str, pr_review.ClassifiedReviewPlan],
@@ -79,8 +93,6 @@ def test_finding_and_summary_markdown_is_byte_stable() -> None:
 
 
 def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     reg = Registry()
     register_builtins(reg)
@@ -96,8 +108,6 @@ def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -
 
 
 def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     def boom(finding: Any, ctx: Any) -> str:
         raise RuntimeError("boom")
@@ -129,8 +139,6 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_c
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
     pr: PRInfo
 ) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     def summary_renderer(ctx: Any) -> Any:
         rows = [
@@ -159,8 +167,6 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
 
 
 def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     reg = Registry()
     register_builtins(reg)
@@ -181,8 +187,6 @@ def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
 def test_summary_renderer_falls_back_and_warns_on_error(
     pr: PRInfo, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     def boom(ctx: Any) -> str:
         raise RuntimeError("kaboom")
@@ -300,7 +304,6 @@ def test_parse_hunks() -> None:
 
 
 def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.hunk_index as hunk_index
 
     calls = {"n": 0}
     real = hunk_index.parse_hunks
@@ -416,9 +419,9 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
 
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 1
-    assert result.inline[0]["path"] == "a.py"
-    assert result.inline[0]["line"] == 10
-    assert result.inline[0]["side"] == "RIGHT"
+    assert result.inline[0].path == "a.py"
+    assert result.inline[0].line == 10
+    assert result.inline[0].side == "RIGHT"
     assert len(result.inline_issues) == 1
     assert result.inline_issues[0].path == "a.py"
     body_paths = [i.path for i in result.body_only]
@@ -456,11 +459,11 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 2
     # conftest.py:89 snapped to hunk start 90
-    assert result.inline[0]["path"] == "conftest.py"
-    assert result.inline[0]["line"] == 90
+    assert result.inline[0].path == "conftest.py"
+    assert result.inline[0].line == 90
     # modernize-app.py:105 snapped to second hunk start 106
-    assert result.inline[1]["path"] == "scripts/modernize-app.py"
-    assert result.inline[1]["line"] == 106
+    assert result.inline[1].path == "scripts/modernize-app.py"
+    assert result.inline[1].line == 106
 
 
 def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> None:
@@ -552,7 +555,7 @@ def test_build_payload_blocks_forged_reviewed_commit_line(
 
 def test_build_payload_shape(pr: PRInfo) -> None:
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         body_only=[
             ParsedIssue(
                 path="b.py",
@@ -580,7 +583,7 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     )
     assert payload["commit_id"] == "head123"
     assert payload["event"] == "COMMENT"
-    assert payload["comments"] == classified.inline
+    assert payload["comments"][0]["path"] == "a.py"
 
     body = payload["body"]
     assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
@@ -620,7 +623,7 @@ def _classified_with_severity(
     severity: str, confidence: str, *, body_confidence: str | None = None,
 ) -> pr_review._ClassifiedIssues:
     return pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
                                confidence=body_confidence or confidence, severity=severity)],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b",
@@ -658,7 +661,7 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
 ) -> None:
     """A None-severity issue must not crash the clean computation."""
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
@@ -677,7 +680,7 @@ def test_build_payload_keeps_comment_when_off_vocabulary_severity(
     the approval (fail-closed) just like 'high'/'medium'.
     """
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[
             ParsedIssue(
                 path="a.py",
@@ -826,6 +829,88 @@ def test_find_pr_by_number_assembles_pr_info(
     ) == (
         7, head, base, "main", "o", "r", "https://github.com/o/r/pull/7", "forky/r",
     )
+
+
+@pytest.mark.parametrize("lookup", ["branch", "number"])
+@pytest.mark.parametrize("include_empty_slug", [False, True])
+def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, tmp_path: Path,
+    lookup: str, include_empty_slug: bool,
+) -> None:
+    """Both gh lookup routes preserve validated head identity through export."""
+
+    row, base, head = _local_pr_row(git_repo)
+    row["headRepository"] = {"id": "R_fixture", "name": "shelfspace-mono"}
+    if include_empty_slug:
+        row["headRepository"]["nameWithOwner"] = ""
+    row["headRepositoryOwner"] = {"login": "shelfspace-app"}
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda *_a, **_k: ("o", "r"))
+    info = (
+        pr_review.find_open_pr(git_repo)
+        if lookup == "branch" else pr_review.find_pr_by_number(git_repo, 7)
+    )
+    assert info is not None
+    assert (info.head_repo, info.base_sha, info.head_sha) == ("shelfspace-app/shelfspace-mono", base, head)
+
+    output = tmp_path / "findings.json"
+    config = RunConfig(findings_out=str(output), pr_number=7 if lookup == "number" else None)
+    assert _emit_findings_from_items(
+        git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
+    ) == 0
+    artifact = load_findings_artifact(
+        output, expected_repo="o/r", expected_pr_number=7, expected_head_sha=head,
+    )
+    assert artifact.findings == []
+
+    # Compatibility fallback must not allow export with an unavailable PR head.
+    output.unlink()
+    row["headRefOid"] = "f" * 40
+    assert _emit_findings_from_items(
+        git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
+    ) == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("value", [None, False, 7, " ", "fork/r/extra", "fork/", "/r"])
+def test_head_slug_fallback_does_not_mask_invalid_present_value(value: Any) -> None:
+    row = {
+        "headRepository": {"name": "r", "nameWithOwner": value},
+        "headRepositoryOwner": {"login": "fork"},
+    }
+    with pytest.raises(GitError, match="invalid PR row"):
+        pr_review._head_repo_slug_from_row(row)
+
+
+@pytest.mark.parametrize("component", ["name", "login"])
+@pytest.mark.parametrize("value", [None, False, 7, "", " ", "a/b", "a\nb"])
+def test_head_slug_fallback_rejects_invalid_components(component: str, value: Any) -> None:
+    row = {
+        "headRepository": {"name": "r", "nameWithOwner": ""},
+        "headRepositoryOwner": {"login": "fork"},
+    }
+    row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
+    with pytest.raises(GitError, match="invalid PR row"):
+        pr_review._head_repo_slug_from_row(row)
+
+
+@pytest.mark.parametrize("slug", ["other/r", "fork/other"])
+def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
+    with pytest.raises(GitError, match="contradictory head repository identity") as error:
+        pr_review._head_repo_slug_from_row({
+            "headRepository": {"name": "r", "nameWithOwner": slug, "id": "private-value"},
+            "headRepositoryOwner": {"login": "fork"},
+        })
+    assert "private-value" not in str(error.value)
+    assert slug not in str(error.value)
+
+
+def test_head_slug_allows_case_differences() -> None:
+    assert pr_review._head_repo_slug_from_row({
+        "headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
+        "headRepositoryOwner": {"login": "fork"},
+    }) == "FORK/widgets"
 
 
 @pytest.mark.parametrize(
@@ -1043,7 +1128,7 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             body_only=[],
         ),
     )
@@ -1084,7 +1169,7 @@ async def test_post_payload_approves_when_clean_and_enabled(
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             inline_issues=[
                 ParsedIssue(
                     path="a.py",
@@ -1128,7 +1213,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             body_only=[],
         ),
     )
@@ -1206,7 +1291,7 @@ async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, 
         pr_review,
         "classify",
         lambda *_a, **_k: pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline=[_inline(line=1)],
             body_only=[],
         ),
     )
@@ -1291,6 +1376,27 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     assert status == pr_review.PostStatus.POSTED
     assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
     assert captured["plan"].diagram_blocks == blocks
+
+
+@pytest.mark.asyncio
+async def test_incomplete_live_review_posts_even_without_findings_and_cannot_approve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
+) -> None:
+    merged = tmp_path / "merged-items.json"
+    merged.write_text(json.dumps({"items": []}))
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
+    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
+    warnings = ("Alternatives: wall_budget_exceeded",)
+    status = await pr_review.post_review_to_pr_from_report(
+        tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+        post=True, approve_on_clean=True, review_warnings=warnings,
+        renderers=BUILTIN_RENDERERS, run_info="test run",
+    )
+    assert status == pr_review.PostStatus.POSTED
+    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
+    assert captured["plan"].review_warnings == warnings
 
 
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
@@ -1468,16 +1574,16 @@ def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> No
 
     result = classify(git_repo, _pr_for(base, head), [issue])
 
-    assert [c["line"] for c in result.inline] == [12], (
+    assert [c.line for c in result.inline] == [12], (
         f"in-hunk citation was not posted on its own line; "
         f"file_level={[i.path for i in result.file_level]} "
         f"body_only={[i.path for i in result.body_only]}"
     )
-    assert result.inline[0]["path"] == "cache.yaml"
+    assert result.inline[0].path == "cache.yaml"
     assert not result.file_level
     assert not result.body_only
     # Nothing moved, so nothing is annotated.
-    assert "**Placement:**" not in result.inline[0]["body"]
+    assert "**Placement:**" not in result.inline[0].body
 
 
 def test_classify_annotates_relocated_line(git_repo: Path) -> None:
@@ -1497,10 +1603,10 @@ def test_classify_annotates_relocated_line(git_repo: Path) -> None:
 
     result = classify(git_repo, _pr_for(base, head), [issue])
 
-    assert [c["line"] for c in result.inline] == [17]
+    assert [c.line for c in result.inline] == [17]
     note = "**Placement:** posted on line 17; reviewer cited line 15."
     assert note in issue.body, "the relocation was not recorded on the finding"
-    assert note in result.inline[0]["body"], "the posted comment does not show the relocation"
+    assert note in result.inline[0].body, "the posted comment does not show the relocation"
     # Re-classifying the same objects must not stack duplicate notes.
     classify(git_repo, _pr_for(base, head), [issue])
     assert issue.body.count("**Placement:**") == 1
@@ -1632,7 +1738,7 @@ def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
     """R2.2: a judged-high finding demoted to low by location validation must
     still block APPROVE — demotion is visible, never approval-silencing."""
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[
             ParsedIssue(
                 path="a.py",
@@ -1656,7 +1762,7 @@ def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
     keeps the gate closed."""
     for before in ("low", None):
         classified = pr_review._ClassifiedIssues(
-            inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+            inline=[_inline()],
             inline_issues=[
                 ParsedIssue(
                     path="a.py",
@@ -1727,7 +1833,7 @@ def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> N
 def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
     # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
     classified = pr_review._ClassifiedIssues(
-        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline=[_inline()],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
@@ -1791,7 +1897,6 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
 
 def test_diagram_marker_round_trip() -> None:
     """The hidden marker is invisible in rendered markdown and parses back exactly."""
-    from daydream.pr_review import diagram_marker, parse_diagram_markers
 
     body = "\n\n".join(
         [
@@ -1809,11 +1914,17 @@ def test_diagram_marker_round_trip() -> None:
     assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
 
 
+def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
+    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
+        calls.append(("minimize", node_id))
+        return True
+
+    return minimize
+
+
 def test_diagram_replacement_post_failure_keeps_prior_comment(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from daydream.git_ops import GitError
-    from daydream.reconcile import PriorDiagramComment
 
     calls: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
@@ -1821,13 +1932,9 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
         lambda *_a, **_k: [PriorDiagramComment("IC_prior", ("sequence",))],
     )
 
-    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
-        calls.append(("minimize", node_id))
-        return True
-
     monkeypatch.setattr(
         "daydream.reconcile.minimize_comment",
-        minimize,
+        _record_minimize(calls),
     )
 
     def fail_post(*_args: Any, **_kwargs: Any) -> Any:
@@ -1851,7 +1958,6 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
 def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from daydream.reconcile import PriorDiagramComment
 
     calls: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
@@ -1862,13 +1968,9 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
         ],
     )
 
-    def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
-        calls.append(("minimize", node_id))
-        return True
-
     monkeypatch.setattr(
         "daydream.reconcile.minimize_comment",
-        minimize,
+        _record_minimize(calls),
     )
 
     def post(*_args: Any, **_kwargs: Any) -> dict[str, str]:
@@ -1930,8 +2032,6 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
     belong inside the summary body), so a renderer that ignores ``ctx.diagrams``
     drops them -- which is exactly what docs/extensions.md warns about.
     """
-    from daydream.extensions import Registry
-    from daydream.extensions.builtins import register_builtins
 
     seen: list[str | None] = []
 
@@ -1990,8 +2090,6 @@ def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
 def test_payload_uses_only_explicit_renderers_and_run_info(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.extensions import Registry, SummaryContext
-    from daydream.extensions.builtins import register_builtins
 
     seen: list[SummaryContext] = []
 

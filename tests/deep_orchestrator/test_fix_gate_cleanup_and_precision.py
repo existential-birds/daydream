@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -9,6 +10,12 @@ from typing import Any
 
 import pytest
 
+from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.deep import orchestrator as deep_orchestrator
+from daydream.extensions.api import Stop
+from daydream.git_ops import GitTimeoutError
+from daydream.run_context import current_run_context
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _forbidden_input,
     _install_accept_gate_pipeline,
@@ -189,7 +196,6 @@ async def test_start_at_fix_recovers_merged_items(
 ) -> None:
     """--start-at fix with ONLY the deep-dir merged-items.json present (canonical repo review-output.md ABSENT)
     still loads items and reaches phase_fix."""
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
 
@@ -249,9 +255,6 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: non-interactive deep run declines fixes and exits 0 without reading stdin."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.run_context import current_run_context
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     # The PR post runs before the gate; stub the non-idempotent GitHub write.
@@ -302,9 +305,6 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 ) -> None:
     """Real-path: an EOF on stdin at the apply-fixes gate is caught and resolved to the safe default -- the deep
     run declines fixes and returns 0, no crash."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.run_context import current_run_context
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
@@ -347,8 +347,6 @@ async def test_apply_fixes_gate_interactive_yes_applies_fixes(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: a typed ``y`` at the apply-fixes gate runs the fix loop."""
-    from daydream.run_context import current_run_context
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
@@ -399,8 +397,6 @@ async def test_cleanup_flag_controls_review_report_on_success(
     report_exists: bool,
 ) -> None:
     """Successful shallow and deep runs follow the explicit cleanup flag."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import run
 
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
@@ -416,8 +412,6 @@ async def test_cleanup_none_unattended_defaults_to_keep(
 ) -> None:
     """#330 R2/#6: an unspecified cleanup flag on an unattended run defaults to KEEPING the report (the old
     ``safe_default=False``), without touching stdin."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import run
 
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
@@ -443,8 +437,6 @@ async def test_cleanup_none_interactive_prompts_before_keeping(
     """#330 R2/#6: with cleanup unspecified and interactive stdin, the terminal
     step prompts the user (the old shallow preamble's question); a "n" answer
     keeps the report."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import run
 
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
@@ -482,8 +474,6 @@ async def test_cleanup_gate_declines_honors_cleanup_flag(
     mute_side_effects: Mute,
 ) -> None:
     """#335 real-path: ``--cleanup`` is honored even when the fix gate declines."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import run
 
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
@@ -510,12 +500,7 @@ async def test_cleanup_skips_on_failure_keeps_evidence(
     mute_side_effects: Mute,
 ) -> None:
     """#335 real-path: a non-zero exit skips ``--cleanup`` so evidence survives."""
-    import dataclasses
 
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.deep import orchestrator as deep_orchestrator
-    from daydream.extensions.api import Stop
-    from daydream.runner import run
 
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
@@ -564,7 +549,6 @@ async def test_deep_run_recovers_from_transient_git_timeout(
 
     exit_code = await _run_deep(multi_stack_target)
 
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     assert state["timed_out_once"], "the injected git timeout never fired"
     # Survived the timeout, exited cleanly, and progressed past the diff preamble.
@@ -580,7 +564,6 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    from daydream.git_ops import GitTimeoutError
 
     def always_timeout(*args: Any, **kwargs: Any) -> str:
         raise GitTimeoutError("git diff main...HEAD timed out after 30s (3 attempts)")

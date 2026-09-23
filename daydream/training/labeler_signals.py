@@ -37,7 +37,7 @@ from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (
     _QUALIFYING_ASSOCIATIONS,
     _identity_gates_pass,
-    _login,
+    _user_str,
     classify_reply,
     is_qualifying_author,
 )
@@ -140,7 +140,7 @@ def _reply_reason(
     assoc = reply.get("author_association")
     if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
         return f"assoc:{assoc}"
-    login = _login(reply)
+    login = _user_str(reply, "login")
     if login in pr_author_logins:
         return "pr_author"
     if login in review_author_logins:
@@ -161,7 +161,7 @@ def _reply_evidence(
         evidence.append(
             {
                 "reply_id": reply.get("id"),
-                "author": _login(reply),
+                "author": _user_str(reply, "login"),
                 "author_association": reply.get("author_association", ""),
                 "created_at": reply.get("created_at", ""),
                 "body_sha256": hashlib.sha256((reply.get("body") or "").encode("utf-8")).hexdigest(),
@@ -761,7 +761,10 @@ def per_finding_resolution_signal(
         comment_id = threads.comment_id_by_fingerprint.get(fingerprint)
         if comment_id is None:
             resolutions.append(
-                PerFindingResolution(fingerprint=fingerprint, comment_id=None, disposition="missing")
+                PerFindingResolution(
+                    fingerprint=fingerprint, comment_id=None, disposition="missing",
+                    evidence_digest=reply_evidence_digest([]),
+                )
             )
             continue
         replies = threads.replies_by_comment.get(comment_id, [])

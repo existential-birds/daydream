@@ -149,6 +149,7 @@ class Pipeline:
     uncovered_sweep_min_hunk_lines: int = 5
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
+    review_wall_budget_s: int = 2700
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ class ReviewProfile:
                 key: strategy.content for key, strategy in sorted(self.strategies.items())
             },
             "pipeline": {
+                "review_wall_budget_s": self.pipeline.review_wall_budget_s,
                 "structural_enabled": self.pipeline.structural_enabled,
                 "uncovered_sweep_enabled": self.pipeline.uncovered_sweep_enabled,
                 "uncovered_sweep_max_files": self.pipeline.uncovered_sweep_max_files,
@@ -222,6 +224,13 @@ class ReviewProfile:
 INTENT_STRATEGY_JUDGMENT_MARKER = "That diff is the complete review target"
 ALTERNATIVES_STRATEGY_JUDGMENT_MARKER = "Report only concrete problems you can substantiate "
 
+FOLDED_ALTERNATIVES_INSTRUCTION = (
+    "Within this same boundary review, check design choices that conflict with the confirmed intent, "
+    "an existing canonical implementation, or an applicable repository convention. "
+    "Report only a concrete downside supported by repository evidence; do not launch "
+    "a separate file-by-file alternatives audit or propose hypothetical replacements."
+)
+
 
 def build_default_profile() -> ReviewProfile:
     """Return the packaged default profile (R7).
@@ -247,7 +256,7 @@ def build_default_profile() -> ReviewProfile:
             "daydream.prompts.exploration_subagents.build_pattern_scanner_prompt",
             (
                 "You are the **pattern-scanner** specialist. Detect codebase conventions\n"
-                "and read guideline files relevant to the changes below."
+                "and read guideline files relevant to the changes below. Report conventions, not defects."
             ),
         ),
         "exploration.dependency_trace": _exploration(
@@ -256,7 +265,7 @@ def build_default_profile() -> ReviewProfile:
                 "You are the **dependency-tracer** specialist. Extend the affected-files\n"
                 "list beyond the static-resolved imports by grepping for call sites and\n"
                 "reading the implementations. For every import or call edge you confirm,\n"
-                "emit a Dependency record."
+                "emit a Dependency record. Stop when relevant edges are mapped; do not audit their correctness."
             ),
         ),
         "exploration.test_mapping": _exploration(
@@ -265,7 +274,8 @@ def build_default_profile() -> ReviewProfile:
                 "You are the **test-mapper** specialist. Locate test files for each modified\n"
                 "source file using conventional path mapping (tests/test_X.py, *.test.ts,\n"
                 "*_test.go, tests/<crate>_test.rs). Emit a FileInfo with role=\"test\" for\n"
-                "each test file you find, and set source_file to the source file it covers."
+                "each test file you find, and set source_file to the source file it covers. "
+                "Map coverage locations; do not conduct a test-quality review."
             ),
         ),
         "intent": Strategy(
@@ -275,7 +285,9 @@ def build_default_profile() -> ReviewProfile:
                 f"{INTENT_STRATEGY_JUDGMENT_MARKER}, already computed against the "
                 "repository's base branch — this run is not tied to a GitHub pull request, so "
                 "do not look up, list, or ask about pull requests. Do not invoke any skills or "
-                "slash commands. Present your understanding concisely — what problem is being "
+                "slash commands. Use the supplied author context and diff first; "
+                "read source only to resolve ambiguity about intent, not to conduct a correctness review. "
+                "Present your understanding concisely — what problem is being "
                 "solved and how — as plain text in your reply."
             ),
             source="copied: daydream.phases.build_intent_prompt",
@@ -286,11 +298,14 @@ def build_default_profile() -> ReviewProfile:
                 "{intent_summary}\n\n"
                 "Given this intent, explore the codebase and evaluate the implementation "
                 f"in the diff at {{diff_path}}. {ALTERNATIVES_STRATEGY_JUDGMENT_MARKER}"
-                "with evidence — correctness bugs, design decisions that will cause a real "
+                "with evidence. Focus on design choices that conflict with the confirmed intent or "
+                "an existing canonical implementation. Stack reviewers handle local correctness; "
+                "the structural pass handles cross-module contracts. Do not repeat their full audit. "
+                "Consider design decisions that will cause a real "
                 "failure, or violations of a Codebase Convention above. Do NOT list stylistic "
                 "preferences, speculative 'nice to have' opinions, or alternatives you cannot "
                 "tie to a concrete downside.\n\n"
-                "Return a numbered list of issues. For each issue, include: a sequential id "
+                "Return the required JSON object with an issues array. For each issue, include: a sequential id "
                 "number, a brief title, a description of the concrete problem and the evidence "
                 "for it, a severity level (high/medium/low), a concrete recommendation for how "
                 "to address it, and the relevant file paths.\n\n"
@@ -305,8 +320,10 @@ def build_default_profile() -> ReviewProfile:
                 "searches, not as permission to apply a memorized framework checklist.\n"
                 "\n"
                 "Method:\n"
-                "1. Read every assigned file and the full enclosing symbol for each "
-                "relevant hunk. Follow changed callers, callees, types, configuration, "
+                "1. Read each relevant hunk in every assigned file with its full "
+                "enclosing symbol or configuration section. Expand to other sections "
+                "only when needed to resolve a concrete candidate. Follow changed callers, "
+                "callees, types, configuration, "
                 "persistence or network boundaries, error paths, and cleanup or lifecycle "
                 "paths as needed.\n"
                 "2. Compare the change with repository-local conventions and canonical "
@@ -338,6 +355,7 @@ def build_default_profile() -> ReviewProfile:
                 "Review the repository-wide interactions introduced or exposed by this "
                 "diff. Concentrate on boundaries that a file-scoped reviewer can miss:\n"
                 "\n"
+                f"{FOLDED_ALTERNATIVES_INSTRUCTION}\n\n"
                 "- incompatible contracts across modules or stacks, including types, "
                 "schemas, CLI or API behavior, configuration, serialization, error "
                 "semantics, and ownership or lifecycle expectations;\n"
@@ -355,7 +373,9 @@ def build_default_profile() -> ReviewProfile:
                 "convention.\n"
                 "\n"
                 "For each candidate, read both sides of the boundary and trace the relevant "
-                "value, call, state transition, or resource lifetime end to end. Search for "
+                "value, call, state transition, or resource lifetime end to end. Do not repeat "
+                "the language reviewers’ file-by-file correctness audit. "
+                "Stop tracing a boundary when its contract agrees and no concrete candidate remains. Search for "
                 "repository evidence that disproves the concern. Verify that any "
                 "recommended canonical helper, contract, or layer actually exists and is "
                 "compatible before proposing reuse.\n"
@@ -372,8 +392,9 @@ def build_default_profile() -> ReviewProfile:
         "discovery.generic_fallback": Strategy(
             content=(
                 "Review these files for correctness, clarity, and consistency with the "
-                "author's intent. Read every assigned file in full and the full "
-                "enclosing symbol for each relevant hunk before judging it. Apply "
+                "author's intent. Read each relevant hunk in every assigned file with "
+                "its full enclosing symbol or configuration section before judging it. "
+                "Expand to other sections only to resolve a concrete candidate. Apply "
                 "language-agnostic review practices."
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",
@@ -632,6 +653,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         raise ProfileError("pipeline must be a table", source)
     _PIPELINE_KEYS = frozenset(
         {
+            "review_wall_budget_s",
             "structural_enabled",
             "uncovered_sweep_enabled",
             "uncovered_sweep_max_files",
@@ -734,6 +756,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         )
 
     return Pipeline(
+        review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
         uncovered_sweep_enabled=_bool(
             "uncovered_sweep_enabled", defaults.uncovered_sweep_enabled
@@ -921,5 +944,3 @@ def resolve_harbor_profile(
             profile=profile, source_kind="candidate", source_path=Path(raw)
         )
     return ResolvedProfile(profile=build_default_profile(), source_kind="default")
-
-

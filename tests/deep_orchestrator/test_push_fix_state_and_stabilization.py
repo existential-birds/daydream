@@ -8,13 +8,36 @@ from typing import Any
 
 import pytest
 
+from daydream import git_ops
+from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 from daydream.backends import ResultEvent
+from daydream.deep.fix_steps import (
+    EvidenceKey,
+    RetainedTreeSnapshot,
+    _authorize_final_red_override,
+    _persist_push_verdict,
+    _render_fix_outcome_summary,
+    _resolve_remote_ci_target,
+    _round_dispatch_items,
+    _step_fix_gate,
+    _step_remote_ci,
+    _step_test,
+    finalize_retained_tree_after_test,
+    verify_retained_tree,
+)
+from daydream.deep.orchestrator import _remote_ci_enabled
+from daydream.extensions.api import Stop
+from daydream.git_ops import GitError
+from daydream.phases import PushReceipt, TestAndHealResult, TestAttemptEvidence
+from daydream.run_context import InteractionPolicy, RunContext
 from tests.deep_orchestrator.support import (
+    _base_repo,
     _direct_fix_context,
     _direct_fix_state,
     _finalization_fixture,
     _remote_identity_context,
 )
+from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
@@ -24,15 +47,8 @@ from tests.test_deep_orchestrator import (
 
 
 def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
-    from daydream import git_ops
-    from daydream.deep.fix_steps import _persist_push_verdict
-    from daydream.phases import PushReceipt
 
-    repo = tmp_path / "push-verdict"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "push-verdict")
     ctx = _direct_fix_context(repo, [], changed_files=set())
     _direct_fix_state(ctx, [], set())
     sha = git_ops.head_sha(repo)
@@ -73,17 +89,8 @@ def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> N
 
 @pytest.mark.anyio
 async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Path) -> None:
-    from daydream import git_ops
-    from daydream.deep.fix_steps import _step_remote_ci
-    from daydream.deep.orchestrator import _remote_ci_enabled
-    from daydream.extensions.api import Stop
-    from daydream.phases import PushReceipt
 
-    repo = tmp_path / "non-github-push"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "non-github-push")
     ctx = _direct_fix_context(repo, [], changed_files=set())
     _direct_fix_state(ctx, [], set())
     ctx.data["push_receipt"] = PushReceipt("origin", "main", git_ops.head_sha(repo), None)
@@ -115,8 +122,6 @@ def test_remote_target_accepts_matching_same_repo_and_fork_identity(
     head_repository: str,
     pushed_repository: str,
 ) -> None:
-    from daydream.deep.fix_steps import _resolve_remote_ci_target
-    from daydream.phases import PushReceipt
 
     ctx, sha = _remote_identity_context(tmp_path, fake_gh, head_repository=head_repository)
     target = _resolve_remote_ci_target(ctx, PushReceipt("origin", "feature", sha, pushed_repository))
@@ -152,9 +157,6 @@ def test_remote_target_rejects_untrusted_identity_combinations(
     base_ref: str,
     configured_pr: int,
 ) -> None:
-    from daydream.deep.fix_steps import _resolve_remote_ci_target
-    from daydream.git_ops import GitError
-    from daydream.phases import PushReceipt
 
     ctx, sha = _remote_identity_context(
         tmp_path,
@@ -172,16 +174,8 @@ async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A start-at-fix preflight cannot inherit green evidence when policy parsing fails."""
-    from daydream import git_ops
-    from daydream.deep.fix_steps import _step_fix_gate
-    from daydream.extensions import Stop
-    from daydream.run_context import InteractionPolicy, RunContext
 
-    repo = tmp_path / "malformed-related"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "malformed-related")
     (repo / "a.py").write_text("A = 2\n")
     item = _merge_item(1, "a.py", "high")
     item["related_files"] = ["../outside.py"]
@@ -204,16 +198,8 @@ async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale
 async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream import git_ops
-    from daydream.deep.fix_steps import _step_fix_gate
-    from daydream.extensions import Stop
-    from daydream.run_context import InteractionPolicy, RunContext
 
-    repo = tmp_path / "staged-preflight"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "staged-preflight")
     (repo / "a.py").write_text("A = 2\n")
     _git(repo, "add", "a.py")
     item = _merge_item(1, "a.py", "high")
@@ -235,7 +221,6 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
 
 
 def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
-    from daydream.deep.fix_steps import _round_dispatch_items
 
     repo = tmp_path / "cross-item-retarget"
     _init_repo(repo)
@@ -273,7 +258,6 @@ def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None
 def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_retarget(
     tmp_path: Path,
 ) -> None:
-    from daydream.deep.fix_steps import _round_dispatch_items
 
     repo = tmp_path / "accepted-then-rejected-retarget"
     _init_repo(repo)
@@ -314,8 +298,6 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.deep.fix_steps import RetainedTreeSnapshot, verify_retained_tree
-    from tests.harness.backend import ScriptedBackend
 
     repo = tmp_path / "resolved-target-provenance"
     _init_repo(repo)
@@ -365,14 +347,18 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
     assert outcomes["item:a"]["path"] == "b.py"
 
 
+@pytest.mark.parametrize("prior_verdict", [None, "resolved", "unresolved", "wrong_target"])
+@pytest.mark.parametrize("final_verdict", ["unresolved", "wrong_target", "regressed"])
 async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    prior_verdict: str | None, final_verdict: str,
 ) -> None:
-    from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
-    from daydream.extensions import Stop
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
+    ctx.data["fix_outcomes"] = (
+        {"item:a": {"issue_id": 1, "verdict": prior_verdict}}
+        if prior_verdict else {}
+    )
     state.verifier_key = EvidenceKey("prior-tree", state.footprint.policy_revision)
     evidence = TestAttemptEvidence(
         session_id=state.session_id,
@@ -389,7 +375,7 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
 
     async def _actionable(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
         calls["verify"] += 1
-        return {"item:a": {"issue_id": 1, "verdict": "unresolved", "reason": "still broken"}}
+        return {"item:a": {"issue_id": 1, "verdict": final_verdict, "reason": "still broken"}}
 
     async def _no_test(*_a: Any, **_k: Any) -> Any:
         calls["test"] += 1
@@ -403,13 +389,18 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
         TestAndHealResult(True, 0, True, False, (evidence,)),
     )
 
+    if prior_verdict in {"unresolved", "wrong_target"} and final_verdict != "regressed":
+        assert result is None
+        assert calls == {"verify": 1, "test": 0}
+        assert state.latest_retained == snapshot
+        assert ctx.data["fix_outcomes"]["item:a"]["verdict"] == final_verdict
+        return
     assert isinstance(result, Stop) and result.exit_code == 1
     assert calls == {"verify": 1, "test": 0}
     assert state.latest_retained is None
     failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
     assert failure["session_id"] == state.session_id
     assert "actionable" in failure["reason"]
-    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 
     phase_states = derive_phase_states(ctx.work.repo, phase_events=[], session_id=state.session_id)
     assert phase_states["fix"]["status"] == "failed"
@@ -422,10 +413,6 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_mode: str
 ) -> None:
     """A healer's red/exception exit is confined like a successful path."""
-    from daydream import git_ops
-    from daydream.deep.fix_steps import _step_test
-    from daydream.extensions import Stop
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     repo = tmp_path / "red-heal-confinement"
     _init_repo(repo)
@@ -475,9 +462,6 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
 async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
 ) -> None:
-    from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
-    from daydream.extensions import Stop
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
     state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
@@ -528,7 +512,6 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     assert test_calls == 1
     assert state.latest_retained is None
     assert (ctx.data["dd"] / "stabilization-failed.json").is_file()
-    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 
     phase_states = derive_phase_states(ctx.work.repo, phase_events=[], session_id=state.session_id)
     assert phase_states["fix"]["status"] == "failed"
@@ -539,9 +522,6 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
 async def test_stabilization_audit_write_failure_stops_before_retest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep.fix_steps import finalize_retained_tree_after_test
-    from daydream.extensions import Stop
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
     evidence = TestAttemptEvidence(
@@ -574,8 +554,7 @@ async def test_stabilization_audit_write_failure_stops_before_retest(
     assert "audit disk full" in failure["reason"]
 
 
-def test_fix_outcome_summary_renders_uid_keyed_outcomes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.deep.fix_steps import _render_fix_outcome_summary
+def test_fix_outcome_summary_renders_uid_keyed_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
 
     rendered: list[tuple[int, int, str | None]] = []
     monkeypatch.setattr(
@@ -585,7 +564,7 @@ def test_fix_outcome_summary_renders_uid_keyed_outcomes(tmp_path: Path, monkeypa
     items = [{**_merge_item(7, "a.py", "high"), "item_uid": "item:a"}]
     outcomes = {"item:a": {"issue_id": 7, "verdict": "resolved", "reason": "fixed"}}
 
-    _render_fix_outcome_summary(tmp_path, items, outcomes)
+    _render_fix_outcome_summary(items, outcomes)
 
     assert rendered == [(1, 1, "resolved")]
 
@@ -598,9 +577,6 @@ async def test_changed_tree_red_retest_requires_new_override(
     expect_stop: bool,
 ) -> None:
     """A prior-tree red override cannot authorize a newly executed red result."""
-    from daydream.deep.fix_steps import EvidenceKey, finalize_retained_tree_after_test
-    from daydream.extensions import Stop
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
     state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
@@ -650,8 +626,6 @@ async def test_changed_tree_red_retest_requires_new_override(
 
 
 def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) -> None:
-    from daydream.deep.fix_steps import _authorize_final_red_override
-    from daydream.run_context import InteractionPolicy, RunContext
 
     prompts: list[dict[str, Any]] = []
 
@@ -674,11 +648,7 @@ def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) ->
             )
             return True
 
-    repo = tmp_path / "red-override"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "red-override")
     ctx = _direct_fix_context(repo, [], changed_files=set())
     ctx.run_context = RecordingContext(InteractionPolicy())
 

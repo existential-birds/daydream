@@ -500,14 +500,13 @@ def test_locationless_gold_set_accepts_canonical_id() -> None:
     assert len(gs) == 1 and gs[0].path is None
 
 
-def test_locationless_candidate_accepted() -> None:
-    f = parse_candidate_finding(_cand(path=None, start_line=None, end_line=None))
+@pytest.mark.parametrize("parse,make", [
+    (parse_candidate_finding, _cand),
+    (parse_gold_finding, _gold),
+])
+def test_locationless_finding_accepted(parse: Any, make: Any) -> None:
+    f = parse(make(path=None, start_line=None, end_line=None))
     assert f.path is None and f.start_line is None and f.end_line is None
-
-
-def test_locationless_gold_accepted() -> None:
-    g = parse_gold_finding(_gold(path=None, start_line=None, end_line=None))
-    assert g.path is None and g.start_line is None and g.end_line is None
 
 
 @pytest.mark.parametrize("partial", [
@@ -618,6 +617,38 @@ def _axis_pair(gold_raw: Any, cand_raw: Any) -> tuple[list[Any], Any, list[Verdi
     return gold, art, vs
 
 
+def _metric_row(**overrides: Any) -> dict[str, Any]:
+    """A scored reward row with every axis key at its zero/absent default.
+
+    ``aggregate_metrics`` reads each axis key through ``row.get(k, 0)``, so
+    these defaults are also what a pre-axis row supplies; tests override only
+    the keys their case exercises, and presence is opted into explicitly (an
+    axis with ``*_present == 0`` contributes no pairs).
+    """
+    row: dict[str, Any] = {
+        "verifier_error": 0,
+        "reward": 1.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "clean_task": 0,
+        "location_present": 0,
+        "location_exact": 0,
+        "location_near": 0,
+        "location_file": 0,
+        "location_miss": 0,
+        "location_credit": 0.0,
+        "severity_present": 0,
+        "severity_exact": 0,
+        "severity_within_1": 0,
+        "severity_mean_distance": 0.0,
+        "severity_credit": 0.0,
+        "severity_pairs": 0,
+    }
+    row.update(overrides)
+    return row
+
+
 def test_score_review_axes_reported_not_gating() -> None:
     # 1 gold finding at src/a.py:10-12, high severity; candidate matches content
     # but reports src/a.py:50 (beyond tolerance) with low severity.
@@ -698,16 +729,11 @@ def test_reward_dict_early_returns_have_absent_axes() -> None:
 
 def test_aggregate_metrics_pools_axis_keys() -> None:
     rows: list[dict[str, object] | None] = [
-        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
-         "clean_task": 1, "location_exact": 1, "location_near": 0, "location_file": 0,
-         "location_miss": 0, "location_credit": 1.0, "location_present": 1,
-         "severity_exact": 1, "severity_within_1": 1, "severity_mean_distance": 0.0,
-         "severity_credit": 1.0, "severity_pairs": 1, "severity_present": 1},
-        {"verifier_error": 0, "reward": 0.0, "tp": 1, "fp": 1, "fn": 0,
-         "clean_task": 1, "location_file": 1, "location_credit": 0.0, "location_present": 1,
-         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
-         "severity_mean_distance": 0.0, "severity_credit": 0.0,
-         "location_exact": 0, "location_near": 0, "location_miss": 0},
+        _metric_row(tp=1, clean_task=1, location_present=1, location_exact=1,
+                    location_credit=1.0, severity_present=1, severity_exact=1,
+                    severity_within_1=1, severity_credit=1.0, severity_pairs=1),
+        _metric_row(reward=0.0, tp=1, fp=1, clean_task=1, location_present=1,
+                    location_file=1),
     ]
     m = vc.aggregate_metrics(rows)
     assert m["location_exact_rate"] == 0.5 and m["location_pairs_scored"] == 2
@@ -728,20 +754,11 @@ def test_aggregate_metrics_axis_rates_zero_when_no_pairs() -> None:
 
 def test_aggregate_metrics_pools_severity_counts_and_credit() -> None:
     rows: list[dict[str, object] | None] = [
-        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
-         "clean_task": 1, "location_present": 0,
-         "location_exact": 0, "location_near": 0, "location_file": 0,
-         "location_miss": 0, "location_credit": 0.0,
-         "severity_exact": 1, "severity_within_1": 1,
-         "severity_mean_distance": 0.0, "severity_credit": 1.0,
-         "severity_pairs": 1, "severity_present": 1},
-        {"verifier_error": 0, "reward": 0.5, "tp": 1, "fp": 0, "fn": 1,
-         "clean_task": 0, "location_present": 0,
-         "location_exact": 0, "location_near": 0, "location_file": 0,
-         "location_miss": 0, "location_credit": 0.0,
-         "severity_exact": 0, "severity_within_1": 1,
-         "severity_mean_distance": 1.0, "severity_credit": 0.5,
-         "severity_pairs": 1, "severity_present": 1},
+        _metric_row(tp=1, clean_task=1, severity_present=1, severity_exact=1,
+                    severity_within_1=1, severity_credit=1.0, severity_pairs=1),
+        _metric_row(reward=0.5, tp=1, fn=1, severity_present=1,
+                    severity_within_1=1, severity_mean_distance=1.0,
+                    severity_credit=0.5, severity_pairs=1),
     ]
     m = vc.aggregate_metrics(rows)
     assert m["severity_pairs_scored"] == 2
@@ -755,13 +772,8 @@ def test_aggregate_metrics_multi_pair_severity_rates_bounded() -> None:
     # must divide by the pooled pair count, never the per-task row count, so
     # the rates stay <= 1.0 (issue: pooled axis rates could exceed 1.0).
     rows: list[dict[str, object] | None] = [
-        {"verifier_error": 0, "reward": 1.0, "tp": 2, "fp": 0, "fn": 0,
-         "clean_task": 1, "location_present": 0,
-         "location_exact": 0, "location_near": 0, "location_file": 0,
-         "location_miss": 0, "location_credit": 0.0,
-         "severity_exact": 2, "severity_within_1": 2,
-         "severity_mean_distance": 0.0, "severity_credit": 1.0,
-         "severity_pairs": 2, "severity_present": 1},
+        _metric_row(tp=2, clean_task=1, severity_present=1, severity_exact=2,
+                    severity_within_1=2, severity_credit=1.0, severity_pairs=2),
     ]
     m = vc.aggregate_metrics(rows)
     assert m["severity_pairs_scored"] == 2
@@ -774,20 +786,10 @@ def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
     # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
     # weighting each task's reported mean by its pair count.
     rows: list[dict[str, object] | None] = [
-        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
-         "clean_task": 1, "location_present": 0,
-         "location_exact": 0, "location_near": 0, "location_file": 0,
-         "location_miss": 0, "location_credit": 0.0,
-         "severity_exact": 1, "severity_within_1": 1,
-         "severity_mean_distance": 0.0, "severity_credit": 1.0,
-         "severity_pairs": 1, "severity_present": 1},
-        {"verifier_error": 0, "reward": 0.5, "tp": 2, "fp": 0, "fn": 0,
-         "clean_task": 0, "location_present": 0,
-         "location_exact": 0, "location_near": 0, "location_file": 0,
-         "location_miss": 0, "location_credit": 0.0,
-         "severity_exact": 0, "severity_within_1": 2,
-         "severity_mean_distance": 1.0, "severity_credit": 0.5,
-         "severity_pairs": 2, "severity_present": 1},
+        _metric_row(tp=1, clean_task=1, severity_present=1, severity_exact=1,
+                    severity_within_1=1, severity_credit=1.0, severity_pairs=1),
+        _metric_row(reward=0.5, tp=2, severity_present=1, severity_within_1=2,
+                    severity_mean_distance=1.0, severity_credit=0.5, severity_pairs=2),
     ]
     m = vc.aggregate_metrics(rows)
     assert m["severity_pairs_scored"] == 3
@@ -800,20 +802,10 @@ def test_aggregate_metrics_location_credit_weights_by_pair_count() -> None:
     # weighting each task's reported credit by its pair count (the sum of its
     # tier counts) so location_credit agrees with the per-pair tier rates.
     rows: list[dict[str, object] | None] = [
-        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
-         "clean_task": 1, "location_exact": 1, "location_near": 0,
-         "location_file": 0, "location_miss": 0, "location_credit": 1.0,
-         "location_present": 1,
-         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
-         "severity_mean_distance": 0.0, "severity_credit": 0.0,
-         "severity_pairs": 0},
-        {"verifier_error": 0, "reward": 0.5, "tp": 2, "fp": 0, "fn": 0,
-         "clean_task": 0, "location_exact": 0, "location_near": 1,
-         "location_file": 1, "location_miss": 0, "location_credit": 0.5,
-         "location_present": 1,
-         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
-         "severity_mean_distance": 0.0, "severity_credit": 0.0,
-         "severity_pairs": 0},
+        _metric_row(tp=1, clean_task=1, location_present=1, location_exact=1,
+                    location_credit=1.0),
+        _metric_row(reward=0.5, tp=2, location_present=1, location_near=1,
+                    location_file=1, location_credit=0.5),
     ]
     m = vc.aggregate_metrics(rows)
     assert m["location_pairs_scored"] == 3

@@ -109,40 +109,35 @@ async def drain(backend: Any, cwd: Path) -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_pi_silent_stream_trips_idle_timeout_and_reaps_subprocess(
+@pytest.mark.parametrize(
+    ("cli", "backend_cls", "lines", "expected_timeout"),
+    [
+        pytest.param("pi", PiBackend, PI_LINES[:2], float(TINY_WINDOW), id="pi"),
+        pytest.param("codex", CodexBackend, CODEX_LINES[:2], None, id="codex"),
+    ],
+)
+async def test_silent_stream_trips_idle_timeout_and_reaps_subprocess(
+    cli: str,
+    backend_cls: Any,
+    lines: list[str],
+    expected_timeout: float | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``pi`` that emits two lines then goes silent forever ends the turn.
+    """A CLI that emits two lines then goes silent forever ends the turn.
 
-    Also proves the env override reaches the armed window: the raised error
-    carries the exact configured value.
+    The pi case also proves the env override reaches the armed window: the
+    raised error carries the exact configured value.
     """
-    spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
+    spawner = install_fake_cli_process(monkeypatch, cli, lines=lines, hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
 
     with pytest.raises(StreamStalledError) as excinfo:
-        await drain(PiBackend(model="test-model"), tmp_path)
+        await drain(backend_cls(model="test-model"), tmp_path)
 
-    assert excinfo.value.cli == "pi"
-    assert excinfo.value.timeout_s == float(TINY_WINDOW)
-    assert excinfo.value.retryable is True
-    assert_stalled_and_reaped(spawner)
-
-
-@pytest.mark.asyncio
-async def test_codex_silent_stream_trips_idle_timeout_and_reaps_subprocess(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ``codex`` that emits two lines then goes silent forever ends the turn."""
-    spawner = install_fake_cli_process(monkeypatch, "codex", lines=CODEX_LINES[:2], hang=True)
-    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
-
-    with pytest.raises(StreamStalledError) as excinfo:
-        await drain(CodexBackend(model="test-model"), tmp_path)
-
-    assert excinfo.value.cli == "codex"
+    assert excinfo.value.cli == cli
+    if expected_timeout is not None:
+        assert excinfo.value.timeout_s == expected_timeout
     assert excinfo.value.retryable is True
     assert_stalled_and_reaped(spawner)
 
@@ -247,28 +242,24 @@ async def test_pi_active_tool_keeps_long_subprocess_window(
 
 
 @pytest.mark.asyncio
-async def test_pi_flowing_stream_does_not_trip_a_tiny_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES)
-    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
-
-    events = await drain(PiBackend(model="test-model"), tmp_path)
-
-    assert [e.text for e in events if isinstance(e, TextEvent)] == ["slow but alive"]
-    assert any(isinstance(e, ResultEvent) for e in events)
-    assert spawner.procs[0].reaped
-
-
-@pytest.mark.asyncio
-async def test_codex_flowing_stream_does_not_trip_a_tiny_window(
+@pytest.mark.parametrize(
+    ("cli", "backend_cls", "lines"),
+    [
+        pytest.param("pi", PiBackend, PI_LINES, id="pi"),
+        pytest.param("codex", CodexBackend, CODEX_LINES, id="codex"),
+    ],
+)
+async def test_flowing_stream_does_not_trip_a_tiny_window(
+    cli: str,
+    backend_cls: Any,
+    lines: list[str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spawner = install_fake_cli_process(monkeypatch, "codex", lines=CODEX_LINES)
+    spawner = install_fake_cli_process(monkeypatch, cli, lines=lines)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
 
-    events = await drain(CodexBackend(model="test-model"), tmp_path)
+    events = await drain(backend_cls(model="test-model"), tmp_path)
 
     assert [e.text for e in events if isinstance(e, TextEvent)] == ["slow but alive"]
     assert any(isinstance(e, ResultEvent) for e in events)
@@ -324,7 +315,7 @@ def test_malformed_override_falls_back_to_default(
 def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pi responses preempt the wall; tools and codex retain the long window.
 
-    Pi's response stream is live while the model generates, so five minutes of
+    Pi's response stream is live while the model generates, so ten minutes of
     silence is a stall. Codex generations and output-silent tools can legitimately
     remain quiet much longer and must still be bounded by the phase wall budget.
     """
@@ -332,6 +323,7 @@ def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
+    assert DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S == 600.0
     assert (
         DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
         < DEFAULT_WALL_BUDGET_S
@@ -506,27 +498,24 @@ def assert_pid_reaped(pid_log: Path) -> int:
 
 
 @pytest.mark.asyncio
-async def test_pi_real_subprocess_wiring(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("cli", "backend_cls", "lines"),
+    [
+        pytest.param("pi", PiBackend, PI_LINES, id="pi"),
+        pytest.param("codex", CodexBackend, CODEX_LINES, id="codex"),
+    ],
+)
+async def test_real_subprocess_wiring(
+    cli: str,
+    backend_cls: Any,
+    lines: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pid_log = install_wiring_cli(tmp_path, monkeypatch, name="pi", lines=PI_LINES)
+    pid_log = install_wiring_cli(tmp_path, monkeypatch, name=cli, lines=lines)
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
 
-    events = await drain(PiBackend(model="test-model"), tmp_path)
-
-    assert [e.text for e in events if isinstance(e, TextEvent)] == ["slow but alive"]
-    assert any(isinstance(e, ResultEvent) for e in events)
-    assert_pid_reaped(pid_log)
-
-
-@pytest.mark.asyncio
-async def test_codex_real_subprocess_wiring(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pid_log = install_wiring_cli(tmp_path, monkeypatch, name="codex", lines=CODEX_LINES)
-    monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
-
-    events = await drain(CodexBackend(model="test-model"), tmp_path)
+    events = await drain(backend_cls(model="test-model"), tmp_path)
 
     assert [e.text for e in events if isinstance(e, TextEvent)] == ["slow but alive"]
     assert any(isinstance(e, ResultEvent) for e in events)

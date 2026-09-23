@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from copy import deepcopy
@@ -22,6 +23,7 @@ from daydream.improve.assemble import (
     render_issue,
 )
 from daydream.improve.command_contract import (
+    APPLICABILITY_SCHEMA,
     canonicalize_directory_scope,
     literal_command_error,
     path_is_confined,
@@ -42,8 +44,11 @@ from daydream.improve.plans import (
     PlanIndexEntry,
     PlanWriteSession,
     _entry_payload,
+    list_reanchor_worktrees,
     load_rejections,
     planned_fingerprints,
+    prune_named_reanchor_worktree,
+    prune_stale_reanchor_worktrees,
     reanchored_plan_rows,
     record_rejections,
 )
@@ -54,8 +59,10 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
+from daydream.improve.render import render_plan as real_render
 from daydream.improve.repo_commands import enumerate_repository_commands
-from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.git_helpers import bare_remote as _bare_remote
+from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
 
 
 @pytest.mark.parametrize(
@@ -374,7 +381,6 @@ def test_directory_scope_canonicalization_drops_the_trailing_slash(
 
 
 def test_command_contract_schema_discloses_scope_cross_field_invariants() -> None:
-    from daydream.improve.command_contract import APPLICABILITY_SCHEMA
 
     invalid_variants = [
         {
@@ -787,6 +793,27 @@ def _authored_new_file_plan() -> dict[str, Any]:
     return plan
 
 
+def _declare_makefile_out_of_scope(plan: dict[str, Any]) -> None:
+    plan["scope"]["out_of_scope_paths"].append(
+        {
+            "path": "Makefile",
+            "reason": "The catalog change adds no new build or test entry point.",
+        }
+    )
+
+
+def _add_readme_change(plan: dict[str, Any]) -> None:
+    plan["steps"][0]["changes"].append(
+        {
+            "path": "README.md",
+            "symbol": "Catalog service",
+            "operation": "modify",
+            "instruction": "Document that catalog item loading is now batched.",
+            "target_state": "README.md states catalog loading issues one query.",
+        }
+    )
+
+
 def _assembled(
     repo: Path,
     plan: dict[str, Any] | None = None,
@@ -893,12 +920,27 @@ def _write_plans(
     return session.finish()
 
 
-def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_sha: str) -> None:
-    result = _write_plans(
+def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branch update.\n") -> str:
+    """Commit a README change on top of *repo* and return the new HEAD SHA."""
+    write_and_stage(repo, "README.md", text)
+    return commit(repo, "advance head after plan fan-out")
+
+
+def _write_single_plan(
+    repo: Path,
+    assembled: dict[str, Any],
+    planned_at: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Write one assembled plan for ``repo`` through the production API."""
+    return _write_plans(
         repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at=head_sha,
+        [{"finding": _finding(), **assembled}],
+        planned_at=planned_at,
     )
+
+
+def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_sha: str) -> None:
+    result = _write_single_plan(repo, _assembled(repo), head_sha)
 
     assert len(result["written"]) == 1
     text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
@@ -1245,11 +1287,7 @@ def test_scope_paths_reject_tracked_and_untracked_symlinked_parents(
 def test_valid_new_path_with_nonexistent_parent_remains_allowed(repo: Path, head_sha: str) -> None:
     plan = _authored_new_file_plan()
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo, plan)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
 
     assert len(result["written"]) == 1
     assert "tests/test_catalog_batching.py" in (
@@ -1269,11 +1307,7 @@ def test_unselected_recon_commands_are_not_injected_into_plan(repo: Path, head_s
     )
     assembled = _assembled(repo, commands=commands)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert len(result["written"]) == 1
     # The same ref is used by the step, the named case, and a done criterion:
@@ -1304,11 +1338,7 @@ def test_plan_current_state_uses_locator_and_persists_host_excerpt(
         plan["scope"]["existing_paths"][0]["verbatim_excerpt"] = model_excerpt
     raw_plan = deepcopy(plan)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo, plan)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
 
     assert len(result["written"]) == 1
     assert plan == raw_plan
@@ -1324,11 +1354,7 @@ def test_stray_markdown_key_is_stripped_and_plan_writes(repo: Path, head_sha: st
     plan = _authored_plan()
     plan["markdown"] = "## Steps\n\nTOKEN=super-secret-value"
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo, plan)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
 
     assert len(result["written"]) == 1
     for artifact in (repo / "daydream_plans").iterdir():
@@ -1602,11 +1628,7 @@ def test_planned_at_from_an_unrelated_root_is_rejected(repo: Path, head_sha: str
     )
     git(repo, "checkout", "--detach", unrelated_root)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert result["written"] == []
     assert "PLANNED_AT_NOT_ANCESTOR" in (
@@ -1625,7 +1647,6 @@ def test_planned_at_naming_only_remote_branch_is_invalid(
     {plan}^{commit} probe did not resolve such a short name, so it must be
     reported as an invalid anchor.
     """
-    from tests.harness.git_helpers import bare_remote as _bare_remote
 
     bare = _bare_remote(tmp_path / "remote.git")
     git(repo, "remote", "add", "origin", str(bare))
@@ -1638,11 +1659,7 @@ def test_planned_at_naming_only_remote_branch_is_invalid(
     git(repo, "checkout", "main")
     git(repo, "branch", "-D", "only-remote")
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at="only-remote",
-    )
+    result = _write_single_plan(repo, _assembled(repo), "only-remote")
 
     assert result["written"] == []
     assert "PLANNED_AT_INVALID" in (repo / "daydream_plans/README.md").read_text()
@@ -1711,18 +1728,9 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     text also lands a durable copy in the main index so it survives pruning.
     """
     assembled = _assembled(repo)
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert len(result["written"]) == 1
     landed = result["written"][0]["path"]
@@ -1773,9 +1781,7 @@ def test_reanchor_uses_supplied_private_workspace_owner(
     private_locations: Any,
     owner: Any,
 ) -> None:
-    (repo / "README.md").write_text("# changed after planning\n", encoding="utf-8")
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo, "# changed after planning\n")
     _forbid_default_private_base(monkeypatch)
 
     session = PlanWriteSession(
@@ -1828,12 +1834,7 @@ def test_reanchored_main_index_is_written_before_finish(
     the REANCHORED entry (and its fingerprint) as soon as the re-anchor
     lands, before finish() runs.
     """
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
 
     session = PlanWriteSession(
         repo / "daydream_plans",
@@ -1872,18 +1873,9 @@ def test_reanchored_plan_survives_worktree_pruning(
     deliverable was permanently deleted while the index kept a dead pointer.
     """
     assembled = _assembled(repo)
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
     assert len(result["written"]) == 1
     landed = Path(result["written"][0]["path"])
     main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
@@ -1891,7 +1883,6 @@ def test_reanchored_plan_survives_worktree_pruning(
     assert f"`{new_head}`" in main_plan.read_text(encoding="utf-8")
     assert landed.is_file()
 
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     removed = prune_stale_reanchor_worktrees(repo)
 
@@ -1911,26 +1902,13 @@ def test_reanchored_finding_is_not_replanned_on_a_later_run(
     run in the same repo does not re-plan the same finding (no duplicate number).
     """
     assembled = _assembled(repo)
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
-    first = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    first = _write_single_plan(repo, assembled, head_sha)
     assert len(first["written"]) == 1  # re-anchored as written
 
     # a later run in the same repo (HEAD now == new_head) must skip the same finding
-    later = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=new_head,
-    )
+    later = _write_single_plan(repo, assembled, new_head)
     assert later["written"] == []
     assert len(later["skipped"]) == 1
 
@@ -1943,7 +1921,6 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     git(repo, "worktree", "add", "--detach", str(stale_dir), "HEAD")
     (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
 
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     removed = prune_stale_reanchor_worktrees(repo)
 
@@ -1957,14 +1934,8 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
 ) -> None:
     """Acceptance #1/#4/#5: run B's start-of-run prune must not destroy run A's
     live re-anchor worktree; A's finished plan still lands on finish()."""
-    from daydream import git_ops
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
-    )
-    git(repo, "add", "README.md")
-    new_head = commit(repo, "advance head after plan fan-out")
+    new_head = _advance_head(repo)
 
     # Run A: mid-write — worktree created + locked, session NOT finished yet
     session_a = PlanWriteSession(
@@ -1976,7 +1947,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     assert session_a.commit(reservations_a[0], _selection(repo)).status == "written"
     worktree_a = repo / ".daydream" / "worktrees" / "run-A-reanchor"
     assert worktree_a.is_dir()
-    assert git_ops.worktree_lock_mtime(repo, worktree_a) is not None  # live lock
+    assert git_ops.worktree_lock_mtime(worktree_a) is not None  # live lock
 
     # Run B starts: its start-of-run prune runs while A is mid-write
     removed = prune_stale_reanchor_worktrees(repo)
@@ -1993,13 +1964,12 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(
         encoding="utf-8"
     )
-    assert git_ops.worktree_lock_mtime(repo, worktree_a) is None  # released
+    assert git_ops.worktree_lock_mtime(worktree_a) is None  # released
 
 
 def test_prune_named_reanchor_worktree_removes_valid_worktree(
     repo: Path
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
@@ -2014,7 +1984,6 @@ def test_prune_named_reanchor_worktree_removes_valid_worktree(
 def test_prune_named_reanchor_worktree_reports_plan_count(
     repo: Path
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
@@ -2043,7 +2012,6 @@ def test_prune_named_reanchor_worktree_rejects_unsafe_names(
     repo: Path,
     bad_name: str,
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     _forbid_default_private_base(monkeypatch, "unsafe name reached storage")
 
@@ -2064,7 +2032,6 @@ def test_prune_named_reanchor_worktree_rejects_unsafe_names(
 def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(
     repo: Path,
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     before = set((repo / ".daydream" / "worktrees").glob("*")) if (
         repo / ".daydream" / "worktrees"
@@ -2081,7 +2048,6 @@ def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(
 
 
 def test_prune_named_reanchor_worktree_not_found(repo: Path) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     outcome = prune_named_reanchor_worktree(repo, "run-zzzz-reanchor")
 
@@ -2091,7 +2057,6 @@ def test_prune_named_reanchor_worktree_not_found(repo: Path) -> None:
 def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
     repo: Path,
 ) -> None:
-    from daydream.improve.plans import prune_named_reanchor_worktree
 
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     target.mkdir(parents=True, exist_ok=True)  # plain dir, NOT a git worktree
@@ -2108,7 +2073,6 @@ def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
 def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(
     repo: Path
 ) -> None:
-    from daydream.improve.plans import list_reanchor_worktrees
 
     a = repo / ".daydream" / "worktrees" / "run-aaaa-reanchor"
     b = repo / ".daydream" / "worktrees" / "run-bbbb-reanchor"
@@ -2128,10 +2092,6 @@ def test_list_and_named_prune_cover_operational_and_legacy_roots(
     tmp_path: Path,
     owner: Any,
 ) -> None:
-    from daydream.improve.plans import (
-        list_reanchor_worktrees,
-        prune_named_reanchor_worktree,
-    )
 
     monkeypatch.setattr(
         artifact_visibility,
@@ -2163,10 +2123,6 @@ def test_duplicate_reanchor_name_across_roots_fails_without_mutation(
     repo: Path,
     owner: Any,
 ) -> None:
-    from daydream.improve.plans import (
-        list_reanchor_worktrees,
-        prune_named_reanchor_worktree,
-    )
 
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
@@ -2192,7 +2148,6 @@ def test_list_reanchors_rejects_symlinked_operational_root_without_following(
     tmp_path: Path,
     owner: Any,
 ) -> None:
-    from daydream.improve.plans import list_reanchor_worktrees
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -2217,9 +2172,7 @@ def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
     owner: Any,
     lock_state: str,
 ) -> None:
-    import os
 
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
@@ -2286,10 +2239,6 @@ def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     namespace_shape: str,
     reanchor_op: str,
 ) -> None:
-    from daydream.improve.plans import (
-        list_reanchor_worktrees,
-        prune_stale_reanchor_worktrees,
-    )
 
     scan = list_reanchor_worktrees if reanchor_op == "list" else prune_stale_reanchor_worktrees
     external, canary, unsafe_file = _unsafe_legacy_reanchor_namespace(
@@ -2315,11 +2264,7 @@ def test_planned_at_still_matching_head_writes_in_place(
     head_sha: str,
 ) -> None:
     """The common case is unchanged: a matching anchor writes in place."""
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, _assembled(repo), head_sha)
 
     assert len(result["written"]) == 1
     assert result["written"][0]["path"] == "001-batch-catalog-queries.md"
@@ -2593,11 +2538,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
     assert planned_fingerprints(plans_dir) == set()
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
-    retried = _write_plans(
-        plans_dir,
-        [{"finding": _finding(), **_assembled(repo)}],
-        planned_at=head_sha,
-    )
+    retried = _write_single_plan(repo, _assembled(repo), head_sha)
     unrelated = _write_plans(
         plans_dir,
         [
@@ -2832,11 +2773,7 @@ def test_secret_literal_value_is_redacted_and_never_reaches_artifacts(
     )
 
     assembled = _assembled(repo, plan)
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     assert assembled["why_this_matters"]["problem"] == (
         "The bootstrap script hardcodes secret: <redacted> in cleartext."
@@ -2867,11 +2804,7 @@ def test_underscored_secret_key_name_is_redacted_in_quoted_source(
     )
 
     assembled = _assembled(repo)
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    result = _write_single_plan(repo, assembled, head_sha)
 
     excerpt = next(
         item
@@ -3090,21 +3023,8 @@ def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_s
         "def test_placeholder():\n    assert True\n",
         encoding="utf-8",
     )
-    plan["scope"]["out_of_scope_paths"].append(
-        {
-            "path": "Makefile",
-            "reason": "The catalog change adds no new build or test entry point.",
-        }
-    )
-    plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
-    )
+    _declare_makefile_out_of_scope(plan)
+    _add_readme_change(plan)
 
     assembled = _assembled(repo, plan)
 
@@ -3134,21 +3054,8 @@ def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(
     head_sha: str,
 ) -> None:
     plan = _authored_plan()
-    plan["scope"]["out_of_scope_paths"].append(
-        {
-            "path": "Makefile",
-            "reason": "The catalog change adds no new build or test entry point.",
-        }
-    )
-    plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
-    )
+    _declare_makefile_out_of_scope(plan)
+    _add_readme_change(plan)
 
     assembled = _assembled(repo, plan)
 
@@ -3186,15 +3093,7 @@ def test_step_editing_the_sole_out_of_scope_path_still_blocks(repo: Path) -> Non
     already produces for a path declared both in scope and out of scope.
     """
     plan = _authored_plan()
-    plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
-    )
+    _add_readme_change(plan)
 
     issues = _issues(repo, plan)
 
@@ -4474,17 +4373,8 @@ def test_reanchored_plan_rows_returns_empty_when_none_reanchored(
 def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
     """Re-anchor one plan into a fresh worktree; return the repo-relative landing path."""
     assembled = _assembled(repo, _authored_plan(title="Fix N+1 catalog queries"))
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
-    result = _write_plans(
-        repo / "daydream_plans",
-        [{"finding": _finding(), **assembled}],
-        planned_at=head_sha,
-    )
+    _advance_head(repo)
+    result = _write_single_plan(repo, assembled, head_sha)
     assert len(result["written"]) == 1
     # The durable landing path is what survives into the index, so source it
     # from the sidecar rather than the (pruned) re-anchor worktree path.
@@ -4579,13 +4469,8 @@ def test_reanchored_failure_releases_worktree_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Should-have #1: a graceful re-anchor write failure releases the lock."""
-    from daydream import git_ops
 
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("render failure")
@@ -4605,7 +4490,7 @@ def test_reanchored_failure_releases_worktree_lock(
     worktree = repo / ".daydream" / "worktrees" / "run-A-reanchor"
     assert not worktree.exists()  # removed (fix #2)
     with pytest.raises(git_ops.GitError, match="Git directory"):
-        git_ops.worktree_lock_mtime(repo, worktree)
+        git_ops.worktree_lock_mtime(worktree)
 
 def test_failed_reanchor_frees_worktree_for_later_finding(
     repo: Path,
@@ -4615,17 +4500,11 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
     """Fix #2: a re-anchor failure must remove the worktree so a later
     re-anchorable finding in the same run can re-add the path instead of
     failing with PLAN_REANCHOR_FAILED."""
-    from daydream.improve.plans import PlanWriteSession
 
-    (repo / "README.md").write_text(
-        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
-    )
-    git(repo, "add", "README.md")
-    commit(repo, "advance head after plan fan-out")
+    _advance_head(repo)
 
     calls = {"n": 0}
 
-    from daydream.improve.render import render_plan as real_render
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         calls["n"] += 1
@@ -4657,10 +4536,7 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
 ) -> None:
     """Acceptance #3: a crashed session's still-locked worktree is eventually
     reclaimed (lock backdated past the staleness window), not wedged forever."""
-    import os
 
-    from daydream import git_ops
-    from daydream.improve.plans import prune_stale_reanchor_worktrees
 
     stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
     git_ops.worktree_add(repo, stale, "HEAD", lock_reason="run-dead")

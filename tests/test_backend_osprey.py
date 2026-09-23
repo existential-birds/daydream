@@ -679,7 +679,7 @@ def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_output_schema_is_temp_file_forwarded_and_cleaned(tmp_path: Path) -> None:
+async def test_output_schema_is_temp_file_forwarded_and_cleaned() -> None:
     lines, _ = _stream()
     _, spawner = await _collect(
         OspreyBackend(osprey_binary="fake"), lines, output_schema={"type": "object"}
@@ -957,12 +957,6 @@ def _p18_osprey_events() -> list[dict[str, object]]:
     ]
 
 
-def _p18_osprey_stream(events: list[dict[str, object]]) -> list[str]:
-    """Wrap events with protocol header/session_start/session_end JSONL lines."""
-    lines, _rc = _stream(*events)
-    return [json.dumps(line) for line in lines]
-
-
 @pytest.mark.asyncio
 async def test_osprey_request_event_temperature_and_label_presence_rules() -> None:
     """Explicit 0.0 is admitted; labels reduce to presence; mode closed values."""
@@ -974,15 +968,8 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
         ultracode=True, max_subagents=3, llm_rpm=0,
         vars=(("k", "v"), ("k2", "v2")),
     )
-    lines = _p18_osprey_stream(_p18_osprey_events())
-    fake = FakeCliProcess(lines)
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=lambda *a, **k: fake,
-    ) as mock_exec:
-        events = [event async for event in backend.execute(Path("/tmp"), "prompt here")]
-
-    argv = [str(a) for a in mock_exec.call_args.args]
+    events, spawner = await _collect(backend, _stream(*_p18_osprey_events())[0])
+    argv = list(spawner.argvs[-1])
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
@@ -1021,15 +1008,8 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
 async def test_osprey_hidden_temperature_stays_absent_in_telemetry() -> None:
     """Without explicit --temperature, the config carries temperature=None."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
-    lines = _p18_osprey_stream(_p18_osprey_events())
-    fake = FakeCliProcess(lines)
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=lambda *a, **k: fake,
-    ) as mock_exec:
-        events = [event async for event in backend.execute(Path("/tmp"), "p")]
-
-    argv = [str(a) for a in mock_exec.call_args.args]
+    events, spawner = await _collect(backend, _stream(*_p18_osprey_events())[0])
+    argv = list(spawner.argvs[-1])
     assert "--temperature" not in argv
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
@@ -1041,15 +1021,8 @@ async def test_osprey_hidden_temperature_stays_absent_in_telemetry() -> None:
 async def test_osprey_nonzero_temperature_is_admitted_verbatim() -> None:
     """An explicit nonzero temperature passes through exactly."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=0.7)
-    lines = _p18_osprey_stream(_p18_osprey_events())
-    fake = FakeCliProcess(lines)
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=lambda *a, **k: fake,
-    ) as mock_exec:
-        events = [event async for event in backend.execute(Path("/tmp"), "p")]
-
-    argv = [str(a) for a in mock_exec.call_args.args]
+    events, spawner = await _collect(backend, _stream(*_p18_osprey_events())[0])
+    argv = list(spawner.argvs[-1])
     assert argv[argv.index("--temperature") + 1] == "0.7"
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
@@ -1061,13 +1034,7 @@ async def test_osprey_nonzero_temperature_is_admitted_verbatim() -> None:
 async def test_osprey_turn_end_model_override_is_native() -> None:
     """turn_end model becomes the native TurnEnd identity; no finish reason."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
-    lines = _p18_osprey_stream(_p18_osprey_events())
-    fake = FakeCliProcess(lines)
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=lambda *a, **k: fake,
-    ):
-        events = [event async for event in backend.execute(Path("/tmp"), "p")]
+    events, _spawner = await _collect(backend, _stream(*_p18_osprey_events())[0])
 
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert len(turn_ends) == 1
@@ -1085,13 +1052,7 @@ async def test_osprey_turn_end_model_override_is_native() -> None:
 async def test_osprey_session_end_usage_is_session_sourced() -> None:
     """Terminal totals carry session measurement source and reported cost."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
-    lines = _p18_osprey_stream(_p18_osprey_events())
-    fake = FakeCliProcess(lines)
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=lambda *a, **k: fake,
-    ):
-        events = [event async for event in backend.execute(Path("/tmp"), "p")]
+    events, _spawner = await _collect(backend, _stream(*_p18_osprey_events())[0])
 
     costs = [e for e in events if isinstance(e, CostEvent)]
     assert len(costs) == 1
@@ -1108,17 +1069,10 @@ async def test_osprey_resume_and_fork_continuation_modes() -> None:
         token = ContinuationToken(
             backend="osprey", data={"session_id": "s-9", "mode": mode},
         )
-        lines = _p18_osprey_stream(_p18_osprey_events())
-        fake = FakeCliProcess(lines)
-        with patch(
-            "daydream.backends._transport.asyncio.create_subprocess_exec",
-            side_effect=lambda *a, **k: fake,
-        ) as mock_exec:
-            events = [
-                event
-                async for event in backend.execute(Path("/tmp"), "p", continuation=token)
-            ]
-        argv = [str(a) for a in mock_exec.call_args.args]
+        events, spawner = await _collect(
+            backend, _stream(*_p18_osprey_events())[0], continuation=token
+        )
+        argv = list(spawner.argvs[-1])
         assert flag in argv
         assert argv[argv.index(flag) + 1] == "s-9"  # token session drives argv
         request = next(e for e in events if isinstance(e, RequestEvent))

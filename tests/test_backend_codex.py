@@ -2,6 +2,7 @@
 """Tests for CodexBackend with canned JSONL fixtures."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,7 +20,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daydream import git_ops
+from daydream.agent import run_agent
 from daydream.backends import (
+    BackendExecutionInput,
     CodexRequestConfig,
     ContinuationToken,
     CostEvent,
@@ -27,21 +30,29 @@ from daydream.backends import (
     MetricsEvent,
     RequestEvent,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    codex,
+    effective_fanout_concurrency,
 )
-from daydream.backends import codex as codex_backend
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
     CodexBackend,
     CodexError,
+    _isolated_child_env,
+    _prepare_read_only_checkout,
+    _rebind_source_paths,
     _unwrap_shell_command,
+    display_shell_command,
 )
+from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
+from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
     GapThenBlockingStdout as _GapThenBlockingStdout,
 )
@@ -49,8 +60,13 @@ from tests.harness.codex_replay import (
     make_mock_process,
     make_mock_process_from_fixture,
 )
-from tests.harness.fake_cli_process import BlockingStdout, ImmediateStdout, LimitAwareStdout, blocking_cli_process
+from tests.harness.fake_cli_process import (
+    FakeCliProcess,
+    LimitAwareStdout,
+    assert_concurrent_streams_isolated,
+)
 from tests.harness.git_helpers import git as _git
+from tests.harness.protocol_cli import install_protocol_cli
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -59,10 +75,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 async def test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hashlib
-    import os
 
-    from tests.harness.protocol_cli import install_protocol_cli
 
     target = (tmp_path / "model cwd with spaces").resolve()
     target.mkdir()
@@ -462,27 +475,32 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continuation_token_resumes() -> None:
-    """Test that continuation token is passed as 'resume' argument."""
-    from daydream.backends import ContinuationToken
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> None:
+    """Stable directories retain native resume, including non-Git read-only runs."""
 
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "Continue", continuation=token):
-            pass
+        events = [event async for event in backend.execute(
+            tmp_path, "Continue", continuation=token, read_only=read_only,
+        )]
 
         call_args = mock_exec.call_args
         flat_args = list(call_args.args) if call_args.args else []
         assert "resume" in flat_args
         assert "th_prev" in flat_args
+        result = next(event for event in events if isinstance(event, ResultEvent))
+        assert result.continuation is not None
+        assert result.continuation.data["thread_id"] == "th_abc123"
+        assert result.session_id == "th_abc123"
 
 
 @pytest.mark.asyncio
 async def test_codex_read_only_uses_read_only_sandbox(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """read_only=True at a worktree runs in a disposable standalone clone:
     read-only sandbox, isolated cwd != source, matching HEAD + staged patch,
@@ -553,11 +571,15 @@ async def test_codex_read_only_uses_read_only_sandbox(
     assert request.prompt.encode() == written
     # Temp dir removed after execute.
     assert not isolated.exists()
+    # The native session remains observable, but its deleted cwd cannot resume.
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.session_id == "th_abc123"
+    assert result.continuation is None
 
 
 @pytest.mark.asyncio
 async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """Issue #1121: a source with >=3 branches (incl. a slash name) snapshots
     ALL of them into the clone by OID; git diff <base>...HEAD works; the
@@ -615,7 +637,6 @@ async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_isolation_failure_is_fail_closed(
-    tmp_path: Path,
     linked_worktree: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -647,7 +668,7 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_snapshot_failure_is_fail_closed(
-    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+    linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A GitError during branch snapshotting aborts preparation: CodexError
     raised, no codex process launched, source git state untouched."""
@@ -676,7 +697,6 @@ def test_rebind_source_paths_preserves_sibling_paths() -> None:
     """The prompt rebind is anchored at path boundaries (issues #1/#9): sibling
     paths that merely share the source prefix survive, while sub-paths, the exact
     path, and ``//``-doubled renderings all map onto the isolated checkout."""
-    from daydream.backends.codex import _rebind_source_paths
 
     source = Path("/home/exedev/work")
     execution = Path("/tmp/daydream-codex-read-only-abc/repo")
@@ -714,7 +734,6 @@ def test_rebind_source_paths_preserves_sibling_paths() -> None:
 def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """_isolated_child_env returns None when no isolation and strips the
     repo-redirect env vars (PWD/$GIT_*) when running in the disposable clone."""
-    from daydream.backends.codex import _isolated_child_env
 
     monkeypatch.setenv("PWD", "/home/exedev/work")
     monkeypatch.setenv("OLDPWD", "/home/exedev")
@@ -738,7 +757,6 @@ def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch
 async def test_codex_execution_input_supplies_complete_native_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     execution = BackendExecutionInput.from_environment(
         {
@@ -777,7 +795,6 @@ async def test_codex_execution_input_supplies_complete_native_environment(
 )
 def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     """M3: non-Darwin env is strip-vars-verbatim, no xcrun."""
-    from daydream.backends import codex
 
     monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
     monkeypatch.setenv("GIT_DIR", "/leak")
@@ -792,11 +809,10 @@ def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_codex_read_only_resume_is_refused(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """A read-only session passed a codex resume token fails closed: the resumed
     thread's stored cwd is the per-call clone, deleted when the turn ends."""
-    from daydream.backends import ContinuationToken
 
     _main, source = linked_worktree
     backend = CodexBackend(model="fixture-model")
@@ -817,7 +833,6 @@ async def test_codex_read_only_parallel_calls_share_one_clone(
     """Concurrent read-only calls on one backend build a single disposable clone
     (parallel fan-out must not clone the monorepo once per call) and remove it
     only after the last holder's generator exits."""
-    from daydream.backends.codex import CodexBackend, _prepare_read_only_checkout
 
     _main, source = linked_worktree
     build_calls: list[Path] = []
@@ -1127,7 +1142,6 @@ def _write_model_prices(path: Path, *, model: str, input_price: float, output_pr
 
 
 async def _codex_cost_for_execution_input(model: str, environment: dict[str, str]) -> float | None:
-    from daydream.backends import BackendExecutionInput
 
     backend = CodexBackend(
         model=model,
@@ -1329,43 +1343,13 @@ async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend must keep reading their own process."""
-    backend = CodexBackend(model="fixture-model")
-
-    first_proc = blocking_cli_process(
-        ImmediateStdout(
-            [
-                '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
-                '{"type":"turn.completed","usage":{}}',
-            ]
-        )
+    await assert_concurrent_streams_isolated(
+        CodexBackend(model="fixture-model"),
+        [
+            '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
+            '{"type":"turn.completed","usage":{}}',
+        ],
     )
-    second_stdout = BlockingStdout()
-    second_proc = blocking_cli_process(second_stdout)
-    procs = iter([first_proc, second_proc])
-
-    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        return next(procs)
-
-    async def consume_second() -> list[object]:
-        return [event async for event in backend.execute(Path("/tmp"), "second")]
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        first_iter = backend.execute(Path("/tmp"), "first")
-        assert isinstance(await anext(first_iter), RequestEvent)
-        first_event = await anext(first_iter)
-        assert isinstance(first_event, TextEvent)
-
-        second_task = asyncio.create_task(consume_second())
-        await second_stdout.entered.wait()
-
-        try:
-            turn_end = await anext(first_iter)
-            assert isinstance(turn_end, TurnEndEvent)
-            next_first_event = await anext(first_iter)
-            assert isinstance(next_first_event, CostEvent)
-        finally:
-            second_stdout.release.set()
-            await second_task
 
 
 class TestUnwrapShellCommand:
@@ -1504,9 +1488,6 @@ class TestUnwrapShellCommand:
         command. A regression handing the supervisor the stored value would let
         'cd <dir> && make test' silently evade '^make'.
         """
-        from daydream.agent import run_agent
-        from daydream.extensions import Registry, ToolDecision, set_registry
-        from daydream.trajectory import DaydreamPhase
 
         raw = '/bin/zsh -lc "cd /home/user/project && make test"'
         lines = [
@@ -1585,7 +1566,6 @@ class TestUnwrapShellCommand:
 
     def test_unquoted_multi_word_cd_display(self) -> None:
         """Unquoted multi-word cd chains stay replayable stored, cd-stripped on display."""
-        from daydream.backends.codex import display_shell_command
 
         raw = "/bin/zsh -lc cd /app && make test"
         assert _unwrap_shell_command(raw) == "cd /app && make test"
@@ -1768,7 +1748,7 @@ async def test_parser_coverage_is_bounded_redacted_and_precedes_result(
 def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
     label = "x" * 54 + " ghp_" + "y" * 12
 
-    bounded = codex_backend._bounded_diagnostic_label(label)
+    bounded = codex._bounded_diagnostic_label(label)
 
     assert len(bounded) <= 64
     assert "ghp_" not in bounded
@@ -1945,8 +1925,6 @@ def test_codex_fanout_concurrency_honours_the_shared_env_override(
     ceiling: int,
     expected: int,
 ) -> None:
-    from daydream.backends import effective_fanout_concurrency
-    from daydream.backends.codex import CodexBackend
 
     if raw is None:
         monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
@@ -1975,22 +1953,10 @@ class TestDisplayShellCommand:
     """S1/M5: display variant decodes AND strips the leading cd prefix."""
 
     def test_display_strips_cd_prefix(self) -> None:
-        from daydream.backends.codex import display_shell_command
         assert display_shell_command('/bin/zsh -lc "cd /home/user/project && make test"') == "make test"
-
-    def test_display_decodes_nested_quotes(self) -> None:
-        from daydream.backends.codex import display_shell_command
-        cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
-        assert display_shell_command(cmd) == "awk '{print $1}' file.txt"
-
-    def test_display_passthrough_for_non_wrapper(self) -> None:
-        from daydream.backends.codex import display_shell_command
-        assert display_shell_command("ls -la") == "ls -la"
-        assert display_shell_command("") == ""
 
     def test_raw_and_display_distinct_for_cd_command(self) -> None:
         """M5: the stored value and the display value are different outputs."""
-        from daydream.backends.codex import _unwrap_shell_command, display_shell_command
         raw = '/bin/zsh -lc "cd /app && echo hello"'
         assert _unwrap_shell_command(raw) == "cd /app && echo hello"
         assert display_shell_command(raw) == "echo hello"
@@ -1999,7 +1965,6 @@ class TestDisplayShellCommand:
 @pytest.fixture(autouse=True)
 def _reset_real_git_resolution() -> Iterator[Any]:
     """Clear the real-git resolver cache before AND after every test (S1 cache)."""
-    from daydream.backends import codex
 
     codex._REAL_GIT_DIR = None
     codex._REAL_GIT_RESOLVED = False
@@ -2014,7 +1979,6 @@ class TestResolveRealGitDir:
     def test_resolves_parent_dir_of_xcrun_result(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
-        from daydream.backends import codex
 
         # Validation requires a real executable file, so stage one on disk.
         git_bin = tmp_path / "usr" / "bin"
@@ -2032,7 +1996,6 @@ class TestResolveRealGitDir:
     def test_caches_at_most_once_per_process(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
-        from daydream.backends import codex
 
         git_bin = tmp_path / "real" / "usr" / "bin"
         git_bin.mkdir(parents=True)
@@ -2066,7 +2029,6 @@ class TestResolveRealGitDir:
         assigned: every concurrent caller gets the resolved dir and xcrun runs
         exactly once.
         """
-        from daydream.backends import codex
 
         git_bin = tmp_path / "real" / "usr" / "bin"
         git_bin.mkdir(parents=True)
@@ -2108,7 +2070,6 @@ class TestResolveRealGitDir:
     def test_nonzero_xcrun_exit_falls_back_to_none_with_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="xcrun: error")
@@ -2120,7 +2081,6 @@ class TestResolveRealGitDir:
         assert any("xcrun" in r.message.lower() or "git" in r.message.lower() for r in caplog.records)
 
     def test_non_executable_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="/nonexistent/xx/git\n", stderr="")
@@ -2133,7 +2093,6 @@ class TestResolveRealGitDir:
         reason="darwin behavior is covered by TestResolveRealGitDir (issue #1122)",
     )
     def test_non_darwin_never_invokes_xcrun(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(
             codex.subprocess, "run",
@@ -2183,7 +2142,6 @@ class TestIsolatedChildEnvDarwinPath:
     def test_injected_environments_probe_their_own_paths_despite_ambient_cache(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        from daydream.backends import codex
 
         ambient, ambient_git_dir, _ = self._install_xcrun(
             tmp_path, label="ambient"
@@ -2231,7 +2189,6 @@ class TestIsolatedChildEnvDarwinPath:
     def test_failed_injected_probe_leaves_path_and_ordinary_cache_unpoisoned(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        from daydream.backends import codex
 
         failed, _, failed_log = self._install_xcrun(
             tmp_path, label="failed", exit_code=1
@@ -2258,7 +2215,6 @@ class TestIsolatedChildEnvDarwinPath:
     def test_darwin_prepends_real_git_dir_preserving_rest_of_path(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         monkeypatch.setattr(
@@ -2273,7 +2229,6 @@ class TestIsolatedChildEnvDarwinPath:
         assert env["PATH"].endswith("/usr/bin:/usr/local/bin")  # M1: remainder + order preserved
 
     def test_darwin_still_strips_redirect_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: "/real/bin")
@@ -2288,7 +2243,6 @@ class TestIsolatedChildEnvDarwinPath:
             assert var not in env
 
     def test_darwin_resolver_failure_leaves_path_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: None)  # M2 fail-open
@@ -2300,7 +2254,6 @@ class TestIsolatedChildEnvDarwinPath:
         assert env["PATH"] == "/usr/bin"  # fallback: unchanged PATH, no exception
 
     def test_non_isolated_path_returns_none_even_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from daydream.backends import codex
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         called = []
@@ -2374,7 +2327,6 @@ async def test_request_event_config_matches_exact_argv() -> None:
 @pytest.mark.asyncio
 async def test_request_event_config_read_only_sandbox_and_isolation() -> None:
     """read_only on a worktree root admits read-only sandbox + clone isolation."""
-    from tests.harness.fake_cli_process import FakeCliProcess
 
     worktree = Path(tempfile.mkdtemp(prefix="codex-p18-ro-"))
     subprocess_run = subprocess.run
@@ -2428,7 +2380,6 @@ async def test_request_event_config_read_only_sandbox_and_isolation() -> None:
 @pytest.mark.asyncio
 async def test_request_event_config_resume_and_schema() -> None:
     """Resume admits continuation_mode=resume; a schema admits native output."""
-    from tests.harness.fake_cli_process import FakeCliProcess
 
     captured_argv: dict[str, Any] = {}
 

@@ -1,0 +1,734 @@
+{
+  "date": "2026-09-21",
+  "baseline_revision": "6ef81035674eb099594b535cbe8ed61ee86b6ee0",
+  "candidate": "working tree on fix/review-finalization-followup based on 891b0610 (before documentation and final integration checks)",
+  "provider": "openrouter",
+  "pi_version": "0.85.1",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "discovery_thinking": "high",
+  "limitations": [
+    "One matched pair per fixture/regime; provider timing is variable and some requests overlapped.",
+    "Candidate finalization reasoning low is part of treatment; investigation model/config and limits match.",
+    "Reserve-only dispatches no investigative tools; inline fixture diff contains the two changed functions. Returned file verdicts are not a claim of source-read coverage; production clears verdicts on incomplete stacks.",
+    "Zero token counts with token_metrics_available=false mean no usage reported, not zero provider consumption.",
+    "Source digest was added to script after these measurements; per-run prompt digests and effective request options retained.",
+    "No reviews posted and Shelfspace not modified."
+  ],
+  "runs": [
+    {
+      "elapsed_s": 14.40855508390814,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "clean",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 480,
+        "finalization_s": 120,
+        "tool_calls": 48
+      },
+      "tool_calls": 8,
+      "prompt_tokens": 26331,
+      "completion_tokens": 1159,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": true,
+      "complete_clean_result": true,
+      "defect_retention": "no findings",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [],
+        "verdicts": [
+          {
+            "path": "notifications.py",
+            "lines_read": 45,
+            "verdict": "clean",
+            "n_findings": 0
+          }
+        ]
+      },
+      "comparison": "before",
+      "regime": "default",
+      "prompt_sha256": "deb52c3c6e699c34d207e52ad04e37397d6ef701a6b34fee234a1dac7f320dfc",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-before-clean-1"
+    },
+    {
+      "elapsed_s": 72.81631787493825,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "clean",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 480,
+        "finalization_s": 120,
+        "tool_calls": 48
+      },
+      "tool_calls": 5,
+      "prompt_tokens": 25956,
+      "completion_tokens": 1255,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": true,
+      "complete_clean_result": true,
+      "defect_retention": "no findings",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [],
+        "verdicts": [
+          {
+            "path": "notifications.py",
+            "lines_read": 45,
+            "verdict": "clean",
+            "n_findings": 0
+          }
+        ]
+      },
+      "comparison": "after",
+      "regime": "default",
+      "prompt_sha256": "1063e21165afd29272daa2eb03f0351d9e79801b0f7f6306527925953a978655",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-after-clean-1"
+    },
+    {
+      "elapsed_s": 70.9334107497707,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "two-defect",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 480,
+        "finalization_s": 120,
+        "tool_calls": 48
+      },
+      "tool_calls": 4,
+      "prompt_tokens": 17389,
+      "completion_tokens": 927,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": false,
+      "complete_clean_result": false,
+      "defect_retention": "requires examination of result evidence against fixture",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [
+          {
+            "id": 1,
+            "description": "`mean([])` now raises `ZeroDivisionError` instead of returning 0, violating the documented empty-batch contract.",
+            "file": "batch.py",
+            "line": 4,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "Exploration Context affected_files lists README.md as the contract: 'Empty batches must return 0.' The diff at batch.py removed the `if not values: return 0` guard, so `mean([])` executes `sum([])/len([])` = `0/0` and raises ZeroDivisionError, leaving the changed code incorrect as merged.",
+            "evidence": "batch.py:3-4 -> `def mean(values):\\n    return sum(values) / len(values)`; README.md: 'Empty batches must return 0.' No callers/tests elsewhere in repo (grep for mean found only batch.py:3)."
+          },
+          {
+            "id": 2,
+            "description": "`can_access` changed from `and` to `or`, so an admin of any tenant can access a document regardless of tenant, and any non-admin whose tenant matches can access it.",
+            "file": "batch.py",
+            "line": 7,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "Exploration Context affected_files cites README.md: 'Only administrators in the document's tenant may access it.' The diff changed the expression to `role == \"admin\" or tenant_id == document_tenant`, which admits (a) admins from other tenants and (b) non-admins with a matching tenant, breaking the tenant trust boundary.",
+            "evidence": "batch.py:6-7 -> `def can_access(role, tenant_id, document_tenant):\\n    return role == \"admin\" or tenant_id == document_tenant`; README.md: 'Only administrators in the document's tenant may access it.'"
+          }
+        ],
+        "verdicts": [
+          {
+            "path": "batch.py",
+            "lines_read": 7,
+            "verdict": "has_findings",
+            "n_findings": 2
+          }
+        ]
+      },
+      "comparison": "before",
+      "regime": "default",
+      "prompt_sha256": "a21b94f6b6c6740e615d8509c7401df07588a447a780cf0a03e2ad5786489d43",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 2,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-before-defect-1"
+    },
+    {
+      "elapsed_s": 39.12062666611746,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "two-defect",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 480,
+        "finalization_s": 120,
+        "tool_calls": 48
+      },
+      "tool_calls": 3,
+      "prompt_tokens": 17116,
+      "completion_tokens": 920,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": false,
+      "complete_clean_result": false,
+      "defect_retention": "requires examination of result evidence against fixture",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [
+          {
+            "id": 1,
+            "description": "`can_access` changed the tenant check from `and` to `or`, so authorization is granted to anyone in the document's tenant regardless of role, and to any administrator regardless of tenant. The README contract requires both conditions (admin AND same tenant).",
+            "file": "batch.py",
+            "line": 7,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "README.md states the preserved contract: 'Only administrators in the document's tenant may access it.' The diff changed `return role == \"admin\" and tenant_id == document_tenant` to `return role == \"admin\" or tenant_id == document_tenant`, violating that documented trust boundary.",
+            "evidence": "batch.py:7 `return role == \"admin\" or tenant_id == document_tenant`; README.md: 'Only administrators in the document's tenant may access it.' Triggering input: can_access(\"user\", \"t1\", \"t1\") now returns True (non-admin same-tenant access) and can_access(\"admin\", \"t2\", \"t1\") returns True (cross-tenant admin access)."
+          },
+          {
+            "id": 2,
+            "description": "`mean` no longer guards the empty-batch case, so `mean([])` now raises ZeroDivisionError instead of returning 0. The README contract explicitly requires empty batches to return 0.",
+            "file": "batch.py",
+            "line": 4,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "README.md states the preserved contract: 'Empty batches must return 0.' The diff removed the `if not values: return 0` guard, leaving `sum(values) / len(values)` which divides by zero for an empty input.",
+            "evidence": "batch.py:4 `return sum(values) / len(values)` (empty guard removed by diff hunk @@ -1,9 +1,7 @@); README.md: 'Empty batches must return 0.' Triggering input: mean([]) -> ZeroDivisionError instead of 0."
+          }
+        ],
+        "verdicts": [
+          {
+            "path": "batch.py",
+            "lines_read": 7,
+            "verdict": "has_findings",
+            "n_findings": 2
+          }
+        ]
+      },
+      "comparison": "after",
+      "regime": "default",
+      "prompt_sha256": "001bd47afb580311b7213c69b44fb1e0277fdb8be05da9a813e069c265bacb0b",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 2,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-after-defect-1"
+    },
+    {
+      "elapsed_s": 42.27387854177505,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "clean",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 120.0,
+        "finalization_s": 60.0,
+        "tool_calls": 2
+      },
+      "tool_calls": 2,
+      "prompt_tokens": 11641,
+      "completion_tokens": 315,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": true,
+      "complete_clean_result": true,
+      "defect_retention": "no findings",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [],
+        "verdicts": [
+          {
+            "path": "notifications.py",
+            "lines_read": 36,
+            "verdict": "clean",
+            "n_findings": 0
+          }
+        ]
+      },
+      "comparison": "before",
+      "regime": "two-tool",
+      "prompt_sha256": "e1d8824cc6043114e20b861169551432e7ae60558acde85fe712cbdba17fec6c",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-before-clean-limited"
+    },
+    {
+      "elapsed_s": 28.55404349975288,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "clean",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 120.0,
+        "finalization_s": 60.0,
+        "tool_calls": 2
+      },
+      "tool_calls": 2,
+      "prompt_tokens": 11442,
+      "completion_tokens": 428,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": true,
+      "complete_clean_result": true,
+      "defect_retention": "no findings",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [],
+        "verdicts": [
+          {
+            "path": "notifications.py",
+            "lines_read": 45,
+            "verdict": "clean",
+            "n_findings": 0
+          }
+        ]
+      },
+      "comparison": "after",
+      "regime": "two-tool",
+      "prompt_sha256": "e7bd06e9d07f8b257a1c64532da3a8e2f8d3a7fed2e0e2be0faef9b95d63a89d",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-after-clean-limited"
+    },
+    {
+      "elapsed_s": 7.147958790883422,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "two-defect",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 120.0,
+        "finalization_s": 60.0,
+        "tool_calls": 2
+      },
+      "tool_calls": 2,
+      "prompt_tokens": 11266,
+      "completion_tokens": 881,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": false,
+      "complete_clean_result": false,
+      "defect_retention": "requires examination of result evidence against fixture",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [
+          {
+            "id": 1,
+            "description": "`mean()` no longer guards against empty input; `sum([])/0` raises `ZeroDivisionError` instead of returning 0, violating the README contract \"Empty batches must return 0.\"",
+            "file": "batch.py",
+            "line": 4,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "README.md states \"Empty batches must return 0\", and the removed guard (`if not values: return 0`) is exactly the contract behavior. The diff deleted it, so `mean([])` now does `sum([])/len([])` -> `ZeroDivisionError`. Explor\"ation Context lists batch.py as modified and README.md as the contract source.",
+            "evidence": "Same-turn read of batch.py:4: `return sum(values) / len(values)`; README.md: \"Empty batches must return 0.\""
+          },
+          {
+            "id": 2,
+            "description": "`can_access()` uses `or` instead of `and`, so it grants access to any admin regardless of tenant and to any role inside the document's tenant. Privilege/tenant isolation is breached, violating README's \"Only administrators in the document's tenant may access it.\"",
+            "file": "batch.py",
+            "line": 7,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "README.md states \"Only administrators in the document's tenant may access it\", which requires both `role == 'admin'` AND `tenant_id == document_tenant`. The diff replaced `and` with `or`, so `can_access('viewer', 't1', 't1')` and `can_access('admin', 't2', 't1')` both return True. Security trust boundary (tenant isolation) honored by the previous code is now crossed.",
+            "evidence": "Same-turn read of batch.py:7: `return role == \"admin\" or tenant_id == document_tenant`; README.md: \"Only administrators in the document's tenant may access it.\""
+          }
+        ],
+        "verdicts": [
+          {
+            "path": "batch.py",
+            "lines_read": 7,
+            "verdict": "has_findings",
+            "n_findings": 2
+          }
+        ]
+      },
+      "comparison": "before",
+      "regime": "two-tool",
+      "prompt_sha256": "05d5cc18749176c0afe11cfc9850a59d209aec87e72fca48e014c3463ad9b2e1",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 2,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-before-two-defect-limited"
+    },
+    {
+      "elapsed_s": 34.55978108290583,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "two-defect",
+      "reason": null,
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 120.0,
+        "finalization_s": 60.0,
+        "tool_calls": 2
+      },
+      "tool_calls": 2,
+      "prompt_tokens": 10895,
+      "completion_tokens": 780,
+      "budget_stops": 0,
+      "schema_valid": true,
+      "valid_empty_result": false,
+      "complete_clean_result": false,
+      "defect_retention": "requires examination of result evidence against fixture",
+      "finalizer_calls": [],
+      "result": {
+        "issues": [
+          {
+            "id": 1,
+            "description": "`mean([])` raises ZeroDivisionError after the empty-batch guard was removed, violating the documented behavior that empty batches return 0.",
+            "file": "batch.py",
+            "line": 4,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "README.md contract states \"Empty batches must return 0.\" The diff removed the `if not values: return 0` guard, so `mean([])` now evaluates `sum([])/len([])` = `0/0` and raises ZeroDivisionError. The changed code is incorrect as merged for the documented empty-batch input.",
+            "evidence": "batch.py:3-4 now reads `def mean(values):` / `return sum(values) / len(values)` (no empty guard). README.md: \"Empty batches must return 0.\""
+          },
+          {
+            "id": 2,
+            "description": "Authorization was widened from AND to OR, allowing any role in the document's tenant and any admin regardless of tenant to access a document, violating the documented authorization contract.",
+            "file": "batch.py",
+            "line": 7,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "README.md contract states \"Only administrators in the document's tenant may access it.\" The diff changed `role == \"admin\" and tenant_id == document_tenant` to `role == \"admin\" or tenant_id == document_tenant`. Triggering inputs: `can_access(\"user\", \"t1\", \"t1\")` now returns True (wrong role), and `can_access(\"admin\", \"t1\", \"t2\")` returns True (cross-tenant admin), both breaching the stated trust boundary.",
+            "evidence": "batch.py:7 `return role == \"admin\" or tenant_id == document_tenant`. README.md: \"Only administrators in the document's tenant may access it.\""
+          }
+        ],
+        "verdicts": [
+          {
+            "path": "batch.py",
+            "lines_read": 7,
+            "verdict": "has_findings",
+            "n_findings": 2
+          }
+        ]
+      },
+      "comparison": "after",
+      "regime": "two-tool",
+      "prompt_sha256": "fbcb6aa28fae066a0eab65ac204d99e3ff5986353945ed33ae97e804cff1dc50",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 2,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-after-two-defect-limited"
+    },
+    {
+      "elapsed_s": 20.16895924974233,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "clean",
+      "reason": "wall_budget_exceeded",
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 0.0,
+        "finalization_s": 60.0,
+        "tool_calls": 48
+      },
+      "tool_calls": 0,
+      "prompt_tokens": 5733,
+      "completion_tokens": 393,
+      "budget_stops": 1,
+      "schema_valid": true,
+      "valid_empty_result": true,
+      "complete_clean_result": false,
+      "defect_retention": "no findings",
+      "finalizer_calls": [
+        {
+          "finalizer": true,
+          "result_event": true,
+          "valid_result": true,
+          "tool_starts": 0,
+          "requests": [
+            {
+              "reasoning_effort": "high",
+              "effective_config": {
+                "temperature": null,
+                "max_turns": null,
+                "read_only": false,
+                "persist_session": true,
+                "continuation_mode": "fresh",
+                "model_mode": "single",
+                "selected_tools_count": null,
+                "selected_tools_present": false,
+                "no_skills": true,
+                "schema_emulated": true
+              }
+            }
+          ],
+          "outcome": "valid_result"
+        }
+      ],
+      "result": {
+        "issues": [],
+        "verdicts": [
+          {
+            "path": "notifications.py",
+            "lines_read": 0,
+            "verdict": "not_reviewed",
+            "n_findings": 0
+          }
+        ]
+      },
+      "comparison": "before",
+      "regime": "reserve-only",
+      "prompt_sha256": "bc8e5bd9c4299f0f2786f24cb2c10bf0ea11c4fcefaafebd6969392fe200ba61",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-before-clean-reserve-only"
+    },
+    {
+      "elapsed_s": 7.41891666688025,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "clean",
+      "reason": "wall_budget_exceeded",
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 0.0,
+        "finalization_s": 60.0,
+        "tool_calls": 48
+      },
+      "tool_calls": 0,
+      "prompt_tokens": 1992,
+      "completion_tokens": 808,
+      "budget_stops": 1,
+      "schema_valid": true,
+      "valid_empty_result": true,
+      "complete_clean_result": false,
+      "defect_retention": "no findings",
+      "finalizer_calls": [
+        {
+          "finalizer": true,
+          "result_event": true,
+          "valid_result": true,
+          "tool_starts": 0,
+          "requests": [
+            {
+              "reasoning_effort": "low",
+              "effective_config": {
+                "finalization": true,
+                "temperature": null,
+                "max_turns": null,
+                "read_only": false,
+                "persist_session": true,
+                "continuation_mode": "fresh",
+                "model_mode": "single",
+                "selected_tools_count": 0,
+                "selected_tools_present": false,
+                "no_tools": true,
+                "no_skills": true,
+                "schema_emulated": true
+              }
+            }
+          ],
+          "outcome": "valid_result"
+        }
+      ],
+      "result": {
+        "issues": [],
+        "verdicts": [
+          {
+            "path": "notifications.py",
+            "lines_read": 0,
+            "verdict": "not_reviewed",
+            "n_findings": 0
+          }
+        ]
+      },
+      "comparison": "after",
+      "regime": "reserve-only",
+      "prompt_sha256": "1a3a440c3c25fd1fe680f2eaf541644a5faae7ef37bd2bfe4a606de015eb666e",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-after-clean-reserve-only"
+    },
+    {
+      "elapsed_s": 60.04478445881978,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "two-defect",
+      "reason": "wall_budget_exceeded",
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 0.0,
+        "finalization_s": 60.0,
+        "tool_calls": 48
+      },
+      "tool_calls": 0,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "budget_stops": 1,
+      "schema_valid": false,
+      "valid_empty_result": false,
+      "complete_clean_result": false,
+      "defect_retention": "no findings",
+      "finalizer_calls": [
+        {
+          "finalizer": true,
+          "result_event": false,
+          "valid_result": false,
+          "tool_starts": 0,
+          "requests": [
+            {
+              "reasoning_effort": "high",
+              "effective_config": {
+                "temperature": null,
+                "max_turns": null,
+                "read_only": false,
+                "persist_session": true,
+                "continuation_mode": "fresh",
+                "model_mode": "single",
+                "selected_tools_count": null,
+                "selected_tools_present": false,
+                "no_skills": true,
+                "schema_emulated": true
+              }
+            }
+          ],
+          "outcome": "no_terminal_result"
+        }
+      ],
+      "result": "",
+      "comparison": "before",
+      "regime": "reserve-only",
+      "prompt_sha256": "956de6ff6ebd68de52a788d5bc760d04703d7cad7fa76be5c08571f2d9f1b357",
+      "token_metrics_available": false,
+      "adjudication": {
+        "expected_defects_retained": 0,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-before-two-defect-reserve-only"
+    },
+    {
+      "elapsed_s": 38.945564249996096,
+      "model": "deepseek/deepseek-v4.1-flash",
+      "thinking": "high",
+      "fixture": "two-defect",
+      "reason": "wall_budget_exceeded",
+      "failure_type": null,
+      "limits": {
+        "investigation_s": 0.0,
+        "finalization_s": 60.0,
+        "tool_calls": 48
+      },
+      "tool_calls": 0,
+      "prompt_tokens": 1824,
+      "completion_tokens": 1109,
+      "budget_stops": 1,
+      "schema_valid": true,
+      "valid_empty_result": false,
+      "complete_clean_result": false,
+      "defect_retention": "requires examination of result evidence against fixture",
+      "finalizer_calls": [
+        {
+          "finalizer": true,
+          "result_event": true,
+          "valid_result": true,
+          "tool_starts": 0,
+          "requests": [
+            {
+              "reasoning_effort": "low",
+              "effective_config": {
+                "finalization": true,
+                "temperature": null,
+                "max_turns": null,
+                "read_only": false,
+                "persist_session": true,
+                "continuation_mode": "fresh",
+                "model_mode": "single",
+                "selected_tools_count": 0,
+                "selected_tools_present": false,
+                "no_tools": true,
+                "no_skills": true,
+                "schema_emulated": true
+              }
+            }
+          ],
+          "outcome": "valid_result"
+        }
+      ],
+      "result": {
+        "issues": [
+          {
+            "id": 1,
+            "description": "Empty batches no longer return 0; `mean([])` now divides by zero and raises `ZeroDivisionError`, violating the repository contract that empty batches must return 0.",
+            "file": "batch.py",
+            "line": 4,
+            "severity": "medium",
+            "confidence": "HIGH",
+            "rationale": "The diff removes the empty-values guard `if not values: return 0`, leaving only `return sum(values) / len(values)`. This changes behavior for empty batches from returning 0 to raising an exception.",
+            "evidence": "def mean(values):\n    return sum(values) / len(values)"
+          },
+          {
+            "id": 2,
+            "description": "Authorization now uses OR instead of AND, allowing access to non-administrators in the same tenant and to administrators outside the document's tenant, violating the contract that only administrators in the document's tenant may access it.",
+            "file": "batch.py",
+            "line": 7,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "The diff changes `role == \"admin\" and tenant_id == document_tenant` to `role == \"admin\" or tenant_id == document_tenant`. This broadens access beyond the required conjunction of administrator role and matching tenant.",
+            "evidence": "return role == \"admin\" or tenant_id == document_tenant"
+          }
+        ],
+        "verdicts": [
+          {
+            "path": "batch.py",
+            "lines_read": 7,
+            "verdict": "has_findings",
+            "n_findings": 2
+          }
+        ]
+      },
+      "comparison": "after",
+      "regime": "reserve-only",
+      "prompt_sha256": "296534e02bb31d27c0dfb0d47bdad86711a2692d03b065fa7aa8a5eed9cca0bd",
+      "token_metrics_available": true,
+      "adjudication": {
+        "expected_defects_retained": 2,
+        "additional_findings": 0,
+        "basis": "Inspected returned file/line, triggering input and evidence against fixture; not a production recall estimate."
+      },
+      "artifact_directory": "/tmp/daydream-followup-after-two-defect-reserve-only"
+    }
+  ]
+}

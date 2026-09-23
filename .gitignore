@@ -50,7 +50,7 @@ htmlcov/
 # Agent tooling (ignore local settings and all project-local skills)
 .claude/*
 .claude/skills/
-.agents/skills/
+.agents/
 
 # Logs
 logs/

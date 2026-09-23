@@ -31,6 +31,16 @@ class TestExtractJson:
                 id="clean-json-object",
             ),
             pytest.param("[1, 2, 3]", [1, 2, 3], id="clean-json-array"),
+            pytest.param('prefix {broken {"x": 1}', {"x": 1}, id="unclosed-outer-object"),
+            pytest.param('prefix [broken [1, 2]', [1, 2], id="unclosed-outer-array"),
+            pytest.param('prefix [1] then { }', {}, id="equal-size-object-before-array"),
+            pytest.param('prefix [1] then [2]', [1], id="equal-size-first-array"),
+            pytest.param('prefix {"x": [1, {"y": 2}]} tail', {"x": [1, {"y": 2}]}, id="mixed-nesting"),
+            pytest.param(
+                'prefix ' + json.dumps({"msg": 'escaped " quote, \\ slash, } ] brackets'}) + ' tail',
+                {"msg": 'escaped " quote, \\ slash, } ] brackets'},
+                id="prose-wrapped-string-escapes",
+            ),
             pytest.param(
                 '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```',
                 {"findings": [{"arb_id": 1, "keep": True}]},

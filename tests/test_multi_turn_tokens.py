@@ -1,6 +1,6 @@
 """TEST-06: Empirical multi-turn fixture verifying session total reconciliation.
 
-Drives 3 sequential run_agent() calls through a MockBackend with known token
+Drives 3 sequential run_agent() calls through a ScriptedBackend with known token
 values. Asserts the recorded final metrics reflect the authoritative per-call
 session totals (reconciled via per-dimension take-max delta, issue #747), NOT
 the collapsed per-message single digits — the under-count is caught, not
@@ -27,7 +27,6 @@ from daydream.backends import (
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
-from tests.harness.stub_backend import MockBackend
 from tests.harness.trajectory import make_recorder, read_trajectory, step_token_sum
 
 # -- Per-phase session totals (one run_agent call per phase) -----------------
@@ -37,25 +36,28 @@ _PHASE_SESSION_TOTALS: list[int] = [66_737, 60_000, 55_000]
 PHASES = [DaydreamPhase.REVIEW, DaydreamPhase.FIX, DaydreamPhase.TEST]
 
 
-def _make_backend(turn_idx: int) -> MockBackend:
+def _make_backend(turn_idx: int) -> ScriptedBackend:
     """Claude-shaped mock: completion is a near-constant single digit per
     message (SDK bug shape); the authoritative whole-call session total rides
     the per-call CostEvent (mirrors the real claude-agent-sdk emission order:
     MetricsEvent per message, then CostEvent)."""
-    return MockBackend([
-        TextEvent(text=f"turn {turn_idx + 1} output"),
-        MetricsEvent(
-            message_id=f"msg_{turn_idx:02d}",
-            prompt_tokens=[100, 150, 200][turn_idx],
-            completion_tokens=12,   # near-constant single digit (SDK bug shape)
-            cached_tokens=None,
-            cost_usd=None,
-        ),
-        TurnEndEvent(message_id=f"msg_{turn_idx:02d}"),
-        CostEvent(cost_usd=0.5, input_tokens=600,
-                  output_tokens=_PHASE_SESSION_TOTALS[turn_idx], cached_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    return ScriptedBackend(
+        events=[
+            TextEvent(text=f"turn {turn_idx + 1} output"),
+            MetricsEvent(
+                message_id=f"msg_{turn_idx:02d}",
+                prompt_tokens=[100, 150, 200][turn_idx],
+                completion_tokens=12,   # near-constant single digit (SDK bug shape)
+                cached_tokens=None,
+                cost_usd=None,
+            ),
+            TurnEndEvent(message_id=f"msg_{turn_idx:02d}"),
+            CostEvent(cost_usd=0.5, input_tokens=600,
+                      output_tokens=_PHASE_SESSION_TOTALS[turn_idx], cached_tokens=None),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
 
 
 async def _run_three_turns(tmp_path: Path) -> dict[str, Any]:

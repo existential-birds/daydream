@@ -11,7 +11,7 @@ import pytest
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
-from tests.test_corpus_projection import _cfg, _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_projection import _admit_second_batch, _cfg, _write_annotations_snapshot, _write_bundle
 
 
 def _read_split_memberships(out_dir: Path) -> tuple[list[str], list[str], list[str]]:
@@ -189,13 +189,7 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
 
 
 def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path) -> None:
-    import hashlib
 
-    from tests.test_corpus_projection import (
-        _admit_second_batch,
-        _write_annotations_snapshot,
-        _write_bundle,
-    )
 
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(

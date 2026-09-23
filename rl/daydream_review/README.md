@@ -60,7 +60,6 @@ backend only needs to learn a base URL and a key:
 `claude` is the default backend — for smoke runs and the real eval rollout
 (`configs/eval-docker.toml` also sets `backend = "claude"`) — because its CLI is
 what the base image already carries and its injection needs no provisioning file.
-`osprey` lands as one more class when daydream ships that backend.
 
 **Only `pi` can train.** Two facts compose. The interception server passes the
 agent's dialect straight through to the upstream — the URL is

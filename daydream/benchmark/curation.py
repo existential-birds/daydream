@@ -981,12 +981,7 @@ def add_finding(
     atom = {"title": title, "body": body, "severity": severity,
             "location": location, "source_ids": source_ids or []}
 
-    def mutate(raw: dict[str, Any]) -> None:
-        _append_atoms_to_case(
-            root, raw, case_id, [atom], authored=True, require_sources=False
-        )
-
-    _with_case_lock(root, case_id, "add", mutate)
+    add_findings(root, case_id, findings=[atom])
 
 
 def add_findings(
@@ -1142,15 +1137,7 @@ def exclude_evidence(
     non-blank note; a stray note on any other reason is rejected.
     """
 
-    def mutate(raw: dict[str, Any]) -> None:
-        _validate_evidence_exclusion_contract(reason, note)
-        _check_evidence_sources(root, raw, [source_id], case_id)
-
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        _append_evidence_exclusion(curation, source_id, reason, note)
-
-    _with_case_lock(root, case_id, "exclude-evidence", mutate)
+    exclude_evidence_batch(root, case_id, [source_id], reason=reason, note=note)
 
 
 def exclude_evidence_batch(

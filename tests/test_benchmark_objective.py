@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import objective
+from daydream.benchmark.harbor import objective, verifier_core
 from daydream.benchmark.harbor import run as run_mod
 from tests.test_benchmark_run import _seed_compiled_lock
 
@@ -211,8 +211,6 @@ def test_objective_metrics_equal_verifier_core(tmp_path: Path) -> None:
     """Run-objective fields must equal the canonical scorer directly — the same
     module the deployed metric loads (cross-surface equality is structural:
     one module, both consumers import it)."""
-    from daydream.benchmark.harbor import verifier_core
-
     ws = _complete_ws(tmp_path, trials=[_reward(tp=2, fp=1, fn=0, reward=0.8),
                                         _reward(tp=1, fp=0, fn=1, reward=0.5), None])
     run = objective.read_completed_run(ws, "run-1", env={})
@@ -275,8 +273,6 @@ def _complete_ws_at(tmp_path: Path, name: Any, run_id: Any, trials: Any, digest:
 
 
 def test_aggregate_suite_pools_micro_metrics_and_never_mean(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor import verifier_core
-
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=1, fn=0)])
     b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=3, fn=0)])
     manifest = {"schema_version": 1, "entries": [
@@ -328,8 +324,6 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: P
     — the canonical module — over the exact flattened cross-run rows, the same
     module the deployed metric loads at runtime.
     """
-    from daydream.benchmark.harbor import verifier_core
-
     # Two compatible workspaces with a realistic, comparison-eligible mix: scored
     # and gold-free clean tasks (an infra-error ``None`` trial would make the entry
     # comparison-ineligible and ``aggregate_suite`` correctly refuses to pool it).
@@ -400,8 +394,6 @@ def test_identity_to_dict_is_single_source_for_all_projections(tmp_path: Path) -
 def test_objective_metric_dict_includes_axis_keys() -> None:
     # Shape parity (P-NUMERIC-ROW): the objective projection must carry the
     # exact key set the authoritative aggregate_metrics returns.
-    from daydream.benchmark.harbor import verifier_core
-
     assert set(objective.Objective(
         tp=0, fp=0, fn=0, precision=1.0, recall=1.0, f1=1.0,
         clean_task_count=0, clean_pass_count=0, clean_accuracy=1.0,

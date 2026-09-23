@@ -29,6 +29,7 @@ import pytest
 
 from daydream.backends import (
     AgentEvent,
+    Backend,
     CostEvent,
     MetricsEvent,
     ToolResultEvent,
@@ -137,8 +138,6 @@ async def test_read_only_preserves_vocabulary(loader: Loader) -> None:
 
 def test_backends_have_no_skill_method() -> None:
     """M13: no backend formats/resolves/registers/permits/invokes a skill."""
-    from daydream.backends import Backend
-
     assert not hasattr(Backend, "format_skill_invocation")
     backends = (
         create_backend("claude", model="test-model"),

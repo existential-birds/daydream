@@ -18,13 +18,16 @@ from typing import Any, Literal, cast
 import anyio
 import pytest
 
-from daydream import git_ops, pr_review, runner
+from daydream import clipboard, git_ops, pr_review, runner
+from daydream.archive import ArchiveFinalizationError
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import (
     Manifest,
     archive_recorder_provenance_from_snapshot,
     build_manifest_from_snapshot,
 )
+from daydream.artifact_visibility import ArtifactSession, private_root_locations
+from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION,
     AgentEvent,
@@ -33,36 +36,45 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.cli import _signal_handler
+from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
 from daydream.exploration import ExplorationContext
+from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
+from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.pr_review import PRInfo
 from daydream.run_context import RunContext, current_run_context
 from daydream.run_snapshot import ArchiveRunSnapshot
-from daydream.runner import RunConfig, capture_manifest_run_identity
+from daydream.runner import (
+    RunConfig,
+    _open_recorder,
+    _RunSnapshotCaptureError,
+    _RunWriteCapture,
+    capture_manifest_run_identity,
+)
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from daydream.workspace import AuditWorkspace, WorkContext
+from daydream.ui import get_shutdown_panel, set_shutdown_panel
+from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.claude_sdk import patch_claude_sdk
 from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
+from tests.harness.review_profile import independent_exploration_profile
+from tests.harness.stub_backend import StubBackend, silence
 from tests.test_deep_pr_comment_integration import (
-    FakeAssistantMessage,
-    FakeResultMessage,
-    FakeTextBlock,
-    FakeThinkingBlock,
-    FakeToolResultBlock,
-    FakeToolUseBlock,
-    FakeUserMessage,
     _answer_prompts,
     _FakeSDKClient,
     _silence_ui,
@@ -70,39 +82,9 @@ from tests.test_deep_pr_comment_integration import (
 
 
 @pytest.fixture
-def deep_target(tmp_path: Path) -> Path:
-    """Real git repo on a feature branch with one Python file changed.
-
-    Mirrors ``tests/test_deep_pr_comment_integration.py``'s fixture so the
-    real-path App-identity test drives the identical single-file deep path
-    (tier ``"skip"``) with the shared fake SDK.
-    """
-    repo = tmp_path / "deep_repo"
-    _init_repo(repo)
-    (repo / "foo.py").write_text("def foo():\n    return 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "init")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "foo.py").write_text("def foo():\n    return 2\n")
-    _git(repo, "add", ".")
-    _commit(repo, "tweak foo")
-    return repo
-
-
-@pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
-    for symbol, fake in (
-        ("ClaudeSDKClient", _FakeSDKClient),
-        ("AssistantMessage", FakeAssistantMessage),
-        ("UserMessage", FakeUserMessage),
-        ("ResultMessage", FakeResultMessage),
-        ("TextBlock", FakeTextBlock),
-        ("ThinkingBlock", FakeThinkingBlock),
-        ("ToolUseBlock", FakeToolUseBlock),
-        ("ToolResultBlock", FakeToolResultBlock),
-    ):
-        monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
+    patch_claude_sdk(monkeypatch, _FakeSDKClient)
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
@@ -233,7 +215,6 @@ def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
     tmp_path: Path, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The recorder callback is a non-raising immutable handoff, not finalization."""
-    from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
 
     final = _capture_snapshot(tmp_path, "complete")
     capture = _RunWriteCapture(session_id="session")
@@ -253,7 +234,6 @@ def test_run_write_capture_closes_ordinary_json_validation_failure(
     tmp_path: Path, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The synchronous recorder callback never leaks an ordinary parser error."""
-    from daydream.runner import _RunSnapshotCaptureError, _RunWriteCapture
 
     partial = _capture_snapshot(tmp_path, "partial")
     capture = _RunWriteCapture(session_id="session")
@@ -284,7 +264,6 @@ def test_run_write_capture_does_not_swallow_base_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
 ) -> None:
     """Cancellation-class failures remain authoritative at the callback boundary."""
-    from daydream.runner import _RunWriteCapture
 
     capture = _RunWriteCapture(session_id="session")
 
@@ -304,9 +283,7 @@ def test_flow_context_exposes_typed_artifact_session_without_data_fallback(
     make_work: Callable[[Path], WorkContext],
     tmp_path: Path,
 ) -> None:
-    """Task 4 receives the host session explicitly, never through ctx.data."""
-    from daydream.artifact_visibility import ArtifactSession
-    from daydream.extensions import get_registry
+    """The host session arrives explicitly, never through ctx.data."""
 
     sentinel = cast(ArtifactSession, object())
     ctx = FlowContext(
@@ -326,7 +303,6 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The producer acknowledges preparation without disclosing host storage."""
-    from daydream.pr_review import PRInfo
 
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -368,7 +344,6 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Missing local PR objects keep artifact classification on the owning session."""
-    from daydream.pr_review import PRInfo
 
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -494,7 +469,6 @@ class _ControlledBackend:
 
 async def _run_private(config: RunConfig, tmp_path: Path) -> int:
     """Drive the real ``runner.run`` against a per-test private artifact root."""
-    from daydream.artifact_visibility import private_root_locations
 
     return await runner.run(
         config, private_roots=private_root_locations(base=tmp_path / "private")
@@ -531,7 +505,6 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
     if failure_mode == "archive":
         (repo / ".review-output.md").write_bytes(b"operator baseline\x00")
-        from daydream.archive import ArchiveFinalizationError
 
         def fail_archive(**_kwargs: Any) -> None:
             raise ArchiveFinalizationError("injected strict archive failure")
@@ -732,11 +705,6 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
     make_config: Callable[..., RunConfig],
 ) -> None:
     """Initial exploration fan-out archives a rooted immutable T1 snapshot."""
-    from daydream.artifact_visibility import private_root_locations
-    from daydream.atif import validate as atif_validate
-    from daydream.cli import _signal_handler
-    from daydream.ui import get_shutdown_panel, set_shutdown_panel
-    from tests.harness.stub_backend import StubBackend, silence
 
     class InitialExplorationBarrierBackend(StubBackend):
         fanout_concurrency = 2
@@ -762,8 +730,8 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
             async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
 
-    # Four changed files select pre_scan's parallel tier; the backend's real
-    # fan-out capacity admits exactly two children while the third waits.
+    # The custom exploration policy retains pre_scan's parallel specialist tier;
+    # the backend admits exactly two children while the third waits.
     (multi_stack_target / "extra.py").write_text("EXTRA = 1\n", encoding="utf-8")
     _git(multi_stack_target, "add", "extra.py")
     _commit(multi_stack_target, "add fourth changed file")
@@ -809,6 +777,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
                     archive=True,
                     run_eval=True,
                     diagram="off",
+                    review_profile=independent_exploration_profile(),
                 ),
                 private_roots=private_root_locations(base=private_base),
             )
@@ -828,8 +797,7 @@ async def test_signal_flush_immutable_cutoff_before_first_root_step(
             panel.finish()
             set_shutdown_panel(None)
 
-        # Task 3 routes the recorder privately. Deep's pre-recorder sidecars
-        # remain Task 4 producer work, so only the public run directory is
+        # The recorder is routed privately; only the public run directory is
         # forbidden at this checkpoint.
         assert not (multi_stack_target / ".daydream" / "runs").exists()
         live_runs = [
@@ -910,7 +878,6 @@ def patch_workspace(
     keep their synthetic ``WorkContext`` while exercising the real artifact
     lease around dispatch.
     """
-    from daydream.artifact_visibility import private_root_locations
 
     _init_repo(tmp_path)
     work = make_work(tmp_path)
@@ -941,7 +908,10 @@ _DISPATCH_TARGETS = (
     "_run_improve",
 )
 
-def _make_recording_dispatch(called: list[str]) -> Any:
+def _make_recording_dispatch(
+    called: list[str],
+    on_call: Callable[[str, Any, Any, RunContext], None] | None = None,
+) -> Any:
     def _record(name: str) -> Any:
         async def stub(
             work: Any, config: Any, _run_artifacts: Any = None, *,
@@ -950,6 +920,8 @@ def _make_recording_dispatch(called: list[str]) -> Any:
         ) -> int:
             assert run_context is current_run_context()
             called.append(name)
+            if on_call is not None:
+                on_call(name, work, config, run_context)
             return 0
         return stub
     return _record
@@ -1005,17 +977,10 @@ async def test_run_dispatches_to_expected_flow(
     """
     called: list[tuple[str, WorkContext, RunConfig]] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append((name, work, config))
-            return 0
+    def _capture(name: str, work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
+        called.append((name, work, config))
 
-        return stub
+    _record = _make_recording_dispatch([], _capture)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
@@ -1119,18 +1084,10 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
     called: list[str] = []
     head_shas: list[str] = []
 
-    def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_factory: BackendFactory | None,
-        ) -> int:
-            assert run_context is current_run_context()
-            called.append(name)
-            head_shas.append(work.head_sha)
-            return 0
+    def _capture(_name: str, work: Any, _config: RunConfig, _run_context: RunContext) -> None:
+        head_shas.append(work.head_sha)
 
-        return stub
+    _record = _make_recording_dispatch(called, _capture)
 
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
@@ -1167,8 +1124,6 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     to the App bot identity, and the minted token is injected as ``GH_TOKEN``
     into every ``gh`` subprocess for the duration of the run.
     """
-    from daydream import pr_review
-    from daydream.runner import RunConfig
 
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
@@ -1259,20 +1214,13 @@ async def test_review_run_does_not_mint_app_identity(
     async def post_forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("report-only --review must not post a PR review")
 
-    async def fake_review(
-        _work: WorkContext,
-        config: RunConfig,
-        _run_artifacts: Any = None,
-        *, run_context: RunContext, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
+    def _check_identity(_name: str, _work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
         assert config.identity == "operator"
-        return 0
 
+    _record = _make_recording_dispatch([], _check_identity)
     monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_review)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
 
     rc = await runner.run(make_config(tmp_path, output_mode="review", pr_repo="acme/widgets"))
 
@@ -1368,19 +1316,12 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     )
     seen: dict[str, Any] = {}
 
-    async def fake_deep(
-        work: WorkContext,
-        config: RunConfig,
-        _run_artifacts: Any = None,
-        *, run_context: RunContext, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
+    def _capture(_name: str, _work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
         seen["output_mode"] = config.output_mode
         seen["branch"] = config.branch
-        return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_deep)
+    _record = _make_recording_dispatch([], _capture)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
 
     config = make_config(tmp_path, output_mode="comment", branch="feat/missing")
     exit_code = await runner.run(config)
@@ -1389,7 +1330,7 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     assert seen == {"output_mode": "comment", "branch": "feat/missing"}, seen
 
 
-# --- Per-phase model resolution tests (Task 2) -----------------------------
+# --- Per-phase model resolution tests --------------------------------------
 
 
 class TestResolveBackendPhaseModel:
@@ -1609,7 +1550,7 @@ async def test_improve_inherited_storage_override_stops_before_model(
     assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
 
 
-# --- Task 6: deep fix-cycle hero is followed by Model: dim line -------------
+# --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
 
 def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
@@ -1623,9 +1564,6 @@ def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
     Returns:
         The ``.daydream/deep`` directory.
     """
-    from daydream import git_ops
-    from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
-    from daydream.workspace import _resolve_base
 
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
@@ -1792,7 +1730,6 @@ async def test_fix_cycle_items_severity_ordered(
         return {}
 
     async def _noop_test(*_a: Any, **kwargs: Any) -> Any:
-        from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
         key = kwargs["capture_tree_key"]()
         attempt = TestAttemptEvidence(
@@ -1832,7 +1769,7 @@ async def test_fix_cycle_items_severity_ordered(
         )
 
 
-# --- Task 4: non_interactive threading -------------------------------------
+# --- non_interactive threading ----------------------------------------------
 
 
 def test_runconfig_defaults_non_interactive_false() -> None:
@@ -1863,16 +1800,11 @@ async def test_run_threads_non_interactive_into_runtime(
     previous = current_run_context()
     received: list[RunContext] = []
 
-    async def stub(
-        work: Any, config: Any, _run_artifacts: Any = None, *,
-        run_context: RunContext, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert current_run_context() is run_context
+    def _capture(_name: str, _work: Any, _config: Any, run_context: RunContext) -> None:
         received.append(run_context)
-        return 0
 
-    monkeypatch.setattr(dispatch_target, stub)
+    _record = _make_recording_dispatch([], _capture)
+    monkeypatch.setattr(dispatch_target, _record(dispatch_target))
     config = make_config(tmp_path, non_interactive=True, **config_kwargs)
 
     assert await runner.run(config) == 0
@@ -1899,7 +1831,6 @@ async def test_fix_cycle_yes_commits_fixes(
     under ``assume="yes"`` the gate auto-approves and the commit agent runs. The
     observable outcome is a NEW git commit carrying the Daydream trailer.
     """
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     _seed_fix_resume(feature_branch_repo, [_fix_item()])
     _silence_fix_cycle_ui(silence_console)
@@ -2129,7 +2060,6 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     warning fires. An event-loop ticker must keep ticking during the worker-thread block —
     proving the copy is offloaded, not run on the loop.
     """
-    from daydream import clipboard
 
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -2274,7 +2204,6 @@ def test_open_recorder_backend_identity(
     expected: tuple[str, str, str, str],
 ) -> None:
     """Each flow records only backend identities for phases it can run."""
-    from daydream.runner import _open_recorder
 
     target_dir = tmp_path / "project"
     target_dir.mkdir()
@@ -2317,7 +2246,6 @@ def test_manifest_backend_is_general_default_not_per_stack_review(tmp_path: Path
     per-phase review override is set, and ``review_backend`` records only the
     review-specific override marker.
     """
-    from daydream.config_file import DaydreamFileConfig
 
     config = RunConfig(
         target=str(tmp_path / "project"),
@@ -2439,7 +2367,6 @@ def test_manifest_identity_uses_registered_pipeline(
 def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     tmp_path: Path, flow_name: str | None, shallow: bool,
 ) -> None:
-    from daydream.config_file import DaydreamFileConfig
 
     config = RunConfig(
         flow_name=flow_name, shallow=shallow, review_backend="claude",
@@ -2489,7 +2416,6 @@ def test_manifest_identity_separates_general_backend_and_review_override(
     tmp_path: Path, backend: str | None, review_backend: str | None, file_backend: str | None,
     file_review: str | None, expected_backend: str, expected_review: str | None,
 ) -> None:
-    from daydream.config_file import DaydreamFileConfig
 
     config = RunConfig(
         backend=backend, review_backend=review_backend,
@@ -2506,7 +2432,6 @@ def test_manifest_identity_separates_general_backend_and_review_override(
 def test_manifest_identity_captures_pi_working_directory_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool,
 ) -> None:
-    from daydream.config import DEFAULT_PI_MODEL
 
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "empty-global"))
     if configured:

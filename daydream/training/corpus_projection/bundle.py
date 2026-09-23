@@ -48,7 +48,6 @@ class BundleBatch(BaseModel):
     status: str
     reason_code: str | None
     artifact_relpath: str
-    artifact_digest: str | None = None
     manifest_relpath: str | None = None
     repo_slug: str | None = None
     license_evidence: dict[str, Any] | None = None
@@ -59,7 +58,6 @@ class BundleBatch(BaseModel):
 class CuratedBundle:
     curation_id: str
     source_hub_commit: str
-    manifest: dict[str, Any]
     batches: tuple[BundleBatch, ...]
 
     @property
@@ -171,6 +169,5 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
     return CuratedBundle(
         curation_id=doc["curation_id"],
         source_hub_commit=doc["source_hub_commit"],
-        manifest=doc,
         batches=batches,
     )

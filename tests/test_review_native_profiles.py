@@ -26,8 +26,7 @@ def test_golden_baseline_arbiter_and_merge() -> None:
                              cwd=Path("/c"))
     m = build_merge_prompt(strategy=_default_strategy("merge"),
                            per_stack_records_paths=[Path("/ps")], intent_path=Path("/i"),
-                           alternatives_path=Path("/a"), dedup_candidates_path=Path("/dc"),
-                           output_path=Path("/o"))
+                           alternatives_path=Path("/a"), dedup_candidates_path=Path("/dc"))
     assert "adjudicating their work" in a      # strategy content present
     assert "/ps" in m and "/dc" in m           # envelope runtime data present
     assert "/in" in a and "/i" in m
@@ -45,6 +44,20 @@ def test_authored_blocks_land_verbatim() -> None:
     assert p.strategies["discovery.per_stack"].source == "authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY"
     assert p.strategies["discovery.structural"].source == "authored: #886 NATIVE_STRUCTURAL_DISCOVERY_STRATEGY"
     assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"
+
+
+def test_discovery_strategy_reads_hunk_context_without_mandatory_full_large_files() -> None:
+    profile = rp.build_default_profile()
+    for name in ("discovery.per_stack", "discovery.generic_fallback"):
+        strategy = profile.strategies[name].content
+        assert "Read every assigned file in full" not in strategy
+        assert "enclosing symbol or configuration section" in strategy
+
+
+def test_structural_strategy_owns_folded_design_review() -> None:
+    strategy = rp.build_default_profile().strategies["discovery.structural"].content
+    assert "design choices that conflict with the confirmed intent" in strategy
+    assert "or alternatives analysis" not in strategy
 
 
 def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None:

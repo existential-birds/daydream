@@ -99,7 +99,6 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
     forked: list[dict[str, Any]] = []
     runs_dir = daydream_dir / RUNS_DIRNAME
 
-    # --- Resolve the run directory ------------------------------------------
     run_dir: Path | None = None
     if session_id:
         # Exact match first, then prefix match on run directory names
@@ -121,7 +120,6 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
             # latest is runs/<session_id>/trajectory.json — parent is the run dir
             run_dir = latest.parent
 
-    # --- Resolve the main and forked trajectories ---------------------------
     if run_dir:
         for path in _run_dir_trajectory_paths(run_dir):
             data = json.loads(path.read_text())
@@ -693,16 +691,55 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _completed_source_packet_files(daydream_dir: Path) -> set[str]:
+    """Credit host source only with the same stack's assigned, final verdict."""
+    # Deep coverage imports this module for legacy artifact normalization.
+    from daydream.deep.artifacts import per_stack_records_path
+    from daydream.deep.coverage import coverage_receipt_path, resolve_per_stack_verdicts
+
+    deep_dir = daydream_dir / "deep"
+    try:
+        receipts = json.loads(coverage_receipt_path(deep_dir).read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(receipts, dict):
+        return set()
+    covered: set[str] = set()
+    for stack, receipt in receipts.items():
+        if not re.fullmatch(r"[\w-]+(?:#\d+)?", stack) or not isinstance(receipt, dict):
+            continue
+        assigned = receipt.get("assigned_files")
+        packet = receipt.get("source_packet_files")
+        if not isinstance(assigned, list) or not isinstance(packet, list):
+            continue
+        try:
+            records = json.loads(per_stack_records_path(deep_dir, stack).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(records, dict) or not isinstance(records.get("verdicts"), list):
+            continue
+        verdicts = resolve_per_stack_verdicts(
+            assigned_files=[path for path in assigned if isinstance(path, str)],
+            declared_verdicts=records["verdicts"],
+            completed_read_paths=set(), finding_files=set(),
+            source_packet_paths={path for path in packet if isinstance(path, str)},
+        )
+        covered.update(v["path"] for v in verdicts if v["verdict"] != "not_reviewed")
+    return covered
+
+
 def analyze_coverage(
     trajectories: dict[str, Any],
     daydream_dir: Path,
     *,
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
 ) -> dict[str, Any]:
-    """File review coverage: diff files vs repository reads, never run artifacts.
+    """File review coverage from repository reads and completed source packets.
 
     ``artifact_reads_rejected`` counts the artifact-shaped or lexically unsafe
-    read paths excluded before suffix matching.
+    read paths excluded before suffix matching. ``files_read_by_reviewers``
+    retains its tool-read meaning; ``files_reviewed`` also includes host sources
+    with an assigned, completed final verdict from the receiving stack.
     """
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
 
@@ -722,12 +759,16 @@ def analyze_coverage(
         roots=_artifact_path_roots(daydream_dir, artifact_provenance),
     )
 
-    covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
+    tool_covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
+    packet_covered = set(diff_files) & _completed_source_packet_files(daydream_dir)
+    covered = tool_covered | packet_covered
     uncovered = sorted(set(diff_files) - covered)
 
     return {
         "files_in_diff": len(diff_files),
-        "files_read_by_reviewers": len(covered),
+        "files_read_by_reviewers": len(tool_covered),
+        "files_reviewed": len(covered),
+        "source_packet_reviewed": len(packet_covered),
         "coverage_ratio": (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
         "uncovered_files": uncovered,
         "artifact_reads_rejected": len(rejected_reads),
@@ -1270,19 +1311,8 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     dict_items = [item for item in items if isinstance(item, dict)]
     records = dict_items[:_DUPLICATION_INPUT_CAP]
     input_truncated = len(dict_items) > _DUPLICATION_INPUT_CAP
-    # ``RecordDuplicatePair`` carries no back-reference to the item it was built
-    # from, and none of the fields it does carry is a reliable key: ``id`` is
-    # unique only when ``normalize_items`` wrote the artifact (this analyzer
-    # reads whatever a run left on disk, legacy shapes included), and
-    # ``(id, file, description)`` collides worst on the near-identical rows this
-    # axis reports. So the mapping is made exact instead of inferred: ``sources``
-    # is copied verbatim onto ``record_a_source``/``record_b_source`` and is
-    # never otherwise inspected by ``build_record_dedup_candidates``, which makes
-    # it the one channel that can round-trip an index. It is also absent from
-    # that function's sort key -- ``(a_id, b_id, a_uid, b_uid)`` -- so routing
-    # the index through it leaves pair ordering, and therefore every metric and
-    # the ``top`` selection, bit-for-bit unchanged. ``lens`` is read back off the
-    # mapped item, which is where it came from in the first place.
+    # ``sources`` round-trips the item index; ``build_record_dedup_candidates``
+    # never inspects it, so pair ordering is unchanged.
     sources = [str(index) for index in range(len(records))]
     pairs = build_record_dedup_candidates(records, sources, threshold=0.0)
 

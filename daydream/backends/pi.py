@@ -166,12 +166,12 @@ def _configured_pi_model(
 # every turn.
 _PI_SYSTEM_PREAMBLE = """\
 You are an efficient coding agent operating under a strict tool-call budget.
-You have a LIMITED number of tool calls per turn (typically 50). Every call is
-precious — make each one count.
+Honor the invocation's time and tool allowance. Each call must resolve a
+specific unanswered question; the allowance is a ceiling, not a target.
 
 WORK STRATEGY:
-- Search before you read. Use grep/find/ls to map relevant locations before
-  opening any file. Prefer one targeted grep over three sequential reads.
+- Use supplied exact file paths and diff context directly. When a location is
+  unknown, use targeted grep/find/ls to locate it before opening files.
 - Batch related reads. Don't read files one at a time in a loop when a single
   grep would surface every relevant location.
 - Read the diff first. If a diff file or git output is in your context, start
@@ -192,6 +192,14 @@ reading whole files.
 
 Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
+
+
+_PI_FINALIZATION_PREAMBLE = """\
+Serialize the completed task using only the supplied context and completed evidence.
+Return exactly the requested output format. Tools are disabled. Do not investigate,
+research, test, or infer missing evidence. An empty findings result is successful
+when no defect is substantiated; preserve truthful incomplete coverage.
+"""
 
 
 _PI_DEFAULT_RETRY_ATTEMPTS = 20
@@ -339,10 +347,6 @@ def _pi_error_category(message: str) -> str:
     return "UNKNOWN"
 
 
-def parse_pi_retry_hint(message: str) -> float | None:
-    return parse_message_retry_hint(message)
-
-
 class _PiFailureFacts(Exception):
     """Classifier probe carrying Pi's category + message and no opt-in flag."""
 
@@ -445,6 +449,9 @@ class PiBackend:
     so trajectory recording (ATIF v1.7) works identically to Claude/Codex.
     """
 
+    supports_finalization = True
+    supports_tools_disabled = True
+    supports_review_instructions = True
     concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
     def __init__(
@@ -508,6 +515,9 @@ class PiBackend:
         max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
+        finalization: bool = False,
+        review_instructions: str | None = None,
+        tools_disabled: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via the Pi CLI and yield unified events.
 
@@ -524,6 +534,13 @@ class PiBackend:
                 gap; the argument is accepted for protocol parity only.
             read_only: When True, restricts Pi's tools to the read-only subset
                 (``read,find,ls,grep``) so the agent cannot write/edit/bash.
+            finalization: Disable tools with ``--no-tools``, replace the system
+                preamble with serialization guidance, and cap thinking at low
+                while preserving explicitly lower settings. max_turns remains
+                unsupported; the caller must enforce its absolute deadline.
+            tools_disabled: Disable tools independently of finalization while
+                preserving configured thinking and normal review instructions.
+                Send the prompt through stdin to support large evidence packets.
             persist_session: When False, pass ``--no-session`` and return no
                 continuation. The default preserves resumable sessions.
 
@@ -622,6 +639,8 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_THINKING")
         )
+        if finalization:
+            thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
         if provider:
             args.extend(["--provider", provider])
         if thinking:
@@ -643,9 +662,28 @@ class PiBackend:
         # Pi's built-in system prompt is minimal; append the daydream preamble
         # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
-        args.extend(["--append-system-prompt", _PI_SYSTEM_PREAMBLE])
+        system_prompt = _PI_FINALIZATION_PREAMBLE if finalization else _PI_SYSTEM_PREAMBLE
+        if review_instructions and not finalization:
+            system_prompt += (
+                "\n\nBOUNDED REPOSITORY REVIEW:\n" + review_instructions
+                + "\nKeep searches repository-scoped to the working directory and assigned "
+                "files or their directly relevant dependencies. Do not search filesystem "
+                "roots, host caches, or unrelated repositories. Use explicitly supplied "
+                "review artifacts at their exact paths. Do not assume a planted defect "
+                "or hidden evaluation requirement. Once a candidate is resolved, do not reopen it without new "
+                "contradictory evidence. After covering the assigned changes and resolving "
+                "concrete candidates, emit the requested result immediately; an empty "
+                "findings result is valid. Do not spend remaining time reconsidering "
+                "closed candidates or searching for a reason to avoid an empty result."
+            )
+        args.extend([
+            "--system-prompt" if finalization else "--append-system-prompt",
+            system_prompt,
+        ])
 
-        if read_only:
+        if finalization or tools_disabled:
+            args.append("--no-tools")
+        elif read_only:
             args.extend(["--tools", _PI_READ_ONLY_TOOLS])
 
         resume_id: str | None = None
@@ -664,7 +702,8 @@ class PiBackend:
         if output_schema:
             full_prompt = prompt + _schema_instruction(output_schema)
 
-        args.append(full_prompt)
+        if not tools_disabled:
+            args.append(full_prompt)
 
         # P18 Task 1: generation lifecycle correlation state (Pi only —
         # native_generation_interval class). One open generation per
@@ -727,19 +766,23 @@ class PiBackend:
         # appendix (schema_emulated=True whenever a schema was supplied).
         yield RequestEvent(
             prompt=full_prompt,
-            system_prompt=_PI_SYSTEM_PREAMBLE,
+            system_prompt=system_prompt,
             model_name=self.model,
             provider_name=provider,
             session_id=effective_session_id,
             reasoning_effort=thinking,
             output_schema=output_schema,
             config=PiRequestConfig(
+                finalization=finalization,
                 read_only=read_only,
                 persist_session=persist_session,
                 continuation_mode="resume" if resume_id is not None else "fresh",
                 model_mode="single",
-                selected_tools_count=len(_PI_READ_ONLY_TOOLS.split(",")) if read_only else None,
-                selected_tools_present=read_only,
+                selected_tools_count=(
+                    0 if finalization or tools_disabled else len(_PI_READ_ONLY_TOOLS.split(",")) if read_only else None
+                ),
+                selected_tools_present=read_only and not (finalization or tools_disabled),
+                no_tools=finalization or tools_disabled,
                 no_skills=True,
                 schema_emulated=output_schema is not None,
             ),
@@ -752,7 +795,8 @@ class PiBackend:
             transport = CliTransport(
                 "pi",
                 args,
-                stdin_mode=StdinMode.DEVNULL,
+                stdin_mode=StdinMode.PIPE if tools_disabled else StdinMode.DEVNULL,
+                stdin_data=full_prompt.encode("utf-8") if tools_disabled else None,
                 stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
@@ -987,7 +1031,7 @@ class PiBackend:
                             error_msg,
                             retryable=_pi_retryable_for(category=category, message=error_msg),
                             category=category,
-                            retry_after=parse_pi_retry_hint(error_msg),
+                            retry_after=parse_message_retry_hint(error_msg),
                         )
 
                 elif event_type == "agent_end":

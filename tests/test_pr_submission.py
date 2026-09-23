@@ -62,7 +62,7 @@ def _finding(
 
 def _plan(
     *,
-    inline: list[dict[str, object]] | None = None,
+    inline: list[InlineReviewComment] | None = None,
     inline_issues: list[ParsedIssue] | None = None,
     file_level: list[ParsedIssue] | None = None,
     body_only: list[ParsedIssue] | None = None,
@@ -172,7 +172,7 @@ def test_submission_plan_is_detached_from_mutable_classification_and_preserves_p
         severity_before_demotion="high",
         severity_off_vocabulary=True,
     )
-    inline = {"path": "inline.py", "line": 7, "side": "RIGHT", "body": "original inline"}
+    inline = InlineReviewComment("inline.py", 7, "RIGHT", "original inline")
     plan = _plan(inline=[inline], file_level=[issue])
 
     issue.path = "mutated.py"
@@ -180,7 +180,6 @@ def test_submission_plan_is_detached_from_mutable_classification_and_preserves_p
     issue.location_distrust = False
     issue.severity_before_demotion = None
     issue.severity_off_vocabulary = False
-    inline["body"] = "mutated inline"
 
     assert plan.inline == (InlineReviewComment("inline.py", 7, "RIGHT", "original inline"),)
     retained = plan.file_level[0]
@@ -193,7 +192,7 @@ def test_submission_plan_is_detached_from_mutable_classification_and_preserves_p
 
 def test_submission_uses_caller_authorized_approve_event() -> None:
     plan = _plan(
-        inline=[{"path": "inline.py", "line": 4, "side": "RIGHT", "body": "inline"}],
+        inline=[InlineReviewComment("inline.py", 4, "RIGHT", "inline")],
         inline_issues=[_finding("inline.py", "Inline finding", "5" * 64, line=4)],
         event=ReviewEvent.APPROVE,
     )

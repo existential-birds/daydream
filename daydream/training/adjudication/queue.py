@@ -92,6 +92,10 @@ def build_queue(
     byte-for-byte. Re-open/digest-drift logic applies to decisive items
     identically — they flow through the same ``prior_observations`` block.
 
+    Findings with prior observations also enter the operator queue even when
+    automatically decisive, so imported conflicts, stale judgments, and legacy
+    review requirements remain accessible to human adjudication.
+
     The queue is rebuilt deterministically, not immutable once built: when
     ``prior_observations`` (``record_id`` -> stored observation) contains a
     completed human judgment whose ``evidence_digest`` differs from the fresh
@@ -107,7 +111,7 @@ def build_queue(
     """
     items: list[dict[str, object]] = []
     for session in sessions:
-        if include_decisive:
+        if include_decisive or prior_observations:
             records, adjudication = project_findings(session, return_adjudication=True)
             entries = adjudication + [
                 r for r in records if is_decisive(str(r.get("disposition")))
@@ -115,6 +119,13 @@ def build_queue(
         else:
             _, adjudication = project_findings(session, return_adjudication=True)
             entries = adjudication
+        for entry in adjudication:
+            if entry["disposition"] not in _NON_DECISIVE_DISPOSITIONS:
+                raise ValueError(
+                    f"build_queue: adjudication entry for fingerprint "
+                    f"{entry.get('fingerprint') or entry.get('finding_fingerprint')!r} "
+                    f"has non-queue disposition {entry['disposition']!r}"
+                )
         session_id = str(session.get("session_id"))
         trajectory_id = str(session.get("trajectory_id"))
         segment_id = str(session.get("segment_id"))
@@ -128,12 +139,12 @@ def build_queue(
                 entry.get("fingerprint") or entry.get("finding_fingerprint")
             )
             disposition = entry["disposition"]
-            if not include_decisive and disposition not in _NON_DECISIVE_DISPOSITIONS:
-                raise ValueError(
-                    f"build_queue: adjudication entry for fingerprint {fingerprint!r} has "
-                    f"non-queue disposition {disposition!r}; expected one of "
-                    f"{sorted(_NON_DECISIVE_DISPOSITIONS)}"
-                )
+            finding_id = record_id(session_id, trajectory_id, segment_id, fingerprint)
+            if (
+                not include_decisive and disposition not in _NON_DECISIVE_DISPOSITIONS
+                and finding_id not in (prior_observations or {})
+            ):
+                continue
             resolution = by_fingerprint.get(fingerprint)
             if resolution is None:
                 raise ValueError(

@@ -608,11 +608,11 @@ def _is_compilable(curation: dict[str, Any]) -> bool:
     return schema.derive_gold_status(schema.Curation(**curation)) is not None
 
 
-def _authoring_input_digest(case_docs: dict[str, Any], manifest: dict[str, Any]) -> str:
+def _authoring_input_digest(case_docs: dict[str, Any], manifest: schema.BenchmarkManifest) -> str:
     """Deterministic sha256 over the authoring inputs (no timestamps)."""
     payload: dict[str, Any] = {}
-    for _case in manifest.get("cases") or []:
-        case_id = _case.get("case_id")
+    for case in manifest.cases:
+        case_id = case.case_id
         if not case_id or case_id not in case_docs:
             continue
         raw = case_docs[case_id]
@@ -862,11 +862,10 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
         try:
-            loaded_manifest = load_benchmark_manifest(root, canonicalize_case_order=True)
+            manifest = load_benchmark_manifest(root, canonicalize_case_order=True)
         except storage.WorkspaceCorrupt as exc:
             raise CompileError(str(exc)) from exc
-        manifest = loaded_manifest.raw
-        repo_slug = manifest.get("source", {}).get("repository") or ""
+        repo_slug = manifest.source.repository
         # Every indexed case is loaded through the shared model-gated loader
         # (same ``_schema_ready`` + ``CaseDocument`` validation as the
         # validate/status read path); a present-but-corrupt case raises
@@ -874,16 +873,15 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
         # validation (which rejects malformed/empty privacy host lists) is
         # surfaced as ``CompileError`` so a disallowed-host policy fails the
         # compile closed through the documented rejection type.
-        manifest_model = loaded_manifest.model
         # The compiled network policy is sourced from the workspace's persisted
         # privacy allowlists -- never a hardcoded default. The Privacy field
         # validators (_normalize_host_list) already reject empty/malformed
         # lists during model_validate, surfacing above as CompileError, so an
         # unsafe (or hostless) policy can never reach the task render.
-        reviewer_hosts = list(manifest_model.privacy.reviewer_allowed_hosts)
-        judge_hosts = list(manifest_model.privacy.judge_allowed_hosts)
+        reviewer_hosts = list(manifest.privacy.reviewer_allowed_hosts)
+        judge_hosts = list(manifest.privacy.judge_allowed_hosts)
         case_docs: dict[str, dict[str, Any]] = {}
-        for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
+        for case_file, doc in workspace.load_case_documents(root, manifest).items():
             dumped = doc.model_dump(mode="json")
             case_id = dumped["case_id"]
             if (dumped.get("curation") or {}).get("state") == "excluded":
@@ -907,8 +905,8 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
             all_files: dict[str, str] = {}
             case_rows: list[dict[str, Any]] = []
             control_plane: dict[str, str] = {"README.md": _ROOT_README}
-            for _case in manifest.get("cases") or []:
-                case_id = _case.get("case_id")
+            for case in manifest.cases:
+                case_id = case.case_id
                 case_doc = case_docs.get(case_id)
                 if case_doc is None:
                     raise CompileError(

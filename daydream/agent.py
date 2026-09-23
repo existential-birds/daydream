@@ -25,15 +25,13 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 from daydream import clock
-from daydream.artifact_visibility import artifact_session_active, assert_model_cwd_clean
+from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
     Backend,
     ContinuationToken,
     CostEvent,
     DiagnosticEvent,
-    GenerationEndEvent,
-    GenerationStartEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -49,6 +47,7 @@ from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
+from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import (
     FailureClass,
     RetryRecoveryBudget,
@@ -57,6 +56,8 @@ from daydream.retry_policy import (
     parse_message_retry_hint,
     undeclared_retry_allowance_message,
 )
+from daydream.review_budget import ReviewLimits, review_deadline, review_limits_for_scope
+from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import (
     RunContext,
     bind_run_context,
@@ -76,7 +77,7 @@ from daydream.ui import (
     print_thinking,
     print_warning,
 )
-from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG
+from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG, _redacted_bash_command
 
 _logger = logging.getLogger(__name__)
 
@@ -110,7 +111,6 @@ class _ResolvedRetrySettings:
     base_delay_s: float
     max_delay_s: float
     allowance_s: float
-    allowance_declared: bool
 
 
 def _resolve_retry_settings(
@@ -228,7 +228,6 @@ def _resolve_retry_settings(
         base_delay_s=base_delay,
         max_delay_s=max_delay,
         allowance_s=resolved_allowance,
-        allowance_declared=declared_allowance,
     )
 
 
@@ -615,10 +614,8 @@ def _summarize_input(input_data: dict[str, Any], name: str) -> str:
             # surface shows the cd-stripped display variant. Codex-only
             # ('shell'): Claude/Pi Bash commands never pass through the Codex
             # wrapper, so their operator-authored cd prefix must render.
-            if key == "command" and name == "shell":
-                from daydream.backends.codex import display_shell_command
-
-                value = display_shell_command(value)
+            if key == "command":
+                return _redacted_bash_command(name, value)
             return redact_structured_text(value)[:_BASH_COMMAND_MAX_CHARS]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
@@ -714,15 +711,62 @@ async def run_agent(
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
+    review_limits: ReviewLimits | None = None,
+    finalization_context: FinalizationContext | None = None,
+    tools_disabled: bool = False,
+    review_system_instructions: str | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
     """
+    if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
+        raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
+    if review_system_instructions is not None:
+        if not tools_disabled:
+            raise ValueError("review_system_instructions requires tools_disabled=True")
+        if not getattr(backend, "supports_review_instructions", False):
+            raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
+    if sanctioned_inputs is not None:
+        # Callers may already have rendered this suffix. Move it after the
+        # host's budget/finalization instructions without duplicating inputs.
+        rendered_suffix = sanctioned_inputs.render_prompt("")
+        if rendered_suffix and prompt.endswith(rendered_suffix):
+            prompt = prompt.removesuffix(rendered_suffix)
+    context = resolve_run_context(run_context)
+    evidence = ReviewEvidence(output_schema) if review_limits is not None else None
+    review_instructions = review_system_instructions
+    hard_deadline = deadline
+    if review_limits is not None:
+        review_limits = review_limits_for_scope(review_limits)
+        started = clock.monotonic()
+        bounds = [started + review_limits.investigation_s + review_limits.finalization_s]
+        if deadline is not None:
+            bounds.append(deadline)
+        if wall_budget_s is not None:
+            bounds.append(started + wall_budget_s)
+        shared = review_deadline(discovery=review_limits.discovery)
+        if shared is not None:
+            bounds.append(shared)
+        hard_deadline = min(bounds)
+        deadline = max(
+            started, min(started + review_limits.investigation_s, hard_deadline - review_limits.finalization_s),
+        )
+        investigation_allowance = max(0.0, deadline - started)
+        tool_call_budget = min(tool_call_budget, review_limits.tool_calls) if tool_call_budget is not None else (
+            review_limits.tool_calls
+        )
+        budget_instructions = (
+            f"Investigation allowance: at most {investigation_allowance:g} seconds and "
+            f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
+        )
+        prompt += "\n\n" + budget_instructions
+        review_instructions = "\n\n".join(
+            item for item in (review_system_instructions, budget_instructions) if item
+        )
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
-    context = resolve_run_context(run_context)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
     with bind_run_context(context), agent_scope(
         phase.value, backend=backend_name, model=backend.model
@@ -737,7 +781,50 @@ async def run_agent(
             validate_structured_output=validate_structured_output,
             sanctioned_inputs=sanctioned_inputs,
             run_context=context,
+            review_evidence=evidence,
+            review_instructions=review_instructions,
+            tools_disabled=tools_disabled,
         )
+        if evidence is not None and review_limits is not None and result[2] in {
+            "wall_budget_exceeded", "tool_call_budget_exceeded",
+        }:
+            partial, token, reason = result
+            if evidence.valid(partial):
+                result = (partial, token, reason)
+            elif evidence.checkpoint is not None:
+                result = (evidence.checkpoint, token, reason)
+            elif hard_deadline is not None and clock.monotonic() < hard_deadline:
+                try:
+                    captured = (
+                        sanctioned_inputs.finalization_text(
+                            backend, cwd, read_only,
+                            input_priority=finalization_context.input_priority if finalization_context else (),
+                        )
+                        if sanctioned_inputs is not None else ""
+                    )
+                    final_prompt = evidence.finalization_prompt(
+                        finalization_context or FinalizationContext(task=phase.value), captured,
+                    )
+                    finalized, _, final_reason = await _run_agent(
+                        backend, cwd, final_prompt, phase=phase,
+                        output_schema=output_schema, progress_callback=progress_callback,
+                        read_only=read_only, persist_session=persist_session, finalization=True,
+                        deadline=min(hard_deadline, clock.monotonic() + review_limits.finalization_s),
+                        tool_call_budget=0,
+                        retry_recovery_allowance_s=retry_recovery_allowance_s,
+                        sanctioned_inputs=sanctioned_inputs, run_context=context,
+                    )
+                    if final_reason is None and (
+                        evidence.valid(finalized) or (output_schema is None and isinstance(finalized, str))
+                    ):
+                        result = (finalized, None, reason)
+                except ArtifactVisibilityError:
+                    raise
+                except Exception:  # finalization must not erase the original incomplete result
+                    _logger.warning("Review finalization failed; retaining incomplete output")
+            # Budget-limited outputs use full validation, never shape-only salvage.
+            if output_schema is not None and not evidence.valid(result[0]):
+                result = ("", None, reason)
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
@@ -763,6 +850,10 @@ async def _run_agent(
     validate_structured_output: bool = True,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
+    review_evidence: ReviewEvidence | None = None,
+    review_instructions: str | None = None,
+    finalization: bool = False,
+    tools_disabled: bool = False,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -937,7 +1028,7 @@ async def _run_agent(
                         attempts=telemetry.retry_attempts,
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
-                        circuit_state=run_context.outage_circuit.state(now),
+                        circuit_state=run_context.outage_circuit.state(),
                         retry_recovery_spent_s=recovery.spent_s + pending,
                         partial_edit_handling="discarded",
                     )
@@ -962,6 +1053,8 @@ async def _run_agent(
                 structured_result = None
                 result_continuation = None
                 tool_calls = 0
+                if review_evidence is not None:
+                    review_evidence.reset()
                 budget_reason: str | None = None
                 # Never dispatch an attempt once the deadline is spent: the
                 # ladder stops here with the reset state.
@@ -1017,6 +1110,12 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
+                    if finalization and getattr(backend, "supports_finalization", False):
+                        execute_kwargs["finalization"] = True
+                    if tools_disabled and getattr(backend, "supports_tools_disabled", False):
+                        execute_kwargs["tools_disabled"] = True
+                    if review_instructions and getattr(backend, "supports_review_instructions", False):
+                        execute_kwargs["review_instructions"] = review_instructions
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
                     event_iter = backend.execute(
@@ -1064,19 +1163,20 @@ async def _run_agent(
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
+                                if review_evidence is not None:
+                                    review_evidence.observe(event)
+                                # Recorder-only parser/transport evidence and the
+                                # invocation ledger must be forwarded before any
+                                # branch-specific break; _dispatch is UI-free and
+                                # ignores RequestEvent (the one armless member).
+                                if inv is not None:
+                                    inv.observe(event)
                                 if use_callback and not isinstance(
                                     event, (TextEvent, DiagnosticEvent)
                                 ):
                                     await _flush_callback_text()
 
-                                if isinstance(event, DiagnosticEvent):
-                                    # Recorder-only parser/transport evidence. It
-                                    # must not affect UI, callbacks, supervision,
-                                    # tool bookkeeping, or invocation budgets.
-                                    if inv is not None:
-                                        inv.observe(event)
-
-                                elif isinstance(event, TextEvent):
+                                if isinstance(event, TextEvent):
                                     output_parts.append(event.text)
 
                                     if policy.log_mode:
@@ -1088,9 +1188,6 @@ async def _run_agent(
                                         # the returned structured result — don't echo it to the terminal.
                                         agent_renderer.append(event.text)
 
-                                    if inv is not None:
-                                        inv.observe(event)
-
                                 elif isinstance(event, ThinkingEvent):
                                     if policy.log_mode:
                                         _print_log(f"[thinking] {event.text}")
@@ -1098,9 +1195,6 @@ async def _run_agent(
                                         if agent_renderer.has_content:
                                             agent_renderer.finish()
                                         print_thinking(console, event.text)
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, ToolStartEvent):
                                     if policy.log_mode:
@@ -1120,9 +1214,6 @@ async def _run_agent(
                                         if agent_renderer.has_content:
                                             agent_renderer.finish()
                                         tool_registry.create(event.id, event.name, event.input)
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                     if tool_supervisor is not None:
                                         try:
@@ -1174,11 +1265,7 @@ async def _run_agent(
                                             panel = tool_registry.get(event.id)
                                             if panel:
                                                 panel.set_result(event.output, event.is_error)
-                                                panel.finish()
                                                 tool_registry.remove(event.id)
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, MetricsEvent):
                                     if policy.log_mode:
@@ -1186,20 +1273,6 @@ async def _run_agent(
                                             f"[metrics] prompt={event.prompt_tokens} "
                                             f"completion={event.completion_tokens}",
                                         )
-                                    # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
-                                    # CostEvent branch so isinstance order is correct.
-                                    if inv is not None:
-                                        inv.observe(event)
-
-                                elif isinstance(event, (GenerationStartEvent, GenerationEndEvent)):
-                                    # P18 T1/T2 seam: the pending-generation ledger is
-                                    # recorder-only evidence (no UI, no logging). The
-                                    # telemetry observer already saw the event at the
-                                    # top of the loop; forward it so the invocation
-                                    # ledger seals drafts and resolves the single
-                                    # billing owner before the attempt scope exits.
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, CostEvent):
                                     if policy.log_mode:
@@ -1210,20 +1283,6 @@ async def _run_agent(
                                             agent_renderer.finish()
                                         console.print()
                                         print_cost(console, event.cost_usd)
-
-                                    if inv is not None:
-                                        inv.observe(event)
-
-                                elif isinstance(event, TurnEndEvent):
-                                    # Per-turn close (issue #747): forward the
-                                    # turn boundary so each turn's already-emitted
-                                    # MetricsEvent lands on its own Step instead of
-                                    # collapsing into one. Pure recorder
-                                    # forwarding — no UI, no logging. The recorder's
-                                    # no-open-step no-op guard prevents empty-step
-                                    # invention.
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, ResultEvent):
                                     # Capture the structured result unconditionally: the log-mode
@@ -1257,9 +1316,6 @@ async def _run_agent(
                                                         formatted.append(f"[{i.get('id', '?')}] {label}")
                                                 agent_renderer.append("\n".join(formatted))
                                     result_continuation = event.continuation
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                             if use_callback:
                                 await _flush_callback_text()
@@ -1374,15 +1430,6 @@ async def _run_agent(
                         # attribute intact.
                         circuit_now = clock.monotonic()
                         admission = run_context.outage_circuit.admit_retry(circuit_now)
-                        # A freshly granted half-open probe is not a *failed*
-                        # probe: it has not dispatched yet. Counting it here
-                        # would re-open the circuit on the spot, clear the probe
-                        # token (so concurrent ladders could each fly their own
-                        # probe) and restart the probe interval -- the documented
-                        # "exactly one probe per interval" contract could then
-                        # never execute. The probe's real outcome is recorded when
-                        # its own attempt reports back; a suppressed ladder still
-                        # counts its failure, which is what re-opens the circuit.
                         opened_here = (
                             False
                             if admission.allowed
@@ -1497,7 +1544,7 @@ async def _run_agent(
                         attempts=telemetry.attempts_dispatched,
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
-                        circuit_state=run_context.outage_circuit.state(clock.monotonic()),
+                        circuit_state=run_context.outage_circuit.state(),
                         retry_recovery_spent_s=recovery.spent_s,
                         partial_edit_handling=(
                             "discarded" if partials_discarded_by_deadline else "kept"
@@ -1573,22 +1620,11 @@ async def _run_agent(
         return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
-        # Fallback: extract JSON from the raw text when structured output
-        # failed. Uses robust extraction (handles prose-wrapped JSON and
-        # markdown code fences — common with GLM and other OpenAI-compat models).
-        # The parsed result must also pass the fallback gate — an unvalidated
-        # fallback would be asymmetric with the success path. The gate is
-        # salvage-tolerant, not all-or-nothing (see _salvageable): consumers
-        # like the per-stack parse, the recommendation verifier, and the
-        # cross-stack merge normalize partial output (dropping invalid records
-        # rather than losing the whole payload, or accepting a bare item
-        # array), so salvageable structures still reach them. Only output that
-        # is unusable in any shape falls through to the plain-text return.
-        # Callers that salvage wholesale downstream — the improve recon and
-        # the plan author, whose downstream validators (validate_recon_commands
-        # / assemble_plan) are the fail-closed enforcement point — opt out
-        # with validate_structured_output=False; the downstream validator
-        # remains the fail-closed enforcement point for those call sites.
+        # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
+        # structured output failed. The parsed value must pass the same
+        # salvage-tolerant gate as the success path (see _salvageable); callers
+        # that salvage wholesale downstream opt out via
+        # validate_structured_output=False.
         if raw.strip():
             parsed = extract_json(raw)
             if parsed is not None and _usable(parsed):

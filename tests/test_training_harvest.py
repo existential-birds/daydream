@@ -18,7 +18,6 @@ from daydream.archive.index import (
     append_label_observation,
     label_observation_history,
     latest_label_observation,
-    pr_attached_label_coverage,
     query_runs,
     upsert_run,
 )
@@ -46,7 +45,7 @@ from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.harvest_services import HarvestTestServices
-from tests.harness.trajectory import diff_adding, make_manifest
+from tests.harness.trajectory import diff_adding
 
 
 def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path:
@@ -73,6 +72,17 @@ _FP_B = "b" * 64
 _FP_C = "c" * 64
 
 
+def _bot_comment(fp: str | None = None, *, id: int = 1) -> dict[str, Any]:
+    """A footer-marked daydream finding comment, optionally carrying ``fp``'s marker."""
+    marker = f"{finding_marker(fp)}\n\n" if fp is not None else ""
+    return {
+        "id": id,
+        "in_reply_to_id": None,
+        "user": {"login": "daydream-runner"},
+        "body": f"finding\n\n{marker}{DAYDREAM_FOOTER}",
+    }
+
+
 def _finding_comments(
     fp: str,
     *,
@@ -86,14 +96,7 @@ def _finding_comments(
     evidence the classifier can label. ``reply_created_at`` feeds the
     decisive-evidence ``valid_at`` derivation.
     """
-    comments: list[dict[str, Any]] = [
-        {
-            "id": 1,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-runner"},
-            "body": f"finding\n\n{finding_marker(fp)}\n\n{DAYDREAM_FOOTER}",
-        }
-    ]
+    comments: list[dict[str, Any]] = [_bot_comment(fp)]
     if reply is not None:
         entry: dict[str, Any] = {
             "id": 2,
@@ -123,12 +126,7 @@ def _write_findings(run_dir: Path, *fps: str) -> None:
 # ``comment_resolution`` is ``(0, 0, 0)`` and a merge alone is not evidence
 # daydream contributed.
 _REPLIED_FINDING: list[dict[str, Any]] = [
-    {
-        "id": 1,
-        "in_reply_to_id": None,
-        "user": {"login": "daydream-runner"},
-        "body": f"finding\n\n{DAYDREAM_FOOTER}",
-    },
+    _bot_comment(),
     {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
 ]
 
@@ -194,6 +192,39 @@ def _services(config: HarvestConfig, *, github: Callable[..., Any]) -> HarvestTe
     return HarvestTestServices(make_harvest_services(config), github=github)
 
 
+def _pr_row(run_dir: Path, session_id: str, *, pr_number: int = 7) -> dict[str, Any]:
+    """The PR-shaped harvested row shared by the annotation/valid-at tests."""
+    return {
+        "session_id": session_id,
+        "pr_repo": "o/r",
+        "pr_number": pr_number,
+        "head_sha": "h",
+        "base_branch": "main",
+        "archive_path": str(run_dir),
+        "grounding_rate": 1.0,
+        "changed_files": "[]",
+    }
+
+
+def _local_row(run_dir: Path, session_id: str, *, grounding_rate: float | None) -> dict[str, Any]:
+    """The PR-less local-branch row shared by the shallow/local annotation tests."""
+    return {
+        "session_id": session_id,
+        "pr_repo": None,
+        "pr_number": None,
+        "branch": "feat",
+        "head_sha": "h",
+        "archive_path": str(run_dir),
+        "grounding_rate": grounding_rate,
+        "changed_files": "[]",
+    }
+
+
+def _write_recommended_patch(run_dir: Path) -> None:
+    """Write the guarded-line recommended patch used by the orphan-run tests."""
+    (run_dir / "recommended.patch").write_text(diff_adding("guarded = True"))
+
+
 def _acquire_annotation(
     raw: dict[str, Any],
     *,
@@ -226,9 +257,7 @@ def _acquire_annotation(
 def test_build_annotation_pr_row_labels_from_decisive_reply_evidence(tmp_path: Path) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s1")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -257,18 +286,8 @@ def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: s
     return _fake_gh(
         merged_at=merged_at,
         comments=[
-            {
-                "id": 1,
-                "in_reply_to_id": None,
-                "user": {"login": "daydream-runner"},
-                "body": f"finding\n\n{finding_marker(fp_replied)}\n\n{DAYDREAM_FOOTER}",
-            },
-            {
-                "id": 2,
-                "in_reply_to_id": None,
-                "user": {"login": "daydream-runner"},
-                "body": f"finding\n\n{finding_marker(fp_unreplied)}\n\n{DAYDREAM_FOOTER}",
-            },
+            _bot_comment(fp_replied),
+            _bot_comment(fp_unreplied, id=2),
             {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"},
              "author_association": "MEMBER", "body": "applied"},
         ],
@@ -284,9 +303,7 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
     (run_dir / "findings.json").write_text(
         json.dumps({"findings": [{"fingerprint": fp_a}, {"fingerprint": fp_b}]})
     )
-    row = {"session_id": "s_pf", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_pf")
     ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged_per_finding("2026-02-01T00:00:00+00:00", fp_a, fp_b),
                            repo_clone=tmp_path)
@@ -299,9 +316,7 @@ def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
     one qualifying question. Run label contested; per-finding exact (M22 final case)."""
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A, _FP_B, _FP_C)
-    row = {"session_id": "s_626", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_626")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -309,24 +324,9 @@ def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
         gh_api=_fake_gh(
             merged_at="2026-02-05T00:00:00+00:00",
             comments=[
-                {
-                    "id": 1,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
-                },
-                {
-                    "id": 2,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
-                },
-                {
-                    "id": 3,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_C)}\n\n{DAYDREAM_FOOTER}",
-                },
+                _bot_comment(_FP_A),
+                _bot_comment(_FP_B, id=2),
+                _bot_comment(_FP_C, id=3),
                 {
                     "id": 4,
                     "in_reply_to_id": 1,
@@ -369,9 +369,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
     # (false_positive_penalty / posterior_cost), not a deduction from the stored
     # composite, which stays pure intrinsic.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej", pr_number=9)
 
     # Intrinsic-only baseline: same inputs scored with no posterior.
     intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
@@ -399,9 +397,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     # "alice" makes the DB query run, but the fresh archive yields the empty-pool
     # path (None, 0), so the reducer applies the 0.5 default prior.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej_prod", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej_prod", pr_number=9)
     _write_findings(run_dir, _FP_A)
     payload = _acquire_annotation(
         row,
@@ -437,17 +433,10 @@ def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> No
     """
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s_fork_auth", "pr_repo": "o/r", "pr_number": 13, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_fork_auth", pr_number=13)
     reply_created = "2026-08-02T10:00:00Z"
     comments = [
-        {
-            "id": 1,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-runner"},
-            "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
-        },
+        _bot_comment(_FP_A),
         {
             "id": 2,
             "in_reply_to_id": 1,
@@ -490,16 +479,9 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
     """
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s_review_auth", "pr_repo": "o/r", "pr_number": 14, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_review_auth", pr_number=14)
     comments = [
-        {
-            "id": 1,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-runner"},
-            "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
-        },
+        _bot_comment(_FP_A),
         {
             "id": 2,
             "in_reply_to_id": 1,
@@ -529,9 +511,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()           # no deep/ → shallow
-    row = {"session_id": "s2", "pr_repo": None, "pr_number": None, "branch": "feat",
-           "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": None,
-           "changed_files": "[]"}
+    row = _local_row(run_dir, "s2", grounding_rate=None)
     ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                            repo_clone=tmp_path)
     assert ann.valid_at is None                               # collapses to observed_at on write
@@ -575,16 +555,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
     )
 
     run_dir = _seed_deep_bronze(tmp_path / "current_run", verdict="consistent", grounding=1.0)
-    row = {
-        "session_id": "s_rej_populated",
-        "pr_repo": "o/r",
-        "pr_number": 9,
-        "head_sha": "h",
-        "base_branch": "main",
-        "archive_path": str(run_dir),
-        "grounding_rate": 1.0,
-        "changed_files": "[]",
-    }
+    row = _pr_row(run_dir, "s_rej_populated", pr_number=9)
     _write_findings(run_dir, _FP_A)
     payload = _acquire_annotation(
         row,
@@ -612,9 +583,7 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
     tmp_path: Path,
 ) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej", pr_number=9)
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(
@@ -644,9 +613,7 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(
     tmp_path: Path,
 ) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_rej", pr_number=9)
     _write_findings(run_dir, _FP_A)
     rb = json.loads(
         _acquire_annotation(
@@ -677,9 +644,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
     from daydream.training.labeler_signals import LocalCommitAppliedSignal
 
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_local", "pr_repo": None, "pr_number": None, "branch": "feat",
-           "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _local_row(run_dir, "s_local", grounding_rate=1.0)
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(
         row,
@@ -708,9 +673,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights(is_default=True))
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    row = {"session_id": "s_custom", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
-           "changed_files": "[]"}
+    row = _pr_row(run_dir, "s_custom", pr_number=9)
     with pytest.raises((AssertionError, RuntimeError), match="canonical"):
         _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                          gh_api=_fake_gh(merged=False), repo_clone=tmp_path)
@@ -784,24 +747,24 @@ def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path) 
     assert no_eval_breakdown.grounding is None
 
 
-def _seed_archived_deep_run(
+def _seed_run_manifest(
     archive_dir: Path,
+    run_dir: Path,
     session_id: str,
     *,
-    merged_at: str,
+    pr_number: int | None,
+    pr_repo: str | None,
+    head_sha: str = "abc",
+    base_branch: str | None = "main",
+    branch: str | None = None,
     source_path: Path | None = None,
-) -> Path:
-    """Seed a deep-run bronze bundle and index it under ``archive_dir``.
+) -> None:
+    """Register the shared indexed manifest row for a seeded bronze bundle.
 
-    ``_seed_deep_bronze`` + ``upsert_run`` (plan note): writes the bronze
-    artifacts beside the archive and registers the indexed manifest row that
-    :func:`run_harvest` walks. Returns the run directory.
-
-    When ``source_path`` is supplied it is recorded on the manifest so
-    :func:`_resolve_repo_for_row` resolves a working tree for the row (the
-    caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
+    Only PR linkage, branch identity, and ``source_path`` vary between the
+    seeded run shapes; the rest is the fixed local-only manifest the harvest
+    services read.
     """
-    run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
     upsert_run(
         archive_dir,
         Manifest(
@@ -810,15 +773,43 @@ def _seed_archived_deep_run(
             run_flow="normal",
             backend="claude",
             repo_slug="org/repo",
-            pr_repo="org/repo",
-            pr_number=42,
-            head_sha="abc",
-            base_branch="main",
+            branch=branch,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            pr_number=pr_number,
+            pr_repo=pr_repo,
             grounding_rate=1.0,
             changed_files=["app.py"],
             archive_path=str(run_dir),
             source_path=str(source_path) if source_path else None,
         ),
+    )
+
+
+def _seed_archived_deep_run(
+    archive_dir: Path,
+    session_id: str,
+    *,
+    source_path: Path | None = None,
+) -> Path:
+    """Seed a deep-run bronze bundle and index it under ``archive_dir``.
+
+    ``_seed_deep_bronze`` + :func:`_seed_run_manifest` (plan note): writes the
+    bronze artifacts beside the archive and registers the indexed manifest row
+    that :func:`run_harvest` walks. Returns the run directory.
+
+    When ``source_path`` is supplied it is recorded on the manifest so
+    :func:`_resolve_repo_for_row` resolves a working tree for the row (the
+    caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
+    """
+    run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
+    _seed_run_manifest(
+        archive_dir,
+        run_dir,
+        session_id,
+        pr_number=42,
+        pr_repo="org/repo",
+        source_path=source_path,
     )
     return run_dir
 
@@ -845,24 +836,16 @@ def _seed_orphan_run(
     (``clone_resolved`` True), enabling the local-commit walk.
     """
     run_dir = _seed_deep_bronze(bronze_parent, verdict="consistent", grounding=1.0)
-    upsert_run(
+    _seed_run_manifest(
         archive_dir,
-        Manifest(
-            session_id=session_id,
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch=branch,
-            head_sha=head_sha,
-            base_branch=base_branch,
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-            source_path=str(source_path) if source_path else None,
-        ),
+        run_dir,
+        session_id,
+        pr_number=None,
+        pr_repo=None,
+        head_sha=head_sha,
+        base_branch=base_branch,
+        branch=branch,
+        source_path=source_path,
     )
     return run_dir
 
@@ -883,29 +866,13 @@ def _seed_pr_runs(
     for pr_number in range(1, count + 1):
         sid = f"s{pr_number}"
         run_dir = _seed_deep_bronze(bronze_parent / sid, verdict="consistent", grounding=1.0)
-        upsert_run(
-            archive_dir,
-            Manifest(
-                session_id=sid,
-                archived_at="2026-01-01T00:00:00Z",
-                run_flow="normal",
-                backend="claude",
-                repo_slug="org/repo",
-                pr_repo="org/repo",
-                pr_number=pr_number,
-                head_sha="abc",
-                base_branch="main",
-                grounding_rate=1.0,
-                changed_files=["app.py"],
-                archive_path=str(run_dir),
-            ),
-        )
+        _seed_run_manifest(archive_dir, run_dir, sid, pr_number=pr_number, pr_repo="org/repo")
         if fingerprints:
             _write_findings(run_dir, *fingerprints)
 
 
 async def test_harvest_writes_one_annotation(tmp_path: Path, archive_dir: Any) -> None:
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s1")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(
         config,
@@ -992,25 +959,9 @@ async def test_harvest_validates_completed_rows_before_resume_filtering(
     archive_dir: Any,
 ) -> None:
     """An invalid completed row still counts; a valid sibling continues normally."""
-    _seed_archived_deep_run(archive_dir, "done", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "done")
     fresh_dir = _seed_deep_bronze(tmp_path / "fresh", verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="fresh",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            pr_repo="org/repo",
-            pr_number=42,
-            head_sha="abc",
-            base_branch="main",
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(fresh_dir),
-        ),
-    )
+    _seed_run_manifest(archive_dir, fresh_dir, "fresh", pr_number=42, pr_repo="org/repo")
     completed = query_runs(archive_dir, "session_id = ?", ("done",))[0]
     fresh = query_runs(archive_dir, "session_id = ?", ("fresh",))[0]
     malformed_completed = {"session_id": "done", "archive_path": "relative/bronze"}
@@ -1045,7 +996,7 @@ async def test_harvest_stores_github_z_merge_timestamp_canonically(
 ) -> None:
     """Real-path writer convergence: GitHub reports merged_at with a 'Z' suffix;
     the stored valid_at must be the canonical '+00:00' spelling."""
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00Z")
+    _seed_archived_deep_run(archive_dir, "s1")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(
         config,
@@ -1067,7 +1018,7 @@ async def test_harvest_unresolved_daydream_comment_stays_unknown(
     accept or reject, so the conservative rubric persists ``unknown`` (empty
     labels) — bare reply absence and merge state never fabricate a label.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-contest")
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     await run_harvest(
@@ -1100,12 +1051,7 @@ async def test_harvest_relinks_orphan_run_and_labels_it(
             merged_at="2026-02-01T00:00:00+00:00",
             comments=[
                 *_finding_comments(_FP_A, reply="applied"),
-                {
-                    "id": 3,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
-                },
+                _bot_comment(_FP_B, id=3),
             ],
             commit_pulls=_ORPHAN_COMMIT_PULLS,
         )
@@ -1152,9 +1098,7 @@ async def test_harvest_fork_pr_404_degrades_not_drops(
     if with_clone:
         source_path = tmp_path / "clone"
         (source_path / ".git").mkdir(parents=True)
-    _seed_archived_deep_run(
-        archive_dir, "s-fork", merged_at="2026-02-01T00:00:00+00:00", source_path=source_path
-    )
+    _seed_archived_deep_run(archive_dir, "s-fork", source_path=source_path)
 
     def _gh_fork_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if re.search(r"/pulls/\d+", endpoint):
@@ -1296,15 +1240,7 @@ async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
         branch="feat/squash-me",
         source_path=clone,
     )
-    (run_dir / "recommended.patch").write_text(
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        "+guarded = True\n"
-    )
+    _write_recommended_patch(run_dir)
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
 
@@ -1374,15 +1310,7 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(
         source_path=clone,
     )
     # The recommended patch adds a line; a later commit on the branch lands it.
-    (run_dir / "recommended.patch").write_text(
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        "+guarded = True\n"
-    )
+    _write_recommended_patch(run_dir)
     (clone / "app.py").write_text("existing\nguarded = True\n")
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
@@ -1406,7 +1334,7 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
     shape. Such a run carries no evidence either way, so it must persist as
     ``unknown`` (empty labels) and stay out of the posterior population.
     """
-    _seed_archived_deep_run(archive_dir, "s-vacuous", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-vacuous")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
     summary = await run_harvest(
         config,
@@ -1436,18 +1364,13 @@ async def test_harvest_merged_pr_with_reject_reply_is_contested(
     reject beside non-decisive evidence aggregates to ``contested`` — a merge
     can never upgrade an explicit rejection to ``accepted``.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-reject", merged_at="2026-08-10T00:00:00Z")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-reject")
     _write_findings(run_dir, _FP_A, _FP_B)
     github = _fake_gh(
             merged_at="2026-08-10T00:00:00Z",
             comments=[
                 *_finding_comments(_FP_A, reply="False positive — the code already handles this"),
-                {
-                    "id": 3,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
-                },
+                _bot_comment(_FP_B, id=3),
             ],
         )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
@@ -1472,7 +1395,7 @@ async def test_harvest_unmerged_pr_with_no_semantic_reply_is_unknown(
     judgment, so the finding is ``unanswered`` and the run stays ``unknown``.
     The PR's open state is preserved as context, not read as a rejection.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-open", merged_at="2026-08-10T00:00:00Z")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-open")
     _write_findings(run_dir, _FP_A)
 
     def _gh_open(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -1505,9 +1428,7 @@ def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
     """valid_at = qualifying reply timestamp, not merged_at (M12/M22)."""
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s-val", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s-val")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -1525,9 +1446,7 @@ def test_valid_at_override_respected(tmp_path: Path) -> None:
     """An explicit override beats derived evidence time (M12)."""
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     _write_findings(run_dir, _FP_A)
-    row = {"session_id": "s-val-ovr", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
-           "base_branch": "main", "archive_path": str(run_dir),
-           "grounding_rate": 1.0, "changed_files": "[]"}
+    row = _pr_row(run_dir, "s-val-ovr")
     ann = _acquire_annotation(
         row,
         run_dir=run_dir,
@@ -1547,7 +1466,7 @@ async def test_labeler_version_is_not_reward_version(
     archive_dir: Any,
 ) -> None:
     """append_label_observation receives labeler_versions.LABELER_POLICY_VERSION (M13/M22)."""
-    run_dir = _seed_archived_deep_run(archive_dir, "s-lv", merged_at="2026-08-10T00:00:00Z")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-lv")
     _write_findings(run_dir, _FP_A)
     captured: dict[str, Any] = {}
 
@@ -1614,15 +1533,7 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
         branch="feat/local-tier",
         source_path=clone,
     )
-    (run_dir / "recommended.patch").write_text(
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        "+guarded = True\n"
-    )
+    _write_recommended_patch(run_dir)
     (clone / "app.py").write_text("existing\nguarded = True\n")
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
@@ -1705,7 +1616,7 @@ async def test_harvest_leaves_true_local_run_unlinked(
 
 
 async def test_re_harvest_is_idempotent(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s1")
     github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
     first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
     await run_harvest(first_config, services=_services(first_config, github=github))
@@ -1720,7 +1631,7 @@ async def test_re_harvest_appends_on_version_bump(
     archive_dir: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s1")
     github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
     first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
     await run_harvest(first_config, services=_services(first_config, github=github))
@@ -1938,26 +1849,6 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(
     assert result == cached_repo
 
 
-# pr_attached_label_coverage
-
-
-def test_pr_coverage_helper_counts_decisive(tmp_path: Path) -> None:
-    for i, label in [(1, "accepted"), (2, "rejected"), (3, "unknown")]:
-        upsert_run(tmp_path, make_manifest(session_id=f"p{i}", pr_number=i, pr_repo="o/r"))
-        append_label_observation(
-            tmp_path,
-            f"p{i}",
-            labels=[label],
-            pr_state=None,
-            labeler_version="auto",
-            evidence_sha=f"s{i}",
-            source="auto",
-        )
-    upsert_run(tmp_path, make_manifest(session_id="local1"))  # no pr_number — excluded
-    cov = pr_attached_label_coverage(tmp_path)
-    assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
-
-
 async def test_harvest_propagates_transient_giterror_for_retry(
     tmp_path: Path,
     archive_dir: Any,
@@ -1972,7 +1863,7 @@ async def test_harvest_propagates_transient_giterror_for_retry(
     it. Drives ``run_harvest`` end-to-end and asserts the row is counted in
     ``errors``, is NOT annotated, and is NOT marked done in the resume cache.
     """
-    _seed_archived_deep_run(archive_dir, "s-transient-500", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-transient-500")
     cache_dir = tmp_path / "c"
 
     def _gh_merge_ok_comments_500(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -2009,7 +1900,7 @@ async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
     ``unknown`` label. The row must instead surface as a hard error and stay
     un-cached so a later resume retries it and recovers the merge evidence.
     """
-    _seed_archived_deep_run(archive_dir, "s-merge-comments-404", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-merge-comments-404")
     cache_dir = tmp_path / "c"
 
     def _gh_merge_ok_comments_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -2044,7 +1935,7 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
     only the optional prior), not dropped as a hard error through the per-row
     catch-all. Drives ``run_harvest`` end-to-end.
     """
-    run_dir = _seed_archived_deep_run(archive_dir, "s-reviews-err", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-reviews-err")
     _write_findings(run_dir, _FP_A)
 
     def _gh_reviews_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -2111,12 +2002,6 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
         # No resolvable clone -> "unknown", NOT the false-negative "rejected" #166 eliminates.
         assert json.loads(query_runs(archive_dir, "session_id = ?", (sid,))[0]["outcome_labels"]) == []
 
-    # Coverage stays honest at 8/10: 8 merged decisive, 2 degraded "unknown"
-    # non-decisive — the 80% bar holds without a bogus "rejected".
-    cov = pr_attached_label_coverage(archive_dir)
-    assert cov["pr_attached"] == 10  # every row stays PR-attached and annotated
-    assert cov["decisive"] == 8  # only the 8 merged rows are decisive; "unknown" is not
-    assert cov["coverage"] == 0.8
 
 
 def _raise_git_error_with_url(*args: object, **kwargs: object) -> None:

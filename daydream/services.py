@@ -79,54 +79,11 @@ def owning_services(
 ) -> tuple[Service, ...]:
     """Return the services that own ``path``, per the caller's stated policy.
 
-    This is the one containment rule (issue #1216). It is parameterized on four
-    axes, and every caller must state all four -- the policy arguments are
-    keyword-only and carry no defaults, so none can silently inherit a rule it
-    did not choose:
-
-    * ``match`` (``ServiceMatch``): ``ALL`` returns every match in the caller's
-      ``services`` order, ``FIRST`` returns the first match in that order, and
-      ``DEEPEST`` returns the match with the greatest
-      ``len(PurePosixPath(root).parts)`` -- keeping the earlier input on a tie
-      and at most one element. Single-valued rules return ``()`` when nothing
-      matches; this function never raises.
-    * ``repo_root`` (``RepoRootPolicy``): the rule for a service rooted at the
-      repository root. ``SKIP`` never matches (the service is not even a
-      candidate), ``CATCH_ALL`` matches every path unconditionally, and
-      ``ORDINARY`` applies no special case: the ordinary containment test below
-      (so a ``.``-rooted service matches the exact path ``.`` when
-      ``match_root_equal`` is true, and nothing else in practice).
-    * ``match_root_equal`` (``bool``): whether a path equal to an ordinary
-      service root counts as contained by it, in addition to the
-      ``f"{root}/"`` prefix test.
-    * the caller's ``services`` order: ``ALL`` and ``FIRST`` are ordered by it,
-      so a caller that needs deepest-first selection sorts before calling.
-
-    Containment for an ordinary service root is ``path.startswith(f"{root}/")``
-    or, when ``match_root_equal`` is true, ``path == root``; ``root`` is
-    ``service.root.as_posix()``. The path itself is never normalized -- a
-    leading ``./`` is not stripped and nothing is resolved. That is a preserved
-    behaviour, not an oversight: ``filter_scope`` normalizes *scopes*, which is
-    a different rule.
-
-    The three live families are preserved as-is rather than unified --
-    correcting any of them is a behavioural change with its own ticket:
-
-    =======================  =========  ===========  ==================
-    caller                   match      repo_root    match_root_equal
-    =======================  =========  ===========  ==================
-    ``deep/diagram_trigger``  DEEPEST    SKIP         ``True``
-    ``improve/partition``     FIRST      CATCH_ALL    ``False``
-    ``improve/orchestrator``  ALL        ORDINARY     ``True``
-    =======================  =========  ===========  ==================
-
-    They diverge on a path equal to a service root (counted by diagram and
-    orchestrator, not by partition) and on a repo-root service (skipped by
-    diagram, a catch-all in partition, ordinary in the orchestrator).
-
-    ``""`` and ``"."`` are one input for a repo-root service:
-    ``Path("").as_posix() == "."``, and ``_expand_globs`` already normalizes to
-    ``Path(".")``, so no caller can spell that root two different ways.
+    ``match`` selects ALL/FIRST/DEEPEST from the caller's ``services`` order;
+    ``repo_root`` applies SKIP/CATCH_ALL/ORDINARY to a ``""``/``"."`` root.
+    Containment for an ordinary root is ``path.startswith(f"{root}/")`` or,
+    when ``match_root_equal`` is true, ``path == root``. The path is never
+    normalized (``filter_scope`` normalizes *scopes*, a different rule).
     """
     matches: list[Service] = []
     for service in services:

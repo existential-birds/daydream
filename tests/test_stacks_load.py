@@ -9,6 +9,7 @@ recomputed from its record id.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -106,8 +107,6 @@ def test_load_v2_projection_returns_per_split_records_lineage_and_digests(
         "holdout.jsonl",
     }
     for name, digest in proj.split_digests.items():
-        import hashlib
-
         assert digest == hashlib.sha256((out / name).read_bytes()).hexdigest()
 
 

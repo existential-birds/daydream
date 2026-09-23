@@ -434,11 +434,13 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
         assert item["source_uids"] == [item["uid"]], item
 
 
+@pytest.mark.parametrize("delegated", [False, True])
 @pytest.mark.parametrize("base_evidenced", [True, False], ids=["base-survives", "structure-survives"])
 async def test_structural_fold_survivor_inherits_both_provenances(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     base_evidenced: bool,
+    delegated: bool,
 ) -> None:
     """Either fold direction preserves both record identities and the structural severity."""
     from daydream.deep.artifacts import deep_dir
@@ -449,6 +451,12 @@ async def test_structural_fold_survivor_inherits_both_provenances(
         multi_stack_target,
         structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1")],
     )
+    if delegated:
+        from tests.test_finite_delegation_parse import _mark_delegated_artifacts
+
+        _mark_delegated_artifacts(multi_stack_target / ".daydream/deep", {
+            "python": ["api.py"], "react": ["App.tsx"], "generic": ["README.md"],
+        })
     stub.merge_items = [
         _provenance_item(
             1,

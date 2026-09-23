@@ -11,7 +11,8 @@ from typing import Any
 import pytest
 
 from daydream import pr_review
-from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
+from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, build_payload, finding_marker
+from daydream.training import labeler_signals
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -38,13 +39,21 @@ def _fake_gh_responder(responses: Any) -> Any:
     return responder
 
 
+def _row(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    """Canonical labeler-signal manifest row; callers add branch/base_branch."""
+    row: dict[str, Any] = {
+        "repo_slug": "org/repo",
+        "head_sha": "abc",
+        "archive_path": str(tmp_path),
+    }
+    row.update(overrides)
+    return row
+
+
 def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None:
     """M5: a comment body containing the reviewed-commit line is still
     recognised by _is_daydream_comment and still ends with exactly one
     version-stable footer."""
-    from daydream.pr_review import PRInfo, build_payload
-    from daydream.training import labeler_signals
-
     pr = PRInfo(
         number=1,
         head_sha="f" * 40,
@@ -92,12 +101,7 @@ def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> N
     """Hunk content from diff.patch appears verbatim in a post-head commit
     on the default branch."""
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -114,12 +118,7 @@ def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> N
 
 def test_fix_applied_signal_empty_window_returns_unknown(tmp_path: Path) -> None:
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -133,12 +132,7 @@ def test_fix_applied_signal_empty_window_returns_unknown(tmp_path: Path) -> None
 
 def test_fix_applied_signal_no_file_overlap_returns_not_applied(tmp_path: Path) -> None:
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -155,12 +149,7 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     (tmp_path / "diff.patch").write_text(
         diff_adding("foo = 1") + diff_adding("bar = 2") + diff_adding("baz = 3")
     )
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -271,12 +260,7 @@ def test_disposition_evidence_digest_changes_with_reply_edit() -> None:
 def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
     """When the diff.patch content appears in a local commit on the branch ≥ head_sha."""
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feat/x",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, branch="feat/x")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
@@ -329,12 +313,7 @@ def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> 
 
 def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path: Path) -> None:
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feat/x",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, branch="feat/x")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
@@ -353,13 +332,7 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     the base branch too, so the fallback cannot upgrade it past "unknown".
     """
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feat/x",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, branch="feat/x", base_branch="main")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
@@ -376,13 +349,7 @@ def test_local_commit_applied_signal_unreadable_window_falls_back_to_base_branch
     present on ``main``, so the change demonstrably landed → "applied".
     """
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feat/squashed-away",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
     seen_refs: list[str] = []
 
     def _file_at(repo: Path, path: str, ref: str) -> str:
@@ -409,13 +376,7 @@ def test_local_commit_applied_signal_base_branch_fallback_prefers_remote_over_st
     the local ref is still tried when the remote is unresolvable.
     """
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feat/squashed-away",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
     seen_refs: list[str] = []
 
     def _file_at(repo: Path, path: str, ref: str) -> str:
@@ -439,13 +400,7 @@ def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_p
     so the fallback must not read "no hunks absent" as "everything landed".
     """
     (tmp_path / "diff.patch").write_text("")
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feat/squashed-away",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
+    row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,

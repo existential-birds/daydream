@@ -10,15 +10,15 @@ import anyio
 import pytest
 
 from daydream.backends import AgentEvent
-from daydream.runner import RunConfig
+from daydream.runner import RunConfig, run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
+from tests.harness.review_profile import independent_alternatives_profile as _independent_alternatives
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
 async def _run_deep(target: Path) -> int:
-    from daydream.runner import RunConfig, run
 
-    return await run(RunConfig(target=str(target), cleanup=False))
+    return await run(RunConfig(target=str(target), cleanup=False, review_profile=_independent_alternatives()))
 
 
 def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
@@ -26,15 +26,14 @@ def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
 
-async def test_tool_heavy_wonder_completes_under_default_budget(
+async def test_tool_heavy_wonder_is_bounded_and_publishes_incomplete_review(
     multi_stack_target: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """The default tool-call budget is unlimited, so a tool-heavy wonder pass lands."""
-    from daydream.runner import run
+    """A backend ignoring the finalization instruction cannot keep investigating."""
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -42,12 +41,14 @@ async def test_tool_heavy_wonder_completes_under_default_budget(
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(60):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                                          review_profile=_independent_alternatives()))
 
     assert isinstance(exit_code, int)
     alts = json.loads((multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text())
-    assert [i["title"] for i in alts] == ["Inconsistent greeting wording"]
-    assert not any("tool_call_budget" in str(v)
+    assert alts == []
+    assert "Review incomplete" in (multi_stack_target / ".review-output.md").read_text()
+    assert any("tool_call_budget" in str(v)
                    for v in _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason"))
 
 
@@ -59,7 +60,6 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A wonder turn outliving the per-stack fan-out still writes a valid trajectory."""
-    from daydream.runner import run
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -67,7 +67,8 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(60):
-        await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                              review_profile=_independent_alternatives()))
 
     payload = json.loads(traj.read_text())
     ids = [s["step_id"] for s in payload["steps"]]
@@ -76,15 +77,14 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     assert "alternatives" in phases, phases
 
 
-async def test_budget_truncated_wonder_fails_loudly(
+async def test_budget_truncated_wonder_keeps_review_results(
     multi_stack_target: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """A budget-truncated wonder pass fails the run instead of degrading to []."""
-    from daydream.runner import run
+    """A budget stop preserves completed stack findings and finishes the review."""
 
     silence(monkeypatch)
     monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
@@ -93,13 +93,16 @@ async def test_budget_truncated_wonder_fails_loudly(
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
-        with pytest.raises(RuntimeError, match="budget"):
-            await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        assert await run(make_config(
+            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="review",
+            review_profile=_independent_alternatives(),
+        )) == 0
 
     run_root = multi_stack_target / ".daydream"
     assert any("budget" in str(v) for v in _scan_trajectory_extra(run_root, traj, "stop_reason"))
     alts = run_root / "deep" / "alternatives.json"
-    assert not alts.exists() or json.loads(alts.read_text()) != []
+    assert json.loads(alts.read_text()) == []
+    assert "incomplete" in (multi_stack_target / ".review-output.md").read_text().lower()
 
 
 class _WonderRendezvousStub(StubBackend):

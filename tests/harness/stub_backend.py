@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -39,45 +38,10 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.deep.records import record_uid, stack_name_from_uid
 from daydream.eval.analyzer import _records_issues_or_empty
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
-
-
-@dataclass
-class MockBackend:
-    """Minimal Backend implementation that replays a canned event list.
-
-    Mirrors the Backend protocol surface (execute / cancel) without inheriting;
-    tests substitute this in place of ClaudeBackend / CodexBackend so the event
-    deterministic.
-    """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        events = self.events
-
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
 
 
 class _StubRetryableError(RuntimeError):
@@ -87,7 +51,7 @@ class _StubRetryableError(RuntimeError):
 
 
 class StubBackend:
-    """MockBackend that dispatches on prompt content.
+    """Prompt-dispatching fake backend.
 
     Writes realistic per-stack review outputs and a merged report so the
     orchestrator can progress through every stage. Records every call so
@@ -381,7 +345,6 @@ class StubBackend:
         Returns:
             One list of uids per records file that had any, in prompt order.
         """
-        from daydream.deep.records import record_uid
 
         groups: list[list[str]] = []
         for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
@@ -902,8 +865,6 @@ class StubBackend:
                 # Issue #742: fresh-run records files carry the dict shape
                 # {"issues": [...], "verdicts": [...]}; normalize to the
                 # bare issues list (legacy files stay bare lists).
-                from daydream.deep.records import record_uid
-
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
@@ -950,8 +911,6 @@ class StubBackend:
             # collapsed (tiny-diff / shallow, where the only stack is
             # ``generic``) has no python/react record to cite, so the lookup
             # falls back to the first stack present rather than emitting ``[]``.
-            from daydream.deep.records import stack_name_from_uid
-
             lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)]
             leads_by_stack = {stack_name_from_uid(uid): uid for uid in reversed(lead_uids)}
 

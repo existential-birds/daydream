@@ -7,6 +7,7 @@ payloads.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -18,7 +19,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daydream.atif import validate
 from daydream.backends import (
+    BackendExecutionInput,
     ContinuationToken,
     CostEvent,
     GenerationEndEvent,
@@ -27,20 +30,24 @@ from daydream.backends import (
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ThinkingEvent,
     ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    create_backend,
     unix_ms_to_ns,
 )
 from daydream.backends._subprocess import StreamStalledError
+from daydream.backends._transport import CliTransport
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     _PI_DEFAULT_RETRY_BASE_DELAY,
     _PI_DEFAULT_RETRY_MAX_DELAY,
     _PI_STDOUT_LIMIT_BYTES,
+    _PI_SYSTEM_PREAMBLE,
     PiBackend,
     PiError,
     _is_retryable_exit_code,
@@ -51,10 +58,14 @@ from daydream.backends.pi import (
     _pi_retryable_for,
     _render_tool_result,
     _schema_instruction,
-    parse_pi_retry_hint,
 )
-from tests.harness.fake_cli_process import BlockingStdout, ImmediateStdout, LimitAwareStdout, blocking_cli_process
+from daydream.config import DEFAULT_PI_MODEL
+from daydream.retry_policy import parse_message_retry_hint
+from daydream.runner import run
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
+from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.stub_backend import silence as _silence
 
@@ -68,7 +79,6 @@ Mute = Callable[..., None]
 def test_backend_execution_input_is_immutable_parsed_and_returns_fresh_environment(
     tmp_path: Path,
 ) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     source = {
         "HOME": str(tmp_path / "home"),
@@ -103,7 +113,6 @@ def test_backend_execution_input_is_immutable_parsed_and_returns_fresh_environme
 
 
 def test_backend_execution_input_uses_backend_specific_defaults(tmp_path: Path) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     environment = {"HOME": str(tmp_path), "PATH": "/run/bin"}
 
@@ -119,7 +128,6 @@ def test_backend_execution_input_uses_backend_specific_defaults(tmp_path: Path) 
 
 
 def test_backend_execution_input_rejects_explicit_osprey() -> None:
-    from daydream.backends import BackendExecutionInput
 
     with pytest.raises(ValueError, match="osprey"):
         BackendExecutionInput.from_environment({}, backend="osprey")
@@ -129,9 +137,7 @@ def test_backend_execution_input_rejects_explicit_osprey() -> None:
 async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hashlib
 
-    from tests.harness.protocol_cli import install_protocol_cli
 
     target = (tmp_path / "model cwd with spaces").resolve()
     target.mkdir()
@@ -161,7 +167,6 @@ async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd
     assert argv[argv.index("--provider") + 1] == "nous"
     assert argv[argv.index("--model") + 1] == "fixture-model"
     assert "--append-system-prompt" in argv and "--no-skills" in argv
-    from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
     # Neither the prompt nor the preamble is recorded verbatim -- only digests.
     observation_bytes = next(fixture.observations.glob("*.json")).read_bytes()
@@ -197,11 +202,23 @@ async def _run_and_capture_args(
     return list(mock_exec.call_args.args), mock_exec
 
 
+async def _collect_events(
+    backend: Any,
+    prompt: Any = "p",
+    *,
+    fixture: Any = "simple_text.jsonl",
+    **kwargs: Any,
+) -> list[Any]:
+    """Drive ``execute`` over a canned fixture and return every emitted event."""
+    mock_proc = make_mock_process_from_fixture(fixture)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        return [event async for event in backend.execute(Path("/tmp"), prompt, **kwargs)]
+
+
 @pytest.mark.asyncio
 async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     execution = BackendExecutionInput.from_environment(
         {
@@ -238,13 +255,9 @@ async def test_pi_execution_input_controls_native_argv_environment_and_policy(
 
 @pytest.mark.asyncio
 async def test_simple_text_events() -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Say hello"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "Say hello", fixture="simple_text.jsonl"
+    )
 
     text_events = [e for e in events if isinstance(e, TextEvent)]
     metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
@@ -276,13 +289,9 @@ async def test_simple_text_events() -> None:
 
 @pytest.mark.asyncio
 async def test_thinking_and_tool_use_events() -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Read the file"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "Read the file", fixture="tool_use.jsonl"
+    )
 
     thinking = [e for e in events if isinstance(e, ThinkingEvent)]
     tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
@@ -333,13 +342,9 @@ async def test_structured_output() -> None:
 
 @pytest.mark.asyncio
 async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost() -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("multi_turn.jsonl")
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Two turns"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "Two turns", fixture="multi_turn.jsonl"
+    )
 
     texts = [e for e in events if isinstance(e, TextEvent)]
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
@@ -415,20 +420,8 @@ async def test_ephemeral_pi_call_uses_no_session() -> None:
     assert "--no-session" in flat_args
     assert "--session-id" not in flat_args
 
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ):
-        result_events = [
-            event
-            async for event in backend.execute(
-                Path("/tmp"),
-                "p",
-                persist_session=False,
-            )
-            if isinstance(event, ResultEvent)
-        ]
+    events = await _collect_events(backend, persist_session=False, fixture="simple_text.jsonl")
+    result_events = [event for event in events if isinstance(event, ResultEvent)]
     assert result_events[0].continuation is None
 
 
@@ -547,7 +540,6 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
 @pytest.mark.asyncio
 async def test_cancel_terminates_then_kills() -> None:
     """cancel() sends SIGTERM to all tracked processes, SIGKILL on timeout."""
-    from daydream.backends._transport import CliTransport
 
     backend = PiBackend(model="glm-5.2")
 
@@ -692,47 +684,17 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend keep reading their own process."""
-    backend = PiBackend(model="glm-5.2")
-
-    first_proc = blocking_cli_process(
-        ImmediateStdout(
-            [
-                '{"type":"session","sessionId":"s1"}',
-                '{"type":"agent_start"}',
-                '{"type":"turn_start"}',
-                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}',
-                '{"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"stop"}}',
-                '{"type":"agent_end","messages":[]}',
-            ]
-        )
+    await assert_concurrent_streams_isolated(
+        PiBackend(model="glm-5.2"),
+        [
+            '{"type":"session","sessionId":"s1"}',
+            '{"type":"agent_start"}',
+            '{"type":"turn_start"}',
+            '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}',
+            '{"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"stop"}}',
+            '{"type":"agent_end","messages":[]}',
+        ],
     )
-    second_stdout = BlockingStdout()
-    second_proc = blocking_cli_process(second_stdout)
-    procs = iter([first_proc, second_proc])
-
-    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        return next(procs)
-
-    async def consume_second() -> list[object]:
-        return [event async for event in backend.execute(Path("/tmp"), "second")]
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        first_iter = backend.execute(Path("/tmp"), "first")
-        assert isinstance(await anext(first_iter), RequestEvent)
-        first_event = await anext(first_iter)
-        assert isinstance(first_event, TextEvent)
-
-        second_task = asyncio.create_task(consume_second())
-        await second_stdout.entered.wait()
-
-        try:
-            turn_end = await anext(first_iter)
-            assert isinstance(turn_end, TurnEndEvent)
-            next_first_event = await anext(first_iter)
-            assert isinstance(next_first_event, CostEvent)
-        finally:
-            second_stdout.release.set()
-            await second_task
 
 
 @pytest.mark.parametrize(
@@ -781,8 +743,6 @@ async def test_execute_always_passes_no_skills_never_skill(tmp_path: Path, monke
 
 
 def test_create_backend_pi_returns_pi_backend_with_default_model() -> None:
-    from daydream.backends import create_backend
-    from daydream.config import DEFAULT_PI_MODEL
 
     backend = create_backend("pi")
     assert isinstance(backend, PiBackend)
@@ -794,7 +754,6 @@ def test_create_backend_pi_returns_pi_backend_with_default_model() -> None:
 
 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
-    from daydream.backends import create_backend
 
     with pytest.raises(ValueError, match="pi"):
         create_backend("invalid")
@@ -849,8 +808,6 @@ async def test_live_pi_smoke() -> None:
 async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
     """A Pi-driven run must produce a trajectory.json that passes the ATIF v1.7
     validator (plan §8.3) — the replay/trajectory proof."""
-    from daydream.atif import validate
-    from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
@@ -1127,7 +1084,6 @@ async def test_runner_real_path_pi_provider_axis(
     is isolated to an empty temp dir so no settings.json exists and the
     code-level fallback fires.
     """
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -1168,7 +1124,6 @@ async def test_append_system_prompt_preamble_in_args() -> None:
     exhausts its tool-call budget during exploration. The flag must appear in
     every run, not gated on env vars or read_only.
     """
-    from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
     backend = PiBackend(model="glm-5.2")
     flat_args, _ = await _run_and_capture_args(backend)
@@ -1239,7 +1194,6 @@ def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) ->
     category branch (or letting a generic permanent token win) would silently strip
     retry coverage from a real provider-throttle response.
     """
-    from daydream.backends.pi import _pi_retryable_for
 
     category = _pi_error_category(message)
 
@@ -1249,7 +1203,6 @@ def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) ->
 
 def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: Path) -> None:
     """The embedded path materialises the operator's env knob into the RetryPolicy."""
-    from daydream.backends import BackendExecutionInput
 
     source = {"HOME": str(tmp_path), "PATH": "/run/bin"}
 
@@ -1275,11 +1228,10 @@ def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
         "503 Service Unavailable; retry-after: 30",
         retryable=_pi_retryable_for(category="SERVER_ERROR", message="503 Service Unavailable; retry-after: 30"),
         category=_pi_error_category("503 Service Unavailable; retry-after: 30"),
-        retry_after=parse_pi_retry_hint("503 Service Unavailable; retry-after: 30"),
+        retry_after=parse_message_retry_hint("503 Service Unavailable; retry-after: 30"),
     )
 
     assert error.retry_after == 30.0
-    assert parse_pi_retry_hint("no hint here") is None
 
 
 @pytest.mark.parametrize(
@@ -1645,12 +1597,9 @@ def test_pi_replay_fixture_is_sanitized_labeled() -> None:
 @pytest.mark.asyncio
 async def test_pi_generation_lifecycle_start_end_pair_around_tool() -> None:
     """Two assistant generations: start before, end sealed at message_end before tools."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "go"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl"
+    )
 
     starts = [e for e in events if isinstance(e, GenerationStartEvent)]
     ends = [e for e in events if isinstance(e, GenerationEndEvent)]
@@ -1695,12 +1644,9 @@ async def test_pi_generation_lifecycle_start_end_pair_around_tool() -> None:
 @pytest.mark.asyncio
 async def test_pi_native_ms_start_converts_exactly_and_chronology_holds() -> None:
     """Native Unix-ms start → exact ns; end receipt is host-observed and later."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "go"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl"
+    )
 
     ends = [e for e in events if isinstance(e, GenerationEndEvent)]
     first = ends[0]
@@ -1715,12 +1661,9 @@ async def test_pi_native_ms_start_converts_exactly_and_chronology_holds() -> Non
 @pytest.mark.asyncio
 async def test_pi_user_and_tool_results_do_not_create_generations() -> None:
     """Only assistant message boundaries create generation events."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "go"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl"
+    )
 
     # The fixture has exactly two assistant messages → exactly two pairs.
     # Tool execution events and turn boundaries are not generations.
@@ -1735,12 +1678,9 @@ async def test_pi_user_and_tool_results_do_not_create_generations() -> None:
 @pytest.mark.asyncio
 async def test_pi_turn_end_carries_native_identity() -> None:
     """Per-turn finish reason/model/provider land on the matching TurnEndEvent."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "go"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl"
+    )
 
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert turn_ends
@@ -1767,16 +1707,15 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
         persist_session=False,
     )
 
-    request_events: list[RequestEvent] = []
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        async for event in PiBackend(model="glm-5.2").execute(
-            Path("/tmp"), "structured please", output_schema=schema, read_only=True,
-            persist_session=False,
-        ):
-            if isinstance(event, RequestEvent):
-                request_events.append(event)
-    request = request_events[0]
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"),
+        "structured please",
+        fixture="simple_text.jsonl",
+        output_schema=schema,
+        read_only=True,
+        persist_session=False,
+    )
+    request = next(event for event in events if isinstance(event, RequestEvent))
     config = request.config
     assert isinstance(config, PiRequestConfig)
     # Exact argv correspondence for each admitted control.
@@ -1796,12 +1735,9 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
 @pytest.mark.asyncio
 async def test_pi_multi_turn_fixture_produces_two_turn_end_boundaries() -> None:
     """Two text turns → two TurnEndEvents, each with its own native identity."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("multi_turn.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "go"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "go", fixture="multi_turn.jsonl"
+    )
 
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert len(turn_ends) == 2
@@ -1844,12 +1780,9 @@ async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:
 @pytest.mark.asyncio
 async def test_pi_usage_events_carry_turn_end_and_terminal_provenance() -> None:
     """Pi turn usage is turn_end-sourced; terminal totals are reported cost."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("generation_lifecycle.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "go"):
-            events.append(event)
+    events = await _collect_events(
+        PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl"
+    )
 
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert metrics

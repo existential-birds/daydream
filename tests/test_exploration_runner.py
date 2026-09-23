@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any, cast
 import anyio
 import pytest
 
+import daydream.exploration_runner as er
+import daydream.exploration_runner as exploration_runner
 from daydream import review_profile as rp
 from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext, FileInfo
@@ -19,6 +22,7 @@ from daydream.exploration_runner import (
     repo_scan,
     select_tier,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
     PATTERN_SCANNER_SCHEMA,
@@ -33,6 +37,7 @@ from daydream.prompts.grounding import (
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
 from tests.harness.backend import Responder, ScriptedBackend
+from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
@@ -194,6 +199,15 @@ def _specialist_backend(
     )
 
 
+async def specialist_pre_scan(*args: Any, **kwargs: Any) -> ExplorationContext:
+    """Exercise opted-in specialist behavior rather than the default static shortcut."""
+    defaults = rp.build_default_profile().strategies
+    strategies = {name: value.content for name, value in defaults.items() if name.startswith("exploration.")}
+    strategies["exploration.dependency_trace"] += "\nCustom specialist dispatch requested."
+    kwargs.setdefault("strategies", strategies)
+    return await pre_scan(*args, **kwargs)
+
+
 # Pure helpers
 def test_count_changed_files_counts_unique_paths() -> None:
     assert count_changed_files("") == 0
@@ -219,7 +233,7 @@ def test_skip_tier_no_subagents(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "trivial_single.diff").read_text()
     backend = _specialist_backend()
 
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     assert backend.calls == []
     assert ctx is not None
@@ -229,7 +243,7 @@ def test_single_tier_dependency_tracer_only(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     backend = _specialist_backend()
 
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     assert backend.call_count == 1
     assert backend.calls[0]["output_schema"] == DEPENDENCY_TRACER_SCHEMA
@@ -238,10 +252,41 @@ def test_single_tier_dependency_tracer_only(tmp_path: Path) -> None:
     assert "daydream/extra.py" in paths
 
 
+@pytest.mark.parametrize(
+    ("investigation_s", "finalization_s", "completed", "has_dependencies", "calls"),
+    [(180, 0, True, True, 1), (301, 60, False, True, 2), (301, 121, False, False, 2)],
+)
+async def test_pre_scan_retains_slow_dependency_mapping_with_bounded_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    investigation_s: float,
+    finalization_s: float,
+    completed: bool,
+    has_dependencies: bool,
+    calls: int,
+) -> None:
+    """Pi can need over two minutes to investigate and over 30s to finalize."""
+    clock = FakeClock().install(monkeypatch)
+
+    async def responder(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        finalizing = "INVESTIGATION HAS ENDED" in args[1]
+        clock.advance(finalization_s if finalizing else investigation_s)
+        yield ResultEvent(structured_output=_VALID_ENVELOPE["dependency_tracer"], continuation=None)
+
+    backend = _specialist_backend(responder=responder)
+    context = await specialist_pre_scan(
+        cast(Backend, backend), tmp_path, (FIXTURES / "python_multifile.diff").read_text(),
+    )
+
+    assert context.completed is completed
+    assert bool(context.dependencies) is has_dependencies
+    assert backend.call_count == calls
+
+
 def test_specialist_rows_carry_llm_provenance(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     backend = _specialist_backend(results=_VALID_ENVELOPE)
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
     by_path = {f.path: f for f in ctx.affected_files}
     assert by_path["daydream/extra.py"].provenance == "llm"
 
@@ -253,7 +298,7 @@ def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path: 
     diff_text = py + ts  # 4 files -> parallel tier, so the test_mapper specialist runs
 
     backend = _specialist_backend(results=_VALID_ENVELOPE)
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     exploration_dir = tmp_path / "exploration"
     ctx.write_to_dir(exploration_dir)
@@ -268,7 +313,7 @@ def test_parallel_tier_launches_three_agents(tmp_path: Path) -> None:
     diff_text = py + ts
 
     backend = _specialist_backend()
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     assert backend.call_count == 3
     schemas = {call["output_schema"]["type"] for call in backend.calls}
@@ -283,19 +328,25 @@ def test_parallel_tier_launches_three_agents(tmp_path: Path) -> None:
     assert "use type hints" in ctx.guidelines
 
 
-def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path: Path) -> None:
+def test_parallel_tier_separates_changed_targets_from_known_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     py = (FIXTURES / "python_multifile.diff").read_text()
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts
+    monkeypatch.setattr("daydream.exploration_runner.detect_affected_files", lambda *_: [
+        FileInfo("src/api.ts", "modified"),
+        FileInfo("src/models.ts", "imports"),
+        FileInfo("tests/api.test.ts", "imported_by"),
+    ])
 
     backend = _specialist_backend()
-    anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     # Paths are cwd-absolute (issue #221): rooted at repo_root (tmp_path).
-    diff_changed = {
-        str(tmp_path / p)
-        for p in ("daydream_demo/api.py", "daydream_demo/models.py", "src/api.ts", "src/models.ts")
-    }
+    changed = str(tmp_path / "src/api.ts")
+    dependency = str(tmp_path / "src/models.ts")
+    test = str(tmp_path / "tests/api.test.ts")
 
     calls_by_schema = {}
     for call in backend.calls:
@@ -313,14 +364,209 @@ def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path: Path) -> N
         end = prompt.index("</affected_files>", start) + len("</affected_files>")
         return prompt[start:end]
 
-    # Consolidation: every specialist receives a byte-identical affected-files
-    # block -- no per-specialist input split.
-    blocks = [_affected_block(calls_by_schema[name]["prompt"]) for name in calls_by_schema]
-    assert blocks[0] == blocks[1] == blocks[2]
+    for call in calls_by_schema.values():
+        targets = _affected_block(call["prompt"])
+        assert f"- {changed} (modified)" in targets
+        assert dependency not in targets
+        assert test not in targets
+    for name in ("dependency_tracer", "test_mapper"):
+        prompt = calls_by_schema[name]["prompt"]
+        context = prompt.split("<known_affected_context>")[1].split("</known_affected_context>")[0]
+        assert dependency in context and test in context
+    assert "<known_affected_context>" not in calls_by_schema["pattern_scanner"]["prompt"]
 
-    # And the shared block lists every changed file, role-annotated and cwd-absolute.
-    for path in diff_changed:
-        assert f"- {path} (modified)" in blocks[0]
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_pre_scan_supplies_small_diff_without_requiring_bash(tmp_path: Path, oversized: bool) -> None:
+
+    diff_text = (FIXTURES / "python_multifile.diff").read_text()
+    if oversized:
+        diff_text += "+" + "x" * INLINE_DIFF_BUDGET_BYTES
+    backend = _specialist_backend()
+    anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    prompt = backend.calls[0]["prompt"]
+    if oversized:
+        assert "<change_diff>" not in prompt
+        assert diff_text not in prompt
+        assert "<change_overview>" in prompt
+        overview = prompt.split("<change_overview>")[1].split("</change_overview>")[0]
+        assert len(overview.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+        assert "omitted" in overview
+    else:
+        assert f"<change_diff>\n{diff_text}\n</change_diff>" in prompt
+        assert "git diff" not in prompt
+
+
+def test_large_diff_overview_preserves_small_edits_after_large_additions() -> None:
+
+    large = "diff --git a/workflow.yml b/workflow.yml\n--- /dev/null\n+++ b/workflow.yml\n@@ -0,0 +1,500 @@\n"
+    large += "+" + "workflow step " * 30 + "\n"
+    large += "+" + "x" * 32_000 + "\n"
+    small = (
+        "diff --git a/component.tsx b/component.tsx\n--- a/component.tsx\n+++ b/component.tsx\n"
+        "@@ -20,2 +20,3 @@\n <input\n+aria-label={label}\n />\n"
+    )
+    prompt = build_dependency_tracer_prompt(
+        [FileInfo("workflow.yml", "modified"), FileInfo("component.tsx", "modified")],
+        "main...HEAD", cwd=Path("/repo"), strategy="custom-strategy",
+        inline_diff=large + small,
+    )
+    assert "<change_overview>" in prompt
+    overview = prompt.split("<change_overview>")[1].split("</change_overview>")[0]
+    assert len(overview.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "+++ b/workflow.yml" in overview and "+++ b/component.tsx" in overview
+    assert "@@ -20,2 +20,3 @@" in overview and "+aria-label={label}" in overview
+    assert "omitted" in overview
+    assert "not source-read or review-coverage evidence" in overview
+
+
+@pytest.mark.parametrize("cwd", [Path("/repo"), Path("/tests/repo")])
+def test_test_mapper_moves_modified_tests_to_context(cwd: Path) -> None:
+    prompt = build_test_mapper_prompt(
+        [FileInfo(str(cwd / "src/component.tsx"), "modified"),
+         FileInfo(str(cwd / "tests/component.test.tsx"), "modified")],
+        "main...HEAD", cwd=cwd, strategy="custom-mapper",
+    )
+    targets = prompt.split("<affected_files>\n")[1].split("</affected_files>")[0]
+    assert "src/component.tsx" in targets
+    assert "tests/component.test.tsx" not in targets
+    context = prompt.split("<known_affected_context>")[1].split("</known_affected_context>")[0]
+    assert "tests/component.test.tsx" in context
+
+
+def test_change_overview_byte_limit_handles_many_long_unicode_paths() -> None:
+
+    diff = "".join(
+        f"diff --git a/{'界' * 100}/{i}.py b/{'界' * 100}/{i}.py\n"
+        f"--- a/{'界' * 100}/{i}.py\n+++ b/{'界' * 100}/{i}.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+        for i in range(100)
+    )
+    prompt = build_dependency_tracer_prompt([], "main...HEAD", cwd=Path("/repo"), strategy="", inline_diff=diff)
+    overview = prompt[prompt.index("<change_overview>"):prompt.index("</change_overview>") + len("</change_overview>")]
+    assert len(overview.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "file excerpts omitted" in overview
+    assert "@@" not in overview  # No dangling hunks without their full file headers.
+
+
+def test_shelfspace_mapper_targets_only_changed_production_sources() -> None:
+    paths = [
+        ".github/workflows/daydream.yml", "Makefile", "docs/README.md", "docs/daydream-review.md",
+        "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
+        "frontend/app/components/shelf/ShelfNameInput.tsx",
+        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
+        "quality-workspaces.json", "scripts/daydream-workflow.test.mjs",
+        "scripts/github-actions-workflow-policy.mjs",
+    ]
+    prompt = build_test_mapper_prompt(
+        [FileInfo(path, "modified") for path in paths], "main...HEAD", cwd=Path("/repo"), strategy="mapper",
+    )
+    targets = prompt.split("<affected_files>\n")[1].split("</affected_files>")[0].splitlines()
+    assert targets == [
+        "- frontend/app/components/shelf/ShelfNameInput.tsx (modified)",
+        "- scripts/github-actions-workflow-policy.mjs (modified)",
+    ]
+    context = prompt.split("<known_affected_context>")[1].split("</known_affected_context>")[0]
+    assert "quality-workspaces.json" in context and "Makefile" in context
+
+
+@pytest.mark.parametrize("extension", ["mjs", "cjs", "sh", "rb", "java", "kt", "ex", "swift"])
+def test_mapper_keeps_generic_language_sources(extension: str) -> None:
+    source = f"src/service.{extension}"
+    prompt = build_test_mapper_prompt(
+        [FileInfo(source, "modified")], "main...HEAD", cwd=Path("/repo"), strategy="mapper",
+    )
+    assert source in prompt.split("<affected_files>\n")[1].split("</affected_files>")[0]
+
+
+def test_pre_scan_skips_mapper_when_no_changed_source_targets(tmp_path: Path) -> None:
+    diff = _multifile_diff(["docs/a.md", "package.json", "Makefile", "tests/foo.test.ts"])
+    backend = _specialist_backend()
+    anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff))
+    assert backend.call_count == 2
+    assert {json.dumps(call["output_schema"], sort_keys=True) for call in backend.calls} == {
+        json.dumps(PATTERN_SCANNER_SCHEMA, sort_keys=True), json.dumps(DEPENDENCY_TRACER_SCHEMA, sort_keys=True),
+    }
+
+
+def test_modest_default_prescan_is_static_and_captures_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = [
+        ".github/workflows/daydream.yml", "Makefile", "docs/README.md", "docs/daydream-review.md",
+        "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
+        "frontend/app/components/shelf/ShelfNameInput.tsx",
+        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
+        "quality-workspaces.json", "scripts/daydream-workflow.test.mjs", "scripts/github-actions-workflow-policy.mjs",
+    ]
+    memberships = [FileInfo(path, "modified") for path in paths] + [FileInfo("frontend/constants.ts", "imports")]
+    monkeypatch.setattr("daydream.exploration_runner.detect_affected_files", lambda *_: memberships)
+    (tmp_path / "AGENTS.md").write_text("Guideline evidence: keep shared helpers canonical.")
+    backend = _specialist_backend()
+    context = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, _multifile_diff(paths)))
+    assert backend.calls == []
+    assert context.affected_files == memberships
+    assert context.dependencies == []  # Membership does not establish a source-target edge.
+    assert context.completed is True
+    context.write_to_dir(tmp_path / "exploration")
+    summary = (tmp_path / "exploration/summary.md").read_text()
+    assert "Guideline evidence: keep shared helpers canonical." in summary
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in summary
+    assert "not correctness review or coverage evidence" in summary
+
+
+@pytest.mark.parametrize("large_diff", [False, True])
+def test_static_prescan_retains_specialists_for_large_changes(tmp_path: Path, large_diff: bool) -> None:
+    paths = ["src/a.py", "src/b.py"] if large_diff else ["src/a.py", "src/b.py", "src/c.py", "src/d.py"]
+    diff = _multifile_diff(paths) + ("+" + "x" * 65_536 if large_diff else "")
+    backend = _specialist_backend()
+    anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff))
+    assert backend.call_count == (1 if large_diff else 3)
+
+
+def test_custom_mapper_runs_without_default_source_targets(tmp_path: Path) -> None:
+    defaults = rp.build_default_profile().strategies
+    strategies = {name: value.content for name, value in defaults.items() if name.startswith("exploration.")}
+    strategies["exploration.test_mapping"] = "custom mapping of config contract tests"
+    backend = _specialist_backend()
+    diff = _multifile_diff(["a.json", "b.json", "c.json", "d.json"])
+    anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff, strategies=strategies))
+    assert backend.call_count == 3
+    mapper = next(call["prompt"] for call in backend.calls if call["output_schema"] == TEST_MAPPER_SCHEMA)
+    targets = mapper.split("<affected_files>\n")[1].split("</affected_files>")[0]
+    assert all(path in targets for path in ("a.json", "b.json", "c.json", "d.json"))
+    assert "custom mapping of config contract tests" in mapper
+    assert "Do not hunt for tests of documentation or manifests" not in mapper
+
+
+def test_static_guidance_is_bounded_and_confined_to_repo(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("界" * 10_000)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside guidance must not be captured")
+    (repo / "CLAUDE.md").symlink_to(outside)
+    (repo / ".editorconfig").write_bytes(b"root=true\n\xff")
+    (repo / "src").mkdir()
+    (repo / "src/AGENTS.md").write_text("nested guideline evidence")
+    backend = _specialist_backend()
+    context = anyio.run(lambda: pre_scan(cast(Backend, backend), repo, _multifile_diff(["src/a.py", "src/b.py"])))
+    assert backend.calls == []
+    assert "outside guidance" not in context.raw_notes
+    assert "nested guideline evidence" in context.raw_notes
+    assert "truncated" in context.raw_notes
+    assert len(context.raw_notes.encode("utf-8")) <= 8192
+
+
+def test_static_guidance_includes_ancestors_of_non_source_changes(tmp_path: Path) -> None:
+    (tmp_path / ".github/workflows").mkdir(parents=True)
+    (tmp_path / ".github/AGENTS.md").write_text("Workflow-specific convention evidence")
+    backend = _specialist_backend()
+    context = anyio.run(lambda: pre_scan(
+        cast(Backend, backend), tmp_path, _multifile_diff([".github/workflows/check.yml", "config.json"]),
+    ))
+    assert backend.calls == []
+    assert "Workflow-specific convention evidence" in context.raw_notes
 
 
 def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
@@ -334,7 +580,7 @@ def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
         }
     }
     backend = _specialist_backend(results=envelope)
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
     assert any(f.path == "daydream/x.py" for f in ctx.affected_files)
     assert ctx.conventions == []
 
@@ -360,7 +606,7 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
         return None
 
     backend = _specialist_backend(responder=responder)
-    ctx = anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     # Pattern scanner failed, but others should have run
     assert backend.call_count == 3
@@ -382,7 +628,7 @@ async def test_pre_scan_dispatch_interval_success(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        context = await pre_scan(
+        context = await specialist_pre_scan(
             cast(Backend, _specialist_backend()), tmp_path, diff_text,
         )
 
@@ -407,7 +653,6 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-scan timeout is terminal evidence and retains only completed refs."""
-    import daydream.exploration_runner as exploration_runner
 
     async def _never_yield() -> AsyncIterator[AgentEvent]:
         await anyio.sleep_forever()
@@ -427,12 +672,12 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
             return _never_yield()
         return None
 
-    monkeypatch.setattr(exploration_runner, "_SPECIALIST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(exploration_runner, "_PRE_SCAN_TIMEOUT_SECONDS", 0.05)
     diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        context = await pre_scan(
+        context = await specialist_pre_scan(
             cast(Backend, _specialist_backend(responder=responder)), tmp_path, diff_text,
         )
 
@@ -484,7 +729,7 @@ def test_pre_scan_passes_cwd_absolute_paths(tmp_path: Path) -> None:
     diff_text = _multifile_diff(paths)
     backend = _specialist_backend()
 
-    anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     joined = "\n".join(c["prompt"] for c in backend.calls)
     # Specialists receive cwd-absolute paths, never bare relatives.
@@ -541,7 +786,6 @@ def test_exploration_prompts_mark_repository_content_untrusted(builder: Any, mar
 
 
 def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.exploration_runner as er
 
     monkeypatch.setattr(
         er,
@@ -552,7 +796,7 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: 
     diff_text = _multifile_diff(["services/taste/a.py", "services/taste/b.py"])
     backend = _specialist_backend()
 
-    anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     dep_prompt = backend.calls[0]["prompt"]
     assert str(tmp_path / "services/taste/dep.py") in dep_prompt
@@ -561,7 +805,6 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: 
 
 def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fallback seeding is rename-aware: a renamed file seeds its new path, not the old one."""
-    import daydream.exploration_runner as er
 
     # Force the fallback path with a genuine static-analysis failure.
     def analyzer_failure(diff_text: str, repo_root: Path) -> list[FileInfo]:
@@ -581,17 +824,16 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pyt
     diff_text = rename_diff + _multifile_diff(["services/taste/other.py"])
     backend = _specialist_backend()
 
-    anyio.run(lambda: pre_scan(cast(Backend, backend), tmp_path, diff_text))
+    anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
     dep_prompt = backend.calls[0]["prompt"]
-    assert str(tmp_path / "services/taste/new_name.py") in dep_prompt
-    assert "old_name.py" not in dep_prompt
+    targets = dep_prompt.split("<affected_files>")[1].split("</affected_files>")[0]
+    assert str(tmp_path / "services/taste/new_name.py") in targets
+    assert "old_name.py" not in targets
 
 
 def test_pre_scan_threads_profile_strategy(tmp_path: Path) -> None:
-    import inspect
 
-    import daydream.exploration_runner as er
 
     p = rp.build_default_profile()
     strategies = {

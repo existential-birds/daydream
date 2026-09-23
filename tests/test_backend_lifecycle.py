@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import daydream.backends.pi as pi_module
 from daydream.backends import _parsed_nonnegative_float, _parsed_nonnegative_int
 from daydream.backends._transport import (
     PROCESS_EXIT_EXCERPT_MAX_LINES,
@@ -183,10 +182,6 @@ def test_pi_facades_delegate_to_the_shared_parsers(
         assert _pi_retry_attempts() == expected
     if env_value not in (None, "5"):
         assert f"DAYDREAM_PI_RETRY_ATTEMPTS={env_value!r}" in caplog.text   # the warning still names the knob
-
-
-def test_pi_retry_delay_is_gone() -> None:
-    assert not hasattr(pi_module, "_pi_retry_delay")
 
 
 # Per-adapter lifecycle (requirement 13): drive the real backends through the

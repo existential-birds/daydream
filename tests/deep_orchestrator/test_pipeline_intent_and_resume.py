@@ -7,7 +7,17 @@ from typing import Any
 
 import pytest
 
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.extensions import Registry
+from daydream.extensions.builtins import register_builtins
+from daydream.git_ops import GitError
+from daydream.hunk_index import load_hunk_index
+from daydream.prompts.authorial_intent import (
+    AUTHORITATIVE_INTENT_RULE,
+    PR_DESCRIPTION_UNTRUSTED_FRAMING,
+)
+from daydream.run_context import current_run_context
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _forbidden_input,
     _make_record_issue,
@@ -56,14 +66,12 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
             order.append("merge")
 
     first = {name: order.index(name) for name in set(order)}
-    assert first["intent"] < first["alternatives"]
-    # Wonder runs concurrently with the per-stack fan-out, but must join before
-    # merge consumes the per-stack records.
-    assert first["alternatives"] < first["merge"]
+    assert "alternatives" not in first
+    assert first["intent"] < first["per-stack"]
     assert first["per-stack"] < first["merge"]
     assert "parse" not in {name.lower() for name in order}
 
-    # At minimum: intent + alternatives + per-stack fan-out + merge.
+    # At minimum: intent + four reviews (including structural design review) + merge.
     assert len(stub.calls) >= 6
     # Each stage fires a distinct execute call -- prompts must be unique.
     prompts = [c["prompt"] for c in stub.calls]
@@ -101,8 +109,7 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     for p in per_stack_prompts:
         assert "intent.md" in p
-        # Multi-stack: wonder runs alongside this fan-out, so alternatives.json
-        # does not exist yet and its pointer is deliberately omitted.
+        # Folded design review has no independent alternatives to consume.
         assert "alternatives.json" not in p
 
     # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
@@ -118,7 +125,6 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     # One records file per per-stack review, plus the structural meta-stack.
     assert len(records_files) >= len(per_stack_prompts)
 
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
     text = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
@@ -135,7 +141,6 @@ async def test_deep_run_writes_hunk_index_after_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The persisted hunk index is written right after diff materialization."""
-    from daydream.hunk_index import load_hunk_index
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -159,7 +164,6 @@ async def test_pr_body_reaches_intent_prompt(
     make_config: MakeConfig,
 ) -> None:
     """The PR description body is threaded into the initial intent prompt."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr(
@@ -182,7 +186,6 @@ async def test_no_pr_body_degrades_cleanly(
     make_config: MakeConfig,
 ) -> None:
     """No PR body -> intent prompt carries no PR-description section."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None, **_kwargs: None)
@@ -208,8 +211,6 @@ async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
     make_config: MakeConfig,
 ) -> None:
     """An advisory PR-body lookup failure cannot abort the review pipeline."""
-    from daydream.git_ops import GitError
-    from daydream.runner import run
 
     _silence(monkeypatch)
 
@@ -239,7 +240,6 @@ async def test_whitespace_only_pr_body_is_not_authoritative(
     make_config: MakeConfig,
 ) -> None:
     """Whitespace-only PR bodies must not publish intent_authoritative (#279)."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr(
@@ -265,8 +265,6 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
 ) -> None:
     """Real-path: the unattended (non-interactive) deep run auto-accepts the proposed intent with no human
     corrector -- and STILL threads the PR body into the intent prompt."""
-    from daydream.run_context import current_run_context
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
@@ -294,9 +292,6 @@ async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_on
 ) -> None:
     """Real-path: an instruction-like PR body in a non-interactive run is framed as untrusted data, cannot suppress
     findings, and the intent turn runs read-only (#579)."""
-    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
-    from daydream.run_context import current_run_context
-    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
@@ -337,7 +332,6 @@ async def test_non_open_pr_state_suppresses_pr_body(
     """When gh_pr_view returns a non-OPEN state (CLOSED or MERGED), the orchestrator must NOT thread the PR body
     into the intent prompt — trusting a stale description would be wrong. Asserts on the observable prompt
     content, not on internal state."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     for state in ("CLOSED", "MERGED"):
@@ -390,7 +384,6 @@ async def test_yes_auto_applies_fix(
     make_config: MakeConfig,
 ) -> None:
     """Task 6 real-path: ``--yes`` (assume="yes") auto-applies fixes without prompting."""
-    from daydream.runner import run
 
     _add_bare_remote(multi_stack_target)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -424,7 +417,6 @@ async def test_fix_gate_authorizes_canonical_finding_outside_reviewed_diff(
     scope_issue_filing: bool,
 ) -> None:
     """A canonical primary path is authorized even when absent from the diff."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -463,7 +455,6 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
     mute_side_effects: Mute,
 ) -> None:
     """#572/#573: a ``./``-prefixed finding file stays in scope."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -495,7 +486,6 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     mute_side_effects: Mute,
 ) -> None:
     """Every canonical finding path reaches the fixer, including off-diff paths."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -527,8 +517,17 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
 
 
-async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("custom_builder", [False, True])
+async def test_preflight_notice(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, custom_builder: bool,
+) -> None:
     """D-30: pre-flight notice lists stages, stacks, and agent count."""
+    if custom_builder:
+
+        registry = Registry()
+        register_builtins(registry)
+        registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
+        monkeypatch.setattr("daydream.deep.orchestrator.get_registry", lambda: registry)
     captured: list[dict[str, Any]] = []
 
     def _capture(
@@ -561,15 +560,14 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     notice = captured[0]
     assert notice["stages"] == [
         "TTT intent",
-        "TTT alternative-review",
+        "TTT alternative-review" if custom_builder else "design alternatives (included in structural review)",
         "per-stack reviews",
         "structural review (parallel with per-stack reviews)",
         "cross-stack merge",
         "optional fix gate",
     ]
-    # The fixture yields four review assignments and the fixed TTT/merge/fix-gate
-    # work, for a total of twelve agents.
-    assert notice["agent_count"] == 12
+    # Folding default alternatives removes one invocation from the legacy estimate.
+    assert notice["agent_count"] == (12 if custom_builder else 11)
     assert notice["stack_lines"] == [
         "python: 1 file(s)",
         "react: 1 file(s)",
@@ -677,7 +675,6 @@ async def test_resume_merge_consumes_saved_records(multi_stack_target: Path, mon
 
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
-    from daydream.config import REVIEW_OUTPUT_FILE
 
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
 

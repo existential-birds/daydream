@@ -1,5 +1,6 @@
 """Owned tracing lifecycle and event reconciliation through real SDK spans."""
 
+import inspect
 import json
 import logging
 import threading
@@ -10,27 +11,39 @@ from typing import Any
 
 import anyio
 import pytest
-from opentelemetry import trace
+from opentelemetry import context as otel_context
+from opentelemetry import metrics, trace
+from opentelemetry import trace as otel_trace
+from opentelemetry._logs import get_logger_provider
+from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
+from opentelemetry.metrics import get_meter_provider
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, StatusCode, TraceFlags
 
+import daydream.observability.spans as spans_module
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
     CostEvent,
     DiagnosticEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
+    TextChoicePart,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.config_file import load_file_config
 from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
+from daydream.observability import runtime
 from daydream.observability.config import (
     ObservabilityConfig,
     ObservabilityError,
@@ -47,11 +60,17 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-@pytest.mark.anyio
-async def test_owned_span_tree_usage_and_content() -> None:
+def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
+    """An in-memory span exporter registered as the active ``memory`` destination."""
     exporter = InMemorySpanExporter()
     registry = Registry()
     registry.register_trace_exporter("memory", lambda _: exporter)
+    return exporter, registry
+
+
+@pytest.mark.anyio
+async def test_owned_span_tree_usage_and_content() -> None:
+    exporter, registry = _memory_tracing()
     original_provider = trace.get_tracer_provider()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         with step_scope("review", iteration=2, stack="python"):
@@ -111,9 +130,7 @@ async def test_owned_span_tree_usage_and_content() -> None:
 
 @pytest.mark.anyio
 async def test_attempt_and_nested_step_do_not_inherit_unobserved_request_metadata() -> None:
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="configured-only"):
             async with attempt_scope(1):
@@ -138,9 +155,7 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(
 ) -> None:
     secret = "opaque-diagnostic-secret"
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", secret)
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
 
     async with trace_run(
         ObservabilityConfig(destinations=("memory",), capture_content=True),
@@ -222,9 +237,7 @@ async def test_run_spans_survive_flag_valued_secret_env_var(monkeypatch: pytest.
     """Real-path: trace_run builds its policy from the ambient environment, so a
     flag-valued secret-named var must not corrupt the agent span's JSON output."""
     monkeypatch.setenv("HERMES_REDACT_SECRETS", "true")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         with agent_scope("review", backend="pi", model="requested") as agent:
             agent.output({"ok": True})
@@ -324,9 +337,7 @@ async def test_retry_keeps_failed_billing_and_agent_records_salvaged_result(tmp_
     class RetryableError(RuntimeError):
         retryable = True
 
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     backend = _ScriptedBackend(
         [
             [TextEvent("failed content"), CostEvent(0.05, 4, 2), ResultEvent(None, None), RetryableError("retry")],
@@ -369,9 +380,7 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-secret")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     backend = _ScriptedBackend(
         [
             [
@@ -419,9 +428,7 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(
 
 @pytest.mark.anyio
 async def test_cancelled_run_closes_open_tool_and_exporter(tmp_path: Path) -> None:
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     backend = _ScriptedBackend([[ToolStartEvent("tool", "Read", {})]], stall=True)
     with anyio.move_on_after(0.03) as cancellation:
         async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
@@ -461,9 +468,7 @@ async def test_partial_initialization_cleans_first_destination_once() -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize("budget", ["wall", "tools", "supervisor"])
 async def test_budget_and_supervision_close_tools_with_reason(tmp_path: Path, budget: str) -> None:
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
 
     def veto(tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
         return ToolDecision(True, "deny this tool")
@@ -546,9 +551,7 @@ async def test_hydration_ignores_ambient_length_limit_and_serialization_is_fail_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT", "2")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     text = "long source and result " * 1000
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         async with attempt_scope(1) as observer:
@@ -567,9 +570,7 @@ async def test_hydration_ignores_ambient_length_limit_and_serialization_is_fail_
 @pytest.mark.anyio
 async def test_failed_tool_exports_native_error_and_sanitized_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-secret")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         async with attempt_scope(1) as observer:
             observer.observe(ToolStartEvent("tool", "Read", {}, timestamp="2026-09-05T10:00:00Z"))
@@ -603,7 +604,6 @@ def _seed_ambient_openllmetry_context(
     managed_prompt: str,
 ) -> list[Any]:
     """Seed ambient Traceloop decorator context exactly as its producers do."""
-    from opentelemetry import context as otel_context
 
     api_key = "opaque-prompt-key"
     tokens: list[Any] = []
@@ -622,7 +622,6 @@ def _seed_ambient_openllmetry_context(
 
 
 def _reset_ambient_openllmetry_context(tokens: list[Any]) -> None:
-    from opentelemetry import context as otel_context
 
     for token in reversed(tokens):
         otel_context.detach(token)
@@ -661,9 +660,7 @@ async def test_ambient_openllmetry_context_never_reaches_owned_spans() -> None:
         association={"ambient_key": "ambient-value", "api_key": "ambient-api-key-secret"},
         managed_prompt="ambient-managed-prompt",
     )
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     try:
         async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
             with step_scope("review"):
@@ -714,14 +711,10 @@ async def test_nested_disabled_run_shields_children_from_ambient_context() -> No
 
 @pytest.mark.anyio
 async def test_ambient_context_restored_after_exception_and_cancellation() -> None:
-    from opentelemetry import context as otel_context
-    from opentelemetry import trace as otel_trace
 
     sentinel = "ambient-restore-secret-2277"
     ambient = otel_context.attach(otel_context.set_value("workflow_name", sentinel))
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     try:
         with pytest.raises(RuntimeError, match="boom"):
             async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
@@ -744,7 +737,6 @@ async def test_ambient_context_restored_after_exception_and_cancellation() -> No
 
 @pytest.mark.anyio
 async def test_concurrent_runs_with_distinct_ambient_context_are_isolated() -> None:
-    from opentelemetry import context as otel_context
 
     registry = Registry()
     exporters: list[InMemorySpanExporter] = []
@@ -805,9 +797,7 @@ async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(
         association={"ambient_key": "notebook-ambient-value"},
         managed_prompt="notebook-ambient-prompt",
     )
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     try:
         async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
             with step_scope("review", iteration=1):
@@ -887,9 +877,7 @@ async def test_operator_resource_attributes_merge_with_authoritative_precedence(
         "service.instance.id=operator-instance-uuid,comma.key=a%2Cb%3Dc,api_key=opaque-resource-secret",
     )
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         run.finish(0)
     resource = _resource_of(exporter.get_finished_spans()[0])
@@ -948,9 +936,7 @@ async def test_invalid_operator_resource_rejects_entire_variable(
     raw: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", raw)
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda config: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         run.finish(0)
     resource = _resource_of(exporter.get_finished_spans()[0])
@@ -969,9 +955,7 @@ async def test_otel_service_name_overrides_service_name_resource(
 ) -> None:
     monkeypatch.setenv("OTEL_SERVICE_NAME", "operator-service")
     monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=should-lose")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(
         ObservabilityConfig(destinations=("memory",), service_name="operator-service"), registry, flow="review"
     ) as run:
@@ -985,7 +969,6 @@ async def test_otel_service_name_overrides_service_name_resource(
 def test_repository_daydream_toml_cannot_set_resources_or_endpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.config_file import load_file_config
 
     (tmp_path / ".daydream.toml").write_text(
         "[observability]\n"
@@ -1006,13 +989,8 @@ def test_repository_daydream_toml_cannot_set_resources_or_endpoints(
 
 @pytest.mark.anyio
 async def test_owned_session_installs_no_global_signals_or_instrumentors() -> None:
-    from opentelemetry import metrics, trace
-    from opentelemetry._logs import get_logger_provider
-    from opentelemetry.metrics import get_meter_provider
 
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda config: exporter)
+    exporter, registry = _memory_tracing()
     provider_before = trace.get_tracer_provider()
     meter_before = get_meter_provider()
     logs_before = get_logger_provider()
@@ -1031,9 +1009,7 @@ async def test_owned_session_installs_no_global_signals_or_instrumentors() -> No
 
 
 def test_traceloop_default_helper_is_not_invoked() -> None:
-    import inspect
 
-    from daydream.observability import runtime
 
     source = "\n".join(
         line for line in inspect.getsource(runtime).splitlines() if not line.strip().startswith(("#", '"', "'"))
@@ -1052,16 +1028,13 @@ def test_traceloop_default_helper_is_not_invoked() -> None:
 async def test_resource_secret_values_never_reach_serialized_spans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 
     monkeypatch.setenv(
         "OTEL_RESOURCE_ATTRIBUTES",
         "api_key=opaque-resource-secret,custom.note=plain,deployment.environment.name=offline-audit",
     )
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda config: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         with step_scope("review"):
             pass
@@ -1069,7 +1042,6 @@ async def test_resource_secret_values_never_reach_serialized_spans(
     readable = exporter.get_finished_spans()
     encoded = encode_spans(readable)
     assert b"opaque-resource-secret" not in bytes(str(encoded), "utf-8")
-    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
     wire = ExportTraceServiceRequest(resource_spans=encoded.resource_spans)
     assert b"opaque-resource-secret" not in wire.SerializeToString()
@@ -1080,11 +1052,8 @@ async def test_resource_secret_values_never_reach_serialized_spans(
 
 @pytest.mark.anyio
 async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> None:
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent, TextChoicePart
 
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="requested"):
             async with attempt_scope(1) as attempt:
@@ -1136,11 +1105,8 @@ async def test_generation_span_carries_session_identity_and_aliases() -> None:
     carry the same session identity keys every other span records (readback
     gate evidence: generations were orphaned without them).
     """
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent
 
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="requested"):
             async with attempt_scope(1) as attempt:
@@ -1178,12 +1144,8 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
     gate evidence: HH replay children fell back to a run-id session).
     """
 
-    from daydream.observability import runtime
-    from daydream.observability.spans import agent_scope, attempt_scope, step_scope
 
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         # Late-binding seam: mirrors the runner/replay tool association that
         # happens after the root opened but before children do.
@@ -1210,11 +1172,8 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
 async def test_generation_child_billed_only_when_ledger_owner_is_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent, TextChoicePart
 
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     fabricated = {
         "trajectory_id": "session:descriptor",
         "invocation_id": "inv-1",
@@ -1239,7 +1198,6 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(
         (),
         {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
     )()
-    import daydream.observability.spans as spans_module
 
     monkeypatch.setattr(spans_module, "get_current_recorder", lambda: recorder)
 
@@ -1274,9 +1232,7 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(
 
 @pytest.mark.anyio
 async def test_actual_nested_agent_scope_is_subagent_siblings_are_not() -> None:
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
+    exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         # One real enclosing logical agent makes the inner scope a subagent;
         # a sibling agent opened after it returns to root.

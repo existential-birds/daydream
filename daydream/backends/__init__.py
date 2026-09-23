@@ -578,6 +578,7 @@ class EffectiveRequestConfig(_AdmissionBase):
     unsafe backend value before ever constructing.
     """
 
+    finalization: bool | None = field(default=None, kw_only=True)
     temperature: float | None = None
     max_turns: int | None = None
     read_only: bool | None = None
@@ -586,6 +587,7 @@ class EffectiveRequestConfig(_AdmissionBase):
     model_mode: Literal["single", "multi_or_dynamic"] | None = None
 
     def _validate(self) -> None:
+        _require_bool(self.finalization, "finalization")
         _require_finite_float(self.temperature, "temperature")
         _require_nonnegative_int(self.max_turns, "max_turns")
         _require_bool(self.read_only, "read_only")
@@ -604,6 +606,7 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     """
 
     permission_mode: Literal["bypassPermissions"] | None = None
+    tools_count: int | None = field(default=None, kw_only=True)
     allowed_tools_count: int | None = None
     allowed_tools_present: bool | None = None
     audit_tools_count: int | None = None
@@ -616,6 +619,7 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     def _validate(self) -> None:
         super()._validate()
         _require_literal(self.permission_mode, ("bypassPermissions",), "permission_mode")
+        _require_nonnegative_int(self.tools_count, "tools_count")
         _require_nonnegative_int(self.allowed_tools_count, "allowed_tools_count")
         _require_bool(self.allowed_tools_present, "allowed_tools_present")
         _require_nonnegative_int(self.audit_tools_count, "audit_tools_count")
@@ -649,6 +653,7 @@ class PiRequestConfig(EffectiveRequestConfig):
 
     selected_tools_count: int | None = None
     selected_tools_present: bool | None = None
+    no_tools: bool | None = field(default=None, kw_only=True)
     no_skills: bool | None = None
     schema_emulated: bool | None = None
 
@@ -656,6 +661,7 @@ class PiRequestConfig(EffectiveRequestConfig):
         super()._validate()
         _require_nonnegative_int(self.selected_tools_count, "selected_tools_count")
         _require_bool(self.selected_tools_present, "selected_tools_present")
+        _require_bool(self.no_tools, "no_tools")
         _require_bool(self.no_skills, "no_skills")
         _require_bool(self.schema_emulated, "schema_emulated")
 
@@ -743,17 +749,6 @@ class RequestEvent:
     Only exposed request data belongs here; backend-internal prompts and
     environment/configuration dictionaries are never inferred or copied.
     ``system_prompt`` contains only the system text explicitly sent by Daydream.
-
-    P18 Task 1 additions (all additive; older call sites stay valid):
-
-    ``config`` carries the closed typed Effective Configuration Admission
-    Contract dataclass (a frozen subclass of :class:`_AdmissionBase`), never a
-    free-form bag. ``*_source`` fields distinguish configured, host-generated
-    and native provenance for identity fields; ``None`` means the field's
-    provenance was not separately established. ``timestamp_source`` is
-    ``"native"`` only when the backend supplied the request timestamp from its
-    own protocol handshake (Osprey ``session_start``); every other backend is
-    ``"host_observed"``.
     """
 
     prompt: str
@@ -1022,14 +1017,6 @@ class TurnEndEvent:
             when the backend cannot supply one (Codex has no per-message
             id surface — D-04 correlator unused for Codex).
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
-        P18 Task 1 additions: where a backend exposes a per-turn finish
-        reason/model/provider on the boundary itself, it is carried here
-        with provenance; backends without such an exposure leave them
-        ``None`` (Pi fills ``model_name``/``provider_name`` from its
-        ``turn_end.message``; Claude leaves them unset and keeps its
-        existing ``ResultEvent``-level metadata). ``timestamp_source``
-        distinguishes a native protocol timestamp (``"native"``) from the
-        host yield time (``"host_observed"``).
     """
 
     message_id: str = ""
@@ -1250,6 +1237,19 @@ class Backend(Protocol):
     the bound root by canonical identity; missing or different values fail
     closed.
 
+    Optional extension: ``supports_finalization = True`` declares support for
+    an invocation-local ``execute(finalization=True)`` keyword. Callers must
+    gate that keyword on the capability; Osprey and custom backends keep their
+    existing interface. Supported adapters lower reasoning and apply only
+    their native supported tool controls without mutating shared settings.
+    Codex still needs the host zero-tool guard; its sandbox permits reads.
+
+    Optional extension: ``supports_tools_disabled = True`` declares native
+    invocation-local ``execute(tools_disabled=True)`` support that removes tools
+    without lowering reasoning or replacing the review task with finalization.
+    Callers must gate this request on the capability; it is not interchangeable
+    with a host tool-call budget or the backend's read-only profile.
+
     Optional extension: backends may expose ``reasoning_effort``, the per-phase
     reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
     and applied through the driver's native knob (Claude
@@ -1369,7 +1369,7 @@ def create_backend(
             default can win before Pi's GLM fallback is selected.
         cwd: Target workspace used to resolve Pi's configured default model.
         reasoning_effort: Optional reasoning-effort override (one of
-            ``daydream.config.REASONING_EFFORT_LEVELS``). Every backend applies
+            ``low``, ``medium``, ``high``, ``xhigh``, ``max``). Every backend applies
             it through its own native knob: Claude via
             ``ClaudeAgentOptions.effort``, Codex via
             ``-c model_reasoning_effort=...``, Pi via ``--thinking``.

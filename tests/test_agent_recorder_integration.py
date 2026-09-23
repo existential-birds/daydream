@@ -37,7 +37,6 @@ from daydream.trajectory import (
     DaydreamRunFlow,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.stub_backend import MockBackend
 from tests.harness.trajectory import make_recorder
 
 
@@ -61,11 +60,12 @@ async def _run_with_recorder(
 
 async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     """MAP-01 + Pitfall 4 — Beagle prompt becomes Step(source='user'); no agent-only fields."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="hello back"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
     assert traj is not None
@@ -82,11 +82,12 @@ async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
 
 async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
     """MAP-02 — TextEvent becomes Step(source='agent', message=text)."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="hello back"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
     assert traj is not None
@@ -98,13 +99,14 @@ async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
     """CORE-06 / MAP-04 / MAP-05 / Pitfall 3 — same-step pairing."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="running pytest"),
             ToolStartEvent(id="t1", name="Bash", input={"command": "pytest"}),
             ToolResultEvent(id="t1", output="OK", is_error=False),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
@@ -120,8 +122,8 @@ async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) ->
 
 async def test_metrics_event_lands_on_agent_step(tmp_path: Path) -> None:
     """MAP-06 + D-15 — cached_tokens is subset of prompt_tokens, not added."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="ok"),
             MetricsEvent(
                 message_id="msg_01",
@@ -131,7 +133,8 @@ async def test_metrics_event_lands_on_agent_step(tmp_path: Path) -> None:
                 cost_usd=0.001,
             ),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
@@ -150,8 +153,8 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
     """MAP-07 / Roadmap success criterion 4 — FinalMetrics totals match per-step sum."""
     recorder = make_recorder(tmp_path)
     target_path = recorder.path
-    backend1 = MockBackend(
-        [
+    backend1 = ScriptedBackend(
+        events=[
             TextEvent(text="first"),
             MetricsEvent(
                 message_id="msg_01",
@@ -161,10 +164,11 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
                 cost_usd=0.001,
             ),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
-    backend2 = MockBackend(
-        [
+    backend2 = ScriptedBackend(
+        events=[
             TextEvent(text="second"),
             MetricsEvent(
                 message_id="msg_02",
@@ -174,7 +178,8 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
                 cost_usd=0.002,
             ),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     async with recorder:
         await run_agent(backend1, tmp_path, "first prompt", phase=DaydreamPhase.REVIEW)
@@ -199,11 +204,12 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
 
 async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
     """CORE-09 — run_agent without active recorder runs cleanly."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="ok"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     # NO TrajectoryRecorder context — recorder is None.
     out, cont, _ = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
@@ -216,11 +222,12 @@ async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
 
 async def test_extra_phase_and_run_flow_labels(tmp_path: Path) -> None:
     """MAP-08 + MAP-09 — every Step has both extra labels."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="ok"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(
         backend,
@@ -239,17 +246,19 @@ async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) 
     """MAP-08 + MAP-09 — phase varies per run_agent call; run_flow per recorder."""
     recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.PR)
     target_path = recorder.path
-    backend1 = MockBackend(
-        [
+    backend1 = ScriptedBackend(
+        events=[
             TextEvent(text="reviewing"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
-    backend2 = MockBackend(
-        [
+    backend2 = ScriptedBackend(
+        events=[
             TextEvent(text="fixing"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     async with recorder:
         await run_agent(backend1, tmp_path, "review please", phase=DaydreamPhase.REVIEW)
@@ -277,11 +286,12 @@ def test_run_agent_requires_phase_keyword() -> None:
 
 async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) -> None:
     """Omitting the required ``phase`` argument raises ``TypeError``."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="ok"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     with pytest.raises(TypeError) as excinfo:
         await run_agent(backend, tmp_path, "hi")  # type: ignore[call-arg]
@@ -292,19 +302,20 @@ async def test_calling_run_agent_with_positional_phase_raises_typeerror(
     tmp_path: Path,
 ) -> None:
     """The required ``phase`` argument remains keyword-only."""
-    backend = MockBackend([])
+    backend = ScriptedBackend(events=[], model="mock-model")
     with pytest.raises(TypeError):
         await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[call-arg]
 
 
 async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
     """MAP-03 — ThinkingEvent populates Step.reasoning_content."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             ThinkingEvent(text="let me think..."),
             TextEvent(text="answer"),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
@@ -373,12 +384,13 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
 
 async def test_cost_event_does_not_break_recording(tmp_path: Path) -> None:
     """CostEvent contributes its usage to the agent step and final metrics."""
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text="ok"),
             CostEvent(cost_usd=0.005, input_tokens=50, output_tokens=10, cached_tokens=None),
             ResultEvent(structured_output=None, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None

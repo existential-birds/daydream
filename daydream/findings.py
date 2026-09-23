@@ -50,6 +50,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
         "pr_number": {"type": "integer"},
         "head_sha": {"type": "string"},
         "run_info": {"type": ["string", "null"]},
+        "review_warnings": {"type": "array", "items": {"type": "string"}},
         # Optional (issue #1113). Absent means "review" -- the only kind that
         # existed before grounded diagrams. Both keys are OPTIONAL in
         # ``required`` but MANDATORY here: ``additionalProperties: false``
@@ -172,6 +173,8 @@ class FindingsArtifact:
         head_sha: Declared PR head SHA the findings were computed against.
         run_info: Phase A's rendered run-info markdown, or None.
         findings: Validated finding entries.
+        review_warnings: Incomplete review coverage; blocks approval and stale
+            comment resolution, but still permits posting surviving findings.
         kind: ``"review"`` (findings to post as a PR review) or ``"diagram"``
             (issue #1113: a grounded-diagram payload to post as a standalone
             issue comment). Defaults to ``"review"`` so a pre-#1113 artifact
@@ -187,6 +190,7 @@ class FindingsArtifact:
     findings: list[ArtifactFinding]
     kind: str = "review"
     diagrams: dict[str, Any] | None = None
+    review_warnings: tuple[str, ...] = ()
 
 
 def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> dict[str, Any]:
@@ -213,6 +217,7 @@ def build_findings_artifact(
     issues: list[ParsedIssue],
     *,
     run_info: str | None,
+    review_warnings: tuple[str, ...] = (),
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
     renderers: pr_review.ReviewRenderers | None = None,
@@ -241,7 +246,7 @@ def build_findings_artifact(
     """
     classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers)
     findings = [
-        _finding_dict(issue, placement="inline", line=entry["line"])
+        _finding_dict(issue, placement="inline", line=entry.line)
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)
     ]
     findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)
@@ -255,6 +260,7 @@ def build_findings_artifact(
         "kind": kind,
         "diagrams": diagrams,
         "findings": findings,
+        **({"review_warnings": list(review_warnings)} if review_warnings else {}),
     }
 
 
@@ -338,4 +344,5 @@ def load_findings_artifact(
         findings=[ArtifactFinding(**f) for f in data["findings"]],
         kind=data.get("kind") or "review",
         diagrams=data.get("diagrams"),
+        review_warnings=tuple(data.get("review_warnings", [])),
     )

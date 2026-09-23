@@ -102,15 +102,10 @@ def descriptions_match(a: str, b: str, *, threshold: float = _SIM_THRESHOLD) -> 
     callers share this module's bigram/Jaccard comparison instead of keeping
     a second copy that can drift away from it.
 
-    ``threshold`` defaults to ``_SIM_THRESHOLD``, the pre-filter's own
-    deliberately loose bar -- safe there because every candidate the
-    pre-filter emits still goes in front of the merge agent (or the arbiter)
-    for adjudication. A caller that makes a destructive, unreviewed "same
-    defect" decision on this predicate's say-so alone -- such as the
-    host-side structural fold (issue #1103,
-    ``phases._append_structural_and_write_merged``) -- must pass
-    ``FOLD_SIM_THRESHOLD`` instead; that fold has no downstream review, so it
-    needs a materially higher bar than the pre-filter's.
+    ``threshold`` defaults to ``_SIM_THRESHOLD``; a caller making a
+    destructive, unreviewed "same defect" decision -- such as the host-side
+    structural fold (#1103) -- must pass ``FOLD_SIM_THRESHOLD`` instead (see
+    its definition above for the two-bars rationale).
 
     Degenerate input never matches: either description empty (or reduced to
     nothing by :func:`normalize_title`) returns ``False`` rather than letting
@@ -234,10 +229,8 @@ def build_record_dedup_candidates(
         sources: Parallel list where ``sources[i]`` is the originating
             stack name (or records filename) for ``records[i]``.
         threshold: Minimum normalized bigram Jaccard similarity a pair must
-            clear to be emitted. Defaults to ``_SIM_THRESHOLD``, preserving
-            the pre-filter's deliberately loose 0.5 bar -- safe there because
-            every candidate still goes in front of the merge agent (or the
-            arbiter) for adjudication. Pass ``threshold=0.0`` to get every
+            clear to be emitted. Defaults to ``_SIM_THRESHOLD`` (see its
+            definition above). Pass ``threshold=0.0`` to get every
             comparable pair with its similarity attached, for callers that
             need the full similarity distribution rather than the pre-filter's
             candidate set (e.g. an eval axis that has to detect a mis-set

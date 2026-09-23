@@ -6,7 +6,6 @@ by the review and fix loop system.
 
 Exports:
     AUDIT_CATEGORIES: tuple[str, ...] - Improve audit categories.
-    STACK_CHOICES: tuple[str, ...] - Supported built-in stack names (no skills).
     EffortTier: Frozen improve audit effort-tier configuration.
     EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
     PLAN_WRITE_MAX_CONCURRENCY: int - Improve plan-writer concurrency ceiling.
@@ -16,7 +15,6 @@ Exports:
     DEFAULT_CODEX_MODEL: str - Default Codex model id when no override is given.
     DEFAULT_PI_MODEL: str - Default Pi model id when no override is given (Nous
         research DeepSeek V4 Flash default).
-    DEFAULT_EXPLORATION_MODEL: str - Default model for the EXPLORE phase.
     PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] - Per-backend per-phase default
         model mapping. Outer key is backend name,
         inner key is the phase name (lowercase, e.g. "review", "parse", "fix"),
@@ -47,12 +45,15 @@ from dataclasses import dataclass
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
-DEFAULT_EXPLORATION_MODEL = "claude-sonnet-5"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
 DEFAULT_WALL_BUDGET_S = 1800.0
 
-# Unlimited by default: a tool-call count is a poor proxy for a runaway turn, and
+# Outer review ceiling. ReviewLimits supplies earlier investigation/finalization
+# bounds; exhaustion produces a partial review. Fix turns retain the default above.
+REVIEW_WALL_BUDGET_S = 3600.0
+
+# Unlimited outside bounded review stages: a tool-call count is a poor proxy for a runaway turn, and
 # 50 truncated legitimately exploratory phases (wonder/per-stack review) mid-pass,
 # failing the run. The wall budget above is the real bound on the time tail; every
 # call site still accepts an explicit ceiling.
@@ -87,8 +88,7 @@ RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
 # re-raises the current failure without dispatching again. Overridable via
 # ``[tool.daydream] retry_recovery_allowance_s`` (file config) or the ambient
 # ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var; ``0`` is the sanctioned
-# "no retry recovery" value. 300.0 is the issue's proposed value, NOT yet tuned
-# against outage data (no corpus is reachable from this host).
+# "no retry recovery" value.
 DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 
 # Per-file-group aggregate budget for the fix phase (issue #201). The
@@ -99,13 +99,6 @@ DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 # the group deadline into every fix turn, so a spent deadline aborts the call
 # itself (batched turns and the retry ladder included). Overridable via
 # ``[tool.daydream]``.
-#
-# Values validated against 139–484 archived runs in ~/.daydream/archive/runs:
-#   600s: pi fix calls run p90=623s / max=1731s, so 600s caps the 1837s/5-call
-#   pi runaway to 2 fixes and the #186 9-call group to 2, while a legit slow
-#   single-call group still rides its own 1800s per-call wall budget.
-#   6 items: >6 findings on one file is 3.5% of files, and the dropped tail is
-#   the lowest-severity findings (the group is severity-sorted).
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 
@@ -209,7 +202,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # The table is composed from two independently-owned halves so tuning one flow
 # never moves the other. Both are merged into ``PHASE_DEFAULT_EFFORT``, which
 # is what the resolver reads.
-REASONING_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 # Half one: the review/fix pipeline (deep, shallow, review).
 #
@@ -272,18 +264,6 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     }
     for backend in {*DEEP_PHASE_DEFAULT_EFFORT, *IMPROVE_PHASE_DEFAULT_EFFORT}
 }
-
-# Supported built-in stack choices (lowercase stack names). This is the neutral
-# CLI selector metadata after the native-profile migration: a stack is a language
-# scope, not a skill.
-STACK_CHOICES: tuple[str, ...] = (
-    "python",
-    "react",
-    "elixir",
-    "go",
-    "rust",
-    "ios",
-)
 
 AUDIT_CATEGORIES: tuple[str, ...] = (
     "correctness",

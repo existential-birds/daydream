@@ -368,31 +368,6 @@ def test_agent_lifecycle_and_lazy_harbor() -> None:
     assert isinstance(DaydreamReviewAgent.version(), str)
 
 
-def test_agent_setup_confirms_version_and_backend(tmp_path: Path) -> None:
-    import pytest
-
-    pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
-
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
-
-    agent = DaydreamReviewAgent(
-        logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "pi"}
-    )
-
-    class Env:
-        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
-            self.captured = command
-            return ExecResult(return_code=0, stdout="ok", stderr="")
-
-    env = Env()
-    import asyncio
-
-    asyncio.run(agent.setup(env))
-    assert agent.version() in env.captured        # setup checks the packaged version
-    assert "shutil.which('pi')" in env.captured      # and the required Pi CLI
-
-
 def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
     import pytest
 
@@ -415,6 +390,7 @@ def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
     import asyncio
     asyncio.run(pi_agent.setup(env_pi))
     assert "shutil.which('pi')" in env_pi.captured
+    assert pi_agent.version() in env_pi.captured
     assert "claude_agent_sdk" not in env_pi.captured
 
     claude_agent = DaydreamReviewAgent(

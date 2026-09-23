@@ -14,11 +14,14 @@ from typing import Any, cast
 
 import anyio
 import pytest
+from rich.console import Console
 
-from daydream.agent import run_agent
-from daydream.backends import Backend, ResultEvent, TextEvent
+from daydream.agent import _plan_retry_delay, _resolve_retry_settings, _retry_hint, run_agent
+from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
+from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
+from daydream.retry_policy import classify_failure
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
@@ -143,7 +146,6 @@ async def test_run_agent_uses_backend_retry_policy_without_reading_ambient_envir
     tmp_path: Path,
 ) -> None:
     """An injected backend policy is complete; ambient retry values are untouched."""
-    from daydream.backends import RetryPolicy
 
     backend = _fail_then_succeed(
         PiError("429 overloaded", retryable=True),
@@ -175,7 +177,6 @@ async def test_run_agent_uses_backend_retry_policy_without_reading_ambient_envir
 @pytest.mark.asyncio
 async def test_run_agent_surfaces_backend_error_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A categoryless backend error surfaces its MESSAGE to the user, not a bare class name."""
-    from rich.console import Console
 
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.agent.console", rec)
@@ -735,7 +736,6 @@ async def test_the_retry_policy_allowance_field_governs_the_ladder(
     one dispatch, and — because a declared ``RetryPolicy`` is complete — the ambient
     env override cannot re-grant recovery behind its back.
     """
-    from daydream.backends import RetryPolicy
 
     monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "600")
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
@@ -759,8 +759,6 @@ async def test_the_retry_policy_allowance_field_governs_the_ladder(
 @pytest.mark.asyncio
 async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None:
     """``_retry_hint`` guards ``str(exc)`` exactly like the shared classifier does."""
-    from daydream.agent import _retry_hint
-    from daydream.retry_policy import classify_failure
 
     class _HostileHint(RuntimeError):
         retryable = True
@@ -791,9 +789,6 @@ def test_the_extracted_settings_resolver_keeps_the_documented_precedence(
     here keeps the documented order (policy field > backend attribute > argument >
     env > default) observable without driving a ladder.
     """
-    from daydream.agent import _resolve_retry_settings
-    from daydream.backends import RetryPolicy
-    from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 
     def _resolve(backend: Any, explicit: float | None = None) -> Any:
         return _resolve_retry_settings(cast(Backend, backend), explicit)
@@ -802,7 +797,6 @@ def test_the_extracted_settings_resolver_keeps_the_documented_precedence(
 
     assert _resolve(_resolver_backend()).allowance_s == 10.0          # env tier
     assert _resolve(_resolver_backend(), 20.0).allowance_s == 20.0    # argument wins
-    assert _resolve(_resolver_backend(), 20.0).allowance_declared is True
 
     attributed = _resolver_backend(retry_recovery_allowance_s=30.0)
     assert _resolve(attributed, 20.0).allowance_s == 30.0             # attribute wins
@@ -814,20 +808,16 @@ def test_the_extracted_settings_resolver_keeps_the_documented_precedence(
     )
     resolved = _resolve(policed, 20.0)
     assert resolved.allowance_s == 0.0            # a declared policy is complete
-    assert resolved.allowance_declared is True
     assert resolved.max_attempts == 3 and resolved.base_delay_s == 1.0
 
     # Nothing declared anywhere: the documented default applies, undeclared.
     monkeypatch.delenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S")
     fallback = _resolve(_resolver_backend())
     assert fallback.allowance_s == DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-    assert fallback.allowance_declared is False
 
 
 def test_the_extracted_settings_resolver_refuses_contradictions() -> None:
     """Both documented contradictions are refused before any dispatch."""
-    from daydream.agent import _resolve_retry_settings
-    from daydream.backends import RetryPolicy
 
     inverted = _resolver_backend(
         retry_policy=RetryPolicy(attempts=3, base_delay_s=5.0, max_delay_s=1.0)
@@ -855,7 +845,6 @@ def test_the_extracted_retry_delay_planner_clamps_to_every_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``_plan_retry_delay`` decides the delay or the hint stop, on its own."""
-    from daydream.agent import _plan_retry_delay
 
     monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
 

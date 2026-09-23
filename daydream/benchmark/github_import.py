@@ -22,11 +22,9 @@ import hashlib
 import json
 import re
 import shutil
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -40,11 +38,6 @@ from daydream.benchmark.schema import EXTRACTION_VERSION
 from daydream.pr_review import FINDING_MARKER_RE
 
 
-def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
-    """Run ``gh auth status --hostname github.com`` (exit code is the contract)."""
-    return git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"], auth=git_ops.INHERIT_GITHUB_AUTH)
-
-
 def _run_gh_api_user(root: Path) -> dict[str, Any]:
     """Return the authenticated GitHub user record from ``gh api user``."""
     proc = git_ops._run_gh(root, ["api", "user"], auth=git_ops.INHERIT_GITHUB_AUTH)
@@ -54,11 +47,6 @@ def _run_gh_api_user(root: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise git_ops.GitError("gh api user returned a non-object payload")
     return data
-
-
-def _git_ls_remote(root: Path, url: str) -> str:
-    """Run an authenticated ``git ls-remote <url>`` and return the refs text."""
-    return git_ops.git_ls_remote(root, url)
 
 
 class PreflightError(Exception):
@@ -161,7 +149,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     if shutil.which("git") is None or shutil.which("gh") is None:
         raise PreflightError("missing_binary", "git and gh binaries must be reachable")
 
-    status = _run_gh_preflight_status(root)
+    status = git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"], auth=git_ops.INHERIT_GITHUB_AUTH)
     if status.returncode != 0:
         raise PreflightError("not_authenticated", "gh is not authenticated to github.com")
 
@@ -194,7 +182,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
         )
 
     try:
-        _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
+        git_ops.git_ls_remote(root, f"https://github.com/{repo_slug}.git")
     except git_ops.GitError as exc:
         raise PreflightError("git_preflight_failed", str(exc)) from exc
 
@@ -208,7 +196,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     # ledger so ``status`` can surface whether the last import/refresh actually
     # re-verified repository identity + read access.
     ledger = schema.PreflightLedger(
-        last_verified_at=_now_rfc3339(),
+        last_verified_at=schema.rfc3339_now(),
         repository=repo_slug,
         repository_id=repository_id,
         visibility=visibility,
@@ -330,11 +318,6 @@ def parse_import_targets(
         requested_heads=["final", *dict.fromkeys(all_valid)],
         pr_heads=pr_heads,
     )
-
-
-def _now_rfc3339() -> str:
-    """Current UTC time as an RFC3339 string."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _parse_ndjson(text: str) -> list[Any]:
@@ -2467,7 +2450,7 @@ def fetch_and_normalize(
         {
             **import_doc,
             "fetch": {
-                "fetched_at": _now_rfc3339(),
+                "fetched_at": schema.rfc3339_now(),
                 "etag": None,
                 "payload_sha256": _payload_sha256(import_doc),
             },

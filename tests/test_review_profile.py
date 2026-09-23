@@ -7,6 +7,22 @@ from daydream import review_profile as rp
 from tests.test_review_profile_completeness import STAGE_KEYS
 
 
+def test_review_deadline_is_profiled_and_validated() -> None:
+    base = rp.parse_profile('schema_version = 1\nname = "p"')
+    bounded = rp.parse_profile('schema_version = 1\nname = "p"\n[pipeline]\nreview_wall_budget_s = 1200')
+    assert bounded.pipeline.review_wall_budget_s == 1200
+    assert base.pipeline.review_wall_budget_s == 2700
+    assert bounded.digest != base.digest
+    with pytest.raises(rp.ProfileError):
+        rp.parse_profile('schema_version = 1\nname = "p"\n[pipeline]\nreview_wall_budget_s = -1')
+
+
+def test_pipeline_keeps_existing_positional_constructor_order() -> None:
+    pipeline = rp.Pipeline(False)
+    assert pipeline.structural_enabled is False
+    assert pipeline.review_wall_budget_s == 2700
+
+
 def test_stage_keys_cover_every_model_bearing_stage() -> None:
     # Every named stage from spec R2 must be present (subset of the #886 manifest keys).
     assert {

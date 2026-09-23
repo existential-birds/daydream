@@ -123,7 +123,7 @@ def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, 
     """Admit known fixture flags only; content values become lengths/hashes."""
     switches = frozenset({
         "codex": "exec --experimental-json",
-        "pi": "--no-session --no-skills",
+        "pi": "--no-session --no-skills --no-tools",
         "osprey": "agent --events-jsonl --sandbox --read-only --ultracode"
                   " --atif-system-prompt-plaintext --immutable-runtime-surface"
                   " --compress-context=true --compress-context=false",
@@ -142,7 +142,7 @@ def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, 
                   " --observation-budget-inline-bytes --observation-budget-admission-bytes",
     }[backend].split())
     content = frozenset(
-        {"codex": "-c", "pi": "--append-system-prompt", "osprey": "--persona --var"}[backend].split()
+        {"codex": "-c", "pi": "--append-system-prompt --system-prompt", "osprey": "--persona --var"}[backend].split()
     )
     recorded: list[str] = []
     hashes: dict[str, list[dict[str, Any]]] = {}
@@ -243,8 +243,9 @@ def _run_cli() -> int:
     mode = config["response_mode"]
     argv = sys.argv[1:]
     stdin = sys.stdin.buffer.read()
-    prompt = stdin.decode("utf-8") if backend == "codex" else argv[-1]
-    args_without_prompt = argv if backend == "codex" else argv[:-1]
+    piped_prompt = backend == "codex" or (backend == "pi" and bool(stdin))
+    prompt = stdin.decode("utf-8") if piped_prompt else argv[-1]
+    args_without_prompt = argv if piped_prompt else argv[:-1]
     recorded_argv, content_arguments = _observed_argv(backend, args_without_prompt)
     cwd = Path(_option(argv, "--cd", str(Path.cwd()))).resolve()
     opened: dict[str, str] = {}

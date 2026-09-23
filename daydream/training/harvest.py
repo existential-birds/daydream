@@ -94,6 +94,7 @@ from daydream.archive.git_safe import _DEFAULT_HOSTS, normalize_remote_url
 from daydream.archive.index import (
     append_label_observation,
     query_runs,
+    readonly_connection,
     reviewer_set_penalty_prior,
     set_run_pr_link,
 )
@@ -107,6 +108,7 @@ from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
     LocalCommitAppliedSignal,
+    PerFindingResolution,
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
@@ -508,6 +510,13 @@ def _build_rubric_local(
         comment_resolution=comments,
         local_commit_applied=local,
         posterior_source="local_branch",
+        per_finding_resolutions=[
+            PerFindingResolution(
+                fingerprint=fingerprint, comment_id=None, disposition="missing",
+                evidence_digest=labeler_versions.reply_evidence_digest([]),
+            )
+            for fingerprint in services.read_recorded_fingerprints(row)
+        ],
     )
 
 
@@ -898,8 +907,9 @@ class HarvestConfig:
 
     Attributes:
         archive_dir: Path to the daydream archive root (contains ``index.db``).
-        dry_run: When ``True``, the loop builds annotations but suppresses the
-            write to ``label_observations`` and the resume log.
+        dry_run: When ``True``, collect evidence without changing bronze,
+            SQLite, repository clones, response caches, or resume state.
+            Existing completion markers do not suppress preview acquisition.
         cache_dir: Optional directory backing
             :class:`~daydream.training.backfill_cache.BackfillCache`. When
             ``None``, ``gh_api`` calls hit the network on every row.
@@ -951,7 +961,7 @@ class _ProductionHarvestServices:
         )
 
     def _cache_instance(self) -> BackfillCache | None:
-        if self._config.cache_dir is None:
+        if self._config.cache_dir is None or self._config.dry_run:
             return None
         if self._cache is None:
             self._cache = BackfillCache(
@@ -963,6 +973,15 @@ class _ProductionHarvestServices:
     def query_rows(self, session_filter: str | None) -> Sequence[Mapping[str, Any]]:
         if not self.archive_dir.exists():
             raise FileNotFoundError(f"archive_dir does not exist: {self.archive_dir}")
+        if self._config.dry_run:
+            conn = readonly_connection(self.archive_dir)
+            try:
+                return [dict(row) for row in conn.execute(
+                    "SELECT * FROM runs WHERE session_id LIKE ? || '%'",
+                    (session_filter or "",),
+                )]
+            finally:
+                conn.close()
         if session_filter:
             return query_runs(
                 self.archive_dir,
@@ -979,6 +998,11 @@ class _ProductionHarvestServices:
         clone_cache = self._config.repo_clone_root or (
             self._config.cache_dir / "repos" if self._config.cache_dir else None
         )
+        if self._config.dry_run:
+            candidates = [row.source_path]
+            if clone_cache is not None and row.repo_slug:
+                candidates.append(clone_cache / row.repo_slug)
+            return next((p for p in candidates if p is not None and (p / ".git").exists()), None)
         return _resolve_repo_for_row(
             row,
             clone_cache,
@@ -993,6 +1017,8 @@ class _ProductionHarvestServices:
         *,
         console: Console,
     ) -> BaseShaStatus:
+        if self._config.dry_run:
+            return "available" if row.base_sha else "unavailable"
         return _materialize_base_sha_if_missing(row, repo_clone, console=console)
 
     def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -1015,6 +1041,7 @@ class _ProductionHarvestServices:
             before_valid_at=before_valid_at,
             exclude_session=exclude_session,
             repo_slug=repo_slug,
+            readonly=self._config.dry_run,
         )
 
     def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None:
@@ -1127,6 +1154,51 @@ def make_harvest_services(
     return _ProductionHarvestServices(config, github_auth)
 
 
+def collect_annotation(
+    row: HarvestRow, *, services: HarvestServices, readonly: bool, console: Console,
+) -> tuple[HarvestRow, AnnotationPayload]:
+    """Collect and reduce the same evidence for preview and canonical harvest.
+
+    Read-only callers supply dry-run services; linking is then in-memory only.
+    """
+    repo_resolution = services.resolve_repo(row, console=console)
+    base_sha_status = services.materialize_base_sha(
+        row,
+        repo_resolution,
+        console=console,
+    )
+    # Re-link orphan runs before acquiring their posterior. Persistence
+    # remains at this exact boundary, so a later row failure keeps the
+    # durable link as before.
+    if not row.is_pr:
+        try:
+            link = pr_link_signal(row.as_signal_row(), gh_api=services.github)
+        except RateLimitError:
+            raise
+        except GitError as exc:
+            if not _is_benign_pr_absence(exc):
+                raise
+            print_warning(
+                console,
+                f"harvest: PR link lookup failed for session {row.session_id}; "
+                f"degrading to local-branch posterior: {type(exc).__name__}: {exc}",
+            )
+            link = None
+        if link is not None:
+            number, slug = link
+            if not readonly:
+                services.set_pr_link(row, number, slug)
+            row = replace(row, pr_number=number, pr_repo=slug)
+
+    evidence = acquire_harvest_evidence(
+        row,
+        services=services,
+        repo_resolution=repo_resolution,
+        base_sha_status=base_sha_status,
+    )
+    return row, build_annotation(row, evidence)
+
+
 async def run_harvest(
     config: HarvestConfig,
     *,
@@ -1170,42 +1242,9 @@ async def run_harvest(
 
     for row in queue:
         try:
-            repo_resolution = services.resolve_repo(row, console=console)
-            base_sha_status = services.materialize_base_sha(
-                row,
-                repo_resolution,
-                console=console,
+            row, payload = collect_annotation(
+                row, services=services, readonly=config.dry_run, console=console,
             )
-            # Re-link orphan runs before acquiring their posterior. Persistence
-            # remains at this exact boundary, so a later row failure keeps the
-            # durable link as before.
-            if not row.is_pr:
-                try:
-                    link = pr_link_signal(row.as_signal_row(), gh_api=services.github)
-                except RateLimitError:
-                    raise
-                except GitError as exc:
-                    if not _is_benign_pr_absence(exc):
-                        raise
-                    print_warning(
-                        console,
-                        f"harvest: PR link lookup failed for session {row.session_id}; "
-                        f"degrading to local-branch posterior: {type(exc).__name__}: {exc}",
-                    )
-                    link = None
-                if link is not None:
-                    number, slug = link
-                    if not config.dry_run:
-                        services.set_pr_link(row, number, slug)
-                    row = replace(row, pr_number=number, pr_repo=slug)
-
-            evidence = acquire_harvest_evidence(
-                row,
-                services=services,
-                repo_resolution=repo_resolution,
-                base_sha_status=base_sha_status,
-            )
-            payload = build_annotation(row, evidence)
             if config.dry_run:
                 summary["would_annotate"] += 1
             else:

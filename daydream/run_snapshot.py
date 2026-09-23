@@ -47,7 +47,6 @@ class RunProfileIdentity:
 class ManifestRunIdentity:
     """Effective non-recorder identity serialized in a run manifest."""
 
-    flow_name: str | None
     skill: str | None
     model: str | None
     backend: str

@@ -20,7 +20,6 @@ import threading
 import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -68,11 +67,6 @@ _NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
 _TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
 
 _logger = logging.getLogger(__name__)
-
-
-def _codex_process_exit_message(non_json_lines: list[str], returncode: int) -> str:
-    """Bind codex's captured diagnostics into the shared PROCESS_EXIT message."""
-    return process_exit_message(display="Codex", returncode=returncode, lines=non_json_lines)
 
 
 def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
@@ -584,6 +578,8 @@ class CodexBackend:
     Translates Codex JSONL events into the unified AgentEvent stream.
     """
 
+    supports_finalization = True
+
     # Codex operates in a disposable read-only clone of the workspace, so it
     # can safely have over-budget diffs inlined (truncated) and exploration
     # summaries inlined rather than pointed at on-disk artifact files.
@@ -622,6 +618,7 @@ class CodexBackend:
         max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
+        finalization: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via Codex CLI and yield unified events.
 
@@ -643,8 +640,14 @@ class CodexBackend:
                 non-Git *cwd* keeps the read-only sandbox in place (no clone).
                 If the disposable checkout cannot be created or prepared, the
                 call raises ``CodexError`` — never a fallback to the caller's
-                cwd. Default False keeps ``danger-full-access`` in the
-                caller's cwd.
+                cwd. Disposable-checkout results retain their native session
+                ID for observability but omit a continuation token because
+                their cwd is deleted. Default False keeps ``danger-full-access``
+                in the caller's cwd.
+            finalization: Cap the invocation-local reasoning override at low,
+                preserving explicitly lower levels. There is no native tool
+                disable control here; callers must retain the host zero-tool
+                guard. Read-only sandbox access still permits tools.
             persist_session: Accepted for backend protocol parity. Codex does
                 not expose persisted CLI sessions here, so this is ignored.
 
@@ -829,8 +832,11 @@ class CodexBackend:
                 "--cd",
                 str(execution_cwd),
             ]
-            if self.reasoning_effort:
-                args.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
+            effort = self.reasoning_effort
+            if finalization:
+                effort = effort if effort in {"none", "minimal", "low"} else "low"
+            if effort:
+                args.extend(["-c", f'model_reasoning_effort="{effort}"'])
             if schema_path:
                 args.extend(["--output-schema", schema_path])
             if continuation is not None and continuation.backend == "codex":
@@ -869,9 +875,10 @@ class CodexBackend:
                 codex_resume_thread = thread_value if isinstance(thread_value, str) else None
             yield RequestEvent(
                 prompt=prompt, model_name=model_name, output_schema=output_schema,
-                reasoning_effort=self.reasoning_effort,
+                reasoning_effort=effort,
                 session_id=codex_resume_thread,
                 config=CodexRequestConfig(
+                    finalization=finalization,
                     sandbox_mode=(
                         "read-only" if read_only else "danger-full-access"
                     ),
@@ -1186,7 +1193,9 @@ class CodexBackend:
                                     break
 
                     continuation_token = None
-                    if thread_id:
+                    # A disposable checkout disappears after this invocation;
+                    # only sessions with a stable cwd can offer native resume.
+                    if thread_id and shared_checkout is None:
                         continuation_token = ContinuationToken(
                             backend="codex",
                             data={"thread_id": thread_id},
@@ -1238,7 +1247,7 @@ class CodexBackend:
                 returncode,
                 error_type=CodexError,
                 category="PROCESS_EXIT",
-                build_message=partial(_codex_process_exit_message, non_json_lines),
+                build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=non_json_lines),
             )
             if _pending_result is not None:
                 yield _pending_result

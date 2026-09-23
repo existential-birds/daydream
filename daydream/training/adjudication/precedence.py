@@ -114,9 +114,13 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     if conflict and adjudicators and adjudicators[-1].get("disposition") in DECISIVE_DISPOSITIONS:
         conflict = False
 
-    review_required = bool(effective.get("review_required", False)) or any(
-        bool(o.get("review_required", False)) for o in (*human_raters, *adjudicators)
-    )
+    # A fresh explicit adjudication can resolve an imported legacy judgment's
+    # review requirement without deleting that immutable historical row.
+    review_required = bool(effective.get("review_required", False))
+    if not adjudicators:
+        review_required = review_required or any(
+            bool(o.get("review_required", False)) for o in human_raters
+        )
     gold_eligible = (
         disposition in DECISIVE_DISPOSITIONS
         and bool(evidence)

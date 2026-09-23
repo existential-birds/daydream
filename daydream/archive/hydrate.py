@@ -65,6 +65,19 @@ _LICENSE_REASON_CODES = frozenset(
         REASON_CODE_REPO_COMMIT_UNRESOLVED,
     }
 )
+# License-gate reason code -> human admission bucket. The key set is exactly
+# ``_LICENSE_REASON_CODES``; ``None`` (imported) maps to "admitted" at the call
+# site. ``repo_identity_missing``/``repo_commit_unresolved`` fold into
+# ``license_evidence_missing``: missing identity or an unresolvable repo commit
+# is missing evidence for the license gate.
+_LICENSE_BUCKET_BY_CODE: dict[str, str] = {
+    REASON_CODE_C5_EXCLUDED_REPO: "c5_excluded",
+    REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
+    REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
+    REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
+    REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
+}
+_LICENSE_BUCKETS = ("admitted", "c5_excluded", "c8_copyleft_unopted", "license_evidence_missing")
 
 
 class HydrationError(Exception):
@@ -889,6 +902,26 @@ def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
     return raw
 
 
+def _manifest_index_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Decode producer manifest blocks into index fields, retaining flat legacy input."""
+    valid = {f.name for f in dataclass_fields(Manifest)} - {"daydream"}
+    fields = {key: value for key, value in data.items() if key in valid}
+    for block_name in ("run", "git", "code_context", "pr", "metrics", "outcome"):
+        block = data.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        aliases = {
+            "run": {"flow": "run_flow"},
+            "pr": {"number": "pr_number", "repo": "pr_repo"},
+            "outcome": {"labels": "outcome_labels"},
+        }.get(block_name, {})
+        for key, value in block.items():
+            field_name = aliases.get(key, key)
+            if field_name in valid:
+                fields[field_name] = json.dumps(value) if field_name == "outcome_labels" else value
+    return fields
+
+
 def rebuild_index(stage: Path) -> None:
     """Index every admitted derivative under ``stage/runs/`` (issue #982 M6).
 
@@ -909,15 +942,10 @@ def rebuild_index(stage: Path) -> None:
             raise HydrationError(
                 redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
             )
-        valid = {f.name for f in dataclass_fields(Manifest)}
-        rewritten = {"archive_path", "source_path", "remote_url", "repo_slug"}
         # ``daydream`` provenance is a nested dict in produced manifests; the
         # index expects the executable-provenance object, so it is dropped from
         # the hydrated rebuild (never coerced into a Manifest field).
-        kwargs = {
-            k: v for k, v in data.items()
-            if k in valid and k not in rewritten and k != "daydream"
-        }
+        kwargs = _manifest_index_fields(data)
         raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():
             slug, canonical = normalize_remote_url(raw_url)
@@ -988,11 +1016,6 @@ def build_resolution_map(
     if unavailable:
         cmap["unavailable"] = sorted(unavailable)
     return cmap
-
-
-# ---------------------------------------------------------------------------
-# Content-addressed dedupe + collision quarantine + import ledger (Task 8)
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -1503,30 +1526,30 @@ def admission_summary_buckets(
     raises: the bucket sum equals the license-gate session count by
     construction (M8).
     """
-    code_map = {
-        REASON_CODE_C5_EXCLUDED_REPO: "c5_excluded",
-        REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
-        REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
-        REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
-        REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
-    }
-    buckets: dict[str, int] = {
-        "admitted": 0,
-        "c5_excluded": 0,
-        "c8_copyleft_unopted": 0,
-        "license_evidence_missing": 0,
-    }
+    buckets: dict[str, int] = dict.fromkeys(_LICENSE_BUCKETS, 0)
     for _sid, code in entries:
         if code is None:
             buckets["admitted"] += 1
-        elif code in code_map:
-            buckets[code_map[code]] += 1
+        elif code in _LICENSE_BUCKET_BY_CODE:
+            buckets[_LICENSE_BUCKET_BY_CODE[code]] += 1
         else:
             raise ValueError(
                 f"license admission summary: {code!r} is not a license-gate "
                 "reason code — the summary buckets only partition license decisions"
             )
     return buckets
+
+
+def _license_admission_entries(ledger: Mapping[str, Any]) -> list[tuple[str, str | None]]:
+    """Extract every license decision before callers read session manifests."""
+    entries: list[tuple[str, str | None]] = [
+        (str(item["session_id"]), None) for item in ledger.get("imported", [])
+    ]
+    for item in ledger.get("rejections", []):
+        code = item.get("reason_code")
+        if code in _LICENSE_REASON_CODES:
+            entries.append((str(item["session_id"]), str(code)))
+    return entries
 
 
 def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
@@ -1536,14 +1559,7 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
     carry a license-gate reason code (ingest/fixture rejections were never
     adjudicated by the license gate and are skipped).
     """
-    entries: list[tuple[str, str | None]] = [
-        (str(item["session_id"]), None) for item in ledger.get("imported", [])
-    ]
-    for item in ledger.get("rejections", []):
-        code = item.get("reason_code")
-        if code in _LICENSE_REASON_CODES:
-            entries.append((str(item["session_id"]), str(code)))
-    return admission_summary_buckets(entries)
+    return admission_summary_buckets(_license_admission_entries(ledger))
 
 
 def license_admission_by_repo(
@@ -1563,13 +1579,7 @@ def license_admission_by_repo(
     and counts, never URLs or paths.
     """
     revision = str(ledger["pinned_revision"])
-    entries: list[tuple[str, str | None]] = [
-        (str(item["session_id"]), None) for item in ledger.get("imported", [])
-    ]
-    for item in ledger.get("rejections", []):
-        code = item.get("reason_code")
-        if code in _LICENSE_REASON_CODES:
-            entries.append((str(item["session_id"]), str(code)))
+    entries = _license_admission_entries(ledger)
     by_repo: dict[str, dict[str, int]] = {}
     for sid, code in entries:
         # Imported sessions still live under stage/runs/<sid> (checked first);
@@ -1577,14 +1587,11 @@ def license_admission_by_repo(
         slug, _evidence = _session_identity(
             stage, sid, revision, root="excluded", collision=False
         )
-        buckets = by_repo.setdefault(slug or "unresolved", {
-            "admitted": 0,
-            "c5_excluded": 0,
-            "c8_copyleft_unopted": 0,
-            "license_evidence_missing": 0,
-        })
-        for bucket, count in admission_summary_buckets([(sid, code)]).items():
-            buckets[bucket] += count
+        buckets = by_repo.setdefault(slug or "unresolved", dict.fromkeys(_LICENSE_BUCKETS, 0))
+        if code is None:
+            buckets["admitted"] += 1
+        else:
+            buckets[_LICENSE_BUCKET_BY_CODE[code]] += 1
     return by_repo
 
 
@@ -1717,10 +1724,6 @@ def build_import_ledger(
     atomic_write_json(curated / "import-ledger.json", ledger)
     return ledger
 
-
-# ---------------------------------------------------------------------------
-# Publication: additive batches + remote resume ledger (Task 9)
-# ---------------------------------------------------------------------------
 
 _UPLOAD_ATTEMPTS = 6
 _UPLOAD_BASE_DELAY_S = 2.0
@@ -2243,11 +2246,6 @@ class HfHubClient:
         return oid
 
 
-# ---------------------------------------------------------------------------
-# Finalization + verify-before-success cycle (Task 10, M18/M19/M20)
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class HydrateHubConfig:
     """Operator configuration for ``run_hydrate_hub`` (harvest ``RunConfig`` discipline)."""
@@ -2485,7 +2483,6 @@ def verify_publication(
     # a failed verification can never leave a published "complete" marker.
 
     # 3. Rescan every published batch (clean-room) and rebuild the scratch index.
-    valid = {f.name for f in dataclass_fields(Manifest)}
     for batch in doc["batches"]:
         if batch["status"] != "admitted":
             continue
@@ -2521,7 +2518,7 @@ def verify_publication(
         data = _read_manifest_dict(batch_dir)
         if data is None:
             raise VerificationError(redact_text(f"verify: batch {sid!r} has an unreadable manifest"))
-        kwargs = {k: v for k, v in data.items() if k in valid and k != "daydream"}
+        kwargs = _manifest_index_fields(data)
         kwargs["archive_path"] = str(batch_dir)
         raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():

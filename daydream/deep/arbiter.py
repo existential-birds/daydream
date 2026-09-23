@@ -226,7 +226,6 @@ def select_arbiter_targets(
 
 def select_suppression_targets(
     records: list[dict[str, Any]],
-    sources: list[str],
     exclude: Iterable[int] = (),
     severity_classes: tuple[str, ...] = ("low",),
     confidence_classes: tuple[str, ...] = ("LOW",),
@@ -250,10 +249,6 @@ def select_suppression_targets(
     Args:
         records: Parsed per-stack records (each ideally carrying ``severity`` and
             ``confidence``).
-        sources: Per-record originating stack name, positionally aligned with
-            ``records`` (``len(sources) == len(records)``). Accepted for signature
-            symmetry with :func:`select_arbiter_targets`; contestedness is handled
-            entirely through ``exclude``.
         exclude: Indices to skip (the arbiter target set). A record already routed
             to the arbiter is never a suppression target.
 
@@ -271,9 +266,9 @@ def select_suppression_targets(
         ``confidence_classes`` or low-severity (per ``severity_classes``).
 
     Raises:
-        ValueError: If ``records`` and ``sources`` differ in length, if
-            ``severity_classes`` contains a non-canonical severity value, or if
-            ``confidence_classes`` contains a non-canonical confidence value.
+        ValueError: If ``severity_classes`` contains a non-canonical severity
+            value, or if ``confidence_classes`` contains a non-canonical
+            confidence value.
     """
     classes = frozenset(
         cls.lower() for cls in severity_classes
@@ -291,11 +286,6 @@ def select_suppression_targets(
             f"confidence_classes must be a subset of {', '.join(sorted(_CONFIDENCE_LEVELS))}; "
             f"got unknown value(s): {', '.join(sorted(unknown_conf))}"
         )
-    if len(records) != len(sources):
-        raise ValueError(
-            f"records/sources length mismatch: {len(records)} != {len(sources)}"
-        )
-
     excluded = set(exclude)
     selected: list[int] = []
     for i, record in enumerate(records):

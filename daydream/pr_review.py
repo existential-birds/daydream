@@ -31,7 +31,7 @@ import logging
 import os
 import re
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -53,6 +53,7 @@ from daydream.extensions import (
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
 from daydream.pr_comment_renderer import render_run_info
 from daydream.repository_paths import valid_repository_file_path
+from daydream.review_budget import render_review_warnings
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import model_facing_levels, normalize_severity
 from daydream.ui import print_error, print_info, print_success, print_warning
@@ -283,7 +284,7 @@ class ItemFields:
 
 @dataclass
 class _ClassifiedIssues:
-    inline: list[dict[str, Any]] = field(default_factory=list)
+    inline: list[InlineReviewComment] = field(default_factory=list)
     body_only: list[ParsedIssue] = field(default_factory=list)
     # Parallel list to `inline`: the original ParsedIssue for each inline
     # comment. Used to roll severity/confidence into the summary body.
@@ -296,7 +297,7 @@ class _ClassifiedIssues:
     def is_empty(self) -> bool:
         """True when nothing would be posted in any placement.
 
-        Checks ``inline`` (the rendered comment dicts) rather than
+        Checks ``inline`` (the rendered comments) rather than
         ``inline_issues``, so the guard holds even if the two parallel lists
         ever drift.
         """
@@ -325,6 +326,7 @@ async def post_review_to_pr_from_report(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -372,7 +374,7 @@ async def post_review_to_pr_from_report(
         )
         return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
-    if not issues and not approve_on_clean and not (diagram_blocks and diagram_blocks.strip()):
+    if not issues and not approve_on_clean and not review_warnings and not (diagram_blocks and diagram_blocks.strip()):
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
     return await _post(
@@ -385,6 +387,7 @@ async def post_review_to_pr_from_report(
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
         diagram_blocks=diagram_blocks,
+        review_warnings=review_warnings,
         run_context=run_context,
         auth=auth,
     )
@@ -546,6 +549,9 @@ def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
     Both PR lookup modes request the head repository and owner. An explicitly
     null repository (for example a deleted fork) permits base-repository link
     fallback; missing or malformed requested metadata is a schema failure.
+    Older gh versions emit an exactly empty ``nameWithOwner``: like an absent
+    field, it permits reconstruction from validated owner/name components.
+    Populated identity fields must agree (ignoring GitHub's case differences).
     """
     if "headRepository" not in row or "headRepositoryOwner" not in row:
         raise GitError("invalid PR row: missing requested head repository metadata")
@@ -562,21 +568,29 @@ def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
         return None
     if not isinstance(head_repo, dict):
         raise GitError("invalid PR row: headRepository must be an object or null")
+    repo_name = head_repo.get("name")
+    if "name" in head_repo and (
+        not isinstance(repo_name, str)
+        or git_ops.split_owner_repo(f"owner/{repo_name}") is None
+    ):
+        raise GitError("invalid PR row: malformed head repository name")
     if "nameWithOwner" in head_repo:
         name_with_owner = head_repo["nameWithOwner"]
         if not isinstance(name_with_owner, str):
-            raise GitError("invalid PR row: malformed head repository slug")
-        slug = git_ops.split_owner_repo(name_with_owner)
-        if slug is None:
-            raise GitError("invalid PR row: malformed head repository slug")
-        return name_with_owner
-    if owner_login is not None and isinstance(head_repo.get("name"), str):
-        candidate_slug = f"{owner_login}/{head_repo['name']}"
-        parsed_slug = git_ops.split_owner_repo(candidate_slug)
-        if parsed_slug is None:
-            raise GitError("invalid PR row: malformed head repository slug")
-        return candidate_slug
-    raise GitError("invalid PR row: incomplete head repository metadata")
+            raise GitError("invalid PR row: head repository nameWithOwner must be a string")
+        if name_with_owner != "":
+            slug = git_ops.split_owner_repo(name_with_owner)
+            if slug is None:
+                raise GitError("invalid PR row: malformed head repository slug")
+            if (
+                (owner_login is not None and slug[0].casefold() != owner_login.casefold())
+                or (isinstance(repo_name, str) and slug[1].casefold() != repo_name.casefold())
+            ):
+                raise GitError("invalid PR row: contradictory head repository identity")
+            return name_with_owner
+    if owner_login is not None and isinstance(repo_name, str):
+        return f"{owner_login}/{repo_name}"
+    raise GitError("invalid PR row: unavailable head repository slug requires owner and name")
 
 
 def _pr_info_from_row(
@@ -1077,14 +1091,14 @@ def _note_relocation(issue: ParsedIssue, posted_line: int) -> None:
     issue.body = f"{issue.body}\n\n{note}" if issue.body else note
 
 
-def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -> dict[str, Any]:
-    """Build one inline review-comment dict for the review payload."""
-    return {
-        "path": issue.path,
-        "line": line,
-        "side": "RIGHT",
-        "body": _format_comment_body(issue, "inline", renderers),
-    }
+def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -> InlineReviewComment:
+    """Build one immutable inline review comment for the review payload."""
+    return InlineReviewComment(
+        path=issue.path,
+        line=line,
+        side="RIGHT",
+        body=_format_comment_body(issue, "inline", renderers),
+    )
 
 
 _SEVERITY_EMOJI: dict[str, str] = {
@@ -1313,22 +1327,6 @@ def resolve_review_renderers(registry: Registry) -> ReviewRenderers:
     )
 
 
-def _snapshot_inline_comment(raw: Mapping[str, Any]) -> InlineReviewComment:
-    """Copy one internal inline dictionary into its immutable payload value."""
-    path = raw.get("path")
-    line = raw.get("line")
-    side = raw.get("side")
-    body = raw.get("body")
-    if (
-        not isinstance(path, str)
-        or type(line) is not int
-        or side != "RIGHT"
-        or not isinstance(body, str)
-    ):
-        raise ValueError("classified inline comment has an invalid shape")
-    return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
-
-
 @dataclass(frozen=True)
 class ClassifiedReviewPlan:
     """Immutable, authorized input to the shared review write operation."""
@@ -1342,6 +1340,7 @@ class ClassifiedReviewPlan:
     run_info: str
     renderers: ReviewRenderers
     diagram_blocks: str | None
+    review_warnings: tuple[str, ...] = ()
 
     @classmethod
     def from_classified(
@@ -1353,11 +1352,12 @@ class ClassifiedReviewPlan:
         run_info: str,
         renderers: ReviewRenderers,
         diagram_blocks: str | None = None,
+        review_warnings: tuple[str, ...] = (),
     ) -> ClassifiedReviewPlan:
         """Snapshot a mutable classified review after the caller authorizes it."""
         return cls(
             pr=pr,
-            inline=tuple(_snapshot_inline_comment(comment) for comment in classified.inline),
+            inline=tuple(classified.inline),
             inline_issues=tuple(
                 SubmissionFinding.from_parsed(issue)
                 for issue in classified.inline_issues
@@ -1372,6 +1372,7 @@ class ClassifiedReviewPlan:
             run_info=run_info,
             renderers=renderers,
             diagram_blocks=diagram_blocks,
+            review_warnings=review_warnings,
         )
 
 
@@ -1620,6 +1621,7 @@ def _build_payload_for_event(
     run_info: str,
     renderers: ReviewRenderers,
     diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
 ) -> ReviewPayload:
     """Render a final review payload for a caller-authorized event.
 
@@ -1694,6 +1696,8 @@ def _build_payload_for_event(
     summary_body = _render_summary(summary_ctx, renderers)
 
     body_chunks: list[str] = []
+    if review_warnings:
+        body_chunks.append(render_review_warnings(review_warnings))
     if approved:
         body_chunks.append("✅ **Deep review passed with no high/medium findings.**")
     body_chunks.append(summary_body)
@@ -1706,9 +1710,7 @@ def _build_payload_for_event(
         event=event,
         commit_id=pr.head_sha,
         body="\n\n".join(body_chunks),
-        comments=tuple(
-            _snapshot_inline_comment(comment) for comment in classified.inline
-        ),
+        comments=tuple(classified.inline),
     )
 
 
@@ -1760,15 +1762,7 @@ def post_classified_review(
             folded.append(finding)
 
     final_classified = _ClassifiedIssues(
-        inline=[
-            {
-                "path": comment.path,
-                "line": comment.line,
-                "side": comment.side,
-                "body": comment.body,
-            }
-            for comment in plan.inline
-        ],
+        inline=list(plan.inline),
         inline_issues=[finding.to_parsed() for finding in plan.inline_issues],
         file_level=[finding.to_parsed() for finding in posted],
         body_only=[
@@ -1783,6 +1777,7 @@ def post_classified_review(
         run_info=plan.run_info,
         renderers=plan.renderers,
         diagram_blocks=plan.diagram_blocks,
+        review_warnings=plan.review_warnings,
     )
     review_result = transport.post_review(plan.pr, review_payload)
     posted_review = review_result.review_url is not None
@@ -1847,6 +1842,7 @@ async def _post(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -1863,6 +1859,7 @@ async def _post(
     if (
         classified.is_empty()
         and not approve_on_clean
+        and not review_warnings
         and not (diagram_blocks and diagram_blocks.strip())
     ):
         print_info(
@@ -1870,14 +1867,14 @@ async def _post(
         )
         return PostStatus.NOTHING_TO_POST
 
-    inline_files = sorted({c["path"] for c in classified.inline})
+    inline_files = sorted({c.path for c in classified.inline})
     summary = (
         f"{len(classified.inline)} inline on "
         f"{', '.join(inline_files) if inline_files else '(none)'}, "
         f"{len(classified.file_level)} file-level, "
         f"{len(classified.body_only)} folded into body"
     )
-    clean = _is_clean_review(classified, approve_on_clean)
+    clean = not review_warnings and _is_clean_review(classified, approve_on_clean)
     event_note = " — will post event: APPROVE" if clean else ""
     print_info(console, f"PR #{pr.number}: {summary}{event_note}")
 
@@ -1901,6 +1898,7 @@ async def _post(
         run_info=run_info,
         renderers=renderers,
         diagram_blocks=diagram_blocks,
+        review_warnings=review_warnings,
     )
     result = post_classified_review(
         plan,
@@ -2746,7 +2744,7 @@ def post_findings_from_artifact(
         return 1
 
     plan = partition([f.fingerprint for f in artifact.findings], prior)
-    if plan.stale:
+    if plan.stale and not artifact.review_warnings:
         resolved, failed = resolve_threads(target_dir, plan.stale, auth=auth)
         print_info(console, f"Stale findings minimized: {resolved} succeeded, {failed} failed.")
 
@@ -2772,7 +2770,7 @@ def post_findings_from_artifact(
     # without this a new low-only batch could post APPROVE over the bot's own
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
-    can_approve = approve_on_clean and not any(
+    can_approve = approve_on_clean and not artifact.review_warnings and not any(
         _finding_blocks_approval(
             finding.severity,
             finding.location_distrust,
@@ -2782,7 +2780,7 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve and diagram_blocks is None:
+    if classified.is_empty() and not can_approve and diagram_blocks is None and not artifact.review_warnings:
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
@@ -2798,6 +2796,7 @@ def post_findings_from_artifact(
         ),
         renderers=renderers,
         diagram_blocks=diagram_blocks,
+        review_warnings=artifact.review_warnings,
     )
     result = post_classified_review(
         submission_plan,

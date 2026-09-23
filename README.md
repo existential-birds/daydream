@@ -76,6 +76,11 @@ The default flow is the deep multi-stack pipeline. This pipeline performs the fo
 10. Commit and push through ordinary Git commands and repository hooks.
 11. Verify GitHub CI for the exact pushed repository, PR, branch, and commit SHA.
 
+Fix verification retries unresolved findings for up to three rounds. Findings
+that remain unresolved are reported in `.daydream/deep/fix-outcomes.json`; the
+retained changes continue through tests, commit, and push. Detected regressions
+still stop publication, and commit messages list only verified fixes.
+
 Local verification, push verification, and remote CI are recorded as distinct
 states. Remote CI polls every 10 seconds, allows 120 seconds for checks to
 register, and has a 30-minute completion bound. Required checks determine the
@@ -459,6 +464,40 @@ The fix-phase anti-degradation quality gate prevents a fix from degrading a file
 
 The gate is fail-open. A flagged file surfaces as a warning plus a manifest record. It never aborts a run. Daydream clamps the thresholds to finite non-negative numbers. An invalid value degrades to the named default.
 
+### Review budgets
+
+The review model pipeline defaults to 45 minutes for modest diffs, including
+queueing and retries, with the last five minutes reserved for synthesis. Diffs
+over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) receive 2×, 4×,
+and 6× review time and per-role tool-call allowances respectively. The 4× and
+6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
+profile keeps its configured whole-review deadline. Set
+`pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
+Individual reviewers also have bounded investigation and finalization stages:
+per-stack investigation stops after eight minutes or 48 tool starts, reserving
+up to two minutes to return validated findings. Intent, exploration, and other
+roles have smaller bounds. The existing 60-minute review ceilings remain outer
+safeguards; fix turns retain their separate 30-minute limit.
+
+When a review agent exhausts its time or tool-call budget, Daydream continues with
+completed reviewers' findings and validated partial checkpoints, and marks the
+report **Review incomplete**. If the
+merge agent times out, the host consolidates surviving stack records. Incomplete
+reviews still produce a `--findings-out` artifact and exit successfully; the poster
+publishes a comment even when there are no findings. It never approves an
+incomplete review or resolves prior findings absent from that partial result.
+Optional arbiter, suppression, and supervisor budget stops also mark the review
+incomplete and preserve each stage's existing missing-verdict policy. Ordinary
+backend errors and malformed merge responses retain their failure behavior.
+
+The findings artifact carries optional `review_warnings`. Update both the analyze
+and posting jobs to the same Daydream revision. Leave CI headroom beyond the
+model deadline for setup, host processing, and artifact publication; a 60-minute
+job with the default model budget leaves 15 minutes for those operations. An
+external job cancellation cannot use the graceful budget-exhaustion path.
+See [review runtime and rollout](docs/review-runtime.md) for role limits,
+measurements, quality limitations, and trajectory-upload guidance.
+
 ### Retry recovery
 
 A retry may spend only the recovery budget it was given, never the invocation's useful-work time. The allowance is a **cumulative retry-overhead budget**, measured in seconds. It is **additional to the invocation deadline** (the per-turn wall budget), it starts at the **first retryable failure** of an invocation, and it then charges every backoff sleep plus the backend time of every retry against itself. A spent allowance re-raises the current failure without dispatching again. Because it only bounds retry overhead, it **never caps** an otherwise healthy invocation: a 300 s allowance does not shorten a healthy 1800 s fix turn, since no retryable failure ever activates it. The retry decides its delay from a server `Retry-After` hint when one is present (numeric seconds only), otherwise from full jitter whose per-failure cap is the smaller of the configured maximum delay and the remaining allowance/deadline — so the allowance is **clamped** by the invocation deadline and by the fix file-group budget rather than re-basing either one.
@@ -628,31 +667,6 @@ The `.daydream/exploration/` cache is reused on an exact key match. The key excl
 ## Development
 
 **New to contributing? Read [CONTRIBUTING.md](CONTRIBUTING.md) — setup, commands, the required gate, and PR workflow.**
-
-```bash
-make install
-make hooks      # install git hooks
-make lint       # ruff linter
-make typecheck  # mypy
-make test       # pytest
-make deadcode   # vulture dead-code scan
-make coverage-report  # verify coverage.xml after make test
-make check-naming  # naming-convention check
-make actionlint # workflow YAML checks via Docker
-make rl-check   # standalone RL: lockcheck + ruff + mypy + pytest
-make check      # the required gate (rl-check is separate; run it when touching rl/)
-```
-
-`make install` runs `uv sync --all-extras`. This builds the virtualenv for the targets above. Like
-`uv sync`, it does not make a `daydream` command on your `PATH`. See [Quick start](#quick-start).
-
-`make hooks` installs two gates: a commit-time gate that runs ruff on the staged
-Python files, and the pre-push gate (the hook verifies commit signatures first,
-then delegates to `make check` — the quality-gate portion of that hook). A running Docker daemon
-is required for `make actionlint` (the workflow YAML checks run the pinned
-container); when no daemon is available that target is skipped with a note and
-exits 0, so `make check` still succeeds without a daemon (CI always runs
-actionlint).
 
 Editors that support [EditorConfig](https://editorconfig.org) pick up the root
 `.editorconfig` automatically (UTF-8, LF, final newline; 4-space Python, 2-space

@@ -115,7 +115,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
 | `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis |
-| `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `build_annotation(row, evidence)` reduces completed evidence without I/O |
+| `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `collect_annotation` shares acquisition with read-only semantic preview, and `build_annotation(row, evidence)` reduces completed evidence without I/O |
 | `training/calibration.py` | Fail-closed projection validation, deterministic calibration statistics, `calibration-artifact` emission (`corpus calibrate-reward`) |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
@@ -163,7 +163,7 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 | `DEFAULT_TOOL_CALL_BUDGET` | `None` | unlimited; per-call `tool_call_budget` still accepted |
 | `DEFAULT_GROUP_MAX_WALL_S` / `_SERIAL_ITEMS` | 600s / 6 | cumulative over all fix calls for one file group |
 | `EXPLORATION_MAX_TURNS` | 50 | exploration specialists — the only `max_turns` call site |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 300s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
 
 - Exhaustion emits a `TurnEndEvent` and marks the trajectory partial. **Truncation is never silently
   absorbed**: a truncated wonder or parse raises; a truncated per-stack review goes to `failed_stacks` so
@@ -210,6 +210,12 @@ exploration pre-scan (cached across runs)
     -> test validation
 ```
 
+- The fix/verify loop has at most three rounds. Remaining `unresolved` or
+  `wrong_target` findings are reported honestly and do not prevent the retained
+  patch from proceeding through tests, commit, and push. A `regressed` verdict
+  stops publication. Post-test re-verification permits existing unresolved
+  findings but stops newly actionable findings; tree identity, scope, tests, and
+  repository hooks remain required. Commit messages list only resolved findings.
 - Wonder ∥ per-stack are siblings in one task group on a fresh multi-stack run (wonder feeds only merge and
   the dedup pre-filter, so reviewer prompts drop the `alternatives.json` pointer; they join before parse).
   Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack
@@ -320,7 +326,7 @@ Full contract: `docs/extensions.md`.
 | `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |
 | `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex | Parallel `execute()` hint (default 8; bad value warns). Pi uses `DAYDREAM_PI_FANOUT_CONCURRENCY` (default 10) |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (pi response default 300; active-tool/codex default 2700; `0` disables) |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (pi response default 600; active-tool/codex default 2700; `0` disables) |
 | `DAYDREAM_REVIEW_API_KEY` / `DAYDREAM_JUDGE_API_KEY` | Benchmark | Harbor reviewer/judge OpenRouter keys; read from the launching env, never written into the workspace or task |
 
 Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).

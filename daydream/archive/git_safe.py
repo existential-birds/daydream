@@ -8,13 +8,10 @@ userinfo or credential-like query parameters into any output form.
 import re
 from urllib.parse import parse_qsl, unquote, urlparse
 
+from daydream.credential_patterns import _CREDENTIAL_QUERY_KEYS as _CREDENTIAL_QUERY_KEYS
+
 # Hosts whose owner/repo identity we trust for harvest resolution.
 _DEFAULT_HOSTS = frozenset({"github.com"})
-
-# Query-parameter keys that must never survive into any output form.
-_CREDENTIAL_QUERY_KEYS = frozenset(
-    {"token", "access_token", "key", "secret", "password", "credential"}
-)
 
 # The one regex case allowed by the contract: the SCP form, which
 # urllib.parse cannot interpret (host:path with no scheme).

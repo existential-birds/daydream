@@ -30,6 +30,25 @@ class AgentError(Exception):
     """Typed failure carrier for the Daydream Harbor agent lifecycle."""
 
 
+def _supported_backend(extra_env: Mapping[str, str]) -> str:
+    """Return the validated ``DAYDREAM_REVIEW_BACKEND`` or raise :class:`AgentError`."""
+    backend = (extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
+    from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+
+    if backend not in _SUPPORTED_BACKENDS:
+        supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
+        raise AgentError(
+            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
+        )
+    return backend
+
+
+def _require_exec_ok(result: Any, label: str) -> None:
+    """Raise :class:`AgentError` when an in-container exec returned non-zero."""
+    if result.return_code != 0:
+        raise AgentError(f"{label} (rc={result.return_code}): {result.stdout or ''}{result.stderr or ''}")
+
+
 _REQUIRED_PROCESS_VARS = ("PATH", "HOME", "LANG")
 _BANNED_VARS = (
     "GH_TOKEN",
@@ -95,14 +114,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         non-zero exec return (missing exact version or missing backend SDK)
         raises :class:`AgentError` -- never a silent pass.
         """
-        backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
-        from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
-
-        if backend not in _SUPPORTED_BACKENDS:
-            supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
-            raise AgentError(
-                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
-            )
+        backend = _supported_backend(self.extra_env)
         # The allowlist can grow before a probe exists; never KeyError on an
         # allowlisted-but-unprobed backend (and never probe a wrong SDK) --
         # refuse with a typed error instead.
@@ -122,11 +134,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         )
         command = 'python -X utf8 -c "' + probe + '"'
         result = await environment.exec(command)
-        if result.return_code != 0:
-            raise AgentError(
-                f"container setup probe failed (rc={result.return_code}): "
-                f"{result.stdout or ''}{result.stderr or ''}"
-            )
+        _require_exec_ok(result, "container setup probe failed")
 
     async def run(
         self,
@@ -144,14 +152,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         """
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
-        backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
-        from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
-
-        if backend not in _SUPPORTED_BACKENDS:
-            supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
-            raise AgentError(
-                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
-            )
+        backend = _supported_backend(self.extra_env)
         parent = {**os.environ, **self.extra_env}
         child_env = build_child_env(parent, backend=backend)
         result = await environment.exec(
@@ -160,11 +161,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
             env=child_env,
             timeout_sec=1800,
         )
-        if result.return_code != 0:
-            raise AgentError(
-                f"entrypoint review failed (rc={result.return_code}): "
-                f"{result.stdout or ''}{result.stderr or ''}"
-            )
+        _require_exec_ok(result, "entrypoint review failed")
 
     def populate_context_post_run(self, context: Any) -> None:
         """Backfill ``AgentContext`` cost/token metrics from the ATIF trajectory.

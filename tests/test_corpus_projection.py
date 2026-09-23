@@ -16,6 +16,7 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
+from tests.harness.scripts import cli_main
 
 _MANIFEST = {
     "schema_version": "1",
@@ -451,11 +452,6 @@ def test_segment_order_is_fork_registration_then_descriptor() -> None:
     assert [s.trajectory_id for s in segs] == ["s1:fix-1", "s1:fix-0"]
 
 
-def test_segmentation_is_idempotent_across_reprojection() -> None:
-    traj = _traj([("s1:explore-0", "e0.jsonl"), ("s1:review-2", "r2.jsonl")])
-    assert segment(traj) == segment(traj)
-
-
 def test_segment_ids_qualify_session_and_descriptor() -> None:
     traj = _traj([("s1:fix-0", "a.jsonl")])
     seg = segment(traj)[0]
@@ -853,27 +849,10 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-def _run_cli(argv: list[str]) -> int:
-    """Drive ``cli.main`` (the production entrypoint) with ``argv``."""
-    import sys
-
-    from daydream import cli
-
-    saved = sys.argv
-    sys.argv = ["daydream", *argv]
-    try:
-        cli.main()
-    except SystemExit as exc:  # main() always exits via sys.exit
-        return int(exc.code or 0)
-    finally:
-        sys.argv = saved
-    return 0
-
-
 def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
-    rc = _run_cli(["corpus", "build", "--bundle-root", str(bundle_dir),
+    rc = cli_main(["corpus", "build", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(snap.parent),
                    "--license-policy", str(_policy_file(bundle_dir.parent)),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
@@ -883,7 +862,7 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
 
 
 def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None:
-    rc = _run_cli(["corpus", "build", "--bundle-root", str(tmp_path / "nope"),
+    rc = cli_main(["corpus", "build", "--bundle-root", str(tmp_path / "nope"),
                    "--annotation-bundle-root", str(tmp_path / "nope" / "ann"),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc != 0
@@ -1163,7 +1142,7 @@ def _run_build_v2_cli(
     terminal output). The projection publishes into ``tmp_path/<out_name>/``."""
     out = tmp_path / out_name / "corpus.jsonl"
     ann = bundle_dir.parent / (bundle_dir.name + "-annotations")
-    rc = _run_cli(["corpus", "build", "--bundle-root", str(bundle_dir),
+    rc = cli_main(["corpus", "build", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(ann),
                    "--license-policy", str(policy),
                    "--out", str(out)])

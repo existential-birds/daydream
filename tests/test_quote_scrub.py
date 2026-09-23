@@ -12,6 +12,28 @@ from daydream.quote_scrub import (
 from tests.harness.git_helpers import git, init_repo
 
 
+def _baseline_repo(
+    tmp_path: Path,
+    files: dict[str, str | bytes],
+    *,
+    symlinks: dict[str, str] | None = None,
+) -> Path:
+    """Real git repo with *files* (and optional *symlinks*) committed as baseline."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    for name, content in files.items():
+        path = repo / name
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
+    for name, target in (symlinks or {}).items():
+        (repo / name).symlink_to(target)
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "baseline")
+    return repo
+
+
 def test_normalize_smart_quotes_maps_all_four_code_points_to_ascii() -> None:
     assert normalize_smart_quotes("\u201cleft\u201d \u2018single\u2019") == "\"left\" 'single'"
     assert normalize_smart_quotes("not \u201d") == 'not "'
@@ -53,12 +75,8 @@ def test_scrub_driver_skips_missing_file(tmp_path: Path) -> None:
 def test_scrub_driver_normalizes_only_added_lines(tmp_path: Path) -> None:
     """Real git repo: pre-existing baseline smart quotes stay untouched; only
     lines the fix pass added are normalized (issue #687 finding 1)."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"main.go": "package main\n\n// baseline \u201d quote\n"})
     src = repo / "main.go"
-    src.write_text("package main\n\n// baseline \u201d quote\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     # The fix pass adds a smart quote on a new line only.
     src.write_text(
         "package main\n\n// baseline \u201d quote\n// added \u201cquote\u201d\n",
@@ -73,12 +91,8 @@ def test_scrub_driver_never_rewrites_baseline_smart_quotes_in_literals(tmp_path:
     """A baseline single-quoted literal containing U+2019 (which whole-file
     normalization would turn into a syntax error) survives byte-identical; an
     added line is still scrubbed."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"main.go": "package main\n\nconst s = 'it\u2019s'\n\n"})
     src = repo / "main.go"
-    src.write_text("package main\n\nconst s = 'it\u2019s'\n\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     src.write_text(
         "package main\n\nconst s = 'it\u2019s'\n\n// \u201cadded\u201d\n",
         encoding="utf-8",
@@ -130,12 +144,8 @@ def test_scrub_driver_raises_git_error_on_attribution_diff_failure(
     """When the attribution diff cannot be computed the driver raises the
     documented GitError (finding 3): the orchestrator's fail-open guard turns
     that into a warning and continues — never an abort."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"main.go": "x\n"})
     src = repo / "main.go"
-    src.write_text("x\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     src.write_text("// \u201d\n", encoding="utf-8")
 
     def _fail_diff(repo: Any, ref: Any, paths: Any) -> None:
@@ -151,12 +161,8 @@ def test_scrub_driver_with_non_utf8_diff_content_raises_git_error(tmp_path: Path
     attribution diff undecodable; the driver must raise the documented GitError
     (degrading to the caller's warn-and-continue) instead of crashing with a
     raw UnicodeDecodeError (finding 1, F1)."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"latin.go": b"// caf\xe9\n"})
     src = repo / "latin.go"
-    src.write_bytes(b"// caf\xe9\n")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     src.write_bytes(b"// caf\xe9\n// \xe2\x80\x9cadded\xe2\x80\x9d\n")
     with pytest.raises(GitError):
         scrub_smart_quotes_changed_files(repo, ["latin.go"], pre_fix_ref="HEAD")
@@ -167,12 +173,8 @@ def test_scrub_driver_with_quotepath_non_ascii_path_preserves_attribution(tmp_pa
     (``+++ \"b/caf\\303\\251.go\"``); the added-line parser must unquote them so
     the file stays line-targeted instead of falling through to whole-file
     normalization, which would rewrite baseline quotes (finding 1, F2)."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"caf\u00e9.go": "package main\n\n// baseline \u201d quote\n"})
     src = repo / "caf\u00e9.go"
-    src.write_text("package main\n\n// baseline \u201d quote\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     src.write_text(
         "package main\n\n// baseline \u201d quote\n// added \u201cquote\u201d\n",
         encoding="utf-8",
@@ -188,11 +190,7 @@ def test_scrub_driver_normalizes_untracked_new_file_in_full(tmp_path: Path) -> N
     """An untracked new file is absent from the attribution diff, so every line
     is agent-authored and normalized in full (finding 2) — the whole-file
     branch for ``added is None`` on a per-path lookup."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / "base.go").write_text("x\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
+    repo = _baseline_repo(tmp_path, {"base.go": "x\n"})
     new_file = repo / "new.go"
     new_file.write_text("// \u201cnew file\u201d\n", encoding="utf-8")
     scrubbed = scrub_smart_quotes_changed_files(repo, ["new.go"], pre_fix_ref="HEAD")
@@ -283,12 +281,8 @@ def test_scrub_driver_raises_git_error_on_external_driver_diff(tmp_path: Path, m
     attributed; the driver raises the documented GitError so the caller's
     fail-open guard skips instead of silently whole-file normalizing baseline
     smart quotes in tracked files (finding 5)."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"main.go": "// baseline \u201d quote\n"})
     src = repo / "main.go"
-    src.write_text("// baseline \u201d quote\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     src.write_text("// baseline \u201d quote\n// added \u201cquote\u201d\n", encoding="utf-8")
 
     def _garbage_diff(repo: Any, ref: Any, paths: Any) -> str:
@@ -306,12 +300,8 @@ def test_scrub_driver_binary_only_diff_does_not_raise(tmp_path: Path) -> None:
     output: the binary file is skipped as undecodable and an untracked sibling
     still normalizes whole-file, without tripping the external-driver check
     (finding 5)."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"blob.bin": b"\x00\x01"})
     blob = repo / "blob.bin"
-    blob.write_bytes(b"\x00\x01")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     blob.write_bytes(b"\x00\x02")
     new_file = repo / "new.go"
     new_file.write_text("// \u201cnew\u201d\n", encoding="utf-8")
@@ -325,14 +315,9 @@ def test_scrub_driver_binary_only_diff_does_not_raise(tmp_path: Path) -> None:
 def test_scrub_driver_preserves_symlink_on_rewrite(tmp_path: Path) -> None:
     """A tracked symlink must survive the scrub: the normalized bytes land in
     the link target, and the directory entry stays a symlink (finding 7)."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
+    repo = _baseline_repo(tmp_path, {"real.go": "// baseline\n"}, symlinks={"link.go": "real.go"})
     target = repo / "real.go"
-    target.write_text("// baseline\n", encoding="utf-8")
     link = repo / "link.go"
-    link.symlink_to(target.name)
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "baseline")
     target.write_text("// baseline\n// added \u201cquote\u201d\n", encoding="utf-8")
     scrubbed = scrub_smart_quotes_changed_files(repo, ["link.go"], pre_fix_ref="HEAD")
     assert scrubbed == ["link.go"]

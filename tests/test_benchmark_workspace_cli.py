@@ -1,10 +1,30 @@
 import hashlib
+import importlib.metadata
+import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+import yaml
+
+from daydream import cli as top_cli
+from daydream.benchmark import cli as benchmark_cli
+from daydream.benchmark.cli import _handle_benchmark_command
+from daydream.benchmark.harbor import calibrate
+from daydream.benchmark.harbor.build import task_spec_approval, task_spec_digest
+from daydream.benchmark.schema import derive_finding_id, derive_workspace_state
+from daydream.benchmark.storage import load_yaml_strict
+from daydream.benchmark.workspace import validate_workspace
+from tests.test_benchmark_calibrate import _env, _scripted_http, _scripted_responses
+from tests.test_benchmark_curate_tui import _scripted
+from tests.test_benchmark_curation import _seed_ready_case
+from tests.test_benchmark_workspace import (
+    _write_curated_workspace,
+    _write_minimal_invalid_workspace,
+)
 
 
 def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
@@ -15,9 +35,7 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
     rewritten so the ledger ``import_sha256`` no longer matches) so ``validate``
     reports a failure whose diagnostics must never disclose the sentinel.
     """
-    import json
 
-    from tests.test_benchmark_workspace import _write_curated_workspace
 
     root = _write_curated_workspace(tmp_path, "ready")
     imp = next((root / "imports").glob("pr-*.json"))
@@ -68,9 +86,7 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
 
 def _tree_sha(root: Path) -> str:
     """Deterministic sha256 over a workspace tree's file bytes (read-only check)."""
-    import hashlib as _h
-
-    digest = _h.sha256()
+    digest = hashlib.sha256()
     for p in sorted(root.rglob("*")):
         if p.is_file():
             digest.update(p.read_bytes())
@@ -155,8 +171,6 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.cli import _handle_benchmark_command
-
     ws = _write_curated_workspace_with_sensitive_evidence(tmp_path)
     before = _tree_sha(ws)
     rc = _handle_benchmark_command(["validate", str(ws)])
@@ -169,12 +183,6 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(
 
 
 def test_validate_exit_code_contract_preserved(tmp_path: Path) -> None:
-    from daydream.benchmark.workspace import validate_workspace
-    from tests.test_benchmark_workspace import (  # noqa: F401
-        _write_curated_workspace,
-        _write_minimal_invalid_workspace,
-    )
-
     assert validate_workspace(_write_curated_workspace(tmp_path / "r1", "ready"))[0] == 0
     assert validate_workspace(_write_curated_workspace(tmp_path / "r2", "draft"))[0] == 2
     assert validate_workspace(_write_minimal_invalid_workspace(tmp_path / "r3"))[0] == 1
@@ -187,17 +195,8 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import importlib.metadata
 
-    import yaml
 
-    from daydream import cli as top_cli
-    from daydream.benchmark import cli as benchmark_cli
-    from daydream.benchmark.harbor.build import task_spec_digest
-    from daydream.benchmark.schema import derive_finding_id
-    from daydream.benchmark.storage import load_yaml_strict
-    from tests.test_benchmark_curate_tui import _scripted
-    from tests.test_benchmark_curation import _seed_ready_case
 
     parent = tmp_path / "workspace parent with spaces"
     parent.mkdir()
@@ -268,13 +267,8 @@ def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation
     capsys: pytest.CaptureFixture[str],
     digest: str | None,
 ) -> None:
-    import importlib.metadata
 
-    import yaml
 
-    from daydream import cli as top_cli
-    from daydream.benchmark.storage import load_yaml_strict
-    from tests.test_benchmark_workspace import _write_curated_workspace
 
     ws = _write_curated_workspace(tmp_path / "malformed approval workspace", "ready")
     wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
@@ -312,9 +306,6 @@ def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation
 def test_real_cli_validate_distinguishes_recovery_corruption_without_disclosure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream import cli as top_cli
-    from tests.test_benchmark_workspace import _write_curated_workspace
-
     ws = _write_curated_workspace(tmp_path / "corrupt journal workspace", "ready")
     residue = ws / "transactions" / "PRIVATE_JOURNAL_SENTINEL"
     residue.write_bytes(b"private unknown transaction residue\n")
@@ -336,14 +327,7 @@ def test_real_cli_validate_distinguishes_recovery_corruption_without_disclosure(
 def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import yaml
 
-    from daydream import cli as top_cli
-    from daydream.benchmark.harbor import calibrate
-    from daydream.benchmark.schema import derive_finding_id
-    from daydream.benchmark.storage import load_yaml_strict
-    from tests.test_benchmark_calibrate import _env, _scripted_http, _scripted_responses
-    from tests.test_benchmark_workspace import _write_curated_workspace
 
     workspaces = [
         _write_curated_workspace(tmp_path / "current", "ready"),
@@ -361,7 +345,6 @@ def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     )
     stale_case.write_text(yaml.safe_dump(stale, sort_keys=False))
 
-    import httpx
 
     responses = _scripted_responses(calibrate._load_fixture())
     fake_http, request_counter = _scripted_http(responses)
@@ -386,7 +369,6 @@ def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     for name, value in _env().items():
         monkeypatch.setenv(name, value)
 
-    from daydream.benchmark.harbor.build import task_spec_approval
 
     assert task_spec_approval(load_yaml_strict(next((workspaces[0] / "cases").glob("*.yaml")))).state == "current"
     assert task_spec_approval(load_yaml_strict(stale_case)).state == "stale"
@@ -408,13 +390,8 @@ def test_real_cli_malformed_manifest_matrix_is_bounded_and_preserves_outputs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import importlib.metadata
 
-    import httpx
-    import yaml
 
-    from daydream import cli as top_cli
-    from tests.test_benchmark_workspace import _write_curated_workspace
 
     ws = _write_curated_workspace(tmp_path / "malformed workspace", "ready")
     wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
@@ -461,8 +438,6 @@ def test_real_cli_malformed_manifest_matrix_is_bounded_and_preserves_outputs(
 
 
 def test_stale_approval_keeps_collecting_and_curating_priority_contract() -> None:
-    from daydream.benchmark.schema import derive_workspace_state
-
     assert derive_workspace_state(
         pull_requests=[{"import_state": "pending"}],
         cases=[{"curation_state": "stale"}],

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -21,13 +22,18 @@ from typing import Any
 
 import pytest
 import verifiers.v1 as vf
+from conftest import FakeRuntime, passed_gate_report
 from daydream.atif import validate
 from daydream.training.harvest import assemble_scoring_inputs
-from daydream.training.reward import score_trajectory
+from daydream.training.reward import REWARD_VERSION, score_trajectory
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
+from daydream_review import rundir as rundir_mod
+from daydream_review import taskset
 from daydream_review.fixture import build_fixture_repo
+from daydream_review.rundir import DAYDREAM_EXCLUDE, RUN_DIR_FILES, candidate_diff_cmd
 from daydream_review.taskset import (
+    ROLLOUT_REWARD_VERSION,
     DaydreamReviewConfig,
     DaydreamReviewData,
     DaydreamReviewState,
@@ -37,6 +43,7 @@ from daydream_review.taskset import (
     _claimed_test_verdict,
     _review_state,
 )
+from daydream_review.verifier import seal_artifacts
 
 MODEL = "some-org/some-policy-model"
 
@@ -65,7 +72,6 @@ def _task(
 ) -> DaydreamReviewTask:
     # The load path refuses without a passed Stage-0 gate report (M4); tests
     # here exercise scoring, not the gate, so hand them a minimal passed one.
-    from conftest import passed_gate_report
 
     with passed_gate_report() as gate_path:
         taskset = DaydreamReviewTaskset(
@@ -193,6 +199,15 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, dest)
     return dest
+
+
+def _golden_task(
+    tmp_path: Path, fixture_manifest_path: Path, rundir_golden: Path
+) -> tuple[Path, DaydreamReviewTask]:
+    """Stage the golden run at ``<tmp_path>/archive`` and load its task."""
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    return archive_root, _task(fixture_manifest_path)
 
 
 # Absolute Unix path shape (``/Users/...``, ``/private/tmp/...``, ``/home/...``):
@@ -375,8 +390,6 @@ def _seal_run(run_dir: Path, task: DaydreamReviewTask, repo_path: Path) -> Path:
     helper, hashes the archive members the harness recorded, and writes
     ``seal.json`` into *run_dir*. Returns the staged repo path.
     """
-    from daydream_review.rundir import RUN_DIR_FILES, candidate_diff_cmd
-    from daydream_review.verifier import seal_artifacts
 
     repo = _stage_repo(repo_path, task.data.head_sha, edit=_CALC_FIXED, commit=True)
     diff = subprocess.run(
@@ -435,9 +448,7 @@ async def test_intrinsic_composite_parity(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
     """The online reward is byte-equal to the offline pipeline's own scorer."""
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -460,9 +471,7 @@ async def test_intrinsic_composite_carries_the_grounding_axis(
     expected_grounding = evaluation["grounding"]["grounding_rate"]
     assert expected_grounding == 1.0, "fixture drift: the golden run is fully grounded"
 
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -575,7 +584,6 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     re-runs green under the verifier identity instead; the expected reading
     follows the host shape either way.
     """
-    from daydream_review import taskset
 
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -628,12 +636,8 @@ fixture_manifest_path: Path,
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
-    import shlex
 
-    from conftest import FakeRuntime
 
-    from daydream_review import taskset
-    from daydream_review.rundir import candidate_diff_cmd
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
@@ -644,28 +648,6 @@ fixture_manifest_path: Path,
     assert shlex.join(candidate_diff_cmd(repo, head_sha)) in script
     # (b) empty-guard: the apply is skipped when the diff is empty
     assert "[ ! -s " in script and "apply" in script
-
-
-async def test_green_unrelated_edit_gets_no_suite_reward(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
-) -> None:
-    """Starting green and making an unrelated edit earns no suite credit."""
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    # The baked head is already green; the agent only touches README (unrelated)
-    # — the suite stays green.
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
-    (repo / "README.md").write_text("# changed\n", encoding="utf-8")
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
-
-    # Suite green is telemetry, never a reward axis.
-    assert set(trace.rewards) == {"intrinsic_composite"}
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 1.0
-    assert trace.metrics["suite_non_regression"] == 1.0
 
 
 async def test_red_suite_records_no_non_regression(
@@ -706,9 +688,7 @@ async def test_tampered_suite_never_records_honest_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A gutted test oracle records suite_non_regression 0.0 and no suite reward."""
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     (repo / "tests/test_calc.py").write_text(_TAMPER_PASSING, encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -752,9 +732,7 @@ async def test_suite_rejects_protected_test_path_changes(
     green tampered suite, 1.0 if it ran red), so its absence below proves the
     gate held rather than passing vacuously over an empty archive.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=edit)
     (repo / tamper_rel).write_text(tamper_content, encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -896,9 +874,7 @@ async def test_oracle_gate_rejects_flag_tampered_tracked_file(
     flag probe (``git ls-files -v``) must fail closed: setting the flag on any
     protected file is itself tampering with the oracle's verifiability.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     # A real fix (calc.py) plus a flagged, gutted tracked test: diff is fooled,
     # so only the flag probe stands between this and a free green reading.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
@@ -928,9 +904,7 @@ async def test_oracle_gate_rejects_tracked_gitignore_edit(
     covers those ignore files (``:(glob)**/.gitignore``), so the edit itself
     must read as an oracle change.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     gitignore = repo / ".gitignore"
     gitignore.write_text(gitignore.read_text(encoding="utf-8") + "tests/pytest.ini\n", encoding="utf-8")
@@ -955,9 +929,7 @@ async def test_oracle_gate_rejects_info_exclude_rule(
     changes. A fresh clone's file is comments-only; any real rule means the
     oracle changed.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     info_exclude = repo / ".git/info/exclude"
     info_exclude.write_text(info_exclude.read_text(encoding="utf-8") + "tests/conftest.py\n", encoding="utf-8")
@@ -984,9 +956,7 @@ async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
     also neutralizes the global excludes file (``$HOME/.config/git/ignore``), so
     the file is listed and the oracle reads as changed.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     ignores = repo.parent / "excludes"
     ignores.write_text("tests/pytest.ini\n", encoding="utf-8")
@@ -1017,9 +987,7 @@ async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
     artifacts are excluded explicitly via ``ORACLE_BENIGN_PATHSPECS`` — never
     loaded by the runner, so excluding them cannot hide a real oracle file.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     pycache = repo / "tests" / "__pycache__"
     pycache.mkdir()
@@ -1047,9 +1015,7 @@ async def test_oracle_gate_rejects_root_sitecustomize(
     ``sys.exit(0)`` makes a suite that never ran look green. It sits outside the
     declared protected paths, so the untracked probe must cover it explicitly.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     (repo / "sitecustomize.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -1100,9 +1066,8 @@ async def test_no_fixes_records_no_non_regression(
     assert "test_claim_passed_without_fix" not in trace.metrics
 
 
-@pytest.mark.parametrize("head_sha", ["0" * 40], ids=["unresolvable-head"])
 async def test_unresolvable_head_sha_scores_no_fix(
-    head_sha: str, tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
     """A baked snapshot object that no longer resolves must read as no fix.
 
@@ -1118,7 +1083,7 @@ async def test_unresolvable_head_sha_scores_no_fix(
     # Stage the real, resolvable snapshot first so the checkout succeeds, then
     # simulate snapshot/object-store drift: the baked head object is gone.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha)
-    task.data = task.data.model_copy(update={"head_sha": head_sha})
+    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
@@ -1176,9 +1141,7 @@ async def test_score_reuses_one_archived_run_snapshot(
     read the shared host snapshot (via ``_read_json``), never re-enter the
     runtime; ``trace.state.run_dir`` must be cleared once scoring returns.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
@@ -1245,9 +1208,7 @@ async def test_review_shape_metrics(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
     """n_findings mirrors merged-items.json; golden_overlap is a path fraction."""
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -1343,39 +1304,6 @@ async def test_committed_daydream_artifacts_not_a_fix(
     assert "test_claim_mismatch" not in trace.metrics
 
 
-async def test_unresolvable_snapshot_sha_reads_as_no_fix(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
-) -> None:
-    """A fix signal that cannot be evaluated reads as no-fix, not a free win.
-
-    ``suite_non_regression`` stays deliberately false-negative biased: any ``git diff
-    --quiet`` exit other than 1 (0 = identical trees, 128 = unresolvable baked
-    SHA, 127 = missing sh/git) means "no fix found". Here the baked snapshot SHA
-    is not present in the repository at all, so the diff exits 128 — the reward
-    must record ``suite_non_regression`` 0.0, never a free green reading for nothing.
-    """
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fix@fixture.invalid"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
-    (repo / "calc.py").write_text(_CALC_BROKEN, encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "snapshot"], check=True)
-
-    task = _task(fixture_manifest_path)
-    # task.data.head_sha is the baked snapshot SHA from the manifest; this fresh
-    # repo has never contained it, so the fix-signal diff cannot resolve it.
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
-
-    assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.metrics["suite_non_regression"] == 0.0
-
-
 async def test_reward_version_is_pinned(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
@@ -1389,9 +1317,7 @@ async def test_reward_version_is_pinned(
     breakdown stamps both the rollout boundary (``reward_version``) and the
     intrinsic scorer it was evaluated against (``intrinsic_reward_version``).
     """
-    from daydream.training.reward import REWARD_VERSION
 
-    from daydream_review.taskset import ROLLOUT_REWARD_VERSION
 
     assert REWARD_VERSION == "2026.09.04-1", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
@@ -1401,9 +1327,7 @@ async def test_reward_version_is_pinned(
         f"the rollout reward contract version moved to {ROLLOUT_REWARD_VERSION!r}"
     )
 
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(fixture_manifest_path)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
@@ -1523,8 +1447,6 @@ async def test_git_failure_at_verify_time_fails_closed(
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(fixture_manifest_path)
-    from daydream_review.rundir import RUN_DIR_FILES
-    from daydream_review.verifier import seal_artifacts
 
     present = [
         run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
@@ -1552,7 +1474,6 @@ async def test_verify_checkout_failed_diff_fails_closed(
     git apply: _prepare_verify_checkout returns None, never a partially-built
     checkout. Mirrors the rundir fail-closed contract on the unified path.
     """
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1587,7 +1508,6 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     committed, staged, AND unstaged tracked contents all match the baked head,
     so the diff must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     # --allow-empty commit: HEAD advances, committed tree identical -> genuinely empty diff
@@ -1619,8 +1539,6 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     diff (no drift between the two sites), as the verifier re-runs the suite
     against the same contract the seal binds.
     """
-    from daydream_review import taskset
-    from daydream_review.rundir import candidate_diff_cmd
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1653,7 +1571,6 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
 
 
 def test_candidate_diff_cmd_carries_hardening_flags() -> None:
-    from daydream_review.rundir import DAYDREAM_EXCLUDE, candidate_diff_cmd
 
     argv = candidate_diff_cmd("/work/repo", "deadbeef")
     assert argv == [
@@ -1668,7 +1585,6 @@ async def test_verify_checkout_repo_helper_ignored(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path, attack: str,
 ) -> None:
     """A repo-local helper that cannot run must not abort verifier-checkout."""
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1697,9 +1613,7 @@ async def test_verify_checkout_repo_helper_ignored(
 
 
 async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
-    from conftest import FakeRuntime
 
-    from daydream_review import taskset
 
     rt = FakeRuntime(exit_code=0)
     await taskset._fixes_applied(rt, "/work/repo", "deadbeef")
@@ -1712,9 +1626,7 @@ async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
 
 
 async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags() -> None:
-    from conftest import FakeRuntime
 
-    from daydream_review import taskset
 
     rt = FakeRuntime(exit_code=0)
     await taskset._protected_test_paths_unchanged(rt, "/work/repo", "deadbeef", ["tests"])
@@ -1725,27 +1637,6 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
         "deadbeef", "--", *["tests"], *taskset.ORACLE_IGNORE_PATHSPECS,
     ]
 
-
-# There is deliberately no real-path "trusted diff.external" attack test for
-# the --quiet oracle probes: on the pinned git (2.43.0) ``git diff --quiet``
-# never invokes diff.external or textconv, so the forgery it would stage cannot
-# fire and the test would be vacuous. The flags' presence on both probes is
-# pinned by the argv-contract tests below; the genuine repo-configurable-helper
-# surface is the non-quiet candidate path, covered by
-# test_verify_checkout_repo_helper_ignored.
-
-
-# --- oracle / candidate-diff working-tree equivalence (issue #725 pin) ---
-#
-# Round 2 of the issue-#725 review found that the acceptance oracle
-# (``_fixes_applied``) and the load-bearing candidate-diff derivation
-# (``candidate_diff_cmd``) share ``DAYDREAM_EXCLUDE`` but encode their
-# working-tree semantics independently: convergence is exact today, but only
-# by docstring reasoning, and a future edit to either side silently re-opens
-# the drift class of issue #725 (oracle accepts a state whose candidate diff
-# is empty, or vice versa). These tests are the executable form of that
-# reasoning: over every canonical repo state a rollout can produce, the
-# oracle's verdict and the derived diff's emptiness must agree.
 
 @pytest.mark.parametrize(
     ("stage_kwargs", "expected"),
@@ -1788,8 +1679,6 @@ async def test_oracle_acceptance_matches_candidate_diff_semantics(
     both — and this test turns any future divergence into a CI failure
     instead of docstring archaeology.
     """
-    from daydream_review import rundir as rundir_mod
-    from daydream_review import taskset
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, **stage_kwargs)

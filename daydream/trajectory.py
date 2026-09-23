@@ -52,6 +52,12 @@ from daydream.atif import (
     ToolCall,
     Trajectory,
 )
+from daydream.credential_patterns import (
+    _QUERY_CREDENTIAL_PATTERN,
+    _SCP_USERINFO_PATTERN,
+    _TOKEN_ONLY_USERINFO_PATTERN,
+    _URL_CREDENTIAL_PATTERN,
+)
 from daydream.json_utils import atomic_write_json
 from daydream.timeutil import parse_iso_timestamp
 from daydream.ui import create_console, print_error, print_warning
@@ -200,7 +206,6 @@ class _CostDelta:
 # bare API-key (so `OPENAI_API_KEY=sk-1234` keeps its name per D-03); (3) structured
 # key-value redaction (_redact_structured_key_values), which skips existing
 # [REDACTED_*] markers so earlier stages' output is never clobbered.
-_URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
 _API_KEY_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|ghs_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
 )
@@ -246,8 +251,18 @@ _DIAGNOSTIC_REDACTION_FAILED = {
 _ENV_VAR_PATTERN = re.compile(
     r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)[^\S\n\r]*=[^\S\n\r]*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
 )
-_REDACTION_RULES: tuple[tuple[Any, str], ...] = (
+def _redact_url_userinfo(match: re.Match[str]) -> str:
+    """Preserve user/password marker shape when the wider token rule overlaps."""
+    userinfo = match.group(0)[len(match.group(1)) : -1]
+    masked = "[REDACTED_USER]:[REDACTED_API_KEY]" if ":" in userinfo else "[REDACTED_USER]"
+    return f"{match.group(1)}{masked}@"
+
+
+_REDACTION_RULES: tuple[tuple[Any, str | Callable[[re.Match[str]], str]], ...] = (
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
+    (_TOKEN_ONLY_USERINFO_PATTERN, _redact_url_userinfo),
+    (_SCP_USERINFO_PATTERN, r"[REDACTED_USER]:[REDACTED_API_KEY]@\2"),
+    (_QUERY_CREDENTIAL_PATTERN, r"\1\2=[REDACTED_CREDENTIAL]"),
     (_PEM_KEY_PATTERN, _PEM_KEY_REDACTED_MARKER),
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
@@ -1812,18 +1827,6 @@ def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
     return extra
 
 
-#
-# Provider generation drafts stay UNENDED until billing ownership resolves.
-# Immutable provider choice + timing seal at ``message_end`` before tools;
-# each draft ends exactly once at its sealed historical end after late usage.
-# Bounds: 512 drafts / 10 MiB retained choice bytes; overflow drains with
-# structural/unbilled-or-none diagnostics, never invented usage. No age limit
-# rejects the 395.332-second case; terminal/cancel paths drain. Native
-# timestamps are non-bool bounded int ms converted exactly to ns;
-# missing/invalid/reversed evidence falls back explicitly — no clamping, no
-# fake RFC3339. Billing owner closes before export to one of
-# ``unresolved | generation_children | structural_attempt | none`` (decision 5).
-
 MAX_PENDING_GENERATION_DRAFTS = 512
 MAX_RETAINED_CHOICE_BYTES = 10 * 1024 * 1024
 _MAX_NATIVE_UNIX_MS = (2**63 - 1) // 1_000_000
@@ -3199,6 +3202,14 @@ class DispatchHandle:
         self._closed = True
 
 
+def finish_partial_or_failed(dispatch: DispatchHandle, has_results: object) -> None:
+    """Close *dispatch* PARTIAL when some child succeeded, else FAILED."""
+    dispatch.finish(
+        LifecycleStatus.PARTIAL if has_results else LifecycleStatus.FAILED,
+        LifecycleReasonCode.SOME_CHILDREN_FAILED if has_results else LifecycleReasonCode.ALL_CHILDREN_FAILED,
+    )
+
+
 @asynccontextmanager
 async def dispatch_scope(
     recorder: "TrajectoryRecorder | None",
@@ -3321,8 +3332,6 @@ class TrajectoryRecorder:
     _trajectory_id: str = ""
     _run_started_at: str = ""
     _run_ended_at: str = ""
-    _partial_state_digest: str = ""
-    _partial_cutoff_at: str = ""
     _signal_registry: _SignalFlushRegistry | None = field(default=None, init=False, repr=False, compare=False)
 
     async def __aenter__(self) -> "TrajectoryRecorder":
@@ -3951,78 +3960,15 @@ class TrajectoryRecorder:
         snapshot.sort(key=lambda s: s.step_id)
         return snapshot
 
-    def _partial_cutoff_for(self, snapshot_steps: list[Step]) -> str:
-        """Reuse a cutoff only while the recorder's serializable state is unchanged."""
-        digest = _digest_partial_state(self, snapshot_steps)
-        self._partial_state_digest, self._partial_cutoff_at = _reuse_or_advance_partial_cutoff(
-            state_digest=digest,
-            previous_digest=self._partial_state_digest,
-            previous_cutoff=self._partial_cutoff_at,
-        )
-        return self._partial_cutoff_at
-
-    def _write_partial_self(self) -> bool:
-        """Write only this recorder's in-flight state to ``partial_document_path(self.path)``.
-
-        Per D-07 the partial trajectory lives at a sibling path with the
-        ``PARTIAL_SUFFIX`` appended to the full filename (e.g.
-        ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
-        ``partial=true`` so consumers can detect incomplete runs without
-        path-string parsing. Steps from any in-flight Invocation are
-        included so SIGINT mid-``run_agent()`` does not lose work; empty
-        trajectories are skipped (matches ``_write``).
-
-        Returns ``True`` only when a nonempty snapshot was written. Disk-write
-        failures degrade with the established warning and return ``False``.
-        """
-        snapshot_steps = self._snapshot_in_flight_steps()
-        if not snapshot_steps:
-            return False
-        try:
-            document = self._prepare_document(
-                status="partial",
-                cutoff_at=self._partial_cutoff_for(snapshot_steps),
-            )
-            if document is None:
-                return False
-            try:
-                self._write_document(document, "partial")
-            except Exception as exc:  # noqa: BLE001 - capture still receives prepared bytes
-                print_warning(
-                    _console,
-                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-                )
-            if self.on_write is not None:
-                snapshot = RunWriteSnapshot(
-                    status="partial",
-                    cutoff_at=self._partial_cutoff_at,
-                    root_trajectory_id=self.trajectory_id,
-                    documents=(document,),
-                )
-                try:
-                    self.on_write(self, snapshot)
-                except Exception:  # noqa: BLE001 - archive failure never blocks shutdown
-                    pass
-            return True
-        except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
-            print_warning(
-                _console,
-                f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-            )
-            return False
-
     def write_partial(self) -> None:
-        """Write this recorder's partial and cascade to its parent on success.
+        """Flush every active recorder owned by this run (idempotent, never raises).
 
-        This compatibility-preserving public path remains idempotent and safe
-        for ordinary synchronous callers. Signal handling uses the run registry's
-        self-only primitive so a parent shared by several live children is written
-        exactly once.
+        Signal handling goes through the run registry so a root shared by
+        several live children is written exactly once. Calling this on a
+        recorder that was never entered is a no-op.
         """
         if self._signal_registry is not None:
             self._signal_registry.flush_active()
-        elif self._write_partial_self() and self.parent is not None:
-            self.parent.write_partial()
 
 
 class _ForkCM:

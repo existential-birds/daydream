@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -17,6 +19,7 @@ import anyio
 import pytest
 
 import daydream.trajectory as trajectory_module
+from daydream.atif import Step as AtifStep
 from daydream.atif import validate as atif_validate
 from daydream.atif.models import Step
 from daydream.backends import (
@@ -29,6 +32,11 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.cli import _signal_handler
+from daydream.deep.artifacts import push_verdict_path, remote_ci_handoff_path, remote_ci_verdict_path
+from daydream.deep.coverage import _completed_read_paths
+from daydream.eval.analyzer import analyze_costs, load_trajectories
+from daydream.phases import _do_commit
 from daydream.trajectory import (
     PARTIAL_SUFFIX,
     RUN_DOCUMENT_NAME,
@@ -40,7 +48,9 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     _safe_descriptor,
+    flush_active_signal_recorders,
     get_current_recorder,
+    host_phase_scope,
     now_iso,
     partial_document_path,
     redact_text,
@@ -49,8 +59,10 @@ from daydream.trajectory import (
     sibling_document_path,
     snapshot_trajectories,
 )
+from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from tests.harness.trajectory import (
     make_recorder,
+    observe_metrics_and_result,
     observe_text_and_result,
     read_trajectory,
 )
@@ -373,7 +385,6 @@ async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -
 
 async def test_completed_read_derivation_sees_finished_read(tmp_path: Path) -> None:
     """Positive control: a Read paired with its result IS a completed read."""
-    from daydream.deep.coverage import _completed_read_paths
 
     traj = await _drive(
         tmp_path,
@@ -394,7 +405,6 @@ async def test_interrupted_read_never_completes_in_fork_review_trajectory(
     completed reads the way the deep-flow consumers do must NOT yield the file:
     fail-open means the sweep still sees it.
     """
-    from daydream.deep.coverage import _completed_read_paths
 
     recorder = make_recorder(tmp_path)
     async with recorder:
@@ -579,29 +589,15 @@ async def test_final_metrics_totals_match_per_step_sum(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="step-one-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=0.001,
-                )
+            observe_metrics_and_result(
+                inv, "step-one-text", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=0.001,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.invocation(phase=DaydreamPhase.FIX) as inv2:
-            inv2.observe(TextEvent(text="step-two-text"))
-            inv2.observe(
-                MetricsEvent(
-                    message_id="m-2",
-                    prompt_tokens=200,
-                    completion_tokens=40,
-                    cached_tokens=20,
-                    cost_usd=0.002,
-                )
+            observe_metrics_and_result(
+                inv2, "step-two-text", message_id="m-2", prompt_tokens=200,
+                completion_tokens=40, cached_tokens=20, cost_usd=0.002,
             )
-            inv2.observe(ResultEvent(structured_output=None, continuation=None))
 
     traj = read_trajectory(recorder.path)
     fm = traj["final_metrics"]
@@ -1096,7 +1092,6 @@ def test_redactor_is_passthrough() -> None:
     contract is field-by-field semantic equality on inputs containing no
     secret patterns.
     """
-    from daydream.atif import Step as AtifStep
 
     step = AtifStep(
         step_id=1,
@@ -1257,30 +1252,16 @@ async def test_parent_metrics_include_children(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-parent",
-                    prompt_tokens=100,
-                    completion_tokens=10,
-                    cached_tokens=5,
-                    cost_usd=0.001,
-                )
+            observe_metrics_and_result(
+                inv, "parent-text", message_id="m-parent", prompt_tokens=100,
+                completion_tokens=10, cached_tokens=5, cost_usd=0.001,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("fix-0") as child:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                inv.observe(TextEvent(text="child-text"))
-                inv.observe(
-                    MetricsEvent(
-                        message_id="m-child",
-                        prompt_tokens=200,
-                        completion_tokens=20,
-                        cached_tokens=10,
-                        cost_usd=0.002,
-                    )
+                observe_metrics_and_result(
+                    inv, "child-text", message_id="m-child", prompt_tokens=200,
+                    completion_tokens=20, cached_tokens=10, cost_usd=0.002,
                 )
-                inv.observe(ResultEvent(structured_output=None, continuation=None))
 
     parent_traj = read_trajectory(recorder.path)
     child_traj = read_trajectory(child.path)
@@ -1413,7 +1394,6 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
 
         assert get_current_recorder() is recorder
         child.path = original_path
-        from daydream.trajectory import flush_active_signal_recorders
 
         flush_active_signal_recorders()
         assert recorder.path.with_suffix(".json.partial").exists()
@@ -1513,18 +1493,13 @@ async def test_write_partial_writes_partial_file_with_partial_flag(
         assert atif_validate(partial, validate_images=False) is True
 
 
-def test_write_partial_no_op_when_steps_empty(tmp_path: Path) -> None:
+async def test_write_partial_no_op_when_steps_empty(tmp_path: Path) -> None:
     """write_partial skips disk write when steps list is empty (matches _write)."""
-    recorder = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
-    )
-    recorder.write_partial()
-    partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-    assert not partial_path.exists()
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        recorder.write_partial()
+        partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
+        assert not partial_path.exists()
 
 
 async def test_write_partial_is_idempotent(tmp_path: Path) -> None:
@@ -1724,7 +1699,6 @@ async def _hold_fork(
 )
 async def test_signal_flushes_concurrent_siblings(tmp_path: Path, entry_order: tuple[str, str]) -> None:
     """One run flush writes root and every live sibling, independent of entry order."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     markers = {"signal-a": "SIBLING_A_ONLY", "signal-b": "SIBLING_B_ONLY"}
     entered = {name: anyio.Event() for name in markers}
@@ -1772,7 +1746,6 @@ async def test_signal_flush_freezes_all_documents_before_one_callback(
     tmp_path: Path,
 ) -> None:
     """A run-wide partial snapshot has one cutoff and immutable written bytes."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
@@ -1821,7 +1794,6 @@ async def test_signal_flush_with_child_evidence_freezes_schema_valid_empty_root(
     tmp_path: Path,
 ) -> None:
     """An early fan-out signal retains root lifecycle evidence without an LLM call."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
@@ -1874,7 +1846,6 @@ async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged run snapshot reuses bytes; child progress advances its cutoff."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     ticks = iter(f"2026-09-06T00:00:{second:02d}.000000Z" for second in range(60))
     monkeypatch.setattr(trajectory_module, "now_iso", lambda: next(ticks))
@@ -1913,7 +1884,6 @@ async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapsh
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A root freeze failure writes no child-only snapshot and a retry recovers."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     snapshots: list[RunWriteSnapshot] = []
     warnings: list[str] = []
@@ -1968,7 +1938,6 @@ async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapsh
 @pytest.mark.parametrize("exit_kind", ["normal", "runtime", "cancel", "system-exit"])
 async def test_signal_flush_excludes_exited_child(tmp_path: Path, exit_kind: str) -> None:
     """Every child exit shape unregisters before a later root-only flush."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     root = make_recorder(tmp_path)
 
@@ -2013,7 +1982,6 @@ async def test_signal_flush_excludes_child_after_final_write_system_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A BaseException from the child final write cannot leak registry membership."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     root = make_recorder(tmp_path)
     child: TrajectoryRecorder
@@ -2040,7 +2008,6 @@ async def test_signal_flush_excludes_child_after_final_write_system_exit(
 
 async def test_signal_flush_selects_latest_independent_root(tmp_path: Path) -> None:
     """A nested independent root is targeted until it exits, then outer resumes."""
-    from daydream.trajectory import flush_active_signal_recorders
 
     writes: list[tuple[str, str]] = []
     outer = make_recorder(
@@ -2065,7 +2032,6 @@ async def test_signal_flush_selects_latest_independent_root(tmp_path: Path) -> N
 
 
 def _finish_shutdown_panel() -> None:
-    from daydream.ui import get_shutdown_panel, set_shutdown_panel
 
     panel = get_shutdown_panel()
     if panel is not None:
@@ -2076,7 +2042,6 @@ def _finish_shutdown_panel() -> None:
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 async def test_signal_handler_flushes_all_siblings_once(tmp_path: Path, signum: signal.Signals) -> None:
     """The real handler flushes root and both siblings without parent recursion."""
-    from daydream.cli import _signal_handler
 
     root_statuses: list[str] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: root_statuses.append(snapshot.status))
@@ -2122,7 +2087,6 @@ async def test_signal_handler_isolates_sibling_write_failure(
     signum: signal.Signals,
 ) -> None:
     """One denied sibling partial cannot prevent healthy siblings or shutdown setup."""
-    from daydream.cli import _signal_handler
 
     root = make_recorder(tmp_path)
     entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
@@ -2292,30 +2256,16 @@ async def test_fork_totals_fold_into_parent(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=1.0,
-                )
+            observe_metrics_and_result(
+                inv, "parent-text", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("deep-python") as child:
             async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
-                cinv.observe(TextEvent(text="child-text"))
-                cinv.observe(
-                    MetricsEvent(
-                        message_id="m-2",
-                        prompt_tokens=40,
-                        completion_tokens=8,
-                        cached_tokens=4,
-                        cost_usd=0.5,
-                    )
+                observe_metrics_and_result(
+                    cinv, "child-text", message_id="m-2", prompt_tokens=40,
+                    completion_tokens=8, cached_tokens=4, cost_usd=0.5,
                 )
-                cinv.observe(ResultEvent(structured_output=None, continuation=None))
 
     parent = read_trajectory(recorder.path)["final_metrics"]
     assert parent["total_prompt_tokens"] == 140
@@ -2338,17 +2288,10 @@ async def test_empty_fork_folds_nothing_into_parent(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent-text"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=1.0,
-                )
+            observe_metrics_and_result(
+                inv, "parent-text", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("empty-child"):
             pass
 
@@ -2362,43 +2305,22 @@ async def test_nested_fork_totals_reach_the_root(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="root"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=10,
-                    completion_tokens=1,
-                    cached_tokens=0,
-                    cost_usd=0.1,
-                )
+            observe_metrics_and_result(
+                inv, "root", message_id="m-1", prompt_tokens=10,
+                completion_tokens=1, cached_tokens=0, cost_usd=0.1,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("outer") as outer:
             async with outer.invocation(phase=DaydreamPhase.DEEP) as oinv:
-                oinv.observe(TextEvent(text="outer"))
-                oinv.observe(
-                    MetricsEvent(
-                        message_id="m-2",
-                        prompt_tokens=20,
-                        completion_tokens=2,
-                        cached_tokens=0,
-                        cost_usd=0.2,
-                    )
+                observe_metrics_and_result(
+                    oinv, "outer", message_id="m-2", prompt_tokens=20,
+                    completion_tokens=2, cached_tokens=0, cost_usd=0.2,
                 )
-                oinv.observe(ResultEvent(structured_output=None, continuation=None))
             async with outer.fork("inner") as inner:
                 async with inner.invocation(phase=DaydreamPhase.DEEP) as iinv:
-                    iinv.observe(TextEvent(text="inner"))
-                    iinv.observe(
-                        MetricsEvent(
-                            message_id="m-3",
-                            prompt_tokens=30,
-                            completion_tokens=3,
-                            cached_tokens=0,
-                            cost_usd=0.3,
-                        )
+                    observe_metrics_and_result(
+                        iinv, "inner", message_id="m-3", prompt_tokens=30,
+                        completion_tokens=3, cached_tokens=0, cost_usd=0.3,
                     )
-                    iinv.observe(ResultEvent(structured_output=None, continuation=None))
 
     root = read_trajectory(recorder.path)["final_metrics"]
     assert root["total_prompt_tokens"] == 60
@@ -2407,7 +2329,6 @@ async def test_nested_fork_totals_reach_the_root(tmp_path: Path) -> None:
 
 async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
     """Root final_metrics is fork-inclusive, so analyze_costs must not re-sum forks."""
-    from daydream.eval.analyzer import analyze_costs, load_trajectories
 
     session = "sess-fold-0001"
     daydream_dir = tmp_path / ".daydream"
@@ -2420,30 +2341,16 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent"))
-            inv.observe(
-                MetricsEvent(
-                    message_id="m-1",
-                    prompt_tokens=100,
-                    completion_tokens=20,
-                    cached_tokens=10,
-                    cost_usd=1.0,
-                )
+            observe_metrics_and_result(
+                inv, "parent", message_id="m-1", prompt_tokens=100,
+                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
             )
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.fork("deep-python") as child:
             async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
-                cinv.observe(TextEvent(text="child"))
-                cinv.observe(
-                    MetricsEvent(
-                        message_id="m-2",
-                        prompt_tokens=40,
-                        completion_tokens=8,
-                        cached_tokens=4,
-                        cost_usd=0.5,
-                    )
+                observe_metrics_and_result(
+                    cinv, "child", message_id="m-2", prompt_tokens=40,
+                    completion_tokens=8, cached_tokens=4, cost_usd=0.5,
                 )
-                cinv.observe(ResultEvent(structured_output=None, continuation=None))
 
     costs = analyze_costs(load_trajectories(daydream_dir, session))
     assert costs["total_cost_usd"] == pytest.approx(1.5)  # not 2.0 (root 1.5 + fork 0.5)
@@ -2562,7 +2469,6 @@ async def test_fork_child_inherits_backend_identity(tmp_path: Path) -> None:
 async def test_host_phase_scope_records_duration_and_stop_reason(
     tmp_path: Path,
 ) -> None:
-    from daydream.trajectory import DaydreamPhase, host_phase_scope
 
     rec = make_recorder(tmp_path)
     async with rec:
@@ -2605,10 +2511,6 @@ async def test_host_phase_scope_records_duration_and_stop_reason(
 
 
 async def test_host_phase_scope_noop_without_recorder() -> None:
-    from daydream.trajectory import (
-        DaydreamPhase,
-        host_phase_scope,
-    )
 
     async with host_phase_scope(DaydreamPhase.COMMIT):
         pass  # must not raise when no recorder is active
@@ -2637,7 +2539,6 @@ async def test_remote_ci_host_phases_record_exact_terminal_reasons(
     expected_reason: str | None,
 ) -> None:
     """Every admitted remote-CI reason has one closed lifecycle projection."""
-    from daydream.trajectory import DaydreamPhase, host_phase_scope
 
     rec = make_recorder(tmp_path)
     async with rec:
@@ -3024,11 +2925,6 @@ async def test_artifact_final_writer_failure_preserves_existing_primary_exceptio
 
 
 def test_remote_ci_artifact_paths_are_named_under_deep_dir(tmp_path: Path) -> None:
-    from daydream.deep.artifacts import (
-        push_verdict_path,
-        remote_ci_handoff_path,
-        remote_ci_verdict_path,
-    )
 
     assert push_verdict_path(tmp_path) == tmp_path / "push-verdict.json"
     assert remote_ci_verdict_path(tmp_path) == tmp_path / "remote-ci-verdict.json"
@@ -3041,10 +2937,7 @@ async def test_do_commit_records_commit_phase_event(
 ) -> None:
     """Real-path: _do_commit's host-native commit emits a distinct ``commit``
     phase event with duration_ms + stop_reason (issue #726 task 12)."""
-    from collections.abc import AsyncGenerator
 
-    from daydream.backends import ResultEvent, TextEvent
-    from daydream.phases import _do_commit
 
     class _Backend:
         model = "mock-model"
@@ -3074,7 +2967,6 @@ async def test_do_commit_records_commit_phase_event(
 
 
 def _git_add_commit(repo: Path) -> None:
-    import subprocess
 
     subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
     subprocess.run(
@@ -3082,3 +2974,24 @@ def _git_add_commit(repo: Path) -> None:
         cwd=repo,
         check=True,
     )
+
+
+async def test_dispatch_registers_late_dynamic_fork_before_scope_exit(tmp_path: Path) -> None:
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with trajectory_module.dispatch_scope(
+            recorder, phase=DaydreamPhase.DEEP, descriptors=("deep-python", "deep-react"),
+        ) as dispatch:
+            assert dispatch is not None
+            for descriptor in ("deep-python", "deep-react", "deep-structure"):
+                async with trajectory_module.maybe_fork(recorder, descriptor, dispatch=dispatch) as child:
+                    async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
+                        observe_text_and_result(inv, descriptor)
+    step = only_dispatch(read_trajectory(recorder.path))
+    assert step["extra"]["planned_count"] == 3
+    assert step["extra"]["attempted_count"] == 3
+    assert step["extra"]["completed_count"] == 3
+    assert step["extra"]["dispatch_status"] == "succeeded"
+    assert [result["content"] for result in step["observation"]["results"]] == [
+        "Dispatched to deep-python", "Dispatched to deep-react", "Dispatched to deep-structure",
+    ]

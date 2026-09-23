@@ -284,9 +284,8 @@ name, source backend/event, source authority/provenance, owning span, type,
 unit, cardinality, derivation, completeness, capture/redaction, generic OTLP
 disposition, HoneyHive canonical destination, LangSmith native destination,
 offline test node, live evidence status, and applicability/omission reason. The
-matrix also lists per-backend unavailable/inapplicable rows, the compatibility
-alias table and removal policy, and an AC-01..AC-31 traceability appendix
-validated against the Task 0 acceptance ledger. The machine-readable subset
+matrix also lists per-backend unavailable/inapplicable rows and the
+compatibility alias table and removal policy. The machine-readable subset
 used by the readback verifier is
 `tests/fixtures/observability_contract/readback-matrix.json`; it may only
 shrink relative to the markdown matrix.

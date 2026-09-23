@@ -8,18 +8,15 @@ SDK shape change had to be chased through four copies.
 
 This module owns one set of stand-ins plus the two helpers every consumer needs:
 
-* :func:`patch_claude_sdk` — patch the eight SDK names in one call. The
-  ``assistant_message`` / ``result_message`` overrides exist so a module that
-  needs richer messages (``usage``, ``message_id``) can subclass the base
-  dataclasses and have the backend's ``isinstance`` dispatch see its variant.
+* :func:`patch_claude_sdk` — patch the eight SDK names in one call.
 * :func:`scripted_client` — build a ``ClaudeSDKClient`` stand-in that replays a
   canned message sequence and, optionally, records the
   ``ClaudeAgentOptions`` it was constructed with.
 
-The mocks are intentionally minimal: only fields ``ClaudeBackend`` reads.
-``message_id`` / ``usage`` live on the subclasses in
-``tests/test_backend_claude_metrics.py`` rather than the base, so the default
-message shape stays the one the non-metrics tests were written against.
+The mocks are intentionally minimal but carry every optional field
+``ClaudeBackend`` reads (``model`` / ``message_id`` / ``usage`` on the
+assistant message; ``usage`` / ``duration_ms`` / ``duration_api_ms`` /
+``stop_reason`` on the result message) so no consumer needs a subclass.
 """
 
 from __future__ import annotations
@@ -58,6 +55,11 @@ class MockToolResultBlock:
 @dataclass
 class MockAssistantMessage:
     content: list[Any] = field(default_factory=list)
+    # Only read via ``getattr`` by ``ClaudeBackend.execute``; the defaults give a
+    # message with no model, no metrics, and no continuation unless a test opts in.
+    model: str | None = None
+    message_id: str = ""
+    usage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -75,14 +77,15 @@ class MockResultMessage:
     # Real ResultMessage always carries one; default None keeps every existing
     # scripted message minting no continuation until a test opts in.
     session_id: str | None = None
+    usage: dict[str, Any] | None = None
+    duration_ms: int | None = None
+    duration_api_ms: int | None = None
+    stop_reason: str | None = None
 
 
 def patch_claude_sdk(
     monkeypatch: pytest.MonkeyPatch,
     client_class: type,
-    *,
-    assistant_message: type = MockAssistantMessage,
-    result_message: type = MockResultMessage,
 ) -> None:
     """Patch every SDK name ``daydream.backends.claude`` resolves at runtime.
 
@@ -90,10 +93,6 @@ def patch_claude_sdk(
         monkeypatch: The test's monkeypatch fixture.
         client_class: Stand-in for ``ClaudeSDKClient`` (see
             :func:`scripted_client`).
-        assistant_message: Class the backend's ``isinstance`` dispatch treats as
-            ``AssistantMessage``. Override with a subclass carrying
-            ``message_id`` / ``usage`` to exercise the metrics path.
-        result_message: Class the backend treats as ``ResultMessage``.
     """
     monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_class)
 
@@ -108,9 +107,9 @@ def patch_claude_sdk(
     monkeypatch.setattr(
         "daydream.backends.claude._RunLocalClaudeSDKClient", _injected_client
     )
-    monkeypatch.setattr("daydream.backends.claude.AssistantMessage", assistant_message)
+    monkeypatch.setattr("daydream.backends.claude.AssistantMessage", MockAssistantMessage)
     monkeypatch.setattr("daydream.backends.claude.UserMessage", MockUserMessage)
-    monkeypatch.setattr("daydream.backends.claude.ResultMessage", result_message)
+    monkeypatch.setattr("daydream.backends.claude.ResultMessage", MockResultMessage)
     monkeypatch.setattr("daydream.backends.claude.TextBlock", MockTextBlock)
     monkeypatch.setattr("daydream.backends.claude.ThinkingBlock", MockThinkingBlock)
     monkeypatch.setattr("daydream.backends.claude.ToolUseBlock", MockToolUseBlock)

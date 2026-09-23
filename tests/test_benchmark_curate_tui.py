@@ -9,7 +9,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
+from daydream.benchmark import curate_tui as tui
+from daydream.benchmark import curation as cu
+from daydream.benchmark.curate_tui import (
+    parse_indices,
+    render_case,
+    render_index_table,
+    run_curate_tui,
+)
+from daydream.benchmark.storage import atomic_write_json, load_json_strict, load_yaml_strict
 from tests.harness.fake_gh import FakeGh
 from tests.test_benchmark_curation import _reanchor_frozen_inline, _seed_ready_case, _seed_ready_case_mixed
 
@@ -21,7 +31,6 @@ def _scripted(*lines: Any) -> Any:
 
 
 def test_parse_indices_accepts_commas_and_ranges() -> None:
-    from daydream.benchmark.curate_tui import parse_indices
     assert parse_indices("1,3-5", 5) == [0, 2, 3, 4]   # 1-based in, 0-based out
     assert parse_indices("2", 5) == [1]
     assert parse_indices("5-1", 5) == [0, 1, 2, 3, 4]   # reversed range normalizes
@@ -39,7 +48,6 @@ def test_run_curate_tui_queue_renders_index_and_quits(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import render_index_table, run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
 
     table = render_index_table([{"case_id": case_id, "pr_number": 101,
@@ -59,8 +67,6 @@ def test_run_curate_tui_queue_renders_index_and_quits(
     assert case_id in out
 
 def test_render_case_shows_header_and_numbered_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import render_case
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     view = cu.get_case(ws, case_id)
     out = render_case(view)
@@ -71,8 +77,6 @@ def test_render_case_shows_header_and_numbered_evidence(tmp_path: Path, fake_gh:
 
 
 def test_render_case_pages_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import render_case
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     out = render_case(cu.get_case(ws, case_id))
     assert "APPROVED" in out and "carol" in out          # pure approval review paged
@@ -86,7 +90,6 @@ def test_run_curate_tui_unknown_action_reprompts(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     rc = run_curate_tui(ws, case_id, read_line=_scripted("z9", "q"))
     assert rc == 0
@@ -97,8 +100,6 @@ def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fak
     """The evidence row surfaces the strict authoring commit (short form) and the
     fixed not-exact reason whenever exact acceptance is unavailable, next to the
     re-anchored commit_id -- the two commits are never conflated."""
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import render_case
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     _reanchor_frozen_inline(ws, case_id, authoring_commit="b" * 40)
@@ -115,7 +116,6 @@ def test_run_curate_tui_queue_bogus_case_id_reprompts(
 ) -> None:
     """A non-digit selector that matches no known case_id reprompts (rc 0)
     instead of letting get_case's CurationError kill the whole session."""
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     rc = run_curate_tui(ws, read_line=_scripted("bogus-id", "q"))
     assert rc == 0
@@ -129,9 +129,6 @@ def test_action_exclude_evidence_persists_supported_reason(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     source_id = cu.get_case(ws, case_id)["evidence"][0]["source_id"]
@@ -153,9 +150,6 @@ def test_action_exclude_evidence_persists_supported_reason(
 
 
 def test_action_accept_persists_historical_finding(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"]
                if c["exact_acceptable"])
@@ -168,7 +162,6 @@ def test_action_accept_persists_historical_finding(tmp_path: Path, fake_gh: Fake
 
 
 def test_action_accept_invalid_index_mutates_nothing(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -181,10 +174,7 @@ def test_action_accept_non_exact_candidate_offers_edit_path(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import yaml
 
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
@@ -203,8 +193,6 @@ def test_action_new_via_real_editor_persists_authored(
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     log = tmp_path / "editor.log"
     editor = tmp_path / "edit.py"
@@ -241,7 +229,6 @@ def test_editor_nonzero_exit_leaves_state_unchanged(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -262,7 +249,6 @@ def test_editor_malformed_buffer_is_discarded(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -278,9 +264,6 @@ def test_editor_malformed_buffer_is_discarded(
 
 
 def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     current = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     editor = tmp_path / "edit2.sh"
@@ -305,8 +288,6 @@ def test_action_edit_authors_edited_finding_from_non_candidate_evidence(
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     editor = tmp_path / "auth.sh"
     editor.write_text(
@@ -331,8 +312,6 @@ def test_edit_author_prefills_selected_evidence_source_ids(
     """The [e]->a author selector must pin the selected evidence's source_ids
     into the editor buffer before it opens, so a wrong/empty/off-by-one prefill
     cannot slip past the callers that rewrite source_ids in their heredocs."""
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     log = tmp_path / "prefill.log"
     editor = tmp_path / "prefill.sh"
@@ -361,8 +340,6 @@ def test_action_edit_splits_one_evidence_into_two_findings(
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     editor = tmp_path / "split.sh"
     editor.write_text(
@@ -384,8 +361,6 @@ def test_action_edit_merges_range_into_one_finding(
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _f = _seed_ready_case_mixed(tmp_path, fake_gh)
     editor = tmp_path / "merge.sh"
     editor.write_text(
@@ -402,9 +377,6 @@ def test_action_edit_merges_range_into_one_finding(
 
 
 def test_action_exclude_evidence_other_requires_note(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = cu.get_case(ws, case_id)["candidates"][0]["source_id"]
 
@@ -419,7 +391,6 @@ def test_action_exclude_evidence_rejects_stray_note(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -430,8 +401,6 @@ def test_action_exclude_evidence_rejects_stray_note(
 
 
 def test_action_exclude_range_excludes_all_selected(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     run_curate_tui(ws, case_id, read_line=_scripted("x", "1,4", "duplicate", "q"))
     ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
@@ -444,7 +413,6 @@ def test_action_exclude_range_invalid_mutates_nothing(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -454,8 +422,6 @@ def test_action_exclude_range_invalid_mutates_nothing(
 
 
 def test_clean_confirm_does_not_mark_ready(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=2)   # empty gold
     run_curate_tui(ws, case_id, read_line=_scripted("c", "y", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
@@ -470,8 +436,6 @@ def test_no_comment_clean_then_ready_marks_case_ready(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=2)   # no-comment, empty gold
     run_curate_tui(ws, case_id, read_line=_scripted("c", "y", "r", "y", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
@@ -486,8 +450,6 @@ def test_mark_ready_requires_yes_and_exact_sha(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "n", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
@@ -502,11 +464,7 @@ def test_stale_case_shows_marker_and_re_attests(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import yaml
 
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import render_case, run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
@@ -524,8 +482,6 @@ def test_stale_case_shows_marker_and_re_attests(
 
 
 def test_case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
 
@@ -540,7 +496,6 @@ def test_case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
 
 
 def test_case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -552,7 +507,6 @@ def test_case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsy
 
 
 def test_defer_is_ui_local_no_mutation(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -563,7 +517,6 @@ def test_defer_is_ui_local_no_mutation(tmp_path: Path, fake_gh: FakeGh, capsys: 
 
 
 def test_quit_ends_and_single_case_defer_ends(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     assert run_curate_tui(ws, read_line=_scripted("q")) == 0
     assert run_curate_tui(ws, case_id, read_line=_scripted("d")) == 0  # single-case d ends
@@ -574,9 +527,6 @@ def test_ctrl_c_preserves_prior_actions_and_cleans_temp(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
@@ -602,7 +552,6 @@ def test_corrupt_workspace_returns_1_no_traceback(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     (ws / "cases" / f"{case_id}.yaml").unlink()          # absent case file
     rc = run_curate_tui(ws, read_line=_scripted("q"))
@@ -615,7 +564,6 @@ def test_bare_evidence_number_opens_pager(
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     seen: dict[str, Any] = {}
     monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager",
@@ -625,15 +573,12 @@ def test_bare_evidence_number_opens_pager(
 
 
 def test_resume_reflects_persisted_state(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark.curate_tui import render_index_table, run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     # session 1: accept + mark ready + quit
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "ready" and cur["snapshot_attested"] is True
     # session 2 (resume): the index reflects the persisted ready state
-    from daydream.benchmark import curation as cu
     cases = cu.list_cases(ws)
     assert cases[0]["state"] == "ready"
     assert "ready" in render_index_table(cases)
@@ -645,8 +590,6 @@ def test_ready_pages_spec_and_approval_sets_digest(
     fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
@@ -662,8 +605,6 @@ def test_ready_declined_leaves_draft_and_no_digest(
     tmp_path: Path,
     fake_gh: FakeGh,
 ) -> None:
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "n", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
@@ -680,8 +621,6 @@ def _add_late_finding(cu_mod: Any, ws: Path, case_id: str) -> None:
 
 
 def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curate_tui as tui
-    from daydream.benchmark import curation as cu
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
     out = tui.render_case(view)
@@ -708,8 +647,6 @@ def test_number_action_resolves_through_captured_binding_not_fresh_order(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import curate_tui as tui
-    from daydream.benchmark import curation as cu
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
     binding = tui._view_binding(view)                     # captured entry->source_id map
@@ -742,10 +679,6 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import curate_tui as tui
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
     view = cu.get_case(ws, case_id)
@@ -787,7 +720,6 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
 def test_accept_non_candidate_and_context_is_rejected_without_write(
     tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
-    from daydream.benchmark import curation as cu
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -802,12 +734,6 @@ def test_accept_non_candidate_and_context_is_rejected_without_write(
 def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Prioritization is advisory: a candidate whose facts/signals sink it to
     possibly_actioned is still acceptable through the unchanged service path."""
-    from daydream.benchmark import curation as cu
-    from daydream.benchmark.storage import (
-        atomic_write_json,
-        load_json_strict,
-        load_yaml_strict,
-    )
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     cand_sid = raw["candidates"][0]["source_id"]

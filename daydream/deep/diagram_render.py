@@ -17,23 +17,16 @@ omission floor is evaluated -- that is what keeps the floor honest. The
 renderers assert them again and raise ``ValueError`` on an over-cap spec:
 defense in depth against a hand-written or corrupted artifact.
 
-``SEQUENCE_LINE_GRAMMAR`` / ``FLOWCHART_LINE_GRAMMAR`` are the exhaustive line
-grammars for each kind -- every line either renderer can emit ``fullmatch``es
-its kind's grammar, and nothing else does. They are exported so the integration
-tests can re-assert that property against real pipeline output.
-
 Exports:
     render_sequence_mermaid: spec_final -> mermaid ``sequenceDiagram`` text
     render_flowchart_mermaid: spec_final -> mermaid ``flowchart TD`` text
     render_diagram_blocks: per-kind results -> folded markdown blocks
     render_omission_notice: kind + result -> one-paragraph omission text
     sanitize_label: model text + cap -> mermaid-safe label
-    SEQUENCE_LINE_GRAMMAR / FLOWCHART_LINE_GRAMMAR: per-kind line grammars
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from daydream.config import (
@@ -138,47 +131,6 @@ def _code_span(value: Any) -> str:
     """Render ``value`` as a markdown code span, or ``""`` when it is empty."""
     text = _md_text(value)
     return f"`{text}`" if text else ""
-
-
-# Line grammars
-
-# One label character: anything the sanitizer cannot remove, plus our three
-# escapes. ``>`` is excluded, so no label can contain ``->>`` or ``-->>``; ``|``
-# is excluded, so an edge label cannot close its own delimiter; the shape
-# delimiters are excluded, so a node label cannot close its own shape.
-_LABEL_CHAR = r"[^\n;`#<>|\[\]{}()]"
-_LABEL_ATOM = rf"(?:#lt;|#gt;|#quot;|{_LABEL_CHAR})"
-_LABEL_RE = rf"{_LABEL_ATOM}*"
-
-#: Every line :func:`render_sequence_mermaid` can emit ``fullmatch``es this.
-SEQUENCE_LINE_GRAMMAR: re.Pattern[str] = re.compile(
-    "|".join(
-        (
-            r"sequenceDiagram",
-            rf"    participant P\d+ as {_LABEL_RE}",
-            rf"(?:    |        )P\d+(?:->>|-->>)P\d+: {_LABEL_RE}",
-            rf"    (?:alt|else|opt|loop) {_LABEL_RE}",
-            r"    end",
-        )
-    )
-)
-
-_SHAPE_RE = (
-    rf"(?:\(\[{_LABEL_RE}\]\)|\[\[{_LABEL_RE}\]\]|\[/{_LABEL_RE}/\]|\[{_LABEL_RE}\]|\{{{_LABEL_RE}\}})"
-)
-_NODE_REF_RE = rf"N\d+{_SHAPE_RE}?"
-
-#: Every line :func:`render_flowchart_mermaid` can emit ``fullmatch``es this.
-FLOWCHART_LINE_GRAMMAR: re.Pattern[str] = re.compile(
-    "|".join(
-        (
-            r"flowchart TD",
-            rf"    N\d+{_SHAPE_RE}",
-            rf"    {_NODE_REF_RE} --> {_NODE_REF_RE}",
-            rf"    {_NODE_REF_RE} -->\|{_LABEL_RE}\| {_NODE_REF_RE}",
-        )
-    )
-)
 
 
 # Small typed readers over the untyped spec/result dicts
@@ -491,6 +443,18 @@ def _defined_at_by_ref(grounding: dict[str, Any], element: str) -> dict[str, str
     return out
 
 
+def _pruned_capped_parts(grounding: dict[str, Any], noun: str) -> list[str]:
+    """The 'dropped as ungrounded' / 'trimmed to fit the diagram cap' grounding tail."""
+    parts: list[str] = []
+    pruned = _int(_mapping(grounding.get("summary")).get("pruned"))
+    if pruned:
+        parts.append(f"{pruned} proposed {_plural(pruned, noun)} {_was(pruned)} dropped as ungrounded.")
+    capped = _capped_total(grounding)
+    if capped:
+        parts.append(f"{capped} further {_plural(capped, noun)} {_was(capped)} trimmed to fit the diagram cap.")
+    return parts
+
+
 def _sequence_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
     """The ``<sub>`` grounding line for a rendered sequence diagram."""
     messages = len(_dicts(spec.get("messages")))
@@ -500,18 +464,7 @@ def _sequence_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
         f"{participants} {_plural(participants, 'component')}, "
         "each grounded to a cited call site."
     ]
-    pruned = _int(_mapping(grounding.get("summary")).get("pruned"))
-    if pruned:
-        parts.append(
-            f"{pruned} proposed {_plural(pruned, 'interaction')} {_was(pruned)} dropped as ungrounded."
-        )
-    capped = _capped_total(grounding)
-    if capped:
-        parts.append(
-            f"{capped} further {_plural(capped, 'interaction')} {_was(capped)} "
-            "trimmed to fit the diagram cap."
-        )
-    return " ".join(parts)
+    return " ".join(parts + _pruned_capped_parts(grounding, "interaction"))
 
 
 def _flowchart_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
@@ -533,15 +486,7 @@ def _flowchart_sub_line(spec: dict[str, Any], grounding: dict[str, Any]) -> str:
         f"Control flow of `{name}`{where}: {nodes} {_plural(nodes, 'node')}, "
         "each grounded to a statement inside that function."
     ]
-    pruned = _int(_mapping(grounding.get("summary")).get("pruned"))
-    if pruned:
-        parts.append(f"{pruned} proposed {_plural(pruned, 'node')} {_was(pruned)} dropped as ungrounded.")
-    capped = _capped_total(grounding)
-    if capped:
-        parts.append(
-            f"{capped} further {_plural(capped, 'node')} {_was(capped)} trimmed to fit the diagram cap."
-        )
-    return " ".join(parts)
+    return " ".join(parts + _pruned_capped_parts(grounding, "node"))
 
 
 def _table(header: list[str], rows: list[list[str]]) -> str:

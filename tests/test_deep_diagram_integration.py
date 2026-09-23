@@ -24,12 +24,48 @@ from typing import Any, cast
 
 import pytest
 
+from daydream import pr_review
+from daydream.artifact_visibility import (
+    artifact_dir_for,
+    open_artifact_session,
+    private_root_locations,
+    resolve_private_workspace_owner,
+)
+from daydream.config_file import DaydreamFileConfig
+from daydream.deep import diagram_steps as deep
+from daydream.deep.diagram_grounding import RepoSymbols
+from daydream.deep.diagram_schema import SEQUENCE_SPEC_SCHEMA
+from daydream.deep.diagram_trigger import Eligibility, KindDecision
+from daydream.deep.diagram_types import DiagramThresholds
+from daydream.deep.prompts import _candidate_roots_block, _diagram_diff_block, _files_by_module_block
+from daydream.exploration import _BOUNDARY_BLOCKQUOTE
+from daydream.extensions import Registry
+from daydream.extensions.registry import Registry as _Registry
+from daydream.flows.engine import FlowContext
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnavailable
+from daydream.runner import RunConfig, run
+from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
+from tests.harness.diagram_repos import build_large_cross_module_repo
 from tests.harness.diagram_repos import load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.test_deep_orchestrator import _profile_with_pipeline
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
+
+
+async def test_expired_review_deadline_skips_optional_diagram_requests(
+    tmp_path: Path, review_run: Callable[..., Any],
+) -> None:
+
+    target = dr.build_cross_module_repo(tmp_path)
+    code, backend = await review_run(target, review_profile=_profile_with_pipeline(review_wall_budget_s=0))
+    assert code == 0
+    assert not backend.calls
+
 
 SEQUENCE_GOLDEN = """sequenceDiagram
     participant P1 as Client
@@ -89,7 +125,6 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
     renderer, the diagram slot, and every marker are produced by production
     code exactly as they would be on a live PR.
     """
-    from daydream import pr_review
 
     captured = _CapturedPost(fake_gh)
     fake_pr = pr_review.PRInfo(
@@ -163,7 +198,6 @@ def review_run(
 
 
 async def _dispatch_run(config: Any) -> int:
-    from daydream.runner import run
 
     return await run(config)
 
@@ -289,15 +323,6 @@ def _reasons(result: dict[str, Any]) -> set[str]:
     }
 
 
-def _assert_grammar(mermaid: str, kind: str) -> None:
-    """Every emitted line must match the kind's exported line grammar."""
-    from daydream.deep.diagram_render import FLOWCHART_LINE_GRAMMAR, SEQUENCE_LINE_GRAMMAR
-
-    grammar = SEQUENCE_LINE_GRAMMAR if kind == "sequence" else FLOWCHART_LINE_GRAMMAR
-    for line in mermaid.split("\n"):
-        assert grammar.fullmatch(line), f"{kind} mermaid emitted an off-grammar line: {line!r}"
-
-
 # --- Spec test 1: sequence auto trigger -------------------------------------
 
 
@@ -335,7 +360,6 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     # Wire contract: the author agent is read-only, answers the kind's schema,
     # gets no ``max_turns`` (which would fail hard rather than soft), and runs
     # under no fan-out ``agents=`` definition.
-    from daydream.deep.diagram_schema import SEQUENCE_SPEC_SCHEMA
 
     assert calls[0]["read_only"] is True
     assert calls[0]["output_schema"] is SEQUENCE_SPEC_SCHEMA
@@ -343,7 +367,6 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     assert calls[0]["agents"] is None
 
     assert sequence["mermaid"] == SEQUENCE_GOLDEN
-    _assert_grammar(sequence["mermaid"], "sequence")
 
     body = captured_post.body()
     assert SEQUENCE_HEADING in body
@@ -406,7 +429,6 @@ async def test_flowchart_auto_trigger_renders_grounded_diagram(
     assert artifact["results"]["sequence"]["status"] == "skipped"
     assert flowchart["grounding"]["root_range"] == [1, 9]
     assert flowchart["mermaid"] == FLOWCHART_GOLDEN
-    _assert_grammar(flowchart["mermaid"], "flowchart")
     assert len(_diagram_calls(stub, "flowchart")) == 1
     assert _diagram_calls(stub, "sequence") == []
 
@@ -534,7 +556,6 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
     assert "Ghost call" in mermaid, "the repaired message must be drawn"
     assert "Unsnappable symbol" not in mermaid
     assert "Undefined callee" not in mermaid
-    _assert_grammar(mermaid, "sequence")
 
     body = captured_post.body()
     assert "2 proposed interactions were dropped as ungrounded." in body
@@ -556,6 +577,37 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
         dispatch,
         ["diagram-sequence", "diagram-sequence-repair"],
     )
+
+
+async def test_nonresumable_diagram_prunes_without_losing_grounded_content(
+    tmp_path: Path,
+    review_run: Callable[..., Any],
+    captured_post: _CapturedPost,
+) -> None:
+    """An unavailable continuation skips repair and preserves verified content."""
+    target = dr.build_cross_module_repo(tmp_path)
+
+    exit_code, stub = await review_run(
+        target,
+        specs={"sequence": _fabricated_sequence_turns()},
+        session_id=None,
+    )
+
+    assert exit_code == 0
+    assert len(_diagram_calls(stub, "sequence")) == 1
+    sequence = _artifact(target)["results"]["sequence"]
+    assert sequence["status"] == "rendered"
+    assert sequence["grounding"]["summary"] == {
+        "proposed": 11,
+        "grounded_first_pass": 8,
+        "repaired": 0,
+        "pruned": 3,
+    }
+    assert sequence["mermaid"] == SEQUENCE_GOLDEN
+    body = captured_post.body()
+    assert SEQUENCE_GOLDEN in body
+    assert "3 proposed interactions were dropped as ungrounded." in body
+    assert all(str(item["label"]) not in body for item in _FABRICATED)
 
 
 # --- Spec test 5: flowchart grounding ---------------------------------------
@@ -671,7 +723,6 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
     assert "N8[item truthy?]" in mermaid, "the demoted decision renders as a process box"
     assert "Outside root" not in mermaid
     assert "Unreachable" not in mermaid
-    _assert_grammar(mermaid, "flowchart")
     assert FLOWCHART_HEADING in captured_post.body()
 
 
@@ -935,7 +986,6 @@ async def test_file_config_mode_off_suppresses_diagrams(
     review_run: Callable[..., Any],
 ) -> None:
     """``[tool.daydream.diagram] mode = "off"`` suppresses without a CLI flag."""
-    from daydream.config_file import DaydreamFileConfig
 
     target = dr.build_cross_module_repo(tmp_path)
 
@@ -955,7 +1005,6 @@ async def test_cli_diagram_both_overrides_file_config_off(
     review_run: Callable[..., Any],
 ) -> None:
     """The CLI flag outranks the repository file's off switch."""
-    from daydream.config_file import DaydreamFileConfig
 
     target = dr.build_cross_module_repo(tmp_path)
 
@@ -978,7 +1027,6 @@ async def test_min_branch_points_threshold_disables_the_flowchart(
     review_run: Callable[..., Any],
 ) -> None:
     """A raised ``min_branch_points`` puts the 4-branch fixture below the bar."""
-    from daydream.config_file import DaydreamFileConfig
 
     target = dr.build_branch_heavy_repo(tmp_path)
 
@@ -1020,7 +1068,6 @@ async def test_injection_payloads_cannot_add_mermaid_statements(
     sequence = _artifact(target)["results"]["sequence"]
     assert sequence["status"] == "rendered"
     mermaid = sequence["mermaid"]
-    _assert_grammar(mermaid, "sequence")
     # Same statement count as the clean golden: nothing was smuggled in.
     assert len(mermaid.split("\n")) == len(SEQUENCE_GOLDEN.split("\n"))
     assert "P1->>P9" not in mermaid, "the newline payload did not become a statement"
@@ -1173,8 +1220,6 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     the step's ``config_phase`` really is ``"diagram"``, which this proves at
     the backend boundary rather than by reading the FlowStep.
     """
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import run
 
     for module in (
         "daydream.deep.orchestrator",
@@ -1241,8 +1286,6 @@ def _recording_agent(prompts: list[str]) -> Any:
 
 
 def _clone_test_eligibility() -> Any:
-    from daydream.deep.diagram_trigger import Eligibility, KindDecision
-    from daydream.deep.diagram_types import DiagramThresholds
 
     return Eligibility(
         code_files=["a.py", "b.py"],
@@ -1259,10 +1302,6 @@ def _clone_test_eligibility() -> Any:
 
 
 def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: str | None) -> Any:
-    from daydream.extensions import Registry
-    from daydream.flows.engine import FlowContext
-    from daydream.runner import RunConfig
-    from daydream.workspace import WorkContext
 
     diff_path = tmp_path / "diff.patch"
     diff_path.write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n", encoding="utf-8")
@@ -1297,9 +1336,7 @@ def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Pa
     carries inline exploration+dependency content, inlines the diff, and names
     NO .daydream/exploration or diff.patch path — the author turn can complete
     without reading any artifact the prompt references."""
-    from types import SimpleNamespace
 
-    from daydream.deep import diagram_steps as deep
 
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
@@ -1313,9 +1350,7 @@ def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Pa
 def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
     """A non-disposable backend takes the unchanged pointer path: the on-disk
     diff.patch and exploration directory are named, not inlined."""
-    from types import SimpleNamespace
 
-    from daydream.deep import diagram_steps as deep
 
     backend = SimpleNamespace(read_only_disposable_clone=False, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
@@ -1329,9 +1364,7 @@ def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
 def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -> None:
     """Missing exploration files are omitted entirely in clone mode — never
     faked — while the diff is still inlined."""
-    from types import SimpleNamespace
 
-    from daydream.deep import diagram_steps as deep
 
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary=None, deps_text=None)
@@ -1346,8 +1379,6 @@ def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_pa
     dependencies.md must not be rendered as a marker-only string: that would
     assert 'Deterministic import edges' while carrying only the truncation
     notice. It is omitted entirely."""
-    from daydream.deep import diagram_steps as deep
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
@@ -1366,8 +1397,6 @@ def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) 
     artifacts that do not travel to the disposable clone (the
     affected_files.md/conventions.md/dependencies.md rows and the embedded
     blockquote the writer emits), while the prose is kept."""
-    from daydream.deep import diagram_steps as deep
-    from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
@@ -1399,8 +1428,6 @@ def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) 
 def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> None:
     """Issue #336: the summary slice is byte-exact (mirroring the diff-block
     truncation), so a multibyte summary cannot exceed INLINE_DIFF_BUDGET_BYTES."""
-    from daydream.deep import diagram_steps as deep
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
@@ -1422,10 +1449,7 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     splatting them in would raise TypeError and degrade the kind to failed.
     The override gets exactly the documented kwarg set and the run proceeds —
     with exploration_dir=None on the clone run, never the dangling host path."""
-    from types import SimpleNamespace
 
-    from daydream.deep import diagram_steps as deep
-    from daydream.extensions.registry import Registry
 
     registry = Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
@@ -1446,8 +1470,6 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
     """Issue #1123 acceptance: the full author turn on a disposable-clone backend
     completes with no read of .daydream/exploration or diff.patch — the prompt
     names neither path, so the clone cannot be asked to read them."""
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
 
     class _Wall:
         """Fake disposable-clone backend."""
@@ -1479,8 +1501,6 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
 
 
 def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_path: Path) -> None:
-    from tests.harness.diagram_repos import build_large_cross_module_repo
-    from tests.harness.git_helpers import git
 
     repo = build_large_cross_module_repo(tmp_path)
     diff = git(repo, "diff", "--stat", "main...HEAD")
@@ -1492,8 +1512,6 @@ def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_pat
 
 
 def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> None:
-    from daydream.deep.prompts import _files_by_module_block
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     huge = {f"pkg_{i:03d}": [f"pkg_{i:03d}/mod_{j:02d}.py" for j in range(30)] for i in range(60)}
     first = _files_by_module_block(huge)
@@ -1510,8 +1528,6 @@ def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> No
 
 
 def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> None:
-    from daydream.deep.prompts import _candidate_roots_block
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     roots = [
         {"file": f"pkg/mod_{i:03d}.py", "name": f"handle_{i:03d}", "line": 1,
@@ -1532,8 +1548,6 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     tmp_path: Path, fake_gh: FakeGh, review_run: Callable[..., Any]
 ) -> None:
     """Real path: a ~20,000-line PR writes a bounded files-by-module block and says so."""
-    from tests.harness.diagram_repos import build_large_cross_module_repo
-    from tests.harness.git_helpers import commit, git
 
     target = build_large_cross_module_repo(tmp_path)
     # The committed fixture spans only two top-level modules, so its projection
@@ -1570,18 +1584,6 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
     the plan). A test that needs teardown should use the ``async with`` form
     instead.
     """
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
-    from daydream.extensions import Registry
-    from daydream.flows.engine import FlowContext
-    from daydream.runner import RunConfig
-    from daydream.workspace import WorkContext
-    from tests.harness.git_helpers import commit, init_repo
-    from tests.harness.git_helpers import git as _git
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1628,8 +1630,6 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
 async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_overflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
 ) -> None:
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
 
     ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
@@ -1648,8 +1648,6 @@ async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_over
 async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
 
     ctx = await _session_test_ctx(tmp_path)
     diff_path = ctx.data["diff_path"]
@@ -1672,8 +1670,6 @@ async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
 async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
 
     ctx = await _session_test_ctx(tmp_path)
 
@@ -1706,8 +1702,6 @@ async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
 async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: Any
 ) -> None:
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
 
     ctx = await _session_test_ctx(tmp_path)
     backend.audit_root = ctx.work.repo.resolve() if hasattr(backend, "audit_root_isolation") else None
@@ -1731,8 +1725,6 @@ async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
 
 
 def test_clone_mode_diff_block_includes_its_banner_and_marker_in_the_budget() -> None:
-    from daydream.deep.prompts import _diagram_diff_block
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     block = _diagram_diff_block(Path("/nowhere/diff.patch"), "é" * 20_000, clone_mode=True)
     assert "[diff truncated to fit the prompt budget]" in block
@@ -1744,9 +1736,6 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
 ) -> None:
     """Req 10 × req 4: a fork override written before the inline kwargs keeps its
     documented kwarg set AND must not be handed a private host path to print."""
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
-    from daydream.extensions.registry import Registry as _Registry
 
     registry = _Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
@@ -1768,9 +1757,6 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
 async def test_author_and_repair_turns_share_one_prepared_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.deep import diagram_steps as deep
-    from daydream.deep.diagram_grounding import RepoSymbols
-    from daydream.prompt_budget import SanctionedInputUnavailable
 
     ctx = await _session_test_ctx(tmp_path)
     seen: list[Any] = []

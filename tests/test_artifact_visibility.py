@@ -1,13 +1,12 @@
-"""Real-process/filesystem spike for the artifact visibility storage design.
+"""Real-process/filesystem tests for production artifact visibility.
 
-This module deliberately contains a small executable transaction model.  Task 0
-uses it to prove the OS and filesystem assumptions before production code adopts
-the protocol in Task 1; it is not a substitute implementation of that API.
+The independent manifest oracle reads filesystem bytes and modes directly, so
+round-trip assertions do not derive their expected results from production code.
+Child processes exercise session locks and crash recovery at durable transitions.
 """
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -22,7 +21,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
@@ -52,6 +51,7 @@ from daydream.artifact_visibility import (
 from daydream.artifact_visibility import (
     open_artifact_session as _open_artifact_session,
 )
+from daydream.deep.artifacts import check_deep_artifacts
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
@@ -205,7 +205,7 @@ def _walk_entry(root: Path, path: Path, entries: list[_Entry]) -> None:
     relative = path.relative_to(root).as_posix()
     mode = stat.S_IMODE(info.st_mode)
     if stat.S_ISLNK(info.st_mode):
-        raise RuntimeError("artifact spike refuses symlink entries")
+        raise RuntimeError("manifest oracle refuses symlink entries")
     if stat.S_ISDIR(info.st_mode):
         entries.append(_Entry(relative, "directory", mode, 0, None))
         children = sorted(path.iterdir(), key=lambda child: os.fsencode(child.name))
@@ -213,7 +213,7 @@ def _walk_entry(root: Path, path: Path, entries: list[_Entry]) -> None:
             _walk_entry(root, child, entries)
         return
     if not stat.S_ISREG(info.st_mode):
-        raise RuntimeError("artifact spike accepts only directories and regular files")
+        raise RuntimeError("manifest oracle accepts only directories and regular files")
     content = _read_regular_nofollow(path, info)
     entries.append(_Entry(relative, "file", mode, len(content), hashlib.sha256(content).hexdigest()))
 
@@ -223,10 +223,6 @@ def _manifest(root: Path) -> tuple[_Entry, ...]:
     for name in (".daydream", ".review-output.md"):
         _walk_entry(root, root / name, entries)
     return tuple(entries)
-
-
-def _manifest_payload(entries: tuple[_Entry, ...]) -> dict[str, object]:
-    return {"schema_version": 1, "entries": [asdict(entry) for entry in entries]}
 
 
 def _load_manifest(path: Path) -> tuple[_Entry, ...]:
@@ -251,78 +247,6 @@ def _load_manifest(path: Path) -> tuple[_Entry, ...]:
     return tuple(entries)
 
 
-def _copy_public(source: Path, destination: Path) -> tuple[_Entry, ...]:
-    entries = _manifest(source)
-    destination.mkdir(parents=True, mode=0o700)
-    for entry in entries:
-        target = destination / entry.path
-        if entry.kind == "directory":
-            target.mkdir()
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        original = source / entry.path
-        content = _read_regular_nofollow(original, original.lstat())
-        with target.open("xb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(target, entry.mode)
-    for entry in reversed(entries):
-        if entry.kind == "directory":
-            directory = destination / entry.path
-            os.chmod(directory, entry.mode)
-            _fsync_dir(directory)
-    _fsync_dir(destination)
-    assert _manifest(destination) == entries
-    return entries
-
-
-def _remove_manifested_public(source: Path, entries: tuple[_Entry, ...]) -> None:
-    if _manifest(source) != entries:
-        raise RuntimeError("public artifact bytes changed before removal")
-    for entry in entries:
-        if entry.kind == "file":
-            target = source / entry.path
-            target.unlink()
-            _fsync_dir(target.parent)
-    directories = sorted(
-        (entry for entry in entries if entry.kind == "directory"),
-        key=lambda entry: entry.path.count("/"),
-        reverse=True,
-    )
-    for entry in directories:
-        target = source / entry.path
-        target.rmdir()
-        _fsync_dir(target.parent)
-
-
-def _install_stage(source: Path, stage: Path) -> None:
-    assert not (source / ".daydream").exists()
-    assert not (source / ".review-output.md").exists()
-    os.replace(stage / ".daydream", source / ".daydream")
-    _fsync_dir(source)
-    os.replace(stage / ".review-output.md", source / ".review-output.md")
-    _fsync_file(source / ".review-output.md")
-    _fsync_dir(source)
-
-
-def _state_root(runtime: Path, source: Path) -> Path:
-    root = runtime / _workspace_key(source)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(root, 0o700)
-    owner = {
-        "schema_version": 1,
-        "source": str(source.resolve(strict=True)),
-        "git_common_dir": str(_git_common_dir(source)),
-    }
-    owner_path = root / "owner.json"
-    if owner_path.exists():
-        assert _load_json(owner_path) == owner
-    else:
-        _atomic_json(owner_path, owner)
-    return root
-
-
 def _park(marker: Path, state: str) -> None:
     """Publish the kill-point marker durably, then wait to be SIGKILLed."""
     marker.write_text(state, encoding="ascii")
@@ -330,102 +254,6 @@ def _park(marker: Path, state: str) -> None:
     _fsync_dir(marker.parent)
     while True:
         signal.pause()
-
-
-def _transition(journal: Path, state: str, kill_at: str, marker: Path) -> None:
-    _atomic_json(journal, {"schema_version": 1, "state": state})
-    if state == kill_at:
-        _park(marker, state)
-
-
-def _check_ephemeral_repo(source: Path, repo: Path) -> None:
-    assert _git(repo, "rev-parse", "--is-inside-work-tree") == "true"
-    assert _git_common_dir(repo) == _git_common_dir(source)
-
-
-def _transaction_child(source: Path, repo: Path, runtime: Path, kill_at: str, marker: Path) -> None:
-    _check_ephemeral_repo(source, repo)
-    state = _state_root(runtime, source)
-    transaction = state / "transactions" / "spike"
-    transaction.mkdir(parents=True)
-    journal = transaction / "journal.json"
-    stage = transaction / "detach-stage"
-    entries = _copy_public(source, stage)
-    manifest_path = transaction / "manifest.json"
-    _atomic_json(manifest_path, _manifest_payload(entries))
-    _transition(journal, "DETACH_STAGED", kill_at, marker)
-
-    canonical = state / "canonical"
-    os.replace(stage, canonical)
-    _fsync_dir(state)
-    _atomic_json(state / "canonical-manifest.json", _manifest_payload(entries))
-    _transition(journal, "DETACH_CANONICAL", kill_at, marker)
-    _transition(journal, "DETACH_REMOVING", kill_at, marker)
-    _remove_manifested_public(source, entries)
-    _transition(journal, "DETACHED", kill_at, marker)
-
-    publish_stage = transaction / "publish-stage"
-    assert _copy_public(canonical, publish_stage) == entries
-    _transition(journal, "PUBLISH_STAGED", kill_at, marker)
-    backup = transaction / "public-backup"
-    backup.mkdir()
-    _fsync_dir(transaction)
-    _transition(journal, "PUBLISH_BACKED_UP", kill_at, marker)
-    _install_stage(source, publish_stage)
-    _transition(journal, "PUBLISH_INSTALLED", kill_at, marker)
-    assert _manifest(source) == entries
-    _transition(journal, "PUBLISH_VERIFIED", kill_at, marker)
-
-
-def _recover_child(source: Path, repo: Path, runtime: Path) -> None:
-    _check_ephemeral_repo(source, repo)
-    state = _state_root(runtime, source)
-    transaction = state / "transactions" / "spike"
-    journal = transaction / "journal.json"
-    payload = _load_json(journal)
-    transition = cast(str, payload["state"])
-    manifest_path = transaction / "manifest.json"
-    entries = _load_manifest(manifest_path)
-    canonical = state / "canonical"
-
-    if transition == "DETACH_STAGED":
-        stage = transaction / "detach-stage"
-        assert _manifest(stage) == entries
-        os.replace(stage, canonical)
-        _fsync_dir(state)
-        _atomic_json(state / "canonical-manifest.json", _manifest_payload(entries))
-        transition = "DETACH_CANONICAL"
-        _atomic_json(journal, {"schema_version": 1, "state": transition})
-
-    assert _load_manifest(state / "canonical-manifest.json") == entries
-    assert _manifest(canonical) == entries
-    if transition in ("DETACH_CANONICAL", "DETACH_REMOVING"):
-        _remove_manifested_public(source, entries)
-        transition = "DETACHED"
-        _atomic_json(journal, {"schema_version": 1, "state": transition})
-
-    public_exists = (source / ".daydream").exists() or (source / ".review-output.md").exists()
-    if transition in ("PUBLISH_INSTALLED", "PUBLISH_VERIFIED"):
-        assert _manifest(source) == entries
-    else:
-        assert not public_exists
-        publish_stage = transaction / "recovery-publish-stage"
-        assert _copy_public(canonical, publish_stage) == entries
-        _install_stage(source, publish_stage)
-    assert _manifest(source) == entries
-    _atomic_json(journal, {"schema_version": 1, "state": "PUBLISH_VERIFIED"})
-
-
-def _lock_child(lock_path: Path, marker: Path) -> None:
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        marker.write_text("locked", encoding="ascii")
-        _fsync_file(marker)
-        while True:
-            signal.pause()
-    finally:
-        os.close(fd)
 
 
 def _wait_for_marker(process: subprocess.Popen[str], marker: Path) -> None:
@@ -596,13 +424,6 @@ def _manifest_identity(entries: Any) -> tuple[tuple[str, str, int, int, Any], ..
     )
 
 
-def _projection_matches(root: Path, entries: tuple[_Entry, ...]) -> bool:
-    try:
-        return _manifest(root) == entries
-    except FileNotFoundError:
-        return False
-
-
 def _work(source: Path, *, repo: Path | None = None, run_id: str = "work") -> WorkContext:
     return WorkContext(
         repo=source if repo is None else repo,
@@ -749,100 +570,6 @@ def source(tmp_path: Path) -> Path:
     repo = tmp_path / "source"
     _init_repo(repo)
     return repo
-
-
-def test_lock_process_rejects_second_process_and_releases_on_death(tmp_path: Path) -> None:
-    lock_path = tmp_path / "workspace.lock"
-    marker = tmp_path / "lock-ready"
-    with _child_at_marker(marker, "lock", str(lock_path), str(marker)):
-        contender = os.open(lock_path, os.O_RDWR)
-        try:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        finally:
-            os.close(contender)
-
-    released = os.open(lock_path, os.O_RDWR)
-    try:
-        fcntl.flock(released, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(released, fcntl.LOCK_UN)
-    finally:
-        os.close(released)
-
-
-def test_recovery_spike_rejects_symlink_without_following(tmp_path: Path, source: Path) -> None:
-    _seed_public_artifacts(source)
-    outside = tmp_path / "outside-secret"
-    outside.write_bytes(b"must remain outside")
-    (source / ".daydream" / "deep" / "outward-link").symlink_to(outside)
-
-    with pytest.raises(RuntimeError, match="refuses symlink"):
-        _copy_public(source, tmp_path / "stage")
-
-    assert outside.read_bytes() == b"must remain outside"
-    assert not (tmp_path / "stage" / ".daydream" / "deep" / "outward-link").exists()
-
-
-@pytest.mark.parametrize("transition", _TRANSITIONS)
-def test_recovery_spike_survives_real_process_death_at_each_journal_transition(
-    tmp_path: Path,
-    source: Path,
-    transition: str,
-) -> None:
-    expected = _seed_public_artifacts(source)
-    runtime = tmp_path / "operator-runtime"
-    first_repo, second_repo = _worktrees(source, "ephemeral-one", "ephemeral-two")
-    common_dir = _git_common_dir(source)
-    assert _git_common_dir(first_repo) == common_dir
-    assert _git_common_dir(second_repo) == common_dir
-    marker = tmp_path / f"reached-{transition}"
-
-    with _child_at_marker(marker, "transaction", str(source), str(first_repo), str(runtime), transition, str(marker)):
-        pass
-
-    state = runtime / _workspace_key(source)
-    assert _projection_matches(source, expected) or _projection_matches(state / "canonical", expected)
-    public_expected = transition in {
-        "DETACH_STAGED",
-        "DETACH_CANONICAL",
-        "DETACH_REMOVING",
-        "PUBLISH_INSTALLED",
-        "PUBLISH_VERIFIED",
-    }
-    assert _projection_matches(source, expected) is public_expected
-
-    recovered = subprocess.run(  # noqa: S603 - fixed test helper and paths
-        [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "recover",
-            str(source),
-            str(second_repo),
-            str(runtime),
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-    assert recovered.returncode == 0, recovered.stderr
-    assert _manifest(source) == expected
-    assert _manifest(state / "canonical") == expected
-    assert (source / ".daydream" / "runs" / "opaque.bin").read_bytes() == b"\x00\xff\xfe\x80payload\n"
-    assert (source / ".daydream" / "deep" / "empty-directory").is_dir()
-    assert not any((source / ".daydream" / "deep" / "empty-directory").iterdir())
-    assert stat.S_IMODE((source / ".daydream" / "deep" / "prior.md").stat().st_mode) == 0o640
-    assert stat.S_IMODE((source / ".daydream" / "runs" / "opaque.bin").stat().st_mode) == 0o600
-    assert stat.S_IMODE(
-        (source / ".daydream" / "deep" / "empty-directory").stat().st_mode
-    ) == 0o711
-    assert stat.S_IMODE((source / ".review-output.md").stat().st_mode) == 0o644
-    assert _load_json(state / "owner.json") == {
-        "schema_version": 1,
-        "source": str(source.resolve(strict=True)),
-        "git_common_dir": str(_git_common_dir(source)),
-    }
 
 
 def test_private_root_locations_explicit_base_bypasses_default_provider(
@@ -1028,7 +755,6 @@ async def test_artifact_session_detaches_routes_and_restores_public_bytes(
 
 
 async def test_artifact_session_preserves_resume_mtimes_across_publication_and_reopen(source: Path) -> None:
-    from daydream.deep.artifacts import check_deep_artifacts
 
     deep = source / ".daydream" / "deep"
     deep.mkdir(parents=True)
@@ -1206,7 +932,12 @@ async def test_artifact_session_rejects_recognized_legacy_anchor_with_unknown_si
 
 @pytest.mark.parametrize(
     ("anchor", "kind"),
-    [pytest.param("improve", "directory", id="improve"), pytest.param("recommended.patch", "file", id="patch")],
+    [
+        pytest.param("improve", "directory", id="improve"),
+        pytest.param("intents", "directory", id="intents"),
+        pytest.param("recommended.patch", "file", id="patch"),
+        pytest.param(".DS_Store", "file", id="ds-store"),
+    ],
 )
 async def test_artifact_session_accepts_registered_legacy_anchor_format(
     source: Path, anchor: str, kind: str,
@@ -1229,7 +960,9 @@ async def test_artifact_session_accepts_registered_legacy_anchor_format(
     ("anchor", "make_wrong_type"),
     [
         pytest.param("improve", lambda path: path.write_bytes(b"not a directory"), id="improve-file"),
+        pytest.param("intents", lambda path: path.write_bytes(b"not a directory"), id="intents-file"),
         pytest.param("recommended.patch", lambda path: path.mkdir(), id="patch-directory"),
+        pytest.param(".DS_Store", lambda path: path.mkdir(), id="ds-store-directory"),
     ],
 )
 async def test_artifact_session_rejects_registered_legacy_anchor_with_wrong_type(
@@ -1638,7 +1371,7 @@ async def test_artifact_session_recovers_real_process_death_at_every_transition(
     artifact_runtime_root: Path,
     transition: str,
 ) -> None:
-    _seed_public_artifacts(source)
+    expected = _seed_public_artifacts(source)
     (source / "explicit-output.txt").write_bytes(b"prior explicit bytes")
     first_repo, second_repo = _worktrees(source, "ephemeral-one", "ephemeral-two")
     marker = tmp_path / f"production-{transition}"
@@ -1670,6 +1403,18 @@ async def test_artifact_session_recovers_real_process_death_at_every_transition(
     assert (source / "explicit-output.txt").read_bytes() == (
         b"published explicit bytes" if has_published_run else b"prior explicit bytes"
     )
+    # Publication may add a run, but every pre-existing entry must survive exactly.
+    restored = {entry.path: entry for entry in _manifest(source)}
+    assert tuple(restored[entry.path] for entry in expected) == expected
+    assert (source / ".daydream" / "runs" / "opaque.bin").read_bytes() == b"\x00\xff\xfe\x80payload\n"
+    assert (source / ".daydream" / "deep" / "empty-directory").is_dir()
+    assert not any((source / ".daydream" / "deep" / "empty-directory").iterdir())
+    assert stat.S_IMODE((source / ".daydream" / "deep" / "prior.md").stat().st_mode) == 0o640
+    assert stat.S_IMODE((source / ".daydream" / "runs" / "opaque.bin").stat().st_mode) == 0o600
+    assert stat.S_IMODE(
+        (source / ".daydream" / "deep" / "empty-directory").stat().st_mode
+    ) == 0o711
+    assert stat.S_IMODE((source / ".review-output.md").stat().st_mode) == 0o644
     state_root = artifact_runtime_root / _workspace_key(source)
     assert not any((state_root / "transactions").iterdir())
 
@@ -3605,9 +3350,6 @@ async def test_current_entry_replacement_is_preserved_during_publication(
 
 # ``<action>`` to child entrypoint, with the positions of its non-Path arguments.
 _HELPERS: dict[str, tuple[Callable[..., None], tuple[int, ...]]] = {
-    "lock": (_lock_child, ()),
-    "transaction": (_transaction_child, (3,)),
-    "recover": (_recover_child, ()),
     "production-transaction": (_production_transaction_child, (3,)),
     "production-lock": (_production_lock_child, ()),
     "production-external": (_production_external_child, (3, 4)),
@@ -3782,7 +3524,7 @@ async def test_artifact_session_projection_rejects_unowned_or_unsafe_paths(
 def _main() -> None:
     action, *arguments = sys.argv[1:]
     if action not in _HELPERS:
-        raise SystemExit(f"unknown storage-spike helper action: {action}")
+        raise SystemExit(f"unknown artifact visibility helper action: {action}")
     handler, strings = _HELPERS[action]
     handler(*(value if index in strings else Path(value) for index, value in enumerate(arguments)))
 

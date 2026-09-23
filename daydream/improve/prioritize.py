@@ -205,6 +205,13 @@ def _without_package_fields(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _string_list(value: object) -> list[str]:
+    """Return the non-empty strings in *value*, or ``[]`` when it is not a list."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
 def _finding_aliases(finding: dict[str, Any]) -> set[str]:
     aliases = {
         value
@@ -214,9 +221,7 @@ def _finding_aliases(finding: dict[str, Any]) -> set[str]:
         )
         if isinstance(value, str) and value
     }
-    member_fingerprints = finding.get("member_fingerprints")
-    if isinstance(member_fingerprints, list):
-        aliases.update(value for value in member_fingerprints if isinstance(value, str) and value)
+    aliases.update(_string_list(finding.get("member_fingerprints")))
     return aliases
 
 
@@ -278,10 +283,7 @@ def _reuse_target_key(finding: dict[str, Any]) -> str:
 
 
 def _maintenance_signals(finding: dict[str, Any]) -> set[str]:
-    signals = finding.get("maintenance_signals")
-    if not isinstance(signals, list):
-        return set()
-    return {signal for signal in signals if isinstance(signal, str) and signal}
+    return set(_string_list(finding.get("maintenance_signals")))
 
 
 def _finding_path(finding: dict[str, Any]) -> str:
@@ -491,12 +493,7 @@ def _finding_services(finding: dict[str, Any]) -> set[str]:
     A finding in an uncovered tree has no service, so the partition is what
     makes it comparable to the same pattern found elsewhere.
     """
-    services = finding.get("services")
-    keys = (
-        {service for service in services if isinstance(service, str) and service}
-        if isinstance(services, list)
-        else set()
-    )
+    keys = set(_string_list(finding.get("services")))
     partition = finding.get("partition")
     if isinstance(partition, str) and partition:
         keys.add(partition)
@@ -504,17 +501,11 @@ def _finding_services(finding: dict[str, Any]) -> set[str]:
 
 
 def _service_list(finding: dict[str, Any]) -> list[str]:
-    services = finding.get("services")
-    if not isinstance(services, list):
-        return []
-    return [service for service in services if isinstance(service, str) and service]
+    return _string_list(finding.get("services"))
 
 
 def _evidence_list(finding: dict[str, Any]) -> list[str]:
-    evidence = finding.get("evidence")
-    if not isinstance(evidence, list):
-        return []
-    return [entry for entry in evidence if isinstance(entry, str) and entry]
+    return _string_list(finding.get("evidence"))
 
 
 def _axis_value(weights: dict[str, float], value: Any, worst: float) -> float:

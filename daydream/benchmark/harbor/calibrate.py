@@ -190,7 +190,7 @@ def _load_workspace_allowlist(workspace: Path) -> list[str]:
     a malformed or missing manifest raises the project's existing workspace
     error (``WorkspaceCorrupt``) — never a silent default.
     """
-    manifest = load_benchmark_manifest(workspace).model
+    manifest = load_benchmark_manifest(workspace)
     return list(manifest.privacy.judge_allowed_hosts)
 
 
@@ -413,15 +413,6 @@ def _write_receipt(workspace: Path, receipt: dict[str, Any]) -> Path:
     return path
 
 
-def _default_confirm(prompt: str) -> bool:
-    """Read a confirmation reply from stdin; non-interactive stdin is refused."""
-    try:
-        reply = input(prompt)
-    except EOFError:
-        return False
-    return reply.strip().lower() in ("y", "yes")
-
-
 def run_calibration(
     workspace: Path,
     *,
@@ -463,6 +454,8 @@ def run_calibration(
 
     if not yes:
         if confirm is None:
+            from daydream.benchmark.harbor.run import _default_confirm
+
             confirm = _default_confirm
         prompt = (
             f"Run calibration against {inputs['provider']} model "
@@ -470,7 +463,7 @@ def run_calibration(
             f"judge prompt digest {inputs['judge_prompt_sha256'][:12]}, "
             f"threshold {inputs['threshold']}, 72 judged calls, "
             f"request timeout {inputs['request_timeout']}s; this incurs paid "
-            f"API costs. Proceed? [y/N] "
+            f"API costs. Proceed?"
         )
         if not confirm(prompt):
             print("calibrate-judge: aborted before any paid call", file=sys.stderr)

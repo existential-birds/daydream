@@ -24,11 +24,16 @@ from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from rich.console import Console
 
-from daydream import git_ops
+from daydream import artifact_visibility, git_ops
+from daydream.archive import finalize_archive_run
+from daydream.archive.index import query_runs
+from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactTreeSnapshot, manifest_tree
 from daydream.backends import (
     AgentEvent,
     DiagnosticEvent,
@@ -37,8 +42,16 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.backends.codex import CodexBackend
+from daydream.eval.analyzer import analyze_session
+from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.review_budget import ReviewLimits
+from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities
 from daydream.runner import RunConfig, run
+from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
+from daydream.trajectory import DaydreamRunFlow, RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
 from tests.harness.backend import ScriptedBackend
+from tests.harness.codex_replay import make_mock_process
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
@@ -55,6 +68,18 @@ from tests.harness.stub_backend import (
 )
 from tests.harness.trajectory import diff_adding
 from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
+
+
+def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
+    """The deep loop-mode config shared by the archive-capture tests."""
+    config: dict[str, Any] = {
+        "target": str(target),
+        "assume": "yes",
+        "output_mode": "loop",
+        "cleanup": False,
+    }
+    config.update(overrides)
+    return RunConfig(**config)
 
 
 class _ArchiveCaptureBackend(StubBackend):
@@ -120,7 +145,6 @@ def _install_deep_capture_backend(
 
 
 async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     before = kwargs["capture_tree_key"]()
     (target / "heal_edit.py").write_text("def healed():\n    pass\n")
@@ -162,11 +186,8 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     head_before = git_ops.head_sha(multi_stack_target)
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
@@ -186,7 +207,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert any("Run the project's test suite" in step["message"] for step in test_steps)
     assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
 
-    # AC1: eval ran by default -> all four metrics non-null.
     metrics = manifest["metrics"]
     assert metrics["grounding_rate"] is not None
     assert metrics["total_findings"] is not None
@@ -203,7 +223,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert len(merge_events) == 2
     assert {event["session_id"] for event in merge_events} == {manifest["session_id"]}
 
-    # AC3: recommended.patch archived and distinct from diff.patch.
     recommended = run_dir / "recommended.patch"
     diff = run_dir / "diff.patch"
     assert recommended.is_file()
@@ -279,11 +298,8 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     stub.fix_edit_line = "# daydream mixed-case identity\n"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo="bAsE-uSeR/pRoJeCt",
         )
@@ -347,11 +363,8 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
@@ -379,12 +392,7 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     )
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
 
@@ -420,11 +428,8 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
@@ -457,12 +462,7 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     stub.fix_edit_line = "# daydream recommended change\n"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
 
@@ -493,12 +493,6 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     eval_path = run_dir / "evaluation.json"
     eval_path.unlink(missing_ok=True)
 
-    from daydream.eval.analyzer import analyze_session
-    from daydream.trajectory import (
-        RunWriteSnapshot,
-        TrajectoryDocumentSnapshot,
-        snapshot_trajectories,
-    )
 
     snapshot = RunWriteSnapshot(
         status="complete",
@@ -552,11 +546,8 @@ async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -583,15 +574,55 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
     assert not dump_dir.exists()
+
+
+async def test_failed_findings_export_retains_requested_diagnostics(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+    fake_gh: FakeGh,
+) -> None:
+    """A post-merge metadata failure still publishes the existing diagnostic bundle."""
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    def invalid_pr(*_args: Any, **_kwargs: Any) -> None:
+        raise git_ops.GitError("invalid PR row: malformed head repository slug")
+
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", invalid_pr)
+    diagnostics = tmp_path / "diagnostics"
+    trajectory = diagnostics / "trajectory.json"
+    bundle = diagnostics / "bundle"
+    findings = tmp_path / "findings.json"
+    exit_code = await run(RunConfig(
+        target=str(multi_stack_target),
+        output_mode="review",
+        non_interactive=True,
+        cleanup=False,
+        pr_number=7,
+        findings_out=str(findings),
+        trajectory_path=trajectory,
+        dump_artifacts=str(bundle),
+    ))
+
+    assert exit_code == 1
+    assert not findings.exists()
+    exported = json.loads(trajectory.read_text())
+    bundled = json.loads((bundle / "trajectory.json").read_text())
+    assert exported["trajectory_id"] == bundled["trajectory_id"]
+    assert exported["steps"]
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
+    assert (bundle / "diff.patch").is_file()
+    assert (bundle / "evaluation.json").is_file()
+    assert fake_gh.calls("POST") == []
+    assert (bundle / "manifest.json").read_bytes() == (_only_archived_run(archive_dir) / "manifest.json").read_bytes()
 
 
 
@@ -624,7 +655,6 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     bundle: review published, archive installed, dump copied, exit 0 (#981's
     "preserving the local run").
     """
-    from daydream.archive.index import query_runs
 
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
     _commit_scanned_file(
@@ -637,11 +667,8 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -653,7 +680,6 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     assert query_runs(archive_dir)
     assert (multi_stack_target / ".review-output.md").is_file()
 
-    # The advisory is reported and value-free (M11): path and category only.
     out = "".join(capfd.readouterr())
     assert "diff.patch" in out
     assert "env_var" in out
@@ -676,9 +702,7 @@ async def _assert_target_is_reusable(target: Path) -> None:
     directory hold either way, so this is what makes the refusal tests real
     guards rather than assertions that pass through the wedge.
     """
-    exit_code = await run(
-        RunConfig(target=str(target), assume="yes", output_mode="loop", cleanup=False)
-    )
+    exit_code = await run(_deep_run_config(target))
     assert exit_code == 0
 
 
@@ -695,7 +719,6 @@ async def test_dump_artifacts_refuses_token_canary_in_diff(
     row, exit 1 — and the console now names the file and rule that refused,
     without echoing the credential.
     """
-    from daydream.archive.index import query_runs
 
     canary = "ghp_canaryfake123"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -704,11 +727,8 @@ async def test_dump_artifacts_refuses_token_canary_in_diff(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -741,7 +761,6 @@ async def test_dump_artifacts_refuses_multiline_pem_in_diff(
     canary on purpose: a bundle carrying both blocks on the canary alone, so a
     combined test passes with the multi-line pass unimplemented.
     """
-    from daydream.archive.index import query_runs
 
     canary = "MIIFAKEKEYMATERIALFORTESTSONLY"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -754,11 +773,8 @@ async def test_dump_artifacts_refuses_multiline_pem_in_diff(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(dump_dir),
         )
     )
@@ -790,7 +806,6 @@ async def test_dump_refusal_reports_the_archive_error_when_the_rollback_also_fai
     destination now restorable this branch is no longer on the ordinary refusal
     path, so the rollback is forced to fail to keep the report proven.
     """
-    from daydream import artifact_visibility
 
     canary = "ghp_canaryfake123"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -802,11 +817,8 @@ async def test_dump_refusal_reports_the_archive_error_when_the_rollback_also_fai
     monkeypatch.setattr(artifact_visibility.ArtifactSession, "_restore_prior", refuse_restore)
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             dump_artifacts=str(tmp_path / "uploaded-artifacts"),
         )
     )
@@ -830,11 +842,8 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     stub.fix_edit_line = "# daydream recommended change\n"
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
+        _deep_run_config(
+            multi_stack_target,
             run_eval=False,
         )
     )
@@ -861,7 +870,6 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
     """
 
     def responder(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> list[AgentEvent]:
-        from daydream.backends import ResultEvent, TextEvent
 
         pl = prompt.lower()
         # Native review prompts are skill-free (#886): dispatch on distinctive
@@ -981,90 +989,88 @@ async def test_shallow_run_captures_recommended_patch(
 
 
 
-def test_fix_applied_signal_prefers_recommended_patch(tmp_path: Path) -> None:
-    """AC4: with both patches present, the signal parses recommended.patch hunks,
-    not diff.patch hunks — a run whose RECOMMENDATION landed labels 'applied' even
-    though the reviewed line is absent post-window."""
-    from daydream.training.labeler_signals import fix_applied_signal
-
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
-    # Post-window state carries the RECOMMENDED line but NOT the reviewed line.
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: "existing\nrecommended = 1\n",
-    )
-    assert sig.verdict == "applied"
-    assert sig.hunks_applied == 1
-    assert sig.hunks_total == 1
-
-
-def test_fix_applied_signal_falls_back_to_diff_patch(tmp_path: Path) -> None:
-    """AC4 backward compat: an old archive with only diff.patch still labels via
-    the diff.patch hunks."""
-    from daydream.training.labeler_signals import fix_applied_signal
-
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "base_branch": "main",
-        "archive_path": str(tmp_path),
-    }
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: "existing\nreviewed = 2\n",
-    )
-    assert sig.verdict == "applied"
-    assert sig.hunks_total == 1
-
-
-def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(
+@pytest.mark.parametrize(
+    (
+        "patches",
+        "manifest",
+        "post_window",
+        "expected_verdict",
+        "expected_hunks_total",
+        "expected_hunks_applied",
+    ),
+    [
+        # AC4: with both patches present, the signal parses recommended.patch
+        # hunks, not diff.patch hunks — a run whose RECOMMENDATION landed labels
+        # 'applied' even though the reviewed line is absent post-window.
+        pytest.param(
+            ("diff.patch", "recommended.patch"),
+            None,
+            "existing\nrecommended = 1\n",
+            "applied",
+            1,
+            1,
+            id="prefers-recommended-patch",
+        ),
+        # AC4 backward compat: an old archive with only diff.patch still labels
+        # via the diff.patch hunks.
+        pytest.param(
+            ("diff.patch",),
+            None,
+            "existing\nreviewed = 2\n",
+            "applied",
+            1,
+            None,
+            id="legacy-falls-back-to-diff-patch",
+        ),
+        # A new-format archive (manifest recommended_patch_supported=True) with
+        # no recommended.patch made NO recommendation (review-only /
+        # all-declined / wash). The cascade must score zero hunks and NOT fall
+        # back to diff.patch (the PR-under-review diff), even when diff.patch's
+        # line is present post-window — otherwise such runs are mislabeled.
+        pytest.param(
+            ("diff.patch",),
+            {"schema_version": "1.0", "recommended_patch_supported": True},
+            "existing\nreviewed = 2\n",
+            "not_applied",
+            0,
+            None,
+            id="new-format-no-recommendation-skips-fallback",
+        ),
+    ],
+)
+def test_fix_applied_signal_selects_patch_and_verdict(
     tmp_path: Path,
+    patches: tuple[str, ...],
+    manifest: dict[str, Any] | None,
+    post_window: str,
+    expected_verdict: str,
+    expected_hunks_total: int,
+    expected_hunks_applied: int | None,
 ) -> None:
-    """A new-format archive (manifest ``recommended_patch_supported=True``) with
-    no ``recommended.patch`` made NO recommendation (review-only / all-declined /
-    wash). The cascade must score zero hunks and NOT fall back to ``diff.patch``
-    (the PR-under-review diff), even when diff.patch's line is present
-    post-window — otherwise such runs are mislabeled 'applied'."""
-    from daydream.training.labeler_signals import fix_applied_signal
 
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"schema_version": "1.0", "recommended_patch_supported": True})
-    )
+    added_lines = {"diff.patch": "reviewed = 2", "recommended.patch": "recommended = 1"}
+    for name in patches:
+        (tmp_path / name).write_text(diff_adding(added_lines[name]))
+    if manifest is not None:
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
         "base_branch": "main",
         "archive_path": str(tmp_path),
     }
-    # Post-window carries the REVIEWED line; diff.patch would match if the
-    # (forbidden) fallback fired.
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
         repo_clone=tmp_path,
         diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: "existing\nreviewed = 2\n",
+        file_at_fetcher=lambda repo, path, sha: post_window,
     )
-    assert sig.hunks_total == 0
-    assert sig.verdict == "not_applied"
+    assert sig.verdict == expected_verdict
+    assert sig.hunks_total == expected_hunks_total
+    if expected_hunks_applied is not None:
+        assert sig.hunks_applied == expected_hunks_applied
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1085,6 @@ def test_local_commit_applied_signal_uses_recommended_patch(
     file_contents: str,
     expected_verdict: str,
 ) -> None:
-    from daydream.training.labeler_signals import local_commit_applied_signal
 
     (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
@@ -1132,12 +1137,7 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     stub.merge_items = [anchored, mis_anchored]
 
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     )
     assert exit_code == 0
 
@@ -1269,6 +1269,14 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     archive_dir: Path,
 ) -> None:
     """runner.run -> archive -> evaluation preserves all unsafe evidence."""
+
+    # This telemetry fixture deliberately needs 326 events to keep its write
+    # ratio below 5%. Give that fixture sufficient investigation allowance;
+    # the production default's truncation is covered by review-runtime tests.
+    def telemetry_limits(*args: Any, **kwargs: Any) -> ReviewLimits:
+        return replace(ReviewLimits(*args, **kwargs), tool_calls=400)
+
+    monkeypatch.setattr("daydream.phases.ReviewLimits", telemetry_limits)
     _install_codex_evidence_backend(
         multi_stack_target,
         monkeypatch,
@@ -1276,12 +1284,7 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     )
 
     assert await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     ) == 0
 
     run_dir = _only_archived_run(archive_dir)
@@ -1348,12 +1351,7 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     )
 
     assert await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            assume="yes",
-            output_mode="loop",
-            cleanup=False,
-        )
+        _deep_run_config(multi_stack_target)
     ) == 0
 
     run_dir = _only_archived_run(archive_dir)
@@ -1377,10 +1375,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     archive_dir: Path,
 ) -> None:
     """Replay CLI drift through the real parser, log-mode runner, and archive."""
-    from unittest.mock import patch
 
-    from daydream.backends.codex import CodexBackend
-    from tests.harness.codex_replay import make_mock_process
 
     class MalformedToolBackend(StubBackend):
         async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -1415,10 +1410,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     backend = MalformedToolBackend(multi_stack_target)
     backend.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
-    assert await run(RunConfig(
-        target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
-        log_mode=True,
-    )) == 0
+    assert await run(_deep_run_config(multi_stack_target, log_mode=True)) == 0
 
     child = json.loads(_deep_python_trajectory(_only_archived_run(archive_dir)).read_text())
     calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
@@ -1797,24 +1789,6 @@ def _finalize_minimal_run(
     Only the backend seam is absent here by construction: the reducer reads the
     frozen phase events and the strict finalizer emits the manifest.
     """
-    from daydream.archive import finalize_archive_run
-    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-    from daydream.artifact_visibility import (
-        ArtifactEvidenceProvenance,
-        ArtifactTreeSnapshot,
-        manifest_tree,
-    )
-    from daydream.run_snapshot import (
-        ArchiveRunSnapshot,
-        ManifestRunIdentity,
-        RunPhaseCapabilities,
-    )
-    from daydream.runner import RunConfig
-    from daydream.trajectory import (
-        DaydreamRunFlow,
-        RunWriteSnapshot,
-        TrajectoryDocumentSnapshot,
-    )
 
     target = tmp_path / f"target-{session_id}"
     target.mkdir()
@@ -1843,7 +1817,6 @@ def _finalize_minimal_run(
         ),
     )
     identity = ManifestRunIdentity(
-        flow_name=None,
         skill="python",
         model=None,
         backend="claude",

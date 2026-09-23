@@ -18,7 +18,9 @@ import pytest
 
 from daydream import git_ops, pr_review, runner
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolStartEvent
+from daydream.config_file import load_file_config
 from daydream.deep.merge_steps import _step_post_review
+from daydream.extensions import build_registry, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.github_app import GitHubExecutionInput
@@ -29,7 +31,10 @@ from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import bare_remote
+from tests.harness.git_helpers import git as _git
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.test_deep_orchestrator import _fix_prompts, _install_stub_backend, _silence, _StubBackend
 
 KEEP_ME = "KEEP_ME"
 DROP_ME = "DROP_ME"
@@ -229,7 +234,6 @@ def _install_filtered_surface(
     extension_source: str = FILTER_ITEMS_EXT,
 ) -> Any:
     """Install the one extension fork and a real-path deep backend."""
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     ext_dir.write_module(extension_source)
     backend = _install_stub_backend(monkeypatch, target)
@@ -358,8 +362,6 @@ async def test_fork_filter_controls_pr_post_payload(
     """A load-items fork controls the canonical PR review payload."""
     _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
     _serve_pr_view(fake_gh, multi_stack_target)
-    from tests.harness.git_helpers import bare_remote
-    from tests.harness.git_helpers import git as _git
 
     _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
@@ -391,12 +393,9 @@ async def test_fork_filter_controls_fix_prompts(
     tmp_path: Path,
 ) -> None:
     """A load-items fork controls the findings that reach the fix phase."""
-    from tests.test_deep_orchestrator import _fix_prompts
 
     backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
     _serve_pr_view(fake_gh, multi_stack_target)
-    from tests.harness.git_helpers import bare_remote
-    from tests.harness.git_helpers import git as _git
 
     _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
@@ -417,9 +416,6 @@ async def test_api_v6_stable_keys_share_state_and_reparse_filtered_items(
     tmp_path: Path,
 ) -> None:
     """The real deep flow preserves API v6 state by reference across extensions."""
-    from tests.harness.git_helpers import bare_remote
-    from tests.harness.git_helpers import git as _git
-    from tests.test_deep_orchestrator import _fix_prompts
 
     backend = _install_filtered_surface(
         ext_dir,
@@ -596,7 +592,6 @@ async def test_fork_disables_arbiter_in_deep(
     ``per-stack-reviews`` step, so ``alternatives`` is no longer a removable
     step name.
     """
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     ext_dir.write_module(
         "def register(r):\n"
@@ -763,7 +758,6 @@ async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Config-enabled built-in and fork supervisors cannot silently compose."""
-    from daydream.config_file import load_file_config
 
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
@@ -868,7 +862,7 @@ async def test_custom_flow_dispatches_and_dumps_artifacts(
     tmp_path: Path,
 ) -> None:
     """A fork-registered custom flow selected via flow_name runs end-to-end and
-    --dump-artifacts writes the bundle (must-haves 1 + 2)."""
+    --dump-artifacts writes the bundle."""
     ext_dir.write_module(CUSTOM_FLOW_EXT)
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
@@ -892,7 +886,7 @@ async def test_unknown_flow_name_errors(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """An unregistered flow name fails with exit 1 (Extension Error panel; must-have 3)."""
+    """An unregistered flow name fails with exit 1 (Extension Error panel)."""
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
 
@@ -907,7 +901,7 @@ async def test_pr_feedback_not_selectable_via_flow(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """--flow pr-feedback errors (needs PR number + bot; must-have 5)."""
+    """--flow pr-feedback errors (needs PR number + bot)."""
     install_backend(ScriptedBackend(events=_EMPTY_TURN, model="mock-model"))
 
     rc = await runner.run(make_config(multi_stack_target, flow_name="pr-feedback"))
@@ -920,20 +914,17 @@ async def test_custom_phase_full_stack(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """Seam acceptance (Task 17): custom phase end-to-end through ``runner.run``.
+    """Custom phase end-to-end through ``runner.run``.
 
     Proves the extension seams are wired together: a fork-registered phase runs
     inside the deep flow, builds its prompt from its own registered prompt
     builder, and gets its backend through ``[tool.daydream.phases.ro_gate]``
-    per-phase config (Assumption 7: ``_coerce_phases`` / ``_resolved_model``
-    accept arbitrary phase strings).
+    per-phase config.
 
     Observable outcomes: exit 0, the ``RO-GATE`` prompt reached the backend,
     and ``create_backend`` was called with the per-phase model from
     ``.daydream.toml``.
     """
-    from daydream.config_file import load_file_config
-    from tests.test_deep_orchestrator import _silence, _StubBackend
 
     ext_dir.write_module(FULL_RO_EXT)
     (multi_stack_target / ".daydream.toml").write_text('[phases.ro_gate]\nmodel = "test-model-x"\n')
@@ -969,9 +960,8 @@ async def test_flow_deep_routes_to_deep_helper(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """--flow deep runs the real deep pipeline (must-have 4): the intent prompt
+    """--flow deep runs the real deep pipeline: the intent prompt
     reaches the backend via the deep flow, exit 0."""
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
     _silence(monkeypatch)
@@ -990,15 +980,19 @@ async def test_flow_review_routes_to_review_helper(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """--flow review runs the real review pipeline: the alternatives prompt
-    reaches the backend via the review flow, exit 0."""
+    """--flow review reaches structural review with the default design lens."""
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
 
     rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))
 
     assert rc == 0
-    assert any(ALTERNATIVES_MARKER in p for p in backend.prompts)  # review pipeline ran
+    assert any(
+        "You are the structural reviewer" in prompt
+        and "Within this same boundary review, check design choices" in prompt
+        for prompt in backend.prompts
+    )
+    assert not any(ALTERNATIVES_MARKER in prompt for prompt in backend.prompts)
 
 
 async def test_flow_shallow_routes_to_shallow_helper(
@@ -1040,7 +1034,6 @@ def test_ext_dir_renderer_override_reaches_pr_review(
         "    r.override_renderer('finding', lambda finding, ctx: f'EXT::{ctx.placement}::{finding.title}')\n"
     )
     monkeypatch.setenv("DAYDREAM_EXT_DIR", str(ext))
-    from daydream.extensions import build_registry, get_registry, set_registry
 
     prev = get_registry()
     set_registry(build_registry())

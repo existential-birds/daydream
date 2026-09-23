@@ -109,6 +109,11 @@ def _bundle_input_names(root: Path) -> set[str]:
     }
 
 
+def _write_bundle_file(out_dir: Path, name: str, data: bytes) -> None:
+    """Atomically stage one bundle file under the deterministic-write convention."""
+    atomic_write_bytes(out_dir / name, data, fsync=False, dir_fsync=False, mode=umask_derived_mode())
+
+
 def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
     """Hash the exact seven-file semantic annotation bundle contract."""
     root = Path(bundle_dir)
@@ -172,6 +177,75 @@ def _lineage_field(manifest: Mapping[str, Any], field: str, manifest_path: Path)
     return value
 
 
+def _validate_policy_binding(
+    raw: bytes,
+    *,
+    label: str,
+    curation_id: str,
+    source_hub_commit: str,
+) -> None:
+    """Validate producer-canonical v2 policy-binding bytes and rederive identity.
+
+    Shared by the staging constructor and the publication boundary so the
+    publication path cannot drift from the construction rules.
+    """
+    try:
+        binding = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label}: unreadable policy binding ({exc})") from None
+    required = {
+        "schema_version",
+        "policy_digest",
+        "policy_version",
+        "allow_copyleft",
+        "exclusions_digest",
+        "resolved_decisions_digest",
+        "distribution_digest",
+    }
+    if not isinstance(binding, dict) or set(binding) != required:
+        raise ValueError(f"{label}: must contain the exact v2 field set")
+    if binding["schema_version"] != "2":
+        raise ValueError(f"{label}: unsupported schema_version")
+    for name in (
+        "policy_digest",
+        "exclusions_digest",
+        "resolved_decisions_digest",
+        "distribution_digest",
+    ):
+        value = binding[name]
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"{label}: invalid {name}")
+    policy_version = binding["policy_version"]
+    if not isinstance(policy_version, str) or not policy_version:
+        raise ValueError(f"{label}: invalid policy_version")
+    allow_copyleft = binding["allow_copyleft"]
+    if (
+        not isinstance(allow_copyleft, list)
+        or any(
+            not isinstance(slug, str)
+            or not slug
+            or slug != slug.casefold()
+            for slug in allow_copyleft
+        )
+        or allow_copyleft != sorted(set(allow_copyleft))
+    ):
+        raise ValueError(f"{label}: invalid allow_copyleft")
+    canonical = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
+    if raw != canonical:
+        raise ValueError(f"{label}: not canonically encoded")
+    derived = derive_curation_id(
+        source_hub_commit,
+        binding["policy_digest"],
+        policy_version,
+        frozenset(allow_copyleft),
+        binding["exclusions_digest"],
+        binding["resolved_decisions_digest"],
+        binding["distribution_digest"],
+    )
+    if derived != curation_id:
+        raise ValueError(f"{label}: derives curation_id {derived!r}, not {curation_id!r}")
+
+
 def _validated_policy_binding(
     curation_bundle_dir: Path,
     *,
@@ -184,63 +258,14 @@ def _validated_policy_binding(
         raise FileNotFoundError(f"curation policy binding not found as a regular file: {path}")
     try:
         raw = path.read_bytes()
-        binding = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         raise ValueError(f"unreadable policy binding at {path}: {exc}") from None
-    required = {
-        "schema_version",
-        "policy_digest",
-        "policy_version",
-        "allow_copyleft",
-        "exclusions_digest",
-        "resolved_decisions_digest",
-        "distribution_digest",
-    }
-    if not isinstance(binding, dict) or set(binding) != required:
-        raise ValueError(f"policy binding at {path} must contain the exact v2 field set")
-    if binding["schema_version"] != "2":
-        raise ValueError(f"policy binding at {path} has unsupported schema_version")
-    for name in (
-        "policy_digest",
-        "exclusions_digest",
-        "resolved_decisions_digest",
-        "distribution_digest",
-    ):
-        value = binding[name]
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise ValueError(f"policy binding at {path} has invalid {name}")
-    policy_version = binding["policy_version"]
-    if not isinstance(policy_version, str) or not policy_version:
-        raise ValueError(f"policy binding at {path} has invalid policy_version")
-    allow_copyleft = binding["allow_copyleft"]
-    if (
-        not isinstance(allow_copyleft, list)
-        or any(
-            not isinstance(slug, str)
-            or not slug
-            or slug != slug.casefold()
-            for slug in allow_copyleft
-        )
-        or allow_copyleft != sorted(set(allow_copyleft))
-    ):
-        raise ValueError(f"policy binding at {path} has invalid allow_copyleft")
-    canonical = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
-    if raw != canonical:
-        raise ValueError(f"policy binding at {path} is not canonically encoded")
-    derived = derive_curation_id(
-        source_hub_commit,
-        binding["policy_digest"],
-        policy_version,
-        frozenset(allow_copyleft),
-        binding["exclusions_digest"],
-        binding["resolved_decisions_digest"],
-        binding["distribution_digest"],
+    _validate_policy_binding(
+        raw,
+        label=f"policy binding at {path}",
+        curation_id=curation_id,
+        source_hub_commit=source_hub_commit,
     )
-    if derived != curation_id:
-        raise ValueError(
-            f"policy binding at {path} derives curation_id {derived!r}, "
-            f"not {curation_id!r}"
-        )
     return raw
 
 
@@ -333,7 +358,7 @@ def build_final_bundle(
     publishes: the caller feeds the directory to
     :func:`daydream.training.adjudication.publish.publish_final_annotation_bundle`.
 
-    - ``annotations.jsonl`` / ``sessions.jsonl``: copied byte-for-byte from the
+    - ``annotations.jsonl`` / ``sessions.jsonl``: both copied byte-for-byte from the
       materialization dir (missing file raises ``FileNotFoundError`` naming it).
     - ``label-observations.jsonl``: the archive's immutable per-session
       observation history (``archive.index.label_observation_history``) for
@@ -406,37 +431,16 @@ def build_final_bundle(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. annotations.jsonl + sessions.jsonl: verbatim copies of the canonical
-    #    materialized artifacts (already canonical JSONL — re-serializing
-    #    would be a second code path for the same bytes).
-    atomic_write_bytes(
-        out_dir / _ANNOTATIONS_FILENAME,
-        (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes(),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
+    # 1. Both consumer views use the canonical merged records. Copying preview
+    #    sessions here would discard imported/human decisions for projection.
+    _write_bundle_file(
+        out_dir, _ANNOTATIONS_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
     )
-    atomic_write_bytes(
-        out_dir / _SESSIONS_OUT_FILENAME,
-        (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes(),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
+    _write_bundle_file(
+        out_dir, _SESSIONS_OUT_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
     )
-    atomic_write_bytes(
-        out_dir / _MANIFEST_FILENAME,
-        manifest_path.read_bytes(),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
-    atomic_write_bytes(
-        out_dir / _POLICY_BINDING_FILENAME,
-        policy_binding,
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+    _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_path.read_bytes())
+    _write_bundle_file(out_dir, _POLICY_BINDING_FILENAME, policy_binding)
 
     # 2. label-observations.jsonl: the archive's per-session observation
     #    history, chronological by ``observed_at`` (per-session rows are
@@ -446,12 +450,10 @@ def build_final_bundle(
     for session_id in snapshot_session_ids:
         history_rows.extend(label_observation_history(archive_dir, session_id))
     history_rows.sort(key=lambda row: (str(row.get("observed_at")), str(row.get("session_id"))))
-    atomic_write_bytes(
-        out_dir / _OBSERVATIONS_FILENAME,
+    _write_bundle_file(
+        out_dir,
+        _OBSERVATIONS_FILENAME,
         "".join(_canonical(row) + "\n" for row in history_rows).encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
     )
 
     # 3. coverage-report.json over the fresh complete queue, enriched exactly
@@ -474,13 +476,7 @@ def build_final_bundle(
     report["strata"] = {
         f"{stack}/{profile}": count for (stack, profile), count in report["strata"].items()
     }
-    atomic_write_bytes(
-        out_dir / _REPORT_FILENAME,
-        (_canonical(report) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+    _write_bundle_file(out_dir, _REPORT_FILENAME, (_canonical(report) + "\n").encode("utf-8"))
 
     # 4. lineage.json: generated from the pin — every field must be present.
     lineage: dict[str, Any] = {
@@ -497,13 +493,7 @@ def build_final_bundle(
         )
     as_of = manifest["as_of"]
     lineage["as_of"] = "" if as_of is None else str(as_of)
-    atomic_write_bytes(
-        out_dir / _LINEAGE_FILENAME,
-        (_canonical(lineage) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+    _write_bundle_file(out_dir, _LINEAGE_FILENAME, (_canonical(lineage) + "\n").encode("utf-8"))
 
     written = sorted(path.name for path in out_dir.iterdir() if path.is_file())
     missing = [name for name in _BUNDLE_FILES if name not in written]

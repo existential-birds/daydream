@@ -40,6 +40,19 @@ from daydream.backends import (
 from daydream.backends._subprocess import StreamStalledError
 from daydream.config import AUDIT_CATEGORIES
 
+# The per-category audit prompt heading, shared by the base dispatch and the
+# ProductionPath recon/audit short-circuit so the two cannot drift.
+_AUDIT_HEADINGS = {
+    "correctness": "## Correctness / Bugs",
+    "security": "## Security",
+    "performance": "## Performance",
+    "tests": "## Test Coverage",
+    "tech-debt": "## Tech Debt & Architecture",
+    "dependencies": "## Dependencies & Migrations",
+    "dx": "## DX & Tooling",
+    "docs": "## Docs",
+}
+
 
 def _plan_ref(
     recon_command_id: str,
@@ -425,7 +438,57 @@ class ImproveStubBackend:
         # (e.g. advance HEAD) with a plan-write session already open.
         self.on_first_plan_write: Callable[[], None] | None = None
 
+    async def _pre_execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        **turn_kwargs: Any,
+    ) -> list[AgentEvent] | None:
+        """Per-turn hook run before the dispatch body.
+
+        Return a list of events to short-circuit the body entirely; return
+        ``None`` to let the base dispatch run. Subclasses use this to bend one
+        axis (an absolute recon cwd, a held plan writer) without re-declaring
+        the protocol signature.
+        """
+        return None
+
+    async def _post_execute(
+        self,
+        prompt: str,
+        **turn_kwargs: Any,
+    ) -> None:
+        """Per-turn hook run after the dispatch body has been fully consumed."""
+
     async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        turn_kwargs: dict[str, Any] = {
+            "output_schema": output_schema,
+            "continuation": continuation,
+            "agents": agents,
+            "max_turns": max_turns,
+            "read_only": read_only,
+            "persist_session": persist_session,
+        }
+        prelude = await self._pre_execute(cwd, prompt, **turn_kwargs)
+        if prelude is not None:
+            for event in prelude:
+                yield event
+        else:
+            async for event in self._execute_body(cwd, prompt, **turn_kwargs):
+                yield event
+        await self._post_execute(prompt, **turn_kwargs)
+
+    async def _execute_body(
         self,
         cwd: Path,
         prompt: str,
@@ -444,17 +507,7 @@ class ImproveStubBackend:
             marker = "recon"
         elif "read-only improve audit specialist" in prompt:
             marker = "audit"
-            headings = {
-                "correctness": "## Correctness / Bugs",
-                "security": "## Security",
-                "performance": "## Performance",
-                "tests": "## Test Coverage",
-                "tech-debt": "## Tech Debt & Architecture",
-                "dependencies": "## Dependencies & Migrations",
-                "dx": "## DX & Tooling",
-                "docs": "## Docs",
-            }
-            category = next(name for name, heading in headings.items() if heading in prompt)
+            category = next(name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt)
         elif "You are the improve vet." in prompt:
             marker = "vet"
         elif "You are writing a self-contained implementation plan" in prompt or (
@@ -806,32 +859,17 @@ class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
         super().__init__(target)
         self._rel = rel
 
-    async def execute(
+    async def _pre_execute(
         self,
         cwd: Path,
         prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+        **turn_kwargs: Any,
+    ) -> list[AgentEvent] | None:
         if "IMPROVE_RECON" in prompt:
             assert isinstance(self.recon_output_override, dict)
             commands = self.recon_output_override["commands"]
             commands[0]["working_directory"] = str(cwd / self._rel)
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
-            yield event
+        return None
 
 
 class _ProductionPathPlannerError(RuntimeError):
@@ -917,17 +955,17 @@ class ProductionPathBackend(ImproveStubBackend):
         )
         return commands
 
-    async def execute(
+    async def _pre_execute(
         self,
         cwd: Path,
         prompt: str,
         output_schema: Any = None,
-        continuation: Any = None,
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+        **turn_kwargs: Any,
+    ) -> list[AgentEvent] | None:
         if "IMPROVE_RECON" in prompt:
             self.calls.append(
                 {
@@ -941,30 +979,21 @@ class ProductionPathBackend(ImproveStubBackend):
                     "marker": "recon",
                 }
             )
-            yield ResultEvent(
-                structured_output={
-                    "languages": ["python", "typescript"],
-                    "commands": self._recon_commands(),
-                    "conventions": ["OpenAPI First"],
-                    "intent_docs": ["README.md"],
-                },
-                continuation=None,
-            )
-            return
+            return [
+                ResultEvent(
+                    structured_output={
+                        "languages": ["python", "typescript"],
+                        "commands": self._recon_commands(),
+                        "conventions": ["OpenAPI First"],
+                        "intent_docs": ["README.md"],
+                    },
+                    continuation=None,
+                )
+            ]
 
         if "read-only improve audit specialist" in prompt:
-            headings = {
-                "correctness": "## Correctness / Bugs",
-                "security": "## Security",
-                "performance": "## Performance",
-                "tests": "## Test Coverage",
-                "tech-debt": "## Tech Debt & Architecture",
-                "dependencies": "## Dependencies & Migrations",
-                "dx": "## DX & Tooling",
-                "docs": "## Docs",
-            }
             category = next(
-                name for name, heading in headings.items() if heading in prompt
+                name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt
             )
             self.calls.append(
                 {
@@ -1004,16 +1033,14 @@ class ProductionPathBackend(ImproveStubBackend):
                         **_neutral_maintenance_fields(),
                     }
                 ]
-            yield ResultEvent(
-                structured_output={"findings": findings},
-                continuation=None,
-            )
-            return
+            return [
+                ResultEvent(
+                    structured_output={"findings": findings},
+                    continuation=None,
+                )
+            ]
 
-        if "You are writing a self-contained implementation plan" in prompt or (
-            isinstance(output_schema, dict)
-            and "false_assumption" in output_schema.get("properties", {})
-        ):
+        if _is_plan_writer_prompt(prompt, output_schema):
             finding = _finding_from_prompt(prompt)
             if self.plan_active >= 2:
                 raise _ProductionPathRateLimitError(
@@ -1029,18 +1056,7 @@ class ProductionPathBackend(ImproveStubBackend):
                     raise _ProductionPathPlannerError(f"planner process metadata {self.planner_secret}")
             finally:
                 self.plan_active -= 1
-
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
-            yield event
+        return None
 
 
 def _is_plan_writer_prompt(prompt: str, output_schema: Any) -> bool:
@@ -1072,17 +1088,13 @@ class IncrementalPlanBackend(ImproveStubBackend):
         self.observed_while_slow_writer_ran: list[str] = []
         self.observed_index_while_slow_writer_ran = ""
 
-    async def execute(
+    async def _pre_execute(
         self,
         cwd: Path,
         prompt: str,
         output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+        **turn_kwargs: Any,
+    ) -> list[AgentEvent] | None:
         if (
             _is_plan_writer_prompt(prompt, output_schema)
             and _finding_from_prompt(prompt)["title"] == self._slow_title
@@ -1104,17 +1116,7 @@ class IncrementalPlanBackend(ImproveStubBackend):
                 raise _ProductionPathPlannerError(
                     "plan writer process exited"
                 )
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
-            yield event
+        return None
 
 
 class OutOfOrderPlanBackend(ImproveStubBackend):
@@ -1138,18 +1140,13 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
         """Fingerprints in the host's observed writer-dispatch order."""
         return list(self._selection_order)
 
-    async def execute(
+    async def _pre_execute(
         self,
         cwd: Path,
         prompt: str,
         output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
-        rank: int | None = None
+        **turn_kwargs: Any,
+    ) -> list[AgentEvent] | None:
         if _is_plan_writer_prompt(prompt, output_schema):
             fingerprint = _finding_from_prompt(prompt)["fingerprint"]
             if fingerprint not in self._selection_order:
@@ -1159,19 +1156,17 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
                 with anyio.move_on_after(10):
                     while len(self.completion_order) < self._expected_writers - 1:
                         await anyio.sleep(0.01)
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-            persist_session=persist_session,
-        ):
-            yield event
-        if rank is not None:
-            self.completion_order.append(rank)
+        return None
+
+    async def _post_execute(
+        self,
+        prompt: str,
+        output_schema: Any = None,
+        **turn_kwargs: Any,
+    ) -> None:
+        if _is_plan_writer_prompt(prompt, output_schema):
+            fingerprint = _finding_from_prompt(prompt)["fingerprint"]
+            self.completion_order.append(self._selection_order.index(fingerprint))
 
 
 _ImproveBackendT = TypeVar("_ImproveBackendT", bound=ImproveStubBackend)
@@ -1191,19 +1186,7 @@ def install_improve_stub(
         attempt_write=attempt_write,
         fanout_concurrency=fanout_concurrency,
     )
-    def _factory(*args: Any, **kwargs: Any) -> ImproveStubBackend:
-        audit_root = kwargs.get("audit_root")
-        stub.audit_root = audit_root
-        stub.audit_outward_symlinks = kwargs.get(
-            "audit_outward_symlinks", frozenset()
-        )
-        stub.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION if audit_root is not None else None
-        )
-        return stub
-
-    monkeypatch.setattr("daydream.runner.create_backend", _factory)
-    return stub
+    return install_capable_improve_backend(monkeypatch, stub)
 
 
 def install_capable_improve_backend(

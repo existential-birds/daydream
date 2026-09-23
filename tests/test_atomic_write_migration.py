@@ -126,8 +126,12 @@ class TestWriterCharacterization:
         with _umask(0o022):
             build_final_bundle(index_root=index_root, materialize_dir=mat,
                                archive_dir=archive_dir, out_dir=out)
-        for name in ("annotations.jsonl", "sessions.jsonl", "preview-manifest.json"):
-            assert (out / name).read_bytes() == (mat / name).read_bytes(), name
+        for name, source in (
+            ("annotations.jsonl", "annotations.jsonl"),
+            ("sessions.jsonl", "annotations.jsonl"),
+            ("preview-manifest.json", "preview-manifest.json"),
+        ):
+            assert (out / name).read_bytes() == (mat / source).read_bytes(), name
         assert (out / "coverage-report.json").read_bytes().endswith(b"\n")
         for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
                      "coverage-report.json", "lineage.json", "preview-manifest.json",
@@ -395,8 +399,7 @@ class TestCandidateKnobs:
         assert content == json.dumps(artifact).encode("utf-8")
         assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
 
-    def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path,
-                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path) -> None:
         # Isolate the destination so the autouse archive_dir fixture's tmp_path/archive
         # does not pollute the "no temp survives" observation.
         out = tmp_path / "out"

@@ -3,7 +3,7 @@ outcome term and CR-Bench FP penalty)."""
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -117,40 +117,29 @@ def test_run_label_no_decisive_evidence_is_unknown() -> None:
             assert derive_outcome_label(_fp_rubric(pr, disps)) == "unknown"
 
 
-def test_run_label_local_branch_unchanged() -> None:
-    """The local-branch posterior semantics remain unchanged."""
-    rub = Rubric(
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        pytest.param("applied", "accepted", id="applied-is-accepted"),
+        pytest.param("rejected", "rejected", id="rejected-is-rejected"),
+        pytest.param("unknown", "unknown", id="other-verdict-is-unknown"),
+    ],
+)
+def test_run_label_local_branch(verdict: Literal["applied", "rejected", "unknown"], expected: str) -> None:
+    """local_branch posterior: applied→accepted, rejected→rejected, otherwise
+    unknown (rubric.py:113-117)."""
+    assert derive_outcome_label(_local_rubric(verdict)) == expected
+
+
+def _local_rubric(verdict: Literal["applied", "rejected", "unknown"]) -> Rubric:
+    """Local-branch posterior: the commit-applied verdict is the only varied signal."""
+    return Rubric(
         pr_merge=PRMergeSignal(False, None),
         fix_applied=FixAppliedSignal("unknown", 0, 0, []),
         comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=LocalCommitAppliedSignal("applied"),
+        local_commit_applied=LocalCommitAppliedSignal(verdict),
         posterior_source="local_branch",
     )
-    assert derive_outcome_label(rub) == "accepted"
-
-
-def test_run_label_local_branch_rejected() -> None:
-    """local_branch with ``rejected`` verdict maps to ``rejected`` (rubric.py:113-116)."""
-    rub = Rubric(
-        pr_merge=PRMergeSignal(False, None),
-        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=LocalCommitAppliedSignal("rejected"),
-        posterior_source="local_branch",
-    )
-    assert derive_outcome_label(rub) == "rejected"
-
-
-def test_run_label_local_branch_unknown() -> None:
-    """local_branch with any other verdict maps to ``unknown`` (rubric.py:116-117)."""
-    rub = Rubric(
-        pr_merge=PRMergeSignal(False, None),
-        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=LocalCommitAppliedSignal("unknown"),
-        posterior_source="local_branch",
-    )
-    assert derive_outcome_label(rub) == "unknown"
 
 
 def test_run_label_no_signal_is_unknown() -> None:

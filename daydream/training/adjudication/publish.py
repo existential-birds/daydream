@@ -29,10 +29,10 @@ from daydream.archive.hydrate import (
     PublicDestinationError,
     RepoInfo,
 )
-from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.training.adjudication.final_bundle import (
     FINAL_IDENTITY_FILES,
     _bundle_input_names,
+    _validate_policy_binding,
 )
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from daydream.trajectory import redact_text
@@ -617,7 +617,6 @@ def _validate_coverage_report(data: bytes) -> None:
 
 def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
     preview = _parse_json_object(_MANIFEST_FILENAME, payloads[_MANIFEST_FILENAME])
-    binding = _parse_json_object("policy-binding.json", payloads["policy-binding.json"])
     lineage = _parse_json_object("lineage.json", payloads["lineage.json"])
     curation_id = _validate_identifier("curation_id", preview.get("curation_id"))
     source = preview.get("source_hub_commit")
@@ -634,56 +633,13 @@ def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
         raise ValueError("preview-manifest.json: invalid producer version pin")
     if "as_of" not in preview or not (preview["as_of"] is None or isinstance(preview["as_of"], str)):
         raise ValueError("preview-manifest.json: invalid as_of pin")
-    expected_fields = {
-        "schema_version",
-        "policy_digest",
-        "policy_version",
-        "allow_copyleft",
-        "exclusions_digest",
-        "resolved_decisions_digest",
-        "distribution_digest",
-    }
-    if set(binding) != expected_fields or binding.get("schema_version") != "2":
-        raise ValueError("policy-binding.json: invalid v2 field set")
-    canonical_binding = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
-    if payloads["policy-binding.json"] != canonical_binding:
-        raise ValueError("policy-binding.json: non-canonical encoding")
-    digests = (
-        "policy_digest",
-        "exclusions_digest",
-        "resolved_decisions_digest",
-        "distribution_digest",
+    _scan_for_secrets("policy-binding.json", payloads["policy-binding.json"])
+    _validate_policy_binding(
+        payloads["policy-binding.json"],
+        label="policy-binding.json",
+        curation_id=curation_id,
+        source_hub_commit=source,
     )
-    if any(
-        not isinstance(binding.get(name), str)
-        or re.fullmatch(r"[0-9a-f]{64}", binding[name]) is None
-        for name in digests
-    ):
-        raise ValueError("policy-binding.json: invalid digest")
-    policy_version = binding.get("policy_version")
-    allow_copyleft = binding.get("allow_copyleft")
-    if (
-        not isinstance(policy_version, str)
-        or not policy_version
-        or not isinstance(allow_copyleft, list)
-        or any(
-            not isinstance(slug, str) or not slug or slug != slug.casefold()
-            for slug in allow_copyleft
-        )
-        or allow_copyleft != sorted(set(allow_copyleft))
-    ):
-        raise ValueError("policy-binding.json: invalid policy fields")
-    derived = derive_curation_id(
-        source,
-        binding["policy_digest"],
-        policy_version,
-        frozenset(allow_copyleft),
-        binding["exclusions_digest"],
-        binding["resolved_decisions_digest"],
-        binding["distribution_digest"],
-    )
-    if derived != curation_id:
-        raise ValueError("policy-binding.json: curation identity mismatch")
     lineage_fields = {
         "curation_id",
         "sanitized_hub_commit",

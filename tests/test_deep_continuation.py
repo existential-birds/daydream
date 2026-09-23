@@ -8,8 +8,10 @@ from typing import Any
 
 import pytest
 
+from daydream.deep.prompts import build_merge_prompt
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.test_deep_orchestrator import _prime_merge_resume, _record, _run_deep
 
 
 def _merge_call(stub: StubBackend) -> dict[str, Any]:
@@ -20,7 +22,6 @@ async def test_merge_resumes_arbiter_session(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The merge call resumes the arbiter's session and warns about stale records."""
-    from tests.test_deep_orchestrator import _run_deep
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -38,7 +39,6 @@ async def test_merge_cold_when_arbiter_mints_no_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No arbiter token means merge runs cold with today's prompt, no addendum."""
-    from tests.test_deep_orchestrator import _run_deep
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -55,7 +55,6 @@ async def test_merge_cold_when_arbiter_skipped_on_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--start-at merge past a completed adjudication runs merge cold."""
-    from tests.test_deep_orchestrator import _prime_merge_resume, _record, _run_deep
 
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -85,13 +84,12 @@ async def test_merge_cold_when_arbiter_skipped_on_resume(
 
 def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
     """resumed_from_arbiter=False reproduces today's prompt exactly."""
-    from daydream.deep.prompts import build_merge_prompt
 
     kwargs: dict[str, Any] = dict(
         strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",
-        dedup_candidates_path=tmp_path / "dedup.json", output_path=tmp_path / "out.md",
+        dedup_candidates_path=tmp_path / "dedup.json",
     )
     omitted = build_merge_prompt(**kwargs)
     explicit_false = build_merge_prompt(**kwargs, resumed_from_arbiter=False)

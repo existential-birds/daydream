@@ -7,14 +7,13 @@ Covers Phase 2 / Plan 02-03:
     field names (`prompt_tokens` / `completion_tokens`); the SDK boundary
     keys (`input_tokens` / `output_tokens`) are renamed at emission time.
 
-Reuses the shared mock-block dataclasses in tests/harness/claude_sdk.py and
-extends MockAssistantMessage / MockResultMessage with the `usage` and
-`message_id` fields needed by Phase 2.
+Reuses the shared mock-block dataclasses in tests/harness/claude_sdk.py;
+the shared MockAssistantMessage / MockResultMessage carry the ``usage`` and
+``message_id`` fields needed by Phase 2.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,30 +34,9 @@ from tests.harness.claude_sdk import (
 )
 
 
-# Phase 2 extensions: AssistantMessage needs message_id + usage; ResultMessage needs usage.
-@dataclass
-class MockAssistantMessageWithUsage(MockAssistantMessage):
-    """Shared MockAssistantMessage plus EVNT-06 fields (message_id, usage)."""
-
-    message_id: str = ""
-    usage: dict[str, Any] | None = None
-
-
-@dataclass
-class MockResultMessageWithUsage(MockResultMessage):
-    """Shared MockResultMessage plus the EVNT-04/05 usage field."""
-
-    usage: dict[str, Any] | None = None
-
-
 async def _collect_events(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[Any]:
     """Drive ClaudeBackend.execute with a canned message sequence; return events."""
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client(messages),
-        assistant_message=MockAssistantMessageWithUsage,
-        result_message=MockResultMessageWithUsage,
-    )
+    patch_claude_sdk(monkeypatch, scripted_client(messages))
     backend = ClaudeBackend(model="opus")
     events: list[Any] = []
     async for event in backend.execute(Path("/tmp"), "test prompt"):
@@ -72,12 +50,12 @@ async def test_dropped_token_bug_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="Reviewing")],
                 message_id="msg_01",
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.001,
                 structured_output=None,
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
@@ -97,12 +75,12 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.M
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="Hi")],
                 message_id="msg_01",
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
             ),
-            MockResultMessageWithUsage(total_cost_usd=0.001, structured_output=None, usage=None),
+            MockResultMessage(total_cost_usd=0.001, structured_output=None, usage=None),
         ],
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
@@ -116,111 +94,77 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("usage", "expected_prompt_tokens", "expected_cached_tokens"),
+    [
+        # Fully-cached turn: raw input_tokens is the uncached remainder (22); the
+        # total input the model actually processed is 22 + 20000 read = 20022.
+        pytest.param(
+            {
+                "input_tokens": 22,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 20000,
+                "cache_creation_input_tokens": 0,
+            },
+            20022,
+            20000,
+            id="cache-read",
+        ),
+        # Cache-write turn: creation tokens fold in too; a write is not a read
+        # hit, so cached_tokens stays 0.
+        pytest.param(
+            {
+                "input_tokens": 50,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 15000,
+            },
+            15050,
+            0,
+            id="cache-write",
+        ),
+        # Read-and-write turn: the buckets are not mutually exclusive. One
+        # breakpoint is read (18000) while another is written (12000); both fold
+        # into the total (40 + 18000 + 12000 = 30040), but cached_tokens
+        # reflects only the read hit.
+        pytest.param(
+            {
+                "input_tokens": 40,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 18000,
+                "cache_creation_input_tokens": 12000,
+            },
+            30040,
+            18000,
+            id="cache-read-and-write",
+        ),
+    ],
+)
+async def test_prompt_tokens_include_cache_read_and_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    usage: dict[str, int],
+    expected_prompt_tokens: int,
+    expected_cached_tokens: int,
+) -> None:
     """prompt_tokens folds input + cache_read + cache_creation into the true total input."""
-    # Fully-cached turn: raw input_tokens is the uncached remainder (22); the total
-    # input the model actually processed is 22 + 20000 read = 20022.
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
-                content=[MockTextBlock(text="cached")],
-                message_id="msg_cached",
-                usage={
-                    "input_tokens": 22,
-                    "output_tokens": 100,
-                    "cache_read_input_tokens": 20000,
-                    "cache_creation_input_tokens": 0,
-                },
+            MockAssistantMessage(
+                content=[MockTextBlock(text="turn")],
+                message_id="msg_01",
+                usage=usage,
             ),
-            MockResultMessageWithUsage(
-                total_cost_usd=0.002,
-                structured_output=None,
-                usage={
-                    "input_tokens": 22,
-                    "output_tokens": 100,
-                    "cache_read_input_tokens": 20000,
-                    "cache_creation_input_tokens": 0,
-                },
-            ),
+            MockResultMessage(total_cost_usd=0.002, structured_output=None, usage=usage),
         ],
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
     cost = [e for e in events if isinstance(e, CostEvent)][0]
-    assert metrics.prompt_tokens == 20022
-    assert metrics.cached_tokens == 20000
+    assert metrics.prompt_tokens == expected_prompt_tokens
+    assert metrics.cached_tokens == expected_cached_tokens
     assert metrics.completion_tokens == 100
-    assert cost.input_tokens == 20022
-    assert cost.cached_tokens == 20000
-
-    # Cache-write turn: creation tokens fold in too; a write is not a read hit, so
-    # cached_tokens stays 0.
-    events = await _collect_events(
-        monkeypatch,
-        [
-            MockAssistantMessageWithUsage(
-                content=[MockTextBlock(text="write")],
-                message_id="msg_write",
-                usage={
-                    "input_tokens": 50,
-                    "output_tokens": 100,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 15000,
-                },
-            ),
-            MockResultMessageWithUsage(
-                total_cost_usd=0.003,
-                structured_output=None,
-                usage={
-                    "input_tokens": 50,
-                    "output_tokens": 100,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 15000,
-                },
-            ),
-        ],
-    )
-    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
-    cost = [e for e in events if isinstance(e, CostEvent)][0]
-    assert metrics.prompt_tokens == 15050
-    assert metrics.cached_tokens == 0
-    assert cost.input_tokens == 15050
-    assert cost.cached_tokens == 0
-
-    # Read-and-write turn: the buckets are not mutually exclusive. One breakpoint
-    # is read (18000) while another is written (12000); both fold into the total
-    # (40 + 18000 + 12000 = 30040), but cached_tokens reflects only the read hit.
-    events = await _collect_events(
-        monkeypatch,
-        [
-            MockAssistantMessageWithUsage(
-                content=[MockTextBlock(text="both")],
-                message_id="msg_both",
-                usage={
-                    "input_tokens": 40,
-                    "output_tokens": 100,
-                    "cache_read_input_tokens": 18000,
-                    "cache_creation_input_tokens": 12000,
-                },
-            ),
-            MockResultMessageWithUsage(
-                total_cost_usd=0.004,
-                structured_output=None,
-                usage={
-                    "input_tokens": 40,
-                    "output_tokens": 100,
-                    "cache_read_input_tokens": 18000,
-                    "cache_creation_input_tokens": 12000,
-                },
-            ),
-        ],
-    )
-    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
-    cost = [e for e in events if isinstance(e, CostEvent)][0]
-    assert metrics.prompt_tokens == 30040
-    assert metrics.cached_tokens == 18000
-    assert cost.input_tokens == 30040
-    assert cost.cached_tokens == 18000
+    assert cost.input_tokens == expected_prompt_tokens
+    assert cost.cached_tokens == expected_cached_tokens
 
 
 @pytest.mark.asyncio
@@ -229,8 +173,8 @@ async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPat
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(content=[MockTextBlock(text="ok")], message_id="msg_03", usage=None),
-            MockResultMessageWithUsage(total_cost_usd=0.001, structured_output=None, usage=None),
+            MockAssistantMessage(content=[MockTextBlock(text="ok")], message_id="msg_03", usage=None),
+            MockResultMessage(total_cost_usd=0.001, structured_output=None, usage=None),
         ],
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
@@ -247,12 +191,12 @@ async def test_partial_usage_data(monkeypatch: pytest.MonkeyPatch) -> None:
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(
+            MockAssistantMessage(
                 content=[MockTextBlock(text="ok")],
                 message_id="msg_04",
                 usage={"input_tokens": 100},  # output_tokens missing
             ),
-            MockResultMessageWithUsage(
+            MockResultMessage(
                 total_cost_usd=0.001,
                 structured_output=None,
                 usage={"input_tokens": 100},
@@ -274,8 +218,8 @@ async def test_cost_event_emitted_on_usage_only(monkeypatch: pytest.MonkeyPatch)
     events = await _collect_events(
         monkeypatch,
         [
-            MockAssistantMessageWithUsage(content=[MockTextBlock(text="ok")], message_id="msg_05", usage=None),
-            MockResultMessageWithUsage(
+            MockAssistantMessage(content=[MockTextBlock(text="ok")], message_id="msg_05", usage=None),
+            MockResultMessage(
                 total_cost_usd=None,
                 structured_output=None,
                 usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0},

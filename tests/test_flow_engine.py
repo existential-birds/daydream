@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from daydream.backends import Backend
 from daydream.extensions import (
     BreakLoop,
     FlowStep,
@@ -14,8 +15,8 @@ from daydream.extensions import (
     UnresolvedExtensionError,
 )
 from daydream.flows.engine import FlowContext, run_flow
-from daydream.runner import RunConfig
-from daydream.workspace import WorkContext
+from daydream.runner import RunConfig, _resolve_backend
+from daydream.workspace import AuditWorkspace, WorkContext
 
 
 def _trace(tag: str) -> Callable[[FlowContext], Awaitable[Stop | BreakLoop | None]]:
@@ -81,9 +82,6 @@ def test_backend_for_resolves_pi_model_from_workspace(tmp_path: Path) -> None:
 
 
 def test_backend_factory_uses_context_workspace_and_cache(tmp_path: Path) -> None:
-    from daydream.backends import Backend
-    from daydream.runner import _resolve_backend
-    from daydream.workspace import AuditWorkspace
 
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()

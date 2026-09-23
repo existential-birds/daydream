@@ -1,19 +1,24 @@
 """Packaging and Harbor 0.23 integration tests for compiled benchmarks."""
+import hashlib
+import importlib.metadata
+import importlib.resources
+import json
+import subprocess
+import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
+from daydream.benchmark.harbor import build
+from daydream.benchmark.harbor import package as pkg
+from daydream.benchmark.harbor.build import TEMPLATE_VERSION
 from tests.harness.fake_gh import FakeGh
 
 
 def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import hashlib
-    import importlib.metadata
-
-    from daydream.benchmark.harbor import package as pkg
-    from daydream.benchmark.harbor.build import TEMPLATE_VERSION
-
     ver = importlib.metadata.version("daydream")
     uv_lock = tmp_path / "uv.lock"
     uv_lock.write_text("LOCKBODY\n")
@@ -28,10 +33,6 @@ def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
-    import importlib.metadata
-
-    from daydream.benchmark.harbor import package as pkg
-
     root = Path(__file__).resolve().parents[1]
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -48,11 +49,9 @@ def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
 
 
 def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) -> None:
-    import importlib.metadata
 
     import pytest
 
-    from daydream.benchmark.harbor import package as pkg
 
     ver = importlib.metadata.version("daydream")
     good = tmp_path / f"daydream-{ver}-py3-none-any.whl"
@@ -74,14 +73,11 @@ def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) ->
 
 
 def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    import importlib.metadata
-    import sys
 
     import pytest
 
     pytest.importorskip("harbor")
 
-    from daydream.benchmark.harbor import package as pkg
 
     monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.23.0")
     exe = pkg.resolve_harbor()
@@ -102,10 +98,6 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.
 
 
 def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
-    import tomllib
-
-    from daydream.benchmark.harbor import package as pkg
-
     text = pkg.render_task_toml(
         "case-abc123def456",
         reviewer_hosts=["api.anthropic.com"],
@@ -125,7 +117,6 @@ def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
 def test_render_task_toml_fails_closed_on_empty_or_missing_hosts() -> None:
     import pytest
 
-    from daydream.benchmark.harbor import package as pkg
 
     bad_cases: tuple[dict[str, Any], ...] = (
         {"reviewer_hosts": [], "judge_hosts": ["h.example"]},
@@ -140,11 +131,9 @@ def test_render_task_toml_fails_closed_on_empty_or_missing_hosts() -> None:
 
 
 def test_render_task_toml_normalizes_and_sorts_hosts() -> None:
-    import tomllib
 
     import pytest
 
-    from daydream.benchmark.harbor import package as pkg
 
     doc = tomllib.loads(pkg.render_task_toml(
         "case-abc",
@@ -164,10 +153,6 @@ def test_render_task_toml_normalizes_and_sorts_hosts() -> None:
 
 
 def test_render_task_toml_matches_plan_s8() -> None:
-    import tomllib
-
-    from daydream.benchmark.harbor import package as pkg
-
     text = pkg.render_task_toml(
         "case-4f7c81d922a0",
         reviewer_hosts=["api.anthropic.com"],
@@ -212,7 +197,6 @@ def test_render_task_toml_matches_plan_s8() -> None:
 
 
 def test_render_environment_dockerfile_clones_bundle_no_remote() -> None:
-    from daydream.benchmark.harbor import package as pkg
 
     dockerfile = pkg.render_environment_dockerfile(
         base_image=pkg.ENV_BASE_IMAGE, daydream_version="0.27.0", wheel=True
@@ -232,7 +216,6 @@ def test_render_environment_dockerfile_clones_bundle_no_remote() -> None:
 
 
 def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned() -> None:
-    from daydream.benchmark.harbor import package as pkg
 
     text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
     assert text.startswith("FROM " + pkg.VERIFIER_BASE_IMAGE)
@@ -245,7 +228,6 @@ def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned() -> None:
 
 
 def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
-    from daydream.benchmark.harbor import package as pkg
 
     text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
     assert "node-v22." in text                     # version-pinned Node tarball
@@ -258,10 +240,6 @@ def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
 
 
 def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
-    import yaml
-
-    from daydream.benchmark.harbor import package as pkg
-
     job = yaml.safe_load(pkg.render_job_config(oracle=False))
     assert job["jobs_dir"] == "jobs" and job["n_attempts"] == 1
     assert job["n_concurrent_trials"] == 4
@@ -296,13 +274,11 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unset *alternative* credential never aborts rendering (issue #979)."""
-    import yaml
 
     pytest.importorskip("harbor")
 
     from harbor.utils.env import resolve_env_vars
 
-    from daydream.benchmark.harbor import package as pkg
 
     # Judge: anthropic selected -> CLAUDE_CODE_OAUTH_TOKEN must be optional.
     for var in (
@@ -332,13 +308,11 @@ def test_render_job_config_still_requires_selection_vars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Selection vars stay bare: unset provider/model still abort rendering."""
-    import yaml
 
     pytest.importorskip("harbor")
 
     from harbor.utils.env import resolve_env_vars
 
-    from daydream.benchmark.harbor import package as pkg
 
     monkeypatch.delenv("DAYDREAM_JUDGE_PROVIDER", raising=False)
     monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
@@ -348,10 +322,7 @@ def test_render_job_config_still_requires_selection_vars(
 
 
 def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
-    import importlib.metadata
 
-    from daydream.benchmark.harbor import build
-    from daydream.benchmark.harbor import package as pkg
     from tests.test_benchmark_harbor_build import _harbor_tree_bytes, _seed_ready_workspace
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -375,11 +346,9 @@ def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: Fa
 
 
 def test_build_harbor_refuses_without_ready_workspace(tmp_path: Path, fake_gh: FakeGh) -> None:
-    import importlib.metadata
 
     import pytest
 
-    from daydream.benchmark.harbor import package as pkg
     from tests.test_benchmark_harbor_build import _seed_clean_workspace
 
     ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)
@@ -392,11 +361,9 @@ def test_build_harbor_refuses_without_ready_workspace(tmp_path: Path, fake_gh: F
 
 
 def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch: pytest.MonkeyPatch) -> None:
-    import importlib.metadata
 
     import pytest
 
-    from daydream.benchmark.harbor import package as pkg
 
     def absent(distribution: Any) -> None:
         raise importlib.metadata.PackageNotFoundError(distribution)
@@ -408,10 +375,8 @@ def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch: 
 
 
 def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: Path, fake_gh: FakeGh) -> None:
-    import importlib.metadata
 
     import pytest
-    import yaml
 
     pytest.importorskip("harbor")
     from harbor.models.job.config import JobConfig
@@ -420,8 +385,6 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
     except ImportError:  # Harbor exposes task as a namespace package in some wheels.
         from harbor.models.task.task import Task
 
-    from daydream.benchmark.harbor import build
-    from daydream.benchmark.harbor import package as pkg
     from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -441,10 +404,6 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
 
 
 def test_templates_and_lock_readable_via_importlib_resources() -> None:
-    import importlib.resources
-
-    from daydream.benchmark.harbor import package as pkg
-
     assert pkg.template_text("tests/Dockerfile")
     assert pkg.template_text("environment/Dockerfile")
     assert pkg.lock_text()
@@ -455,15 +414,10 @@ def test_templates_and_lock_readable_via_importlib_resources() -> None:
 
 
 def test_audit_execution_proofs_harbor_gated(tmp_path: Path, fake_gh: FakeGh) -> None:
-    import importlib.metadata
-    import json
-    import subprocess
 
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor import build
-    from daydream.benchmark.harbor import package as pkg
     from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     root = Path(__file__).resolve().parents[1]

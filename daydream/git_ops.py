@@ -240,6 +240,17 @@ class DeadlineExpired(GitError):
     """Raised before a GitHub request when its shared deadline has expired."""
 
 
+def _require_ok(proc: subprocess.CompletedProcess[Any], context: str) -> None:
+    """Raise ``GitError`` as ``context: stderr`` when *proc* failed.
+
+    The single owner of that message shape, so callers only supply the
+    human-readable command context. ``os.fsdecode`` is identity on text
+    captures and decodes binary ones.
+    """
+    if proc.returncode != 0:
+        raise GitError(f"{context}: {os.fsdecode(proc.stderr).strip()}")
+
+
 @dataclass(frozen=True)
 class GitHubRequestBudget:
     """Shared absolute deadline and per-request cap for GitHub reads."""
@@ -412,7 +423,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 5,
+    timeout: int | float = 5,
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -427,7 +438,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 5,
+    timeout: int | float = 5,
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -441,7 +452,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 5,
+    timeout: int | float = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -603,8 +614,7 @@ def head_sha(repo: Path) -> str:
         GitError: If ``git rev-parse HEAD`` fails (e.g. empty repository).
     """
     proc = _run_git(repo, ["rev-parse", "HEAD"], timeout=5)
-    if proc.returncode != 0:
-        raise GitError(f"cannot resolve HEAD in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"cannot resolve HEAD in {repo}")
     return proc.stdout.strip()
 
 
@@ -649,10 +659,7 @@ def list_local_branches(repo: Path) -> dict[str, str]:
         ["for-each-ref", "refs/heads", "--format=%(refname) %(objectname)"],
         timeout=10,
     )
-    if proc.returncode != 0:
-        raise GitError(
-            f"cannot list local branches in {repo}: {proc.stderr.strip()}",
-        )
+    _require_ok(proc, f"cannot list local branches in {repo}")
     branches: dict[str, str] = {}
     for line in proc.stdout.splitlines():
         if not line.strip():
@@ -725,8 +732,7 @@ def current_branch(repo: Path) -> str | None:
         GitError: If the underlying subprocess fails to execute.
     """
     proc = _run_git(repo, ["branch", "--show-current"], timeout=5)
-    if proc.returncode != 0:
-        raise GitError(f"cannot read current branch in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"cannot read current branch in {repo}")
     name = proc.stdout.strip()
     return name or None
 
@@ -1013,8 +1019,7 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
         args.append(".")
         args.extend(f":(exclude){p.rstrip('/')}" for p in exclude)
     proc = _run_git(repo, args, timeout=30)
-    if proc.returncode != 0:
-        raise GitError(f"git diff {base}...{head} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git diff {base}...{head} failed")
     result = proc.stdout
 
     # The range above is committed-only. Include tracked index/worktree changes
@@ -1026,8 +1031,7 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
         worktree_args.append(".")
         worktree_args.extend(f":(exclude){p.rstrip('/')}" for p in exclude)
     proc = _run_git(repo, worktree_args, timeout=30)
-    if proc.returncode != 0:
-        raise GitError(f"git diff {head} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git diff {head} failed")
     result += proc.stdout
 
     return result
@@ -1089,8 +1093,7 @@ def diff_paths(
     range_arg = f"{base}{sep}{head}"
     args = ["diff", f"--unified={unified}", range_arg, "--", *paths]
     proc = _run_git(repo, args, timeout=30)
-    if proc.returncode != 0:
-        raise GitError(f"git diff {range_arg} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git diff {range_arg} failed")
     return proc.stdout
 
 
@@ -1113,8 +1116,7 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
         return ""
     args = ["diff", ref, "--", *paths]
     proc = _run_git(repo, args, timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git diff {ref} -- {paths} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git diff {ref} -- {paths} failed in {repo}")
     return proc.stdout
 
 
@@ -1128,9 +1130,59 @@ def log(repo: Path, base: str, head: str = "HEAD") -> str:
         GitError: If ``git log`` fails.
     """
     proc = _run_git(repo, ["log", f"{base}..{head}", "--oneline"], timeout=30)
-    if proc.returncode != 0:
-        raise GitError(f"git log {base}..{head} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git log {base}..{head} failed")
     return proc.stdout.strip()
+
+
+def _log_shas_range(
+    repo: Path,
+    rev_range: str,
+    range_from: str,
+    range_to: str,
+    *,
+    label: str,
+    failure_value: list[str] | None,
+    failure_reason: str,
+) -> list[str] | None:
+    """Walk ``git log --pretty=%H <rev_range>`` with soft failure.
+
+    ``failure_value`` is what a git timeout/error/non-zero exit returns so
+    callers can distinguish "could not look" from "found nothing"; the
+    warning keeps the ``<label>: git log <from>..<to>`` shape and appends
+    ``failure_reason``.
+    """
+    try:
+        proc = _run_git(repo, ["log", "--pretty=%H", rev_range], timeout=30)
+    except GitTimeoutError:
+        _logger.warning(
+            "%s: git log %s..%s timed out after retries; %s",
+            label,
+            range_from,
+            range_to,
+            failure_reason,
+        )
+        return failure_value
+    except GitError as exc:
+        _logger.warning(
+            "%s: git log %s..%s failed: %s; %s",
+            label,
+            range_from,
+            range_to,
+            exc,
+            failure_reason,
+        )
+        return failure_value
+    if proc.returncode != 0:
+        _logger.warning(
+            "%s: git log %s..%s exited non-zero (%d); %s",
+            label,
+            range_from,
+            range_to,
+            proc.returncode,
+            failure_reason,
+        )
+        return failure_value
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def log_shas(repo: Path, ref: str, *, since: str) -> list[str] | None:
@@ -1151,35 +1203,15 @@ def log_shas(repo: Path, ref: str, *, since: str) -> list[str] | None:
         (newest first), possibly empty. ``None`` if the query could not be
         answered.
     """
-    try:
-        proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=30)
-    except GitTimeoutError:
-        _logger.warning(
-            "log_shas: git log %s..%s timed out after retries; "
-            "returning None (commit window unavailable)",
-            since,
-            ref,
-        )
-        return None
-    except GitError as exc:
-        _logger.warning(
-            "log_shas: git log %s..%s failed: %s; "
-            "returning None (commit window unavailable)",
-            since,
-            ref,
-            exc,
-        )
-        return None
-    if proc.returncode != 0:
-        _logger.warning(
-            "log_shas: git log %s..%s exited non-zero (%d); "
-            "returning None (commit window unavailable)",
-            since,
-            ref,
-            proc.returncode,
-        )
-        return None
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return _log_shas_range(
+        repo,
+        f"{since}..{ref}",
+        since,
+        ref,
+        label="log_shas",
+        failure_value=None,
+        failure_reason="returning None (commit window unavailable)",
+    )
 
 
 def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
@@ -1200,39 +1232,16 @@ def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
         List of 40-character SHA strings in ``git log`` output order
         (newest first). Empty list on any soft failure.
     """
-    try:
-        proc = _run_git(
-            repo,
-            ["log", "--pretty=%H", f"{head}..{base}"],
-            timeout=30,
-        )
-    except GitTimeoutError:
-        _logger.warning(
-            "log_shas_since: git log %s..%s timed out after retries; "
-            "returning empty window (fix-applied verdict may degrade to unknown)",
-            head,
-            base,
-        )
-        return []
-    except GitError as exc:
-        _logger.warning(
-            "log_shas_since: git log %s..%s failed: %s; "
-            "returning empty window (fix-applied verdict may degrade to unknown)",
-            head,
-            base,
-            exc,
-        )
-        return []
-    if proc.returncode != 0:
-        _logger.warning(
-            "log_shas_since: git log %s..%s exited non-zero (%d); "
-            "returning empty window (fix-applied verdict may degrade to unknown)",
-            head,
-            base,
-            proc.returncode,
-        )
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    shas = _log_shas_range(
+        repo,
+        f"{head}..{base}",
+        head,
+        base,
+        label="log_shas_since",
+        failure_value=[],
+        failure_reason="returning empty window (fix-applied verdict may degrade to unknown)",
+    )
+    return shas if shas is not None else []
 
 
 def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
@@ -1363,8 +1372,7 @@ def status_porcelain(repo: Path) -> str:
         GitError: If ``git status`` fails.
     """
     proc = _run_git(repo, ["status", "--porcelain"], timeout=10)
-    if proc.returncode != 0:
-        raise GitError(f"git status failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git status failed in {repo}")
     return proc.stdout
 
 
@@ -1389,6 +1397,18 @@ def staged_patch(repo: Path) -> bytes:
     return proc.stdout
 
 
+def _ordered_unique_names(lines: list[str]) -> list[str]:
+    """Return *lines* stripped, with blanks and later duplicates removed."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
     """Return repo-relative paths of files changed in the working tree.
 
@@ -1407,20 +1427,13 @@ def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) 
     Returns:
         De-duplicated list of repo-relative path strings.  Empty on error.
     """
-    names: list[str] = []
-    seen: set[str] = set()
     try:
         proc = _run_git(repo, ["diff", "--name-only", "HEAD"], timeout=10)
         tracked = proc.stdout.splitlines() if proc.returncode == 0 else []
     except GitError:
         tracked = []
     untracked = _filter_preexisting_untracked(list_untracked(repo), preexisting_untracked)
-    for line in [*tracked, *untracked]:
-        name = line.strip()
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return names
+    return _ordered_unique_names([*tracked, *untracked])
 
 
 def changed_files_against(
@@ -1436,24 +1449,15 @@ def changed_files_against(
     make the guard's safety decision unreliable.
     """
     proc = _run_git(repo, ["diff", "--name-only", ref], timeout=10)
-    if proc.returncode != 0:
-        raise GitError(f"git diff --name-only {ref} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git diff --name-only {ref} failed in {repo}")
     untracked_proc = _run_git(
         repo, ["ls-files", "--others", "--exclude-standard"], timeout=10,
     )
-    if untracked_proc.returncode != 0:
-        raise GitError(f"git ls-files --others failed in {repo}: {untracked_proc.stderr.strip()}")
+    _require_ok(untracked_proc, f"git ls-files --others failed in {repo}")
 
-    names: list[str] = []
-    seen: set[str] = set()
     untracked = [line.strip() for line in untracked_proc.stdout.splitlines() if line.strip()]
     untracked = _filter_preexisting_untracked(untracked, preexisting_untracked)
-    for line in [*proc.stdout.splitlines(), *untracked]:
-        name = line.strip()
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return names
+    return _ordered_unique_names([*proc.stdout.splitlines(), *untracked])
 
 
 def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
@@ -1473,11 +1477,7 @@ def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
         repo, ["diff", "--name-only", "-z", from_ref, to_ref],
         timeout=10, capture_bytes=True,
     )
-    if proc.returncode != 0:
-        raise GitError(
-            f"git diff --name-only -z {from_ref} {to_ref} failed in {repo}: "
-            f"{os.fsdecode(proc.stderr).strip()}"
-        )
+    _require_ok(proc, f"git diff --name-only -z {from_ref} {to_ref} failed in {repo}")
     return _decode_nul_paths(proc.stdout)
 
 
@@ -1581,6 +1581,18 @@ def _is_untracked_runtime_artifact(path: str) -> bool:
     return path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE
 
 
+def _list_untracked_z(repo: Path) -> list[str]:
+    """Return NUL-delimited untracked paths, raising on a git failure."""
+    proc = _run_git(
+        repo,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        timeout=10,
+        capture_bytes=True,
+    )
+    _require_ok(proc, f"git ls-files --others -z failed in {repo}")
+    return _decode_nul_paths(proc.stdout)
+
+
 def changed_paths_z(
     repo: Path,
     ref: str,
@@ -1599,17 +1611,8 @@ def changed_paths_z(
         raise GitError(f"git diff --name-only -z {ref} failed in {repo}: {stderr.strip()}")
     paths = _decode_nul_paths(proc.stdout)
     if include_untracked:
-        others = _run_git(
-            repo,
-            ["ls-files", "--others", "--exclude-standard", "-z"],
-            timeout=10,
-            capture_bytes=True,
-        )
-        if others.returncode != 0:
-            stderr = os.fsdecode(others.stderr)
-            raise GitError(f"git ls-files --others -z failed in {repo}: {stderr.strip()}")
         paths.extend(
-            path for path in _decode_nul_paths(others.stdout)
+            path for path in _list_untracked_z(repo)
             if include_runtime_artifacts or not _is_untracked_runtime_artifact(path)
         )
     unique = dict.fromkeys(paths)
@@ -1626,8 +1629,7 @@ def _write_git_blob(repo: Path, content: bytes) -> str:
         capture_bytes=True,
         input_bytes=content,
     )
-    if proc.returncode != 0:
-        raise GitError(f"git hash-object failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    _require_ok(proc, f"git hash-object failed in {repo}")
     oid = os.fsdecode(proc.stdout).strip()
     if not oid:
         raise GitError("git hash-object returned no object id")
@@ -1636,31 +1638,8 @@ def _write_git_blob(repo: Path, content: bytes) -> str:
 
 def _read_git_blob(repo: Path, oid: str) -> bytes:
     proc = _run_git(repo, ["cat-file", "blob", oid], timeout=30, capture_bytes=True)
-    if proc.returncode != 0:
-        raise GitError(f"git cat-file blob failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    _require_ok(proc, f"git cat-file blob failed in {repo}")
     return proc.stdout
-
-
-def _index_mode_for_path(repo: Path, path: str) -> int | None:
-    proc = _run_git(
-        repo,
-        ["ls-files", "--stage", "-z", "--", _literal_pathspec(path)],
-        capture_bytes=True,
-    )
-    if proc.returncode != 0:
-        raise GitError(f"git ls-files --stage failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
-    records = [record for record in proc.stdout.split(b"\0") if record]
-    if not records:
-        return None
-    if len(records) != 1:
-        raise GitError("index contains unresolved entries for a captured path")
-    metadata, separator, raw_path = records[0].partition(b"\t")
-    if not separator or os.fsdecode(raw_path) != path:
-        raise GitError("git returned an unexpected index path")
-    mode, _oid, stage = metadata.decode("ascii").split(" ")
-    if stage != "0":
-        raise GitError("index contains an unresolved entry")
-    return int(mode, 8)
 
 
 def _snapshot_worktree_path(
@@ -1670,7 +1649,7 @@ def _snapshot_worktree_path(
     allow_leaf_symlink: bool,
 ) -> GitPathState:
     _require_git_path_confined(repo, path, allow_leaf_symlink=allow_leaf_symlink)
-    mode_from_index = _index_mode_for_path(repo, path)
+    mode_from_index = _snapshot_git_tree_paths(repo, ["ls-files", "--stage"], [path])[0].mode
     absolute_bytes = os.fsencode(repo) + b"/" + os.fsencode(path)
     try:
         metadata = os.lstat(absolute_bytes)
@@ -1730,15 +1709,7 @@ def snapshot_untracked_paths(
     repo: Path, *, include_runtime_artifacts: bool = True,
 ) -> dict[str, GitPathState]:
     """Capture actual untracked content/type/mode, optionally omitting runtime output."""
-    proc = _run_git(
-        repo,
-        ["ls-files", "--others", "--exclude-standard", "-z"],
-        timeout=10,
-        capture_bytes=True,
-    )
-    if proc.returncode != 0:
-        raise GitError(f"git ls-files --others -z failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
-    paths = _decode_nul_paths(proc.stdout)
+    paths = _list_untracked_z(repo)
     return {
         path: _snapshot_worktree_path(repo, path, allow_leaf_symlink=True)
         for path in paths
@@ -1758,10 +1729,7 @@ def snapshot_worktree_paths(repo: Path, paths: Iterable[str]) -> tuple[GitPathSt
 def snapshot_worktree_gitlinks(repo: Path) -> tuple[GitPathState, ...]:
     """Capture every tracked gitlink's actual clean checked-out commit."""
     proc = _run_git(repo, ["ls-files", "--stage", "-z"], capture_bytes=True)
-    if proc.returncode != 0:
-        raise GitError(
-            f"git ls-files --stage failed in {repo}: {os.fsdecode(proc.stderr).strip()}"
-        )
+    _require_ok(proc, f"git ls-files --stage failed in {repo}")
     paths: list[str] = []
     for record in (record for record in proc.stdout.split(b"\0") if record):
         metadata, separator, raw_path = record.partition(b"\t")
@@ -1816,8 +1784,7 @@ def _snapshot_git_tree_paths(
         [*args, "-z", "--", *(_literal_pathspec(path) for path in unique)],
         capture_bytes=True,
     )
-    if proc.returncode != 0:
-        raise GitError(f"git tree-state query failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    _require_ok(proc, f"git tree-state query failed in {repo}")
     found: dict[str, GitPathState] = {}
     for record in (record for record in proc.stdout.split(b"\0") if record):
         metadata, separator, raw_path = record.partition(b"\t")
@@ -1855,15 +1822,13 @@ def _snapshot_git_tree_paths(
 def snapshot_index(repo: Path) -> IndexSnapshot:
     """Capture the complete index tree without changing the worktree."""
     tree = _run_git(repo, ["write-tree"], timeout=30)
-    if tree.returncode != 0:
-        raise GitError(f"git write-tree failed in {repo}: {tree.stderr.strip()}")
+    _require_ok(tree, f"git write-tree failed in {repo}")
     changed = _run_git(
         repo,
         ["diff", "--cached", "--name-only", "-z", "HEAD"],
         capture_bytes=True,
     )
-    if changed.returncode != 0:
-        raise GitError(f"git diff --cached failed in {repo}: {os.fsdecode(changed.stderr).strip()}")
+    _require_ok(changed, f"git diff --cached failed in {repo}")
     paths = tuple(sorted(set(_decode_nul_paths(changed.stdout)), key=_path_sort_key))
     return IndexSnapshot(tree_sha=tree.stdout.strip(), paths=paths)
 
@@ -1929,6 +1894,26 @@ def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
         for path in stdout.split(b"\0")
         if path
     ]
+
+
+def ls_files_scoped(repo: Path, path: str, *, timeout: float = 5) -> list[str]:
+    """Return tracked paths under one literal repository-relative file or directory.
+
+    A successful empty scope returns ``[]``; execution failures and nonzero Git
+    exits raise ``GitError``. Timeout retries are disabled so callers can bound
+    enumeration by their remaining evidence deadline.
+    """
+    proc = _run_git(
+        repo,
+        ["-c", "core.fsmonitor=false", "ls-files", "-z", "--cached", "--", _literal_pathspec(path)],
+        timeout=timeout,
+        capture_bytes=True,
+        retries=0,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        raise GitError(f"git ls-files failed in {repo}: {stderr.strip()}")
+    return _decode_nul_paths(proc.stdout)
 
 
 def tracked_path_collisions(repo: Path, *relatives: str) -> tuple[str, ...]:
@@ -2384,8 +2369,7 @@ def stash_create(repo: Path) -> str | None:
         GitError: If ``git stash create`` fails.
     """
     proc = _run_git(repo, ["stash", "create"], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git stash create failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git stash create failed in {repo}")
     return proc.stdout.strip() or None
 
 
@@ -2497,8 +2481,7 @@ def fetch(repo: Path, remote: str = "origin") -> None:
         GitError: If the fetch fails.
     """
     proc = _run_git(repo, ["fetch", remote], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git fetch {remote} failed in {repo}")
 
 
 def remove_remote(repo: Path, remote: str = "origin") -> None:
@@ -2512,8 +2495,7 @@ def remove_remote(repo: Path, remote: str = "origin") -> None:
         GitError: If ``git remote remove`` fails.
     """
     proc = _run_git(repo, ["remote", "remove", remote], timeout=10, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git remote remove {remote} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git remote remove {remote} failed in {repo}")
 
 
 _OBJECT_ID_RE = re.compile(r"[0-9a-fA-F]{40}")
@@ -2573,8 +2555,7 @@ def update_refs(repo: Path, ref_oids: dict[str, str]) -> None:
     proc = _run_git(
         repo, ["update-ref", "--stdin"], timeout=30, retries=0, input_text=lines
     )
-    if proc.returncode != 0:
-        raise GitError(f"git update-ref --stdin failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git update-ref --stdin failed in {repo}")
 
 
 def apply_staged_patch(repo: Path, patch: bytes) -> None:
@@ -2594,8 +2575,7 @@ def apply_staged_patch(repo: Path, patch: bytes) -> None:
             fh.write(patch)
             tmp_path = fh.name
         proc = _run_git(repo, ["apply", "--cached", "--binary", tmp_path], timeout=30, retries=0)
-        if proc.returncode != 0:
-            raise GitError(f"git apply --cached --binary failed in {repo}: {proc.stderr.strip()}")
+        _require_ok(proc, f"git apply --cached --binary failed in {repo}")
     finally:
         if tmp_path is not None:
             os.unlink(tmp_path)
@@ -2613,8 +2593,7 @@ def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
         GitError: If the checkout fails.
     """
     proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git checkout --detach {sha} failed in {repo}")
 
 
 def _safe_url_desc(url: str) -> str:
@@ -2752,8 +2731,7 @@ def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
         return
     args = ["checkout", ref, "--", *(str(p) for p in paths)]
     proc = _run_git(repo, args, timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git checkout {ref} -- {paths} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git checkout {ref} -- {paths} failed in {repo}")
 
 
 def restore_worktree_paths_from_ref(repo: Path, ref: str, paths: Iterable[str]) -> None:
@@ -2777,8 +2755,7 @@ def restore_worktree_paths_from_ref(repo: Path, ref: str, paths: Iterable[str]) 
         timeout=30,
         retries=0,
     )
-    if proc.returncode != 0:
-        raise GitError(f"git restore --worktree from ref failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git restore --worktree from ref failed in {repo}")
 
 
 def _remove_confined_leaf(repo: Path, path: str) -> None:
@@ -2822,11 +2799,7 @@ def _restore_path_state(
             timeout=30,
             retries=0,
         )
-        if proc.returncode != 0:
-            raise GitError(
-                f"could not restore gitlink {state.path!r} to its captured commit: "
-                f"{proc.stderr.strip()}"
-            )
+        _require_ok(proc, f"could not restore gitlink {state.path!r} to its captured commit")
         if head_sha(nested) != state.digest:
             raise GitError(f"gitlink {state.path!r} did not reach its captured commit")
         _preflight_gitlink_restore(repo, state)
@@ -2943,8 +2916,7 @@ def restore_group_from_snapshot(
 def restore_index(repo: Path, snapshot: IndexSnapshot) -> None:
     """Restore a complete index tree without modifying the worktree."""
     proc = _run_git(repo, ["read-tree", snapshot.tree_sha], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git read-tree failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git read-tree failed in {repo}")
 
 
 def build_recommended_patch_strict(
@@ -2984,8 +2956,7 @@ def build_recommended_patch_strict(
                 timeout=30,
                 capture_bytes=True,
             )
-            if proc.returncode != 0:
-                raise GitError(f"git diff --binary failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+            _require_ok(proc, f"git diff --binary failed in {repo}")
         chunks.append(proc.stdout)
     return b"".join(chunks)
 
@@ -3020,8 +2991,7 @@ def worktree_add(
         args.extend(["--reason", lock_reason])
     args.extend([str(path), ref])
     proc = _run_git(repo, args, timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git worktree add {path} {ref} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git worktree add {path} {ref} failed")
 
 
 def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
@@ -3039,8 +3009,7 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
         args.append("--force")
     args.append(str(path))
     proc = _run_git(repo, args, timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git worktree remove {path} failed")
 
 
 def worktree_move(repo: Path, source: Path, destination: Path) -> None:
@@ -3051,10 +3020,7 @@ def worktree_move(repo: Path, source: Path, destination: Path) -> None:
         timeout=30,
         retries=0,
     )
-    if proc.returncode != 0:
-        raise GitError(
-            f"git worktree move {source} {destination} failed: {proc.stderr.strip()}"
-        )
+    _require_ok(proc, f"git worktree move {source} {destination} failed")
 
 
 def worktree_remove_unlocked(repo: Path, path: Path, *, force: bool = True) -> None:
@@ -3087,8 +3053,7 @@ def worktree_unlock(repo: Path, path: Path) -> None:
         GitError: If ``git worktree unlock`` fails.
     """
     proc = _run_git(repo, ["worktree", "unlock", str(path)], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git worktree unlock {path} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git worktree unlock {path} failed")
 
 
 def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
@@ -3104,8 +3069,7 @@ def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
         GitError: If ``git worktree list`` itself fails.
     """
     proc = _run_git(repo, ["worktree", "list", "--porcelain"], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git worktree list failed: {proc.stderr.strip()}")
+    _require_ok(proc, "git worktree list failed")
     wanted = path.resolve()
     for line in proc.stdout.splitlines():
         if line.startswith("worktree "):
@@ -3118,7 +3082,7 @@ def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
     return None
 
 
-def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
+def worktree_lock_mtime(path: Path) -> float | None:
     """Return the lock-armed time of the worktree at *path*, or None if unlocked.
 
     Git names each linked worktree's administrative directory itself, so the
@@ -3150,8 +3114,7 @@ def create_branch(repo: Path, name: str) -> None:
             whether to reuse or force the branch.
     """
     proc = _run_git(repo, ["checkout", "-b", name], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git checkout -b {name} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git checkout -b {name} failed in {repo}")
 
 
 def checkout_branch(repo: Path, name: str) -> None:
@@ -3169,8 +3132,7 @@ def checkout_branch(repo: Path, name: str) -> None:
         proc = _run_git(repo, ["checkout", name], timeout=30, retries=0)
     else:
         proc = _run_git(repo, ["checkout", "-b", name, f"origin/{name}"], timeout=30, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git checkout {name} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git checkout {name} failed in {repo}")
 
 
 def stage_paths(repo: Path, paths: list[Path]) -> None:
@@ -3197,8 +3159,7 @@ def stage_paths(repo: Path, paths: list[Path]) -> None:
         timeout=30,
         retries=0,
     )
-    if add.returncode != 0:
-        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+    _require_ok(add, f"git add {paths} failed in {repo}")
 
 
 def commit_staged(repo: Path, message: str) -> None:
@@ -3217,8 +3178,7 @@ def commit_staged(repo: Path, message: str) -> None:
             *commit_args,
         ]
     commit = _run_git(repo, commit_args, timeout=30, retries=0)
-    if commit.returncode != 0:
-        raise GitError(f"git commit failed in {repo}: {commit.stderr.strip()}")
+    _require_ok(commit, f"git commit failed in {repo}")
 
 
 def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
@@ -3249,8 +3209,7 @@ def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
         GitError: If the push fails (propagates stderr).
     """
     proc = _run_git(repo, ["push", "-u", remote, branch], timeout=60, retries=0)
-    if proc.returncode != 0:
-        raise GitError(f"git push -u {remote} {branch} failed in {repo}: {proc.stderr.strip()}")
+    _require_ok(proc, f"git push -u {remote} {branch} failed in {repo}")
 
 
 # --- gh wrappers -------------------------------------------------------------
@@ -3402,8 +3361,7 @@ def gh_pr_diff(
         auth=auth,
         retries=_gh_retries(),
     )
-    if proc.returncode != 0:
-        raise GitError(f"gh pr diff {pr} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"gh pr diff {pr} failed")
     return proc.stdout
 
 
@@ -3446,8 +3404,7 @@ def git_ls_remote(repo: Path, url: str) -> str:
     args = [*_credential_helper_args(), "ls-remote", url]
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     proc = _run_git(repo, args, env_cmd=env)
-    if proc.returncode != 0:
-        raise GitError(f"git ls-remote {url} failed: {proc.stderr.strip()}")
+    _require_ok(proc, f"git ls-remote {url} failed")
     return proc.stdout
 
 
@@ -3464,10 +3421,7 @@ def remote_contains_commit(repo: Path, branch: str, sha: str, *, remote: str = "
         ["ls-remote", remote, f"refs/heads/{branch}"],
         env_cmd={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
-    if proc.returncode != 0:
-        raise GitError(
-            f"git ls-remote {remote} refs/heads/{branch} failed: {proc.stderr.strip()}"
-        )
+    _require_ok(proc, f"git ls-remote {remote} refs/heads/{branch} failed")
     return any(line.split()[0] == sha for line in proc.stdout.splitlines() if line.strip())
 
 
@@ -3476,21 +3430,13 @@ def gh_repo_view(
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[str, str] | None:
-    """Return the ``(owner, name)`` slug for the current repository.
-
-    Returns:
-        Tuple of ``(owner, name)``, or ``None`` when the call fails or the
-        slug cannot be parsed.
-    """
-    proc = _run_gh(
-        repo,
-        ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        auth=auth,
-        retries=_gh_retries(),
-    )
-    if proc.returncode != 0:
+    """Return the ``(owner, name)`` slug, or ``None`` when it cannot be read."""
+    try:
+        return gh_repo_view_required(repo, auth=auth)
+    except GitTimeoutError:
+        raise
+    except GitError:
         return None
-    return split_owner_repo(proc.stdout.strip())
 
 
 def gh_repo_view_required(

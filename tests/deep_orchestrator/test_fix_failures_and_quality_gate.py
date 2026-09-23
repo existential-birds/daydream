@@ -8,6 +8,9 @@ from typing import Any
 
 import pytest
 
+from daydream.config_file import DaydreamFileConfig
+from daydream.eval import analyzer as analyzer_mod
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _merged_items,
 )
@@ -43,7 +46,6 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
 ) -> None:
     """Real-path: a fix group that raises MaxTurnsError mid-edit is rolled back, its partial content saved, and the
     archived run is marked ``partial``."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -97,7 +99,6 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
     mute_side_effects: Mute,
 ) -> None:
     """Footprint preflight blocks unsafe paths before fixing and records why."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -160,7 +161,6 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     mute_side_effects: Mute,
 ) -> None:
     """Real runner confines a failed fixer and archives its restore audit."""
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -254,7 +254,6 @@ async def test_fix_quality_gate_threshold_config(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315): configurable delta thresholds flip the flag on the SAME edit."""
-    from daydream.config_file import DaydreamFileConfig
 
     tolerant_target = _build_gate_target(tmp_path, "gate_tolerant")
     tolerant = await _run_quality_gate_fixture(
@@ -297,7 +296,6 @@ async def test_fix_quality_gate_fail_open(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315/#329): an analyzer failure degrades to an auditable unavailable round."""
-    from daydream.eval import analyzer as analyzer_mod
 
     real_analyze = analyzer_mod.analyze_quality
 
@@ -310,7 +308,6 @@ async def test_fix_quality_gate_fail_open(
             raise RuntimeError("analyzer down")
         return real_analyze(daydream_dir, candidate_paths, **kwargs)
 
-    from daydream.config_file import DaydreamFileConfig
 
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _boom)
     exit_code = await _run_quality_gate_fixture(
@@ -364,7 +361,6 @@ async def test_fix_quality_gate_flags_undefined_baseline_verbosity(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329): an empty file uses the verbosity absolute fallback."""
-    from daydream.config_file import DaydreamFileConfig
 
     target = _build_gate_target_no_functions(tmp_path, "gate_undefined_verbosity")
     (target / "api.py").write_text("\n")
@@ -397,7 +393,6 @@ async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315/#329): the ABSOLUTE knob, not the delta one, gates undefined baselines."""
-    from daydream.config_file import DaydreamFileConfig
 
     target = _build_gate_target_no_functions(tmp_path, "gate_absolute_threshold")
     exit_code = await _run_quality_gate_fixture(
@@ -474,7 +469,6 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 5): a file missing from post-fix analyzer output is flagged."""
-    from daydream.eval import analyzer as analyzer_mod
 
     real_analyze = analyzer_mod.analyze_quality
 
@@ -513,7 +507,6 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 6): a malformed resume artifact can't silently disable the gate."""
-    from daydream.runner import run
 
     target = _build_gate_target(tmp_path, "gate_malformed_resume")
     deep = target / ".daydream" / "deep"
@@ -552,7 +545,6 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 5): a new session never inherits a prior session's rounds."""
-    from daydream.runner import run
 
     target = _build_gate_target(tmp_path, "gate_session_resume")
     _silence(monkeypatch)
@@ -601,7 +593,6 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 6): a file edited OUTSIDE its finding group is gated."""
-    from daydream.runner import run
 
     target = _build_gate_target_with_helper(tmp_path, "gate_secondary_edit")
     _silence(monkeypatch)
@@ -634,7 +625,6 @@ async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
     mute_side_effects: Mute,
 ) -> None:
     """Real-path (#457): both gate captures call analyze_quality with the reviewed *.py set only."""
-    from daydream.eval import analyzer as analyzer_mod
 
     target = _build_scope_creep_target(tmp_path, "gate_scoped")
     real_analyze = analyzer_mod.analyze_quality
@@ -668,8 +658,6 @@ async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
     mute_side_effects: Mute,
 ) -> None:
     """An out-of-diff module created by the fixer is scrubbed before the quality gate records candidates."""
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "gate_missing_baseline")
     _silence(monkeypatch)

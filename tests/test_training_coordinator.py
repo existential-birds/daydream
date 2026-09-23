@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from daydream.training.coordinator import PipelineConfig
+
 
 def test_cli_verb_wired(cli_runner: Any) -> None:
     r = cli_runner.invoke(["train", "--help"])
@@ -20,7 +22,6 @@ def test_cli_verb_wired(cli_runner: Any) -> None:
 
 def test_pipeline_config_rejects_legacy_corpus_kwarg() -> None:
     """#1093: the v1 `corpus` input is gone; the canonical input is `projection`."""
-    from daydream.training.coordinator import PipelineConfig
 
     with pytest.raises(TypeError):
         PipelineConfig(out_dir=Path("/tmp/x"), corpus=Path("/tmp/corpus.jsonl"))  # type: ignore[call-arg]
@@ -28,14 +29,12 @@ def test_pipeline_config_rejects_legacy_corpus_kwarg() -> None:
 
 def test_pipeline_config_projection_only() -> None:
     """#1093: `projection` is the one and only pipeline input (package renamed in this task)."""
-    from daydream.training.coordinator import PipelineConfig
 
     cfg = PipelineConfig(out_dir=Path("/tmp/x"), projection=Path("/tmp/proj"))
     assert cfg.projection == Path("/tmp/proj")
 
 
 def test_pipeline_config_requires_projection() -> None:
-    from daydream.training.coordinator import PipelineConfig
 
     with pytest.raises(ValueError, match="projection"):
         PipelineConfig(out_dir=Path("/tmp/x"))

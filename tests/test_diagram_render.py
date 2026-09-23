@@ -2,8 +2,7 @@
 
 The renderers are the last thing between model-authored JSON and a PR comment,
 so these tests are byte-golden and adversarial: the two ``.mmd`` fixtures pin
-the exact mermaid bytes, the exported line grammars prove no statement other
-than the documented ones can be emitted, and the injection cases feed the spec's
+the exact mermaid bytes, and the injection cases feed the spec's
 attack payloads through every label slot.
 """
 
@@ -25,8 +24,6 @@ from daydream.config import (
     DIAGRAM_MAX_PARTICIPANTS,
 )
 from daydream.deep.diagram_render import (
-    FLOWCHART_LINE_GRAMMAR,
-    SEQUENCE_LINE_GRAMMAR,
     render_diagram_blocks,
     render_flowchart_mermaid,
     render_omission_notice,
@@ -416,8 +413,6 @@ def test_injection_payloads_never_add_a_mermaid_statement() -> None:
     assert lines[4].startswith("        P1->>P2: ")
     assert lines[5] == "    end"
     assert "%%" not in mermaid
-    for line in lines:
-        assert SEQUENCE_LINE_GRAMMAR.fullmatch(line), line
 
 
 def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> None:
@@ -446,8 +441,6 @@ def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> N
     lines = mermaid.split("\n")
     assert len(lines) == 5  # header + 4 edges, no extra statement
     assert "%%" not in mermaid
-    for line in lines:
-        assert FLOWCHART_LINE_GRAMMAR.fullmatch(line), line
     # The over-long edge label is capped at the configured length.
     assert f"-->|{'x' * DIAGRAM_LABEL_CAP_EDGE}|" in mermaid
     assert f"-->|{'x' * (DIAGRAM_LABEL_CAP_EDGE + 1)}|" not in mermaid
@@ -482,21 +475,6 @@ def test_injection_payloads_keep_the_html_wrapper_and_table_intact() -> None:
     assert table[0].count("|") == 5   # four cells, no cell break-out
     assert "`ab.py:7`" in table[0]    # markdown cells drop backticks and pipes
     assert "`xy.py:1/details`" in table[0]
-
-
-def test_every_golden_line_matches_its_kind_grammar() -> None:
-    for line in render_sequence_mermaid(SEQUENCE_SPEC).split("\n"):
-        assert SEQUENCE_LINE_GRAMMAR.fullmatch(line), line
-    for line in render_flowchart_mermaid(FLOWCHART_SPEC).split("\n"):
-        assert FLOWCHART_LINE_GRAMMAR.fullmatch(line), line
-    # The grammars are exhaustive per kind: a flowchart line is not a sequence
-    # line and vice versa, so a cross-kind leak would be caught.
-    assert not SEQUENCE_LINE_GRAMMAR.fullmatch("flowchart TD")
-    assert not FLOWCHART_LINE_GRAMMAR.fullmatch("sequenceDiagram")
-    for bad in ("    P1->>P2: a; b", "    P1->>P2: a`b", "    P1->>P2: a|b", "click P1 href \"x\""):
-        assert not SEQUENCE_LINE_GRAMMAR.fullmatch(bad), bad
-    for bad in ("    N1[a] --> N2[b] --> N3[c]", "    N1[a;b]", "    click N1 href \"x\""):
-        assert not FLOWCHART_LINE_GRAMMAR.fullmatch(bad), bad
 
 
 # Block structure edge cases

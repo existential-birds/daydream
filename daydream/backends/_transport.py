@@ -9,9 +9,7 @@ reap / exit-check / teardown sequence and the exit-diagnostic message builder
 wording and parameters. Backends keep all protocol mapping: the transport
 yields raw decoded lines and surfaces only the exit code, so each backend
 owns its error wording. The shared PROCESS_EXIT builder reports the number
-of lines actually printed, so Pi's header differs from its pre-transport
-builder (which reported the raw capture length); Codex and Osprey wording
-is unchanged.
+of lines actually printed.
 """
 
 from __future__ import annotations

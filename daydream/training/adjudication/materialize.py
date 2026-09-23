@@ -1,9 +1,10 @@
 """Preview materialization of per-finding annotation snapshots (issue #1055).
 
-Runs the #980 semantic resolutions stored in a hydrated index's
-``label_observations.rubric_json`` through the shared serializer
+Collects fresh semantic evidence from production bronze through the harvester's
+read-only services, or reads stored resolutions from legacy/index-only history,
+then runs the resulting per-finding payload through the shared serializer
 (``snapshot.build_canonical_record``) and emits a deterministic
-``sessions.jsonl`` plus a pin-pinned ``preview-manifest.json``.
+``sessions.jsonl`` plus a digest-pinned ``preview-manifest.json``.
 
 Preview mode guarantees (AC 4 / M2): never appends ``label_observations``,
 never writes any resume-cache or harvest-complete marker. When the input is a
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError
+from daydream.archive.index import readonly_connection
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.preview import _load_sessions
@@ -53,13 +55,12 @@ def index_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
 def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
     """Build queue-consumable session records from a hydrated staging archive.
 
-    A hydrated staging archive (``archive.hydrate.run_hydrate_hub``) has no
-    ``sessions.jsonl``: its per-finding resolutions live in the SQLite
-    index's ``label_observations.rubric_json`` (the canonical dict shape
-    emitted by ``Rubric.to_dict``). This adapter joins ``query_runs`` rows
-    to their observations into the same session shape ``_load_sessions``
-    returns — the observations connection is opened read-only, fail-closed
-    on any missing or adjudication-empty run.
+    Production trajectories have no embedded resolutions. Their finding
+    identities and fresh GitHub evidence feed the same annotation builder as
+    ``corpus harvest``, entirely in memory. This happens even when historical
+    annotations exist, so canonical drift checks cannot reuse stale replies.
+    DB-only histories and legacy trajectories retain the stored-resolution
+    adapter. Index reads never create SQLite sidecars or update bronze.
 
     Latest-observation selection (deterministic): a session's rows are
     grouped by the harvester dedup key ``(evidence_sha, labeler_policy_version,
@@ -75,8 +76,9 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     (``index.append_label_observation``), so a dedup-key split alone never
     marks a session non-gold, and neither a human override row (authoritative
     under the archive's precedence) nor a non-decisive-only generation (a
-    pre-adjudication evolution) does. For a conflicted session the winner
-    still supplies the resolutions and every emitted record for that session
+    pre-adjudication evolution) does. Production bronze supplies fresh
+    resolutions; the winner supplies them only for stored-history fallbacks.
+    Every emitted record for a conflicted session
     carries ``"conflicting": true`` with the disposition neutralized to
     ``_CONFLICTED_DISPOSITION`` (surfaced non-gold downstream, never merged
     away). A session whose rows carry no materializable per-finding
@@ -102,10 +104,11 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     for row in rows:
         session_id = str(row["session_id"])
         observations = _label_observations_readonly(index_root / "index.db", session_id)
+        conflicting = False
+        resolutions = _semantic_resolutions_readonly(index_root, row)
+        session: dict[str, Any]
         if observations:
             winner, conflicting = _winning_observation(observations)
-            resolutions: list[dict[str, Any]] | None = None
-            session: dict[str, Any]
             rubric_raw = winner.get("rubric_json")
             if rubric_raw is not None:
                 try:
@@ -119,55 +122,25 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
                         f"session {session_id!r}: winning rubric_json is not an object"
                     )
                 per_finding = rubric.get("per_finding_resolutions")
-                if isinstance(per_finding, list) and per_finding:
+                if resolutions is None and isinstance(per_finding, list) and per_finding:
                     resolutions = per_finding
-            if resolutions is None:
-                # NULL rubric_json (a human-sourced ``daydream label`` row --
-                # ``index.update_labels`` appends with no rubric) or a legacy
-                # labels-only row (pre-#1095 ``Rubric.to_dict`` emitted only
-                # ``per_finding_outcomes``) carries no per-finding semantics to
-                # materialize, and the import path (runbook step 3b) appends
-                # such rows verbatim — an imported archive therefore reaches
-                # this branch with observations present, and failing closed
-                # here would brick the session for every later
-                # preview/materialize/harvest. Serve the session from the
-                # sanitized per-run trajectory instead (the pre-#1095
-                # materialization source), exactly like a session with no
-                # observation rows at all; a session with no trajectory either
-                # has no materializable content at all and contributes no
-                # records (evidence-only rows, e.g. sessions an import admitted
-                # from a backup root outside the curation), never failing the
-                # whole stage over one such session.
-                resolutions = _trajectory_resolutions_readonly(index_root, session_id)
-                if resolutions is None:
-                    continue
-            session = {
-                "session_id": session_id,
-                "trajectory_id": session_id,
-                "segment_id": session_id,
-                "resolutions": resolutions,
-            }
-            if conflicting:
-                session["conflicting"] = True
-        else:
-            # Freshly hydrated staging archive: no label_observations history
-            # yet (canonical harvest appends the first rows, runbook step 5).
-            # Fall back to the sanitized per-run trajectory the hydration gate
-            # guarantees (_REQUIRED_SESSION_ARTIFACTS) -- the pre-#1095
-            # materialization source -- so the first preview pass over a new
-            # stage still works. Once any observation row exists for the
-            # session it wins; the two sources are never mixed. A session
-            # without either contributes no records (the one-session-fails-all
-            # blast radius is reserved for corrupt data, not absence).
+        # DB-only history and legacy embedded resolutions remain supported.
+        # Production bronze was already acquired above, independently of the
+        # winner's dispositions and without changing the pinned source tree.
+        if resolutions is None:
             resolutions = _trajectory_resolutions_readonly(index_root, session_id)
             if resolutions is None:
                 continue
-            session = {
-                "session_id": session_id,
-                "trajectory_id": session_id,
-                "segment_id": session_id,
-                "resolutions": resolutions,
-            }
+        if not resolutions:
+            continue  # An explicitly empty bronze finding inventory has no records.
+        session = {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "segment_id": session_id,
+            "resolutions": resolutions,
+        }
+        if conflicting:
+            session["conflicting"] = True
         sessions.append(session)
     downloads = index_root / "downloads"
     if not downloads.is_dir():
@@ -179,6 +152,67 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
             "expected exactly one pinned source commit"
         )
     return sessions, revisions[0]
+
+
+def _semantic_resolutions_readonly(
+    index_root: Path, row: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Acquire live evidence for production bronze, including on re-harvest.
+
+    Legacy snapshots with embedded resolutions and DB-only imported histories
+    retain their stored-evidence adapter. Production trajectories never need
+    an annotation field or a prior canonical write.
+    """
+    from daydream.training.harvest import HarvestConfig, collect_annotation, make_harvest_services
+    from daydream.training.harvest_types import HarvestRow
+    from daydream.trajectory import run_directory, run_document_path
+    from daydream.ui import create_console
+
+    run_dir = run_directory(index_root, str(row["session_id"]))
+    path = run_document_path(run_dir)
+    if not path.is_file():
+        return None
+    try:
+        trajectory = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(trajectory, dict):
+            raise ValueError("trajectory must be an object")
+        if "resolutions" in trajectory:
+            return None
+        findings_path = run_dir / "findings.json"
+        findings = json.loads(findings_path.read_text()).get("findings") if findings_path.is_file() else None
+        if findings == [] or (findings is None and row.get("total_findings") == 0):
+            return []
+        # Hydration owns the bronze path; never follow an archived producer's
+        # absolute archive_path into a different tree.
+        harvest_row = HarvestRow.from_mapping(
+            {**row, "archive_path": str(run_dir.resolve())}, row_number=1,
+        )
+        config = HarvestConfig(archive_dir=index_root, dry_run=True)
+        _linked_row, payload = collect_annotation(
+            harvest_row, services=make_harvest_services(config), readonly=True,
+            console=create_console(),
+        )
+        rubric = json.loads(payload.rubric_json or "{}")
+        resolutions = rubric.get("per_finding_resolutions")
+        if not isinstance(resolutions, list) or not resolutions:
+            raise ValueError("no per-finding resolutions; missing recorded finding identities")
+        by_fingerprint = {str(finding["fingerprint"]): finding for finding in findings or []}
+        provenance_keys = (
+            "profile_schema_version", "profile_name", "profile_source_kind", "profile_digest", "stack",
+        )
+        return [
+            {
+                **{key: row.get(key) for key in provenance_keys},
+                **{key: value for key, value in by_fingerprint.get(resolution["fingerprint"], {}).items()
+                   if key in provenance_keys},
+                **resolution,
+            }
+            for resolution in resolutions
+        ]
+    except Exception as exc:
+        raise HubUnavailableError(
+            f"semantic preview for session {row['session_id']!r} failed: {exc}"
+        ) from exc
 
 
 def _trajectory_resolutions_readonly(
@@ -233,12 +267,10 @@ def _raise_on_uncheckpointed_wal(db_path: Path) -> None:
     is therefore a loud error: the operator must checkpoint/recover the index
     (or let an active writer finish) before the read-only guarantee holds.
     """
-    if (db_path.with_name(db_path.name + "-wal")).is_file():
-        raise HubUnavailableError(
-            f"hydrated index {db_path} has an uncheckpointed WAL "
-            f"({db_path.name}-wal): committed rows may live only in the WAL; "
-            "checkpoint or recover the index before previewing/materializing"
-        )
+    try:
+        readonly_connection(db_path.parent).close()
+    except ValueError as exc:
+        raise HubUnavailableError(str(exc)) from exc
 
 
 def _readonly_query(
@@ -251,10 +283,10 @@ def _readonly_query(
     reject an uncheckpointed ``index.db-wal`` first
     (``_raise_on_uncheckpointed_wal``): ``immutable=1`` skips it entirely.
     """
-    import sqlite3
-
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
-    conn.row_factory = sqlite3.Row
+    try:
+        conn = readonly_connection(db_path.parent)
+    except ValueError as exc:
+        raise HubUnavailableError(str(exc)) from exc
     try:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
     finally:
@@ -379,12 +411,11 @@ def run_materialize(
     ``dry_run=True`` validates everything and returns the summary without
     writing any file.
     """
-    sessions, index_revision = index_sessions(index_root)
-
     # Validate the pin before touching its components in the loop body:
     # ``snapshot_id`` raises the documented ValueError naming the missing
     # component, never a KeyError from ``pin["evidence_observed_at"]``.
     pin_id = snapshot_id(pin)
+    sessions, index_revision = index_sessions(index_root)
 
     records: list[dict[str, Any]] = []
     for session in sessions:

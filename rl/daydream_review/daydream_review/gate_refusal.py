@@ -11,10 +11,11 @@ default-to-allowed branch — an unvalidated reward model never trains a policy.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
+from daydream.training.gate import _evidence_digest as _evidence_digest
 
 
 class Stage0GateRefused(ValueError):
@@ -57,11 +58,6 @@ def require_stage0_gate(gate_report_path: Path) -> dict[str, Any]:
             "The learned reward model did not clear the offline gate, so Stage-3 training is refused."
         )
     return report
-
-
-def _evidence_digest(payload: dict[str, Any]) -> str:
-    """SHA-256 over the sorted evidence payload (mirror of ``gate.py``)."""
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def require_outcome_model_bound(gate_report: dict[str, Any], outcome_model_path: Path) -> None:

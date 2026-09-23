@@ -1,17 +1,30 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
+import errno
 import json
+import json as _json
 import os
 import shlex
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
+from pathlib import Path as _Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 
+import anyio
+import jsonschema
 import pytest
+import pytest as _pytest
+from rich.console import Console
 
+import daydream
+from daydream import artifact_visibility as av
+from daydream import git_ops, phases
 from daydream import review_profile as _rp
+from daydream.artifact_visibility import ArtifactVisibilityError, OutputLabel, artifact_dir_for
 from daydream.backends import (
     AgentEvent,
     Backend,
@@ -19,8 +32,78 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
-from daydream.config import REVIEW_OUTPUT_FILE, TEST_WALL_BUDGET_S
-from daydream.trajectory import TrajectoryRecorder
+from daydream.backends.codex import CodexBackend
+from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
+from daydream.config_file import DaydreamFileConfig
+from daydream.deep.artifacts import deep_dir, merged_items_path, verdicts_path
+from daydream.deep.detection import StackAssignment
+from daydream.deep.prompts import build_per_stack_prompt
+from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
+from daydream.hunk_index import write_hunk_index
+from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
+from daydream.phases import (
+    _FIX_GUARDRAILS,
+    _PR_BODY_MAX_CHARS,
+    FEEDBACK_SCHEMA,
+    FIX_VERIFY_ACTIONABLE_VERDICTS,
+    FIX_VERIFY_RETARGETABLE_VERDICTS,
+    FIX_VERIFY_VERDICTS,
+    FIX_VERIFY_VERDICTS_SCHEMA,
+    PER_STACK_RECORD_SCHEMA,
+    TEST_OUTPUT_TAIL_LINES,
+    PushAttemptError,
+    _build_failure_summarizer_prompt,
+    _build_fix_prompt,
+    _build_minimal_handoff,
+    _changed_files,
+    _do_commit,
+    _exploration_pointer,
+    _git_branch,
+    _git_log,
+    _inlineable_diff,
+    _is_evidenced,
+    _parse_test_map,
+    _reject_test_healing_generated_file_edits,
+    _resolve_handoff_paths,
+    _run_failure_summarizer,
+    _sanitize_suggested_command,
+    _test_command_wall_budget,
+    _write_handoff,
+    _write_single_stack_merged_items,
+    build_alternative_review_prompt,
+    build_commit_message,
+    build_intent_prompt,
+    group_items_by_footprint,
+    phase_alternative_review,
+    phase_commit_push,
+    phase_cross_stack_merge,
+    phase_per_stack_reviews,
+    phase_understand_intent,
+    phase_verify_recommendations,
+    require_empty_staged_index,
+)
+from daydream.prompt_budget import (
+    INLINE_DIFF_BUDGET_BYTES,
+    SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
+    SanctionedInputUnavailable,
+)
+from daydream.prompts.authorial_intent import (
+    AUTHORITATIVE_INTENT_BLOCK,
+    AUTHORITATIVE_INTENT_RULE,
+    PR_DESCRIPTION_UNTRUSTED_FRAMING,
+)
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.run_context import InteractionPolicy, RunContext
+from daydream.test_execution import TestExecutionResult
+from daydream.trajectory import (
+    DaydreamRunFlow,
+    TrajectoryRecorder,
+    run_directory,
+    run_document_path,
+    siblings_directory,
+)
+from daydream.ui.summary import print_fix_complete
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
@@ -40,14 +123,12 @@ def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
 
 
 def test_fix_guardrails_forbid_git_index_mutation() -> None:
-    from daydream.phases import _FIX_GUARDRAILS
 
     assert "`git add`" in _FIX_GUARDRAILS
 
 
 async def _fake_passed_run(*args: Any, **kwargs: Any) -> Any:
     """Stand-in for ``run_test_command`` returning a green host-side result."""
-    from daydream.test_execution import TestExecutionResult
 
     return TestExecutionResult(exit_status=0, timed_out=False, merged_output="ok")
 
@@ -61,7 +142,6 @@ def _private_session(tmp_path: Path, work: WorkContext, session_id: str) -> Any:
 
     Nothing is faked: real ownership resolution, real locking, real filesystem.
     """
-    from daydream import artifact_visibility as av
 
     locations = av.private_root_locations(base=(tmp_path / "private").resolve())
     owner = av.resolve_private_workspace_owner(work.source, locations=locations)
@@ -69,7 +149,11 @@ def _private_session(tmp_path: Path, work: WorkContext, session_id: str) -> Any:
 
 
 def _inline_or_exact_backend(
-    repo: Path, *, inline: bool, events: tuple[AgentEvent, ...] | None = None
+    repo: Path,
+    *,
+    inline: bool,
+    events: tuple[AgentEvent, ...] | None = None,
+    script: list[list[AgentEvent]] | None = None,
 ) -> ScriptedBackend:
     """A backend whose sanctioned-input transport is inline or exact paths.
 
@@ -78,9 +162,55 @@ def _inline_or_exact_backend(
     """
     if inline:
         return ScriptedBackend(
-            events=events, audit_root_isolation="claude-pretooluse", audit_root=repo.resolve()
+            script=script,
+            events=events,
+            audit_root_isolation="claude-pretooluse",
+            audit_root=repo.resolve(),
         )
-    return ScriptedBackend(events=events)
+    return ScriptedBackend(script=script, events=events)
+
+
+@asynccontextmanager
+async def _intent_inline_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    *,
+    session_id: str,
+    exploration_files: dict[str, str],
+    events: tuple[AgentEvent, ...] | None = None,
+    script: list[list[AgentEvent]] | None = None,
+    prompt_user: Callable[..., str] | None = None,
+) -> AsyncIterator[tuple[ScriptedBackend, WorkContext, Path, str, Path]]:
+    """Boot a real INLINE intent fixture and hold its private session open.
+
+    Yields ``(backend, work, diff_file, diff_text, exploration)`` so each test
+    can call ``phase_understand_intent`` inside the artifact session, with the
+    shared repo, exploration files, diff, and strict audit-root backend already
+    in place.
+    """
+
+    monkeypatch.setattr(
+        "daydream.run_context._prompt_user",
+        prompt_user if prompt_user is not None else (lambda *a, **kw: "y"),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    async with _private_session(tmp_path, work, session_id):
+        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
+        exploration.mkdir(parents=True)
+        for name, text in exploration_files.items():
+            (exploration / name).write_text(text, encoding="utf-8")
+        backend = _inline_or_exact_backend(repo, inline=True, events=events, script=script)
+        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
+        diff_file = tmp_path / "diff.patch"
+        diff_file.write_text(diff_text, encoding="utf-8")
+        yield backend, work, diff_file, diff_text, exploration
 
 
 def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
@@ -124,8 +254,6 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     they now run through a stable identity callback and an explicit run scope.
     New contract-focused cases can pass their own values, which are preserved.
     """
-    from daydream import git_ops, phases
-    from daydream.fix_footprint import AuthorizedFixFootprint
 
     implementation = phases.phase_test_and_heal
     fix_implementation = phases.phase_fix
@@ -188,7 +316,6 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
                 _item_paths=item_paths,
             ),
         )
-        from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
 
         kwargs.setdefault(
             "round_snapshot",
@@ -216,8 +343,6 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
     silence_console: Callable[..., None],
 ) -> None:
     """The per-healing guard protects historical migrations after a fix agent runs."""
-    from daydream import git_ops
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -250,8 +375,6 @@ def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
     silence_console: Callable[..., None],
 ) -> None:
     """A healing edit cannot remove a marker and thereby evade the guard."""
-    from daydream import git_ops
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -277,7 +400,6 @@ def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(
     silence_console: Callable[..., None],
 ) -> None:
     """Without a pre-fix snapshot, recovery must not fall back to HEAD."""
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -302,8 +424,6 @@ def test_test_healing_guard_uses_unique_recovery_patch_names(
     silence_console: Callable[..., None],
 ) -> None:
     """Distinct paths with the same slug preserve both rejected edits."""
-    from daydream import git_ops
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -334,9 +454,6 @@ def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
     silence_console: Callable[..., None],
 ) -> None:
     """An unknown changed-path set cannot safely drive destructive recovery."""
-    from daydream import git_ops
-    from daydream.git_ops import GitError
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -367,9 +484,6 @@ def test_test_healing_guard_reports_restoration_failure(
     silence_console: Callable[..., None],
 ) -> None:
     """A forbidden edit remains unsafe when Git cannot restore its baseline."""
-    from daydream import git_ops
-    from daydream.git_ops import GitError
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -399,8 +513,6 @@ def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(
     silence_console: Callable[..., None],
 ) -> None:
     """A healing edit to an untracked migration is restored byte-for-byte."""
-    from daydream import git_ops
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -434,8 +546,6 @@ def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(
     silence_console: Callable[..., None],
 ) -> None:
     """An untouched untracked migration remains byte-identical."""
-    from daydream import git_ops
-    from daydream.phases import _reject_test_healing_generated_file_edits
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -472,7 +582,6 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     """_do_commit stages only (daydream changes + new untracked) - (pre-existing
     untracked): a pre-existing file never enters the commit tree; a fix-created
     file does."""
-    from daydream.phases import _do_commit
 
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")  # tracked baseline
@@ -507,7 +616,6 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     set — no scope creep (extras beyond it) and no under-commit (pre-staged
     files dropped) is possible, because ``commit_paths`` stages and commits the
     same deterministic set in one host-side subprocess (issue #726)."""
-    from daydream.phases import _do_commit
 
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")            # tracked baseline
@@ -545,7 +653,6 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     fix-failures.json, quality-gate verdicts) are excluded from the
     deterministic stage: they must not land in the daydream commit and get
     pushed even when the repo does not ignore .daydream/."""
-    from daydream.phases import _do_commit
 
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")
@@ -582,7 +689,6 @@ async def test_host_commit_push_verifies_remote_before_success(
     """Host-native commit/push: _do_commit commits deterministically, pushes,
     and verifies the remote actually contains the pushed HEAD before the phase
     may report success. No agent turn is involved in the commit."""
-    from daydream.phases import _do_commit
 
     remote = tmp_path / "remote"
     git(tmp_path, "init", "--bare", "remote")
@@ -606,7 +712,6 @@ async def test_host_commit_push_verifies_remote_before_success(
     assert ok.committed is True
     assert ok.push is not None
     assert ok.push.pushed_repository is None
-    from daydream import git_ops
 
     sha = git_ops.head_sha(work_repo)
     assert git_ops.remote_contains_commit(work_repo, "main", sha, remote="origin") is True
@@ -620,7 +725,6 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """The ordinary real push returns its exact SHA/branch/GitHub identity."""
-    from daydream.phases import _do_commit
 
     remote = tmp_path / "receipt remote.git"
     git(tmp_path, "init", "--bare", str(remote))
@@ -666,7 +770,6 @@ async def test_push_rejects_remote_url_changed_by_real_hook(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """A hook cannot make verification attest a different configured remote."""
-    from daydream.phases import PushAttemptError, _do_commit
 
     remote = tmp_path / "remote-url-race.git"
     git(tmp_path, "init", "--bare", str(remote))
@@ -715,7 +818,6 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
     """A failed push is a failure even though a local commit exists: _do_commit
     raises the project error (surfaced as Stop(1) by the commit step) and never
     reports final completion."""
-    from daydream.phases import _do_commit
 
     work_repo = tmp_path / "clone"
     work_repo.mkdir()
@@ -729,7 +831,6 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
     # Remote points at a non-existent repository so the push fails.
     git(work_repo, "remote", "add", "origin", str(tmp_path / "missing.git"))
 
-    from daydream.git_ops import GitError
 
     work = make_work(work_repo)
     with pytest.raises(GitError):
@@ -750,8 +851,6 @@ async def test_push_attempt_error_carries_exact_attempted_identity(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """A local transport rejection retains the exact attempted push receipt."""
-    from daydream import git_ops
-    from daydream.phases import _do_commit
 
     repo = tmp_path / "rejected checkout"
     repo.mkdir()
@@ -792,8 +891,6 @@ async def test_push_verification_failure_surfaces_even_when_push_succeeds(
 ) -> None:
     """Success requires the remote-contains check to return True: a push that
     "succeeds" without the remote reporting the pushed sha is still a failure."""
-    from daydream import git_ops
-    from daydream.phases import _do_commit
 
     monkeypatch.setattr(git_ops, "remote_contains_commit", lambda *a, **k: False)
 
@@ -827,7 +924,6 @@ async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
     """When the pre-run untracked snapshot is None (legacy callers), the host
     path defensively computes it at commit time so user scratch files are
     never swept into the commit."""
-    from daydream.phases import _do_commit
 
     (git_repo / "app.py").write_text("x = 0\n")
     git(git_repo, "add", "app.py")
@@ -856,7 +952,6 @@ async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
     ``list_untracked`` and is excluded (an under-commit). This codifies the
     defensive path's documented limitation; in-tree callers pass the pre-run
     snapshot, which avoids it."""
-    from daydream.phases import _do_commit
 
     (git_repo / "app.py").write_text("x = 0\n")
     git(git_repo, "add", "app.py")
@@ -920,9 +1015,6 @@ async def test_hook_aware_push_runs_suite_exactly_once(
     never bypassed (no --no-verify; the hook still fires during push_branch).
     Without a pre-push hook, no push-time host run happens at all: validation
     already ran exactly once in the TEST phase."""
-    import daydream.phases
-    from daydream import git_ops
-    from daydream.phases import _do_commit
 
     for hook_present, expected_runs in ((True, 1), (False, 0)):
         repo = _pushable_repo(tmp_path / f"case-{int(hook_present)}")
@@ -934,7 +1026,6 @@ async def test_hook_aware_push_runs_suite_exactly_once(
 
         async def fake_run(*a: Any, _runs: list[dict[str, Any]] = runs, **k: Any) -> Any:
             _runs.append(k)
-            from daydream.test_execution import TestExecutionResult
 
             return TestExecutionResult(exit_status=0, timed_out=False, merged_output="")
 
@@ -968,8 +1059,6 @@ async def test_hook_aware_push_red_suite_blocks_push(
     """A red host-run suite with a pre-push hook present blocks the push (and
     is a failure even though the local commit exists) — the hook never becomes
     a license to push unvalidated code."""
-    import daydream.phases
-    from daydream.phases import _do_commit
 
     repo = _pushable_repo(tmp_path)
     _install_pre_push_hook(repo)
@@ -977,7 +1066,6 @@ async def test_hook_aware_push_red_suite_blocks_push(
     remote_head_before = git(repo, "ls-remote", "origin", "refs/heads/main")
 
     async def fake_run(*a: Any, **k: Any) -> Any:
-        from daydream.test_execution import TestExecutionResult
 
         return TestExecutionResult(exit_status=1, timed_out=False, merged_output="1 failed")
 
@@ -999,8 +1087,6 @@ async def test_hook_aware_push_red_suite_blocks_push(
 def test_test_command_wall_budget_resolves_file_config_override() -> None:
     """The test_command_wall_s key overrides the orchestrator default; unset
     (or absent/missing file config) falls through to TEST_WALL_BUDGET_S."""
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.phases import _test_command_wall_budget
 
     assert _test_command_wall_budget(None) == TEST_WALL_BUDGET_S
     assert (
@@ -1033,10 +1119,7 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
     Issue #726: without this wiring, a user-set test_command_wall_s silently
     had no effect — every run_test_command call hard-coded TEST_WALL_BUDGET_S.
     """
-    import daydream.phases
-    from daydream.config_file import DaydreamFileConfig
     from daydream.phases import phase_test_and_heal
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
 
@@ -1354,7 +1437,6 @@ async def test_fix_prompt_frames_confirmed_intent_body_as_untrusted(
     """An instruction-like body echoed into the confirmed-intent file reaches the
     mutating fix agent only under the untrusted framing hardening (issue #579)."""
     from daydream.phases import phase_fix
-    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
     silence_console("daydream.phases")
 
@@ -1385,7 +1467,6 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
     inline: bool,
 ) -> None:
     """A production fix gets intent/index bytes without an artifact-dir grant."""
-    from daydream.artifact_visibility import artifact_dir_for
     from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
@@ -1434,7 +1515,6 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 
 def test_build_fix_prompt_concise_mode() -> None:
     """_build_fix_prompt adds concise directives when concise_mode=True."""
-    from daydream.phases import _build_fix_prompt
 
     prompt = _build_fix_prompt(
         "test output failed",
@@ -1470,7 +1550,6 @@ async def test_phase_fix_prompt_carries_ascii_quote_guardrail(
 
 
 def test_build_fix_prompt_carries_generated_file_rule() -> None:
-    from daydream.phases import _build_fix_prompt
 
     prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
     assert "generated" in prompt.lower()
@@ -1525,41 +1604,43 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(
     assert "File: src/nonexistent.py" in backend.prompts[0]
 
 
-@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.parametrize("entry_point", ["phase_fix", "phase_fix_batched", "phase_fix_parallel"])
+@pytest.mark.parametrize("bad_ref", ["traversal", "absolute", "symlink", "missing"])
 @pytest.mark.asyncio
-async def test_phase_fix_rejects_unconfined_finding_file(
+async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
-    path_kind: Any,
+    entry_point: str,
+    bad_ref: str,
 ) -> None:
-    """A finding file escaping the worktree raises ValueError and emits no prompt."""
-    from daydream.phases import phase_fix
+    """Every fix entry point rejects an unconfined or missing file reference.
+
+    The bad reference sits in the second item for the batched/parallel
+    entrypoints so their preflight loop actually runs past index 0; single
+    ``phase_fix`` receives it as its only item.
+    """
 
     silence_console("daydream.phases")
     backend = ScriptedBackend()
-    item = {"id": 1, "description": "Escape", "file": _unconfined_finding_file(tmp_path, path_kind), "line": 1}
+    bad: dict[str, Any] = {"id": 99, "description": "Escape", "line": 1}
+    if bad_ref != "missing":
+        bad["file"] = _unconfined_finding_file(tmp_path, bad_ref)
+    items = [
+        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
+        bad,
+    ]
+    work = make_work(tmp_path)
+    call: Any
+    if entry_point == "phase_fix":
+        call = phases.phase_fix(backend, work, bad, 1, 1)
+    elif entry_point == "phase_fix_batched":
+        call = phases.phase_fix_batched(backend, work, items, [1, 2], 2)
+    else:
+        call = phases.phase_fix_parallel(backend, work, items)
 
     with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
-    assert backend.prompts == []
-
-
-@pytest.mark.asyncio
-async def test_phase_fix_rejects_missing_file_reference(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """An item with no file reference is rejected, not silently delegated."""
-    from daydream.phases import phase_fix
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    item = {"id": 1, "description": "No file", "line": 3}
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
+        await call
     assert backend.prompts == []
 
 
@@ -1694,7 +1775,6 @@ async def test_phase_fix_batched_single_item_delegates_to_phase_fix(
     silence_console: Callable[..., None],
 ) -> None:
     """A one-item group delegates to phase_fix instead of building a batched prompt."""
-    from daydream import phases
 
     silence_console("daydream.phases")
 
@@ -1759,57 +1839,7 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
     assert "assumes single-threaded" in prompt
 
 
-@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
-@pytest.mark.asyncio
-async def test_phase_fix_batched_rejects_unconfined_finding_file(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-    path_kind: Any,
-) -> None:
-    """A single unconfined reference at any position rejects the whole batch.
 
-    The hostile value lives only in the second item so the batched preflight
-    loop ``for item in items[1:]`` actually runs past index 0 before raising.
-    """
-    from daydream.phases import phase_fix_batched
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    hostile = _unconfined_finding_file(tmp_path, path_kind)
-    items = [
-        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
-        {"id": 2, "description": "Escape", "file": hostile, "line": 2},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
-    assert backend.prompts == []
-
-
-@pytest.mark.asyncio
-async def test_phase_fix_batched_rejects_missing_file_reference(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """An item with no file reference rejects the whole batch, not just that item.
-
-    The missing ref lives in the second item so the batched preflight loop
-    ``for item in items[1:]`` actually runs past index 0 before raising.
-    """
-    from daydream.phases import phase_fix_batched
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    items = [
-        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
-        {"id": 2, "description": "No file", "line": 2},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
-    assert backend.prompts == []
 
 
 @pytest.mark.asyncio
@@ -1819,7 +1849,6 @@ async def test_phase_fix_parallel_batches_same_file_findings(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""
-    from daydream import phases
 
     batched_calls: list[list[dict[str, Any]]] = []
 
@@ -1855,7 +1884,6 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """When the batched turn raises, the group retries each finding via phase_fix."""
-    from daydream import phases
 
     fix_calls: list[int] = []
 
@@ -1892,57 +1920,7 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(
     assert failures == {}
 
 
-@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
-@pytest.mark.asyncio
-async def test_phase_fix_parallel_rejects_unconfined_finding_file(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-    path_kind: Any,
-) -> None:
-    """A single unconfined reference at any position aborts the whole run.
 
-    The hostile value lives only in the second item so the parallel preflight
-    loop actually runs past index 0 before raising -- no dispatch happens.
-    """
-    from daydream.phases import phase_fix_parallel
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    hostile = _unconfined_finding_file(tmp_path, path_kind)
-    items = [
-        {"id": 1, "file": "src/ok.py"},
-        {"id": 2, "file": hostile},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_parallel(backend, make_work(tmp_path), items)
-    assert backend.prompts == []
-
-
-@pytest.mark.asyncio
-async def test_phase_fix_parallel_rejects_missing_file_reference(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """An item with no file reference aborts the whole run before any dispatch.
-
-    The missing ref lives in the second item so the parallel preflight loop
-    actually runs past index 0 before raising -- no grouping happens.
-    """
-    from daydream.phases import phase_fix_parallel
-
-    silence_console("daydream.phases")
-    backend = ScriptedBackend()
-    items = [
-        {"id": 1, "file": "src/ok.py"},
-        {"id": 2, "description": "No file"},
-    ]
-
-    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
-        await phase_fix_parallel(backend, make_work(tmp_path), items)
-    assert backend.prompts == []
 
 
 @pytest.mark.asyncio
@@ -1951,9 +1929,8 @@ async def test_phase_fix_batched_adds_test_map_source_hint(
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
 ) -> None:
-    import json as _json
 
-    from daydream.phases import _parse_test_map, phase_fix_batched
+    from daydream.phases import phase_fix_batched
 
     silence_console("daydream.phases")
     test_map_path = tmp_path / "test-map.json"
@@ -2020,10 +1997,6 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     builder resolved -- only the external network backend is mocked. Asserts the
     exact bounded files actually reach the reviewer prompt.
     """
-    from daydream.backends import ResultEvent, TextEvent
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep.detection import StackAssignment
-    from daydream.phases import phase_per_stack_reviews
 
     silence_console("daydream.phases")
     backend = ScriptedBackend(
@@ -2066,8 +2039,10 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     assert failures == {}
     assert STRUCTURE_STACK_NAME in results
     structural_prompt = next(p for p in backend.prompts if "structural" in p)
-    assert str(exploration_dir / "summary.md") in structural_prompt
-    assert str(exploration_dir / "affected_files.md") in structural_prompt
+    assert "# Exploration Summary" in structural_prompt
+    assert "# Affected Files" in structural_prompt
+    assert "api/main.py" in structural_prompt
+    assert "do not re-read these files" in structural_prompt
 
 
 @pytest.mark.asyncio
@@ -2089,7 +2064,6 @@ class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
     def test_short_output_included_fully(self) -> None:
-        from daydream.phases import _build_fix_prompt
 
         output = "FAILED test_foo.py::test_bar - AssertionError"
         result = _build_fix_prompt(output)
@@ -2100,7 +2074,6 @@ class TestBuildFixPrompt:
         assert "Analyze the failures and fix them" in result
 
     def test_long_output_truncated(self) -> None:
-        from daydream.phases import TEST_OUTPUT_TAIL_LINES, _build_fix_prompt
 
         lines = [f"line {i}" for i in range(200)]
         output = "\n".join(lines)
@@ -2114,7 +2087,6 @@ class TestBuildFixPrompt:
         assert f"line {200 - TEST_OUTPUT_TAIL_LINES - 1}\n" not in result
 
     def test_feedback_items_adds_file_list(self) -> None:
-        from daydream.phases import _build_fix_prompt
 
         items = [
             {"id": 1, "description": "Bug", "file": "src/foo.py", "line": 10},
@@ -2131,14 +2103,12 @@ class TestBuildFixPrompt:
         assert result.count("- src/foo.py") == 1
 
     def test_build_fix_prompt_threads_evidence_exemplar(self) -> None:
-        from daydream.phases import _build_fix_prompt
 
         items = [{"file": "src/app.py", "evidence": "tests/test_deep_orchestrator.py:526"}]
         prompt = _build_fix_prompt("tests failed", items, repo=None)
         assert "tests/test_deep_orchestrator.py:526" in prompt
 
     def test_none_feedback_items_omits_file_section(self) -> None:
-        from daydream.phases import _build_fix_prompt
 
         result = _build_fix_prompt("test failed", None)
 
@@ -2148,7 +2118,6 @@ class TestBuildFixPrompt:
         assert "Analyze the failures and fix them" in result
 
     def test_empty_feedback_items_omits_file_section(self) -> None:
-        from daydream.phases import _build_fix_prompt
 
         result = _build_fix_prompt("test failed", [])
 
@@ -2156,7 +2125,6 @@ class TestBuildFixPrompt:
         assert "Focus on the files" not in result
 
     def test_repo_maps_existing_file_to_absolute(self, tmp_path: Path) -> None:
-        from daydream.phases import _build_fix_prompt
 
         (tmp_path / "daydream").mkdir()
         (tmp_path / "daydream" / "x.py").write_text("# real file\n")
@@ -2174,7 +2142,6 @@ class TestBuildFixPrompt:
         assert abs_path not in rel_result
 
     def test_repo_leaves_missing_file_relative(self, tmp_path: Path) -> None:
-        from daydream.phases import _build_fix_prompt
 
         items = [{"id": 1, "description": "Bug", "file": "src/ghost.py", "line": 1}]
         result = _build_fix_prompt("test failed", items, repo=tmp_path)
@@ -2185,7 +2152,6 @@ class TestBuildFixPrompt:
 
 def test_git_log_returns_log(git_repo: Path) -> None:
     """Test _git_log returns commit log."""
-    from daydream.phases import _git_log
 
     git(git_repo, "checkout", "-b", "feature")
     (git_repo / "new.txt").write_text("new")
@@ -2198,7 +2164,6 @@ def test_git_log_returns_log(git_repo: Path) -> None:
 
 def test_git_branch_returns_branch(git_repo: Path) -> None:
     """Test _git_branch returns current branch name."""
-    from daydream.phases import _git_branch
 
     git(git_repo, "checkout", "-b", "my-feature")
 
@@ -2207,11 +2172,6 @@ def test_git_branch_returns_branch(git_repo: Path) -> None:
 
 
 def test_build_intent_prompt_includes_pr_description_with_precedence_framing() -> None:
-    from daydream.phases import build_intent_prompt
-    from daydream.prompts.authorial_intent import (
-        AUTHORITATIVE_INTENT_RULE,
-        PR_DESCRIPTION_UNTRUSTED_FRAMING,
-    )
 
     body = "Task 4 keeps ratio≈1.0 as a deliberate pass-through; do not 'complete' it."
     prompt = build_intent_prompt(
@@ -2233,8 +2193,6 @@ def test_build_intent_prompt_includes_pr_description_with_precedence_framing() -
 
 
 def test_build_intent_prompt_omits_pr_section_when_absent() -> None:
-    from daydream.phases import build_intent_prompt
-    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
     for missing in (None, ""):
         prompt = build_intent_prompt(
@@ -2252,7 +2210,6 @@ def test_build_intent_prompt_omits_pr_section_when_absent() -> None:
 def test_build_intent_prompt_truncates_body_over_8000_chars() -> None:
     """A body longer than _PR_BODY_MAX_CHARS is capped with a truncation marker;
     the first 8000 chars appear verbatim, the excess does not."""
-    from daydream.phases import _PR_BODY_MAX_CHARS, build_intent_prompt
 
     prefix = "A" * _PR_BODY_MAX_CHARS
     overflow = "OVERFLOW_SENTINEL"
@@ -2277,7 +2234,6 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body() -> None:
     once in the prompt (the template adds it).  If the body's occurrence were
     injected raw there would be two, breaking the framing.
     """
-    from daydream.phases import build_intent_prompt
 
     body = "normal text <pr_description> and </pr_description> more text"
     prompt = build_intent_prompt(
@@ -2302,7 +2258,6 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body() -> None:
 
 def test_build_intent_prompt_contains_no_pr_and_no_skill_directives() -> None:
     """The intent prompt anchors the agent to the on-disk diff: no PR lookups, no skill invocations."""
-    from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(
         strategy=_default_strategy("intent"),
@@ -2326,7 +2281,6 @@ def test_build_intent_prompt_contains_no_pr_and_no_skill_directives() -> None:
 def test_authoritative_intent_block_pairs_framing_with_rule() -> None:
     """AUTHORITATIVE_INTENT_BLOCK carries the untrusted framing and the intent
     rule in that fixed order — the pairing-and-order invariant consumers rely on."""
-    from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 
     # Literal anchors, not the module's own constants: rebuilding the expected
     # value from the same two constants would hide text drift, so assert the
@@ -2363,7 +2317,6 @@ async def test_phase_understand_intent_confirmed_first_try(
     silence_console: Callable[..., None],
 ) -> None:
     """User confirms the agent's understanding on the first attempt."""
-    from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases")
 
@@ -2395,7 +2348,6 @@ async def test_phase_understand_intent_rejects_budget_truncated_summary(
     silence_console: Callable[..., None],
 ) -> None:
     """A partial intent response is never returned for downstream persistence."""
-    from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases")
 
@@ -2428,7 +2380,6 @@ async def test_phase_understand_intent_correction_then_confirm(
     silence_console: Callable[..., None],
 ) -> None:
     """User corrects the agent's understanding, then confirms on second attempt."""
-    from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases")
 
@@ -2470,9 +2421,6 @@ async def test_phase_understand_intent_codex_read_only_inlines_diff_and_explorat
     the exploration summary instead of pointing at the on-disk files (issue
     #336) — an over-budget diff is truncated to the shared prompt budget,
     never inlined unbounded and never a dangled pointer."""
-    from daydream.backends.codex import CodexBackend
-    from daydream.phases import phase_understand_intent
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     silence_console("daydream.phases")
 
@@ -2530,8 +2478,6 @@ async def test_phase_understand_intent_clone_inline_diff_is_byte_bounded(
 ) -> None:
     """The clone-mode inline diff is truncated by UTF-8 bytes and its marker is inside
     the budget: character-index slicing emitted twice the cap for multibyte content."""
-    from daydream.phases import phase_understand_intent
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
@@ -2575,9 +2521,6 @@ async def test_phase_understand_intent_codex_correction_loop_inlines_diff_under_
     the UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY (issue #336 findings 1/3/7): the
     inlined diff is repository-controlled content, and the on-disk
     ``.daydream/diff.patch`` may be absent from the read-only clone."""
-    from daydream.backends.codex import CodexBackend
-    from daydream.phases import phase_understand_intent
-    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     silence_console("daydream.phases")
 
@@ -2624,8 +2567,6 @@ async def test_phase_understand_intent_non_codex_keeps_budget_gated_diff_pointer
 ) -> None:
     """Non-cloning backends keep the budget-gated diff pointer: their execution
     cwd is the worktree, where the on-disk ``.daydream/diff.patch`` is present."""
-    from daydream.phases import phase_understand_intent
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     silence_console("daydream.phases")
 
@@ -2662,7 +2603,6 @@ async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_di
     silence_console: Callable[..., None],
 ) -> None:
     """The rebuilt prompt after a user correction still forbids PR lookups and skill invocations."""
-    from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases")
 
@@ -2714,8 +2654,6 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(
     the prompt when interactive, so the user is consulted. Observable: the
     correction prompt is reached (prompt_user is called), not bypassed.
     """
-    from daydream.phases import phase_understand_intent
-    from daydream.run_context import InteractionPolicy, RunContext
 
     silence_console("daydream.phases")
 
@@ -2767,9 +2705,7 @@ async def test_phase_understand_intent_renders_summary_panel_before_gate(
     Uses a recording console (not capsys scraping — that flakes in the no-TTY
     CI sandbox) and asserts on ``export_text()``.
     """
-    from rich.console import Console
 
-    from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases", keep=("console", "print_intent_summary"))
     recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
@@ -2802,9 +2738,7 @@ async def test_phase_understand_intent_renders_placeholder_for_empty_summary(
     silence_console: Callable[..., None],
 ) -> None:
     """An empty intent reply renders the dim placeholder, not a blank panel."""
-    from rich.console import Console
 
-    from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases", keep=("console", "print_intent_summary"))
     recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
@@ -2835,7 +2769,6 @@ async def test_phase_alternative_review_returns_issues(
     silence_console: Callable[..., None],
 ) -> None:
     """Agent returns numbered issues via structured output."""
-    from daydream.phases import phase_alternative_review
 
     silence_console("daydream.phases")
 
@@ -2886,7 +2819,6 @@ async def test_phase_alternative_review_no_issues(
     silence_console: Callable[..., None],
 ) -> None:
     """Agent finds no issues — returns empty list."""
-    from daydream.phases import phase_alternative_review
 
     silence_console("daydream.phases")
 
@@ -2909,7 +2841,6 @@ async def test_phase_alternative_review_no_issues(
 
 @pytest.mark.parametrize("schema_name", ["FEEDBACK_SCHEMA", "ALTERNATIVE_REVIEW_SCHEMA"])
 def test_schema_requires_confidence_and_rationale(schema_name: str) -> None:
-    from daydream import phases
 
     schema = getattr(phases, schema_name)
     required = schema["properties"]["issues"]["items"]["required"]
@@ -2922,8 +2853,6 @@ def test_schema_requires_confidence_and_rationale(schema_name: str) -> None:
 
 def test_finding_file_schema_slots_use_repository_file_path_schema() -> None:
     """Every model-facing finding schema constrains its file slot to the shared repository-path grammar."""
-    from daydream import phases
-    from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
 
     # Directly-assigned slots reference the exact shared schema object.
     feedback_file = phases.FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]
@@ -2942,7 +2871,6 @@ def test_finding_file_schema_slots_use_repository_file_path_schema() -> None:
 
 def test_is_evidenced_gate_branches() -> None:
     """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
-    from daydream.phases import _is_evidenced
 
     base = {"confidence": "HIGH", "rationale": "cites a real edge", "file": "api.py", "line": 42}
     # Grounded: non-blank evidence + real file:line.
@@ -2998,7 +2926,6 @@ def test_is_evidenced_gate_branches() -> None:
 
 def _per_stack_prompt(**overrides: Any) -> str:
     """Build the deep per-stack review prompt (the single-skill review's successor, #330)."""
-    from daydream.deep.prompts import build_per_stack_prompt
 
     args: dict[str, Any] = {
         "strategy": _rp.build_default_profile().strategies["discovery.per_stack"].content,
@@ -3026,11 +2953,6 @@ def test_review_prompt_distinguishes_convention_cases(tmp_path: Path) -> None:
 
 
 def test_all_phase_builders_include_exploration_pointer(tmp_path: Path) -> None:
-    from daydream.phases import (
-        build_alternative_review_prompt,
-        build_intent_prompt,
-    )
-    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
@@ -3048,7 +2970,6 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path: Path) -> None:
 
 
 def test_exploration_pointer_names_only_bounded_files_and_scopes_read_clause(tmp_path: Path) -> None:
-    from daydream.phases import _exploration_pointer
 
     exploration_dir = tmp_path / "exploration"
     pointer = _exploration_pointer(exploration_dir)
@@ -3060,8 +2981,6 @@ def test_exploration_pointer_names_only_bounded_files_and_scopes_read_clause(tmp
 
 
 def test_exploration_pointer_marks_results_untrusted(tmp_path: Path) -> None:
-    from daydream.phases import _exploration_pointer
-    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     exploration_dir = tmp_path / "exploration"
     pointer = _exploration_pointer(exploration_dir)
@@ -3072,7 +2991,6 @@ def test_exploration_pointer_marks_results_untrusted(tmp_path: Path) -> None:
 
 
 def test_issue_producing_builders_use_shared_instructions(tmp_path: Path) -> None:
-    from daydream.phases import build_alternative_review_prompt
 
     builders: list[Callable[..., str]] = [
         lambda **kw: _per_stack_prompt(**kw),
@@ -3084,7 +3002,6 @@ def test_issue_producing_builders_use_shared_instructions(tmp_path: Path) -> Non
 
 
 def test_intent_builder_omits_issue_instructions(tmp_path: Path) -> None:
-    from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(strategy=_default_strategy("intent"), exploration_dir=tmp_path)
     assert "Confidence and Convention Rules" not in prompt
@@ -3111,7 +3028,6 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
 ) -> None:
     """Host-native commit-push writes Daydream-Run / Daydream-Version trailers
     at commit time via ``build_commit_message`` — no agent prompt, no amend."""
-    from daydream.phases import phase_commit_push
 
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
@@ -3134,7 +3050,6 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     work = make_work(repo, base_sha="ABC123", head_sha="DEF456")
     await phase_commit_push(backend, work)
 
-    import daydream
 
     message = git(repo, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in message
@@ -3166,8 +3081,6 @@ async def test_declined_commit_still_runs_host_validation_before_success(
 ) -> None:
     """Declining the commit gate must still re-run the host test runner and
     only count the run as successful when that validation passes."""
-    from daydream.phases import phase_commit_push
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
@@ -3199,10 +3112,7 @@ async def test_declined_commit_surfaces_failed_validation(
 ) -> None:
     """A red validation suite after a declined commit must surface the failure
     (raise), never report success on a red suite."""
-    import pytest as _pytest
 
-    from daydream.phases import phase_commit_push
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
@@ -3229,7 +3139,6 @@ async def test_declined_commit_without_configured_command_skips_validation(
 ) -> None:
     """With no canonical test command configured there is nothing to validate
     against; the decline path must not fabricate a verdict and must not crash."""
-    from daydream.phases import phase_commit_push
 
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
@@ -3257,7 +3166,6 @@ async def test_approved_investigator_command_runs_once_host_side(
 ) -> None:
     """Approved investigator command runs once host-side, never in an agent prompt."""
     from daydream.phases import phase_test_and_heal
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
 
@@ -3309,7 +3217,6 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     skipped with a warning rather than crashing the run with an unhandled
     empty-subprocess / shlex exception (issues #726, #1)."""
     from daydream.phases import phase_test_and_heal
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
 
@@ -3433,7 +3340,6 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
 ) -> None:
     """Investigator suggests replacement + user confirms → host-side run."""
     from daydream.phases import phase_test_and_heal
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
 
@@ -3591,7 +3497,6 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
 
 def test_minimal_handoff_separates_facts_from_unknown_cause() -> None:
     """The no-agent fallback mirrors the facts/hypotheses split and invents no cause."""
-    from daydream.phases import _build_minimal_handoff
 
     body = _build_minimal_handoff(
         test_output="E   assert 1 == 2\nFAILED tests/t.py::test_x",
@@ -3642,7 +3547,6 @@ def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_wri
     the real recorder field so the handoff path resolver can detect
     whether archiving is enabled.
     """
-    from contextlib import asynccontextmanager
 
     class _FakeRecorder:
         target_dir = tmp_path
@@ -3963,7 +3867,6 @@ async def test_recorderless_standalone_ephemeral_handoff_survives_worktree_clean
     tmp_path: Path,
 ) -> None:
     """A standalone handoff without a recorder still belongs to the source checkout."""
-    from daydream.phases import _run_failure_summarizer
 
     source = tmp_path / "source"
     init_repo(source)
@@ -4009,8 +3912,6 @@ async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_own
     make_work: Callable[..., WorkContext],
 ) -> None:
     """Compatibility routing cannot borrow a private session for a durable handoff."""
-    from daydream.artifact_visibility import ArtifactVisibilityError
-    from daydream.phases import _resolve_handoff_paths
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -4022,7 +3923,6 @@ async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_own
 
 def _make_ephemeral_workcontext(source: Path, repo: Path) -> Any:
     """Build a WorkContext where ``source != repo`` (ephemeral case)."""
-    from daydream.workspace import WorkContext
 
     return WorkContext(
         repo=repo,
@@ -4048,7 +3948,6 @@ def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
     layout wrote handoff.md under work.source so it survived worktree
     cleanup but was not part of the archive bundle.
     """
-    from daydream.phases import _resolve_handoff_paths
 
     source = tmp_path / "source"
     source.mkdir()
@@ -4084,8 +3983,6 @@ def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
 
 def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path: Path) -> None:
     """In-place: artifact references stay under recorder.target_dir."""
-    from daydream.phases import _resolve_handoff_paths
-    from daydream.workspace import WorkContext
 
     work = WorkContext(
         repo=tmp_path,
@@ -4126,8 +4023,6 @@ def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path: P
     which runs after the handoff helper). Now we surface the forward
     reference unconditionally.
     """
-    from daydream.phases import _resolve_handoff_paths
-    from daydream.workspace import WorkContext
 
     work = WorkContext(
         repo=tmp_path,
@@ -4170,14 +4065,6 @@ async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
     composed through the layout surface, so a reader never re-derives
     ``<root>/runs/<session_id>/trajectory.json`` on its own.
     """
-    from daydream.artifact_visibility import artifact_dir_for
-    from daydream.phases import _resolve_handoff_paths
-    from daydream.trajectory import (
-        DaydreamRunFlow,
-        run_directory,
-        run_document_path,
-        siblings_directory,
-    )
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -4209,7 +4096,6 @@ async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
 
 def test_write_handoff_returns_true_on_success(tmp_path: Path) -> None:
     """Happy path: bytes hit disk and the helper reports success."""
-    from daydream.phases import _write_handoff
 
     target = tmp_path / "runs" / "sid" / "handoff.md"
     assert _write_handoff(target, "BODY") is True
@@ -4222,9 +4108,7 @@ def test_write_handoff_returns_false_on_oserror(tmp_path: Path, monkeypatch: pyt
     Without this signal the option-4 abort branch prints "Handoff written:
     <path>" pointing at a file that does not exist on disk.
     """
-    from pathlib import Path as _Path
 
-    from daydream.phases import _write_handoff
 
     target = tmp_path / "runs" / "sid" / "handoff.md"
 
@@ -4313,7 +4197,6 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
     menu prompt is never consulted, and the fix agent is never launched.
     """
     from daydream.phases import phase_test_and_heal
-    from daydream.run_context import InteractionPolicy, RunContext
 
     run_context = RunContext(InteractionPolicy(interactive=False))
     try:
@@ -4322,7 +4205,6 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
 
         # Any prompt read at all proves the menu/stdin path was entered — which
         # the non-interactive branch must skip entirely.
-        from unittest.mock import Mock
 
         prompt_sentinel = Mock(
             side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
@@ -4386,7 +4268,6 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
     Verified facts from Hypotheses and never invents a cause.
     """
     from daydream.phases import phase_test_and_heal
-    from daydream.run_context import InteractionPolicy, RunContext
 
     run_context = RunContext(InteractionPolicy(interactive=False))
     try:
@@ -4394,7 +4275,6 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
         _install_recorder(monkeypatch, tmp_path)
         monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
-        from unittest.mock import Mock
 
         prompt_sentinel = Mock(
             side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
@@ -4447,7 +4327,6 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
     → abort, preventing an unbounded mutating fix loop under ``--yes``.
     """
     from daydream.phases import phase_test_and_heal
-    from daydream.run_context import InteractionPolicy, RunContext
 
     run_context = RunContext(InteractionPolicy(assume="yes"))
     try:
@@ -4455,7 +4334,6 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
         _install_recorder(monkeypatch, tmp_path)
 
         # Sentinel: the menu must never be shown in auto mode.
-        from unittest.mock import Mock
 
         prompt_sentinel = Mock(
             side_effect=AssertionError("prompt_user must not be called under --yes"),
@@ -4502,7 +4380,6 @@ def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace() 
     close the fence and append arbitrary instructions to the next agent
     call. Newlines / tabs are folded too so the value stays single-line.
     """
-    from daydream.phases import _sanitize_suggested_command
 
     assert _sanitize_suggested_command("make check") == "make check"
     # Triple backticks closing the fence + injection follow-on:
@@ -4531,7 +4408,6 @@ async def test_normal_test_path_uses_host_runner_no_agent_turn(
     empty: any ``run_agent`` call would fail the test by exhausting it.
     """
     from daydream.phases import phase_test_and_heal
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
 
@@ -4577,7 +4453,6 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
     backticks), so nothing fence- or shell-breaking survives.
     """
     from daydream.phases import phase_test_and_heal
-    from daydream.test_execution import TestExecutionResult
 
     silence_console("daydream.phases")
 
@@ -4688,7 +4563,6 @@ def _init_git_repo(repo: Path) -> None:
 
 def test_changed_files_includes_untracked_new_files(tmp_path: Path) -> None:
     """A fix that creates a new file is still untracked at abort time."""
-    from daydream.phases import _changed_files
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -4711,7 +4585,6 @@ def test_changed_files_includes_untracked_new_files(tmp_path: Path) -> None:
 
 def test_changed_files_returns_empty_on_non_git_dir(tmp_path: Path) -> None:
     """Outside a git repo the helper still degrades gracefully to []."""
-    from daydream.phases import _changed_files
 
     assert _changed_files(tmp_path) == []
 
@@ -4722,7 +4595,6 @@ def test_changed_files_skips_unsafe_lexical_names(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Each unsafe Git name is warned about and skipped without escaping."""
-    from daydream.phases import _changed_files
 
     repo = tmp_path / "repo"
     names = [
@@ -4753,9 +4625,6 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """A changed tracked symlink remains a lexical changed-file identity."""
-    from daydream.artifact_visibility import artifact_dir_for
-    from daydream.phases import _run_failure_summarizer
-    from daydream.trajectory import DaydreamRunFlow
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -4818,8 +4687,6 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
     private_leaf: str,
 ) -> None:
     """A model cannot echo private control or sibling-workspace identities."""
-    from daydream.artifact_visibility import OutputLabel
-    from daydream.phases import _run_failure_summarizer
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -4859,7 +4726,6 @@ def test_failure_summarizer_empty_governed_set_keeps_public_paths_future_only(
     tmp_path: Path,
 ) -> None:
     """An active session with zero captured files never grants public paths."""
-    from daydream.phases import _build_failure_summarizer_prompt
 
     public = tmp_path / "source" / ".daydream"
     run = public / "runs" / "session"
@@ -5036,7 +4902,6 @@ async def test_phase_prints_model_line_after_hero(
     expected_hero: Any,
     setup: Any,
 ) -> None:
-    from daydream import phases
 
     silence_console("daydream.phases", keep=("print_phase_hero", "print_dim"))
     heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
@@ -5066,8 +4931,6 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
       - The rendered ``review-output.md`` still has the ``## Structural Review``
         section.
     """
-    from daydream.deep.artifacts import deep_dir, merged_items_path
-    from daydream.phases import phase_cross_stack_merge
 
     silence_console("daydream.phases")
 
@@ -5123,9 +4986,6 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
     silence_console: Callable[..., None],
     inline: bool,
 ) -> None:
-    from daydream.artifact_visibility import artifact_dir_for
-    from daydream.phases import phase_cross_stack_merge
-    from daydream.prompt_budget import SanctionedInputUnavailable
 
     silence_console("daydream.phases")
     repo = tmp_path / "repo"
@@ -5207,46 +5067,17 @@ async def test_phase_understand_intent_inline_exploration_budget_degrades(
     with SanctionedInputUnavailable. Greedy prefix keeps the summary when the
     pair is over budget, and an over-budget pair drops the tail file.
     """
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
-    from daydream.phases import phase_understand_intent
-    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-
-    async with open_artifact_session(work, session_id="intent-inline-oversize", owner=owner):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        big_summary = "s" * (SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES + 1)
-        (exploration / "summary.md").write_text(big_summary, encoding="utf-8")
-        (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
-
-        backend = ScriptedBackend(
-            events=[
-                TextEvent(text="This PR adds a login page."),
-                _RESULT,
-            ],
-            audit_root_isolation="claude-pretooluse",
-            audit_root=repo.resolve(),
-        )
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-
+    big_summary = "s" * (SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES + 1)
+    async with _intent_inline_fixture(
+        tmp_path,
+        monkeypatch,
+        make_work,
+        session_id="intent-inline-oversize",
+        exploration_files={"summary.md": big_summary, "affected_files.md": "affected-a\n"},
+        events=(TextEvent(text="This PR adds a login page."), _RESULT),
+    ) as (backend, work, diff_file, diff_text, exploration):
         result = await phase_understand_intent(
             backend,
             work,
@@ -5274,47 +5105,18 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
     silence_console: Callable[..., None],
 ) -> None:
     """Two exploration files summing over budget drop the second, keep the first."""
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
-    from daydream.phases import phase_understand_intent
-    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-
-    async with open_artifact_session(work, session_id="intent-inline-pair", owner=owner):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        half = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES // 2
-        summary = "s" * half
-        (exploration / "summary.md").write_text(summary, encoding="utf-8")
-        (exploration / "affected_files.md").write_text("a" * half, encoding="utf-8")
-
-        backend = ScriptedBackend(
-            events=[
-                TextEvent(text="This PR adds a login page."),
-                _RESULT,
-            ],
-            audit_root_isolation="claude-pretooluse",
-            audit_root=repo.resolve(),
-        )
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-
+    half = SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES // 2
+    summary = "s" * half
+    async with _intent_inline_fixture(
+        tmp_path,
+        monkeypatch,
+        make_work,
+        session_id="intent-inline-pair",
+        exploration_files={"summary.md": summary, "affected_files.md": "a" * half},
+        events=(TextEvent(text="This PR adds a login page."), _RESULT),
+    ) as (backend, work, diff_file, diff_text, exploration):
         result = await phase_understand_intent(
             backend,
             work,
@@ -5334,48 +5136,6 @@ async def test_phase_understand_intent_inline_pair_over_budget_drops_tail(
 
 
 @pytest.mark.asyncio
-async def test_budgeted_exploration_inputs_delegates_to_the_shared_capability(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_work: Callable[..., WorkContext],
-) -> None:
-    """One policy, not two: the intent pre-budget call site delegates to
-    ``select_advisory_inputs`` and reports the same admitted/omitted split."""
-    from daydream import phases as phases_module
-    from daydream.prompt_budget import AdvisorySelection, select_advisory_inputs
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    exploration = tmp_path / "exploration"
-    exploration.mkdir()
-    (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
-    (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
-    captured: dict[str, Any] = {}
-    real_select = select_advisory_inputs
-
-    def _spy(backend: Any, cwd: Any, candidates: Any, *, read_only: bool) -> AdvisorySelection:
-        captured["labels"] = [candidate.label for candidate in candidates]
-        captured["read_only"] = read_only
-        return real_select(backend, cwd, candidates, read_only=read_only)
-
-    monkeypatch.setattr(phases_module, "select_advisory_inputs", _spy)
-    # A capture (and therefore shared sizing) only happens inside a real
-    # artifact session; the no-session path returns the full mapping verbatim.
-    async with _private_session(tmp_path, work, "budgeted-exploration-inputs"):
-        sized = phases_module._budgeted_exploration_inputs(
-            exploration, backend=SimpleNamespace(model="fake"), cwd=repo
-        )
-    assert captured["labels"] == ["exploration-summary", "exploration-affected-files"]
-    assert sized["exploration-summary"] == exploration / "summary.md"
-    assert sized["exploration-affected-files"] == exploration / "affected_files.md"
-
-
-@pytest.mark.asyncio
 async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5391,53 +5151,22 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
     every inlined diff; ``str(diff_path)`` is confined to the EXACT_PATHS
     branch where the diff is a sanctioned input.
     """
-    from daydream.artifact_visibility import (
-        artifact_dir_for,
-        open_artifact_session,
-        private_root_locations,
-        resolve_private_workspace_owner,
-    )
-    from daydream.phases import phase_understand_intent
-    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     silence_console("daydream.phases")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    locations = private_root_locations(base=(tmp_path / "private").resolve())
-    owner = resolve_private_workspace_owner(repo, locations=locations)
-
     responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
-
-    async with open_artifact_session(work, session_id="intent-inline-correction", owner=owner):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        (exploration / "summary.md").write_text("summary works\n", encoding="utf-8")
-        (exploration / "affected_files.md").write_text("affected-a\n", encoding="utf-8")
-
-        backend = ScriptedBackend(
-            script=[
-                [
-                    TextEvent(text="This PR adds a signup page."),
-                    _RESULT,
-                ],
-                [
-                    TextEvent(text="This PR adds a login page with OAuth support."),
-                    _RESULT,
-                ],
-            ],
-            audit_root_isolation="claude-pretooluse",
-            audit_root=repo.resolve(),
-        )
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-
+    script: list[list[AgentEvent]] = [
+        [TextEvent(text="This PR adds a signup page."), _RESULT],
+        [TextEvent(text="This PR adds a login page with OAuth support."), _RESULT],
+    ]
+    async with _intent_inline_fixture(
+        tmp_path,
+        monkeypatch,
+        make_work,
+        session_id="intent-inline-correction",
+        exploration_files={"summary.md": "summary works\n", "affected_files.md": "affected-a\n"},
+        script=script,
+        prompt_user=lambda *a, **kw: next(responses),
+    ) as (backend, work, diff_file, diff_text, exploration):
         result = await phase_understand_intent(
             backend,
             work,
@@ -5464,7 +5193,6 @@ async def test_cross_stack_merge_agent_phase_label(
     silence_console: Callable[..., None],
 ) -> None:
     """The production cross-stack agent is canonically attributed to MERGE."""
-    from daydream.phases import phase_cross_stack_merge
 
     silence_console("daydream.phases")
     recorder = make_recorder(tmp_path)
@@ -5496,7 +5224,6 @@ async def test_merge_raises_on_empty_agent_output(
     silence_console: Callable[..., None],
 ) -> None:
     """Empty/invalid agent output raises ValueError -- no silent [] fallback."""
-    from daydream.phases import phase_cross_stack_merge
 
     silence_console("daydream.phases")
 
@@ -5524,8 +5251,6 @@ async def test_verifier_excludes_structural_lens(
     Assumption 2 of the canonical-finding-pipeline plan). The per-stack item is
     the only candidate the verifier can return a verdict for.
     """
-    from daydream.deep.artifacts import deep_dir, merged_items_path, verdicts_path
-    from daydream.phases import phase_verify_recommendations
 
     silence_console("daydream.phases")
 
@@ -5609,8 +5334,6 @@ async def test_verifier_prompt_carries_gate_zero_protocol(
     agent receives must carry the same-turn-echo anti-confabulation gate, not just
     the standalone builder (unit-tested in test_deep_prompts.py).
     """
-    from daydream.deep.artifacts import deep_dir, merged_items_path
-    from daydream.phases import phase_verify_recommendations
 
     silence_console("daydream.phases")
 
@@ -5660,9 +5383,7 @@ async def test_verifier_prompt_carries_gate_zero_protocol(
 
 
 def test_fix_verify_schema_rejects_bad_verdict() -> None:
-    import jsonschema
 
-    from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
 
     payload = {"verdicts": [
         {"issue_id": 1, "verdict": "fixed-ish", "path": "a.py", "reason": "r"},
@@ -5672,9 +5393,7 @@ def test_fix_verify_schema_rejects_bad_verdict() -> None:
 
 
 def test_fix_verify_schema_accepts_all_four_verdicts() -> None:
-    import jsonschema
 
-    from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
 
     for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
         entry: dict[str, Any] = {"issue_id": 1, "verdict": verdict, "reason": "r"}
@@ -5695,12 +5414,6 @@ def test_fix_verify_verdicts_are_single_source() -> None:
     ``FIX_VERIFY_VERDICTS`` in ``daydream.phases`` so a rename/reorder lands in
     one place.
     """
-    from daydream.phases import (
-        FIX_VERIFY_ACTIONABLE_VERDICTS,
-        FIX_VERIFY_RETARGETABLE_VERDICTS,
-        FIX_VERIFY_VERDICTS,
-        FIX_VERIFY_VERDICTS_SCHEMA,
-    )
 
     enum = FIX_VERIFY_VERDICTS_SCHEMA["properties"]["verdicts"]["items"]["properties"]["verdict"]["enum"]
     assert enum == list(FIX_VERIFY_VERDICTS)
@@ -5713,9 +5426,7 @@ def test_print_fix_complete_gates_on_resolved(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from rich.console import Console
 
-    from daydream.ui.summary import print_fix_complete
 
     c = Console(record=True)
     print_fix_complete(c, 1, 1, outcome="resolved")
@@ -5727,8 +5438,6 @@ def test_print_fix_complete_gates_on_resolved(
 
 
 def test_group_items_by_footprint_unions_overlapping_footprints(tmp_path: Path) -> None:
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.phases import group_items_by_footprint
 
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["b.py"]},
@@ -5745,8 +5454,6 @@ def test_group_items_by_footprint_unions_overlapping_footprints(tmp_path: Path) 
 
 
 def test_group_items_by_footprint_never_splits_same_file_batch(tmp_path: Path) -> None:
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.phases import group_items_by_footprint
 
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py"},
@@ -5762,8 +5469,6 @@ def test_group_items_by_footprint_never_splits_same_file_batch(tmp_path: Path) -
 
 def test_group_items_by_footprint_uses_authorized_transitive_scopes(tmp_path: Path) -> None:
     """Grouping is driven by the normalized policy, not raw finding fields."""
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.phases import group_items_by_footprint
 
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["bridge.py"]},
@@ -5787,9 +5492,6 @@ async def test_phase_fix_parallel_passes_exact_group_edit_and_run_read_scopes(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """Disjoint groups cannot edit a reviewed-only path shared by the run."""
-    from daydream import phases
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
 
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py"},
@@ -5827,9 +5529,6 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-    from daydream import git_ops, phases
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
 
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["shared.py"]},
@@ -5873,9 +5572,6 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
 async def test_batched_and_fallback_calls_share_the_group_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext]
 ) -> None:
-    from daydream import phases
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
 
     items: list[dict[str, Any]] = [
         {"id": i, "item_uid": f"item:{i}", "file": "a.py", "related_files": []} for i in (1, 2)
@@ -5913,9 +5609,6 @@ async def test_phase_test_once_records_host_input_and_output_identity(
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-    from daydream import phases
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.test_execution import TestExecutionResult
 
     observed = iter(["before", "after"])
 
@@ -5950,8 +5643,6 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-    from daydream import phases
-    from daydream.fix_footprint import AuthorizedFixFootprint
 
     feedback = [{"id": 1, "item_uid": "item:1", "file": "a.py"}]
     footprint = AuthorizedFixFootprint.build(tmp_path, {"readme.md"}, feedback)
@@ -5985,7 +5676,6 @@ def test_require_empty_staged_index_rejects_preexisting_staged_change(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
 ) -> None:
-    from daydream.phases import require_empty_staged_index
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -6005,7 +5695,6 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-    from daydream import git_ops, phases
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -6058,7 +5747,6 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
     make_work: Callable[..., WorkContext],
     permissions: int,
 ) -> None:
-    from daydream import git_ops, phases
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -6101,9 +5789,7 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
     make_work: Callable[..., WorkContext],
     native_retained: bool,
 ) -> None:
-    import errno
 
-    from daydream import git_ops, phases
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -6159,7 +5845,6 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
     must_block: bool,
 ) -> None:
     """A real hook may update runtime output, never tracked or lookalike user files."""
-    from daydream import git_ops, phases
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -6211,7 +5896,6 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
     make_work: Callable[..., WorkContext],
     hook_mutation: str,
 ) -> None:
-    from daydream import git_ops, phases
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -6256,9 +5940,7 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-    import anyio
 
-    from daydream import phases
 
     active_files, batched_calls, fix_calls = set(), [], []
 
@@ -6314,9 +5996,6 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
 async def test_timed_out_fix_turn_is_recorded_as_a_group_stop_not_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext]
 ) -> None:
-    from daydream import phases
-    from daydream.fix_footprint import AuthorizedFixFootprint
-    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
 
     items = [{"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": []}]
     footprint = AuthorizedFixFootprint.build(tmp_path, set(), items)
@@ -6349,7 +6028,6 @@ async def test_phase_fix_parallel_partial_dispatch_preserves_successful_group(
     silence_console: Callable[..., None],
 ) -> None:
     """One failed real fix group records partial without losing its sibling ref."""
-    from daydream import phases
 
     def _one_fix_fails_responder(
         cwd: Any, prompt: str, *args: Any
@@ -6403,7 +6081,6 @@ async def test_phase_fix_parallel_rolled_back_group_dispatch_is_failed(
     silence_console: Callable[..., None],
 ) -> None:
     """Progress erased by whole-group rollback is not reported as partial."""
-    from daydream import phases
 
     def _fallback_then_failure_responder(
         cwd: Any, prompt: str, *args: Any
@@ -6459,7 +6136,6 @@ _INLINE_TEST_DIFF = (
 
 
 def test_intent_prompt_inlines_small_diff() -> None:
-    from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(
         strategy=_default_strategy("intent"), diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
@@ -6472,7 +6148,6 @@ def test_intent_prompt_inlines_small_diff() -> None:
 
 
 def test_intent_prompt_pointer_when_diff_is_none() -> None:
-    from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(
         strategy=_default_strategy("intent"), diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
@@ -6483,7 +6158,6 @@ def test_intent_prompt_pointer_when_diff_is_none() -> None:
 
 def test_intent_prompt_explicit_none_matches_omitted() -> None:
     """Explicit ``inline_diff=None`` matches the omitted argument."""
-    from daydream.phases import build_intent_prompt
 
     explicit_none = build_intent_prompt(
         strategy=_default_strategy("intent"), diff_path="d.patch", branch="b", log="l", inline_diff=None
@@ -6493,8 +6167,6 @@ def test_intent_prompt_explicit_none_matches_omitted() -> None:
 
 
 def test_alternatives_prompt_inlines_small_diff() -> None:
-    from daydream.phases import build_alternative_review_prompt
-    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     prompt = build_alternative_review_prompt(
         strategy=_default_strategy("alternatives"), intent_summary="does a thing", diff_path=".daydream/diff.patch",
@@ -6509,7 +6181,6 @@ def test_alternatives_prompt_inlines_small_diff() -> None:
 
 
 def test_alternatives_prompt_pointer_when_diff_is_none() -> None:
-    from daydream.phases import build_alternative_review_prompt
 
     prompt = build_alternative_review_prompt(
         strategy=_default_strategy("alternatives"), intent_summary="does a thing", diff_path=".daydream/diff.patch",
@@ -6520,8 +6191,6 @@ def test_alternatives_prompt_pointer_when_diff_is_none() -> None:
 
 def test_inlineable_diff_budget_boundaries() -> None:
     """Under and exactly-at budget inline; over budget falls back to the pointer."""
-    from daydream.phases import _inlineable_diff
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     assert _inlineable_diff(None) is None
     assert _inlineable_diff("") == ""  # empty diff is under budget
@@ -6533,8 +6202,6 @@ def test_inlineable_diff_budget_boundaries() -> None:
 
 def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
     """A multi-byte diff just over the byte budget is not inlined."""
-    from daydream.phases import _inlineable_diff
-    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # 3 bytes per char in UTF-8, so this is ~3x the budget in bytes while
     # being under it in characters.
@@ -6546,7 +6213,6 @@ def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
 
 async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched() -> None:
     """Key Decision 2: PER_STACK_RECORD_SCHEMA gains per-file verdicts; FEEDBACK_SCHEMA is not mutated."""
-    from daydream.phases import FEEDBACK_SCHEMA, PER_STACK_RECORD_SCHEMA
     props = PER_STACK_RECORD_SCHEMA["properties"]
     assert "verdicts" in props
     v_items = props["verdicts"]["items"]["properties"]
@@ -6558,8 +6224,6 @@ async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched()
 
 def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
     """A beyond-tolerance citation is demoted-with-annotation, not snapped."""
-    from daydream.hunk_index import write_hunk_index
-    from daydream.phases import _write_single_stack_merged_items
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True)
@@ -6581,7 +6245,6 @@ def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
         }
     ]
     _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
-    from daydream.deep.artifacts import merged_items_path
 
     items = json.loads(merged_items_path(dd).read_text())["items"]
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
@@ -6591,8 +6254,6 @@ def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
 def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path: Path) -> None:
     """R2.1/R2.4: a beyond-tolerance demotion keeps the original severity recoverable
     and carries a machine-readable ``location_distrust`` mark through the merge."""
-    from daydream.hunk_index import write_hunk_index
-    from daydream.phases import _write_single_stack_merged_items
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True)
@@ -6614,7 +6275,6 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
         }
     ]
     _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
-    from daydream.deep.artifacts import merged_items_path
 
     items = json.loads(merged_items_path(dd).read_text())["items"]
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
@@ -6623,7 +6283,6 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
 
 
 def test_build_commit_message_deterministic_with_trailers() -> None:
-    from daydream.phases import build_commit_message
 
     items = [{"file": "a.py", "description": "fix null guard"},
              {"file": "b.py", "description": "add retry"}]

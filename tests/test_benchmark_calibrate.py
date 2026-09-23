@@ -7,6 +7,31 @@ from typing import Any
 
 import pytest
 
+import daydream.benchmark.harbor.calibrate as cal
+from daydream.benchmark import cli
+from daydream.benchmark.cli import _build_benchmark_parser
+from daydream.benchmark.harbor import calibrate
+from daydream.benchmark.harbor import verifier_core as canonical_vc
+from daydream.benchmark.harbor.calibrate import (
+    _build_calibration_client,
+    _build_receipt,
+    _class_balanced_accuracy,
+    _confusion_matrix,
+    _invalidation_inputs,
+    _judge_host_from_env,
+    _judge_pairs,
+    _load_fixture,
+    _load_judge_template,
+    _load_provenance,
+    _load_workspace_allowlist,
+    _majority_label,
+    _pass_gate,
+    _per_pair_stable,
+    _validate_workspace_host,
+    _write_receipt,
+    run_calibration,
+)
+
 _FIXTURE = Path(__file__).parents[1] / "daydream" / "benchmark" / "harbor" / "calibration"
 
 REQUIRED_CATEGORIES = {
@@ -17,7 +42,6 @@ _CRED = re.compile(r"sk-ant-|sk-or-|Bearer |x-api-key")
 
 
 def test_fixture_is_24_pairs_12_12() -> None:
-    from daydream.benchmark.harbor.calibrate import _load_fixture
     pairs = _load_fixture()
     assert len(pairs) == 24
     labels = [p["label"] for p in pairs]
@@ -25,13 +49,11 @@ def test_fixture_is_24_pairs_12_12() -> None:
 
 
 def test_fixture_covers_all_eight_categories() -> None:
-    from daydream.benchmark.harbor.calibrate import _load_fixture
     pairs = _load_fixture()
     assert {p["category"] for p in pairs} >= REQUIRED_CATEGORIES
 
 
 def test_fixture_is_source_free() -> None:
-    from daydream.benchmark.harbor import calibrate
 
     pairs = calibrate._load_fixture()
     text = json.dumps(pairs, ensure_ascii=False)
@@ -57,7 +79,6 @@ def test_fixture_is_source_free() -> None:
 
 
 def test_fixture_provenance_declares_unverified_llm_origin() -> None:
-    from daydream.benchmark.harbor.calibrate import _load_fixture, _load_provenance
 
     pairs = _load_fixture()
     prov = _load_provenance(pairs)
@@ -71,7 +92,6 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
 
 
 def test_every_pair_renders_within_24kib() -> None:
-    from daydream.benchmark.harbor.calibrate import _load_fixture, _load_judge_template
     sr = _load_judge_template()
     for p in _load_fixture():
         prompt = sr.render_pair_prompt(
@@ -81,14 +101,12 @@ def test_every_pair_renders_within_24kib() -> None:
 
 
 def test_loader_resolves_sibling_verifier_core() -> None:
-    from daydream.benchmark.harbor import calibrate
 
     sr = calibrate._load_judge_template()
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
     # issue #1004: the template twin is gone -- the asset's bare `import
     # verifier_core` resolves to the canonical host module.
-    from daydream.benchmark.harbor import verifier_core as canonical_vc
     assert sr.verifier_core is canonical_vc
 
     verdict = sr.parse_verdict(
@@ -99,7 +117,6 @@ def test_loader_resolves_sibling_verifier_core() -> None:
 
 
 def test_client_builder_threads_http_seam() -> None:
-    from daydream.benchmark.harbor.calibrate import _build_calibration_client
     calls = []
 
     class Fake:
@@ -118,14 +135,12 @@ def test_client_builder_threads_http_seam() -> None:
 
 
 def test_client_builder_fails_closed_without_model_or_key() -> None:
-    from daydream.benchmark.harbor.calibrate import _build_calibration_client, _load_judge_template
     sr = _load_judge_template()
     with pytest.raises(sr.VerifierError):
         _build_calibration_client({"DAYDREAM_JUDGE_MODEL": "m"})  # no API key
 
 
 def test_judge_host_resolved_from_env() -> None:
-    from daydream.benchmark.harbor.calibrate import _judge_host_from_env
     assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
                                  "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9"}) == "127.0.0.1"
     assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "anthropic"}) == "api.anthropic.com"
@@ -143,29 +158,8 @@ def test_judge_host_resolved_from_env() -> None:
         })
 
 
-def test_out_of_allowlist_host_rejected(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor.calibrate import (
-        _load_workspace_allowlist,
-        _validate_workspace_host,
-    )
-    ws = tmp_path / "ws"
-    (ws / "runtime").mkdir(parents=True)
-    (ws / "benchmark.yaml").write_text(json.dumps({
-        "schema_version": 1,
-        "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
-        "created_at": "2026-08-21T12:00:00Z",
-        "source": {"provider": "github", "hostname": "github.com",
-                    "repository": "OWNER/REPO", "repository_id": None,
-                    "visibility": "unresolved"},
-        "privacy": {"classification": "confidential",
-                     "reviewer_data": "source_snapshot",
-                     "reviewer_allowed_hosts": ["review.example"],
-                     "judge_data": "finding_text_and_location_only",
-                     "judge_allowed_hosts": ["127.0.0.1"],
-                     "archive": "disabled", "uploads": "disabled"},
-        "pull_requests": [],
-        "cases": [],
-    }))
+def test_out_of_allowlist_host_rejected(tmp_path: Path, ws_factory: Any) -> None:
+    ws = ws_factory(tmp_path)
     allow = _load_workspace_allowlist(ws)
     assert allow == ["127.0.0.1"]
     with pytest.raises(ValueError):
@@ -174,11 +168,6 @@ def test_out_of_allowlist_host_rejected(tmp_path: Path) -> None:
 
 
 def test_judge_pairs_makes_exactly_72_calls() -> None:
-    from daydream.benchmark.harbor.calibrate import (
-        _judge_pairs,
-        _load_fixture,
-        _load_judge_template,
-    )
 
     sr = _load_judge_template()
     pairs = _load_fixture()
@@ -201,7 +190,6 @@ def test_judge_pairs_makes_exactly_72_calls() -> None:
 
 @pytest.fixture(scope="module")
 def sr() -> Any:
-    from daydream.benchmark.harbor.calibrate import _load_judge_template
     return _load_judge_template()
 
 
@@ -212,7 +200,6 @@ def _v(sr: Any, match: Any, conf: Any) -> Any:
 
 
 def test_majority_and_stability(sr: Any) -> None:
-    from daydream.benchmark.harbor.calibrate import _majority_label, _per_pair_stable
     assert _majority_label([_v(sr, True, .9), _v(sr, True, .8), _v(sr, False, .6)]) is True
     assert _majority_label([_v(sr, False, .3), _v(sr, False, .2), _v(sr, True, .9)]) is False
     flips = [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)]  # retained [T,F,T]
@@ -222,7 +209,6 @@ def test_majority_and_stability(sr: Any) -> None:
 
 
 def test_balanced_accuracy_and_confusion(sr: Any) -> None:
-    from daydream.benchmark.harbor.calibrate import _class_balanced_accuracy, _confusion_matrix
     assert _class_balanced_accuracy({"tp": 12, "fp": 0, "tn": 12, "fn": 0}) == pytest.approx(1.0)
     assert _class_balanced_accuracy({"tp": 9, "fp": 3, "tn": 12, "fn": 0}) == pytest.approx(0.9)
     assert _confusion_matrix([True, True, False, False],
@@ -230,7 +216,6 @@ def test_balanced_accuracy_and_confusion(sr: Any) -> None:
 
 
 def test_pass_gate_reports_instability_only(sr: Any) -> None:
-    from daydream.benchmark.harbor.calibrate import _pass_gate
     pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}]
     runs = [
         [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)],
@@ -251,11 +236,6 @@ def _env() -> dict[str, Any]:
 
 
 def test_invalidation_inputs_and_determinism() -> None:
-    from daydream.benchmark.harbor.calibrate import (
-        _invalidation_inputs,
-        _load_fixture,
-        _load_judge_template,
-    )
     sr, pairs = _load_judge_template(), _load_fixture()
     a = _invalidation_inputs(_env(), pairs, sr)
     b = _invalidation_inputs(_env(), pairs, sr)
@@ -263,12 +243,6 @@ def test_invalidation_inputs_and_determinism() -> None:
 
 
 def test_receipt_written_atomic_0600_and_current(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor.calibrate import (
-        _build_receipt,
-        _load_fixture,
-        _load_judge_template,
-        _write_receipt,
-    )
     sr, pairs = _load_judge_template(), _load_fixture()
     receipt = _build_receipt(sr, pairs, _env(), passed=True,
                              balanced_accuracy=0.9583,
@@ -282,7 +256,6 @@ def test_receipt_written_atomic_0600_and_current(tmp_path: Path) -> None:
 
 
 def test_receipt_has_no_credentials_or_source() -> None:
-    from daydream.benchmark.harbor.calibrate import _build_receipt, _load_fixture, _load_judge_template
     sr, pairs = _load_judge_template(), _load_fixture()
     receipt = _build_receipt(sr, pairs, _env(), passed=True,
                              balanced_accuracy=0.9583, confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
@@ -329,7 +302,6 @@ def test_run_calibration_reports_missing_judge_provider(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark.harbor.calibrate import run_calibration
 
     assert run_calibration(ws_factory(tmp_path), yes=True, env={}) == 1
     assert "missing DAYDREAM_JUDGE_PROVIDER" in capsys.readouterr().err
@@ -398,7 +370,6 @@ class TestCalibrateAcceptance:
     """
 
     def test_run_calibration_pass_writes_receipt(self, tmp_path: Path, ws_factory: Any) -> None:
-        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
         responses = _scripted_responses(_load_fixture())
         assert len(responses) == 72
         fake, counter = _scripted_http(responses)
@@ -408,7 +379,6 @@ class TestCalibrateAcceptance:
         assert counter[0] == 72
 
     def test_accuracy_failure_no_receipt(self, tmp_path: Path, ws_factory: Any) -> None:
-        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
         responses = _scripted_responses(_load_fixture(), mislabel_count=3)
         assert len(responses) == 72
         fake, counter = _scripted_http(responses)
@@ -418,7 +388,6 @@ class TestCalibrateAcceptance:
         assert counter[0] == 72
 
     def test_confirmation_refuses_before_any_call(self, tmp_path: Path, ws_factory: Any) -> None:
-        from daydream.benchmark.harbor.calibrate import run_calibration
         fake, counter = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
         code = run_calibration(
             ws_factory(tmp_path), yes=False, confirm=lambda _: False, env=_env(), http=fake
@@ -433,7 +402,6 @@ class TestCalibrateAcceptance:
         ws_factory: Any,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
         pairs = _load_fixture()
         responses = []
         for idx, p in enumerate(pairs):
@@ -453,7 +421,6 @@ class TestCalibrateAcceptance:
         assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
 
     def test_acceptance_zero_source_leakage(self, tmp_path: Path, ws_factory: Any) -> None:
-        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
         responses = _scripted_responses(_load_fixture())
         fake, _ = _scripted_http(responses)
         assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
@@ -464,7 +431,6 @@ class TestCalibrateAcceptance:
 
 
 def test_calibrate_judge_subparser_and_flags() -> None:
-    from daydream.benchmark.cli import _build_benchmark_parser
     args = _build_benchmark_parser().parse_args(["calibrate-judge", "/ws", "--yes"])
     assert args.subcommand == "calibrate-judge" and str(args.dir) == "/ws" and args.yes is True
 
@@ -474,7 +440,6 @@ def test_calibrate_judge_refuses_without_tty_or_yes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from daydream.benchmark import cli
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
     code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path)])
     assert code == 1
@@ -486,8 +451,6 @@ def test_calibrate_judge_handler_forwards_yes_and_dir(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import daydream.benchmark.harbor.calibrate as cal
-    from daydream.benchmark import cli
     seen: dict[str, Any] = {}
     def fake_run(workspace: Any, *, yes: Any, env: Any, http: Any) -> int:
         seen.update(ws=str(workspace), yes=yes)
@@ -504,8 +467,6 @@ def test_calibrate_judge_handler_threads_claude_oauth_token(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import daydream.benchmark.harbor.calibrate as cal
-    from daydream.benchmark import cli
     seen: dict[str, Any] = {}
 
     def fake_run(workspace: Any, *, yes: Any, env: Any, http: Any) -> int:
@@ -536,8 +497,6 @@ def test_calibrate_judge_claude_cli_composed_path(
     fail-closed presence gate (``score_review._build_client``) -- the behavior
     the env threading exists to enable -- not by stubbing run_calibration.
     """
-    from daydream.benchmark import cli
-    from daydream.benchmark.harbor import calibrate as cal
 
     ws = ws_factory(tmp_path, judge_allowed_hosts=("api.anthropic.com",))
     monkeypatch.delenv("DAYDREAM_JUDGE_ALLOWED_HOSTS", raising=False)
@@ -567,7 +526,6 @@ def test_calibrate_judge_claude_cli_missing_token_fails_closed(
     run (exit 1, bounded stderr diagnostic, no receipt) instead of shelling the
     real ``claude`` binary unpaid.
     """
-    from daydream.benchmark import cli
 
     ws = ws_factory(tmp_path, judge_allowed_hosts=("api.anthropic.com",))
     monkeypatch.delenv("DAYDREAM_JUDGE_ALLOWED_HOSTS", raising=False)

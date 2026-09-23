@@ -40,7 +40,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.records import stamp_item_uids
 from daydream.deep.scope_issues import _resolve_changed_files, enforce_authorized_fix_footprint
-from daydream.deep.settings import _resolve_config_value
+from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
@@ -87,22 +87,6 @@ from daydream.workspace import WorkContext
 if TYPE_CHECKING:
     from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
     from daydream.runner import RunConfig
-
-
-def _scope_issue_filing(config: RunConfig) -> bool:
-    """Resolve the out-of-scope issue-filing opt-in (issue #1056).
-
-    Precedence: 1) ``RunConfig.scope_issue_filing``
-    (CLI tier), 2) ``DaydreamFileConfig.scope_issue_filing`` (file-config
-    scalar), 3) built-in default ``False`` (no out-of-scope GitHub issues are
-    filed unless a repo explicitly opts in).
-    """
-    if config.scope_issue_filing:
-        return True
-    file_config = config.file_config
-    if file_config is not None and file_config.scope_issue_filing:
-        return True
-    return False
 
 
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -643,16 +627,9 @@ async def _evaluate_quality_gate(
                     "reason": "file missing from post-fix analyzer output (unparseable?)",
                 }
                 continue
-            # Issue #329 / #457: the pre-fix snapshot is scoped to the reviewed
-            # diff's ``*.py`` set, so a candidate the fix pass edited that was
-            # NOT in the reviewed diff -- a secondary edit that survived the
-            # residual net, e.g. a newly-created untracked ``*.py`` -- has no
-            # before baseline. A missing baseline must not read as a clean
-            # pass: the delta is unknowable, so record the file explicitly
-            # flagged with its reason instead of silently falling into the
-            # absolute-only fallback, which can miss the exact delta regression
-            # #329 added changed_after_fix for. Still fail-open: never raises,
-            # never stops the run.
+            # A missing pre-fix baseline (e.g. a secondary edit outside the
+            # reviewed diff) means the delta is unknowable: flag the file, never
+            # read it as a clean pass. Fail-open (issue #329 / #457).
             if before_entry is None and after_entry is not None:
                 per_file[rel] = {
                     "erosion_before": None,
@@ -792,7 +769,6 @@ class FixCycleState:
     footprint: AuthorizedFixFootprint
     latest_retained: RetainedTreeSnapshot | None = None
     verifier_key: EvidenceKey | None = None
-    test_evidence: TestAttemptEvidence | None = None
     last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
 
 
@@ -1008,7 +984,7 @@ def _strict_scope_and_scrub(
         preexisting_gitlinks=state.preexisting_gitlinks,
         phase=phase,
         round_number=round_number,
-        file_scope_issues=_scope_issue_filing(ctx.config),
+        file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
         auth=ctx.github_execution.auth,
     )
     scrub_smart_quotes_changed_files(
@@ -1037,7 +1013,7 @@ def _enforce_terminal_confinement(
             preexisting_gitlinks=state.preexisting_gitlinks,
             phase=phase,
             round_number=round_number,
-            file_scope_issues=_scope_issue_filing(ctx.config),
+            file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
             auth=ctx.github_execution.auth,
         )
         key = EvidenceKey(
@@ -1048,6 +1024,37 @@ def _enforce_terminal_confinement(
     except Exception as exc:
         return str(exc)
     return None
+
+
+def _confinement_stop(
+    ctx: FlowContext,
+    state: FixCycleState,
+    phase: str,
+    round_number: int | None,
+    message: str,
+    error: str | None = None,
+    *,
+    warning: bool = False,
+) -> Stop:
+    """Restore protected state, report the terminal failure, and stop the flow."""
+    confinement_error = _enforce_terminal_confinement(
+        ctx,
+        state,
+        phase=phase,
+        round_number=round_number,
+    )
+    if warning:
+        print_warning(console, message)
+    elif error is not None:
+        print_error(console, message, error)
+    if confinement_error is not None:
+        label = (
+            "Test failure confinement failed"
+            if phase == "test_failure"
+            else "Fix failure confinement failed"
+        )
+        print_error(console, label, confinement_error)
+    return Stop(1)
 
 
 def _stabilization_stop(
@@ -1121,15 +1128,10 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 group_max_serial_items=_resolve_config_value(
                     config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS
                 ),
-                # One cumulative retry-overhead allowance per file group,
-                # resolved once here and forwarded unchanged into every fix
-                # call the group owns. Resolved by a direct file-config read
-                # rather than ``_resolve_config_value``: that helper
-                # substitutes the module default, but the allowance is
-                # tri-state. An unset key must stay undeclared (None) so
-                # ``run_agent`` applies the default without mistaking it for an
-                # operator's explicit value -- which would refuse a backend
-                # that deliberately disabled retries.
+                # One cumulative retry-overhead allowance per file group, read
+                # directly (not via ``_resolve_config_value``) because it is
+                # tri-state: unset must stay None so ``run_agent`` applies its
+                # default instead of reading it as an explicit disable.
                 retry_recovery_allowance_s=(
                     config.file_config.retry_recovery_allowance_s
                     if config.file_config is not None
@@ -1142,16 +1144,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 run_context=ctx.run_context,
             )
         except Exception as exc:
-            confinement_error = _enforce_terminal_confinement(
-                ctx,
-                state,
-                phase="fix_failure",
-                round_number=deep_state.iteration,
-            )
-            print_error(console, "Fix failed", str(exc))
-            if confinement_error is not None:
-                print_error(console, "Fix failure confinement failed", confinement_error)
-            return Stop(1)
+            return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failed", str(exc))
     budget_prefix = "file_group_budget_exceeded:"
     exception_failures = {
         path: reason
@@ -1165,16 +1158,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
         else:
             failures_artifact.unlink(missing_ok=True)
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_failure",
-            round_number=deep_state.iteration,
-        )
-        print_error(console, "Fix failure audit failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
+        return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failure audit failed", str(exc))
     if exception_failures:
         from daydream import git_ops
 
@@ -1217,16 +1201,9 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
         )
         snapshot = capture_retained_tree(ctx.work, state)
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_failure",
-            round_number=deep_state.iteration,
+        return _confinement_stop(
+            ctx, state, "fix_failure", deep_state.iteration, "Fix scope enforcement failed", str(exc)
         )
-        print_error(console, "Fix scope enforcement failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
     deep_state.fix_round_snapshot = snapshot
     try:
         await _evaluate_quality_gate(
@@ -1261,16 +1238,9 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
             iteration=deep_state.iteration,
         )
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_failure",
-            round_number=deep_state.iteration,
+        return _confinement_stop(
+            ctx, state, "fix_failure", deep_state.iteration, "Fix quality evaluation failed", str(exc)
         )
-        print_error(console, "Fix quality evaluation failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
     return None
 
 
@@ -1349,16 +1319,9 @@ async def _step_fix_verify_authorized(
         try:
             snapshot = capture_retained_tree(ctx.work, state)
         except Exception as exc:
-            confinement_error = _enforce_terminal_confinement(
-                ctx,
-                state,
-                phase="fix_verify_failure",
-                round_number=deep_state.iteration,
+            return _confinement_stop(
+                ctx, state, "fix_verify_failure", deep_state.iteration, "Fix verification capture failed", str(exc)
             )
-            print_error(console, "Fix verification capture failed", str(exc))
-            if confinement_error is not None:
-                print_error(console, "Fix failure confinement failed", confinement_error)
-            return Stop(1)
     iteration = deep_state.iteration
     round_number = iteration if isinstance(iteration, int) else 1
     try:
@@ -1372,22 +1335,23 @@ async def _step_fix_verify_authorized(
         _persist_fix_outcomes_current(ctx, state, key, outcomes)
         _write_footprint_audit(ctx, state, key)
     except Exception as exc:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="fix_verify_failure",
-            round_number=round_number,
-        )
-        print_error(console, "Fix verification failed", str(exc))
-        if confinement_error is not None:
-            print_error(console, "Fix failure confinement failed", confinement_error)
-        return Stop(1)
+        return _confinement_stop(ctx, state, "fix_verify_failure", round_number, "Fix verification failed", str(exc))
     actionable = _actionable_verdicts(outcomes)
     if actionable and iteration not in (None, 3):
         return None
-    _render_fix_outcome_summary(deep_state.dd, deep_state.items, outcomes)
-    if actionable:
+    _render_fix_outcome_summary(deep_state.items, outcomes)
+    if "regressed" in actionable:
+        print_error(
+            console, "Fix verification failed",
+            "The retained changes introduce a regression; commit and push blocked.",
+        )
         return Stop(1)
+    if actionable:
+        print_warning(
+            console,
+            f"Fix attempts exhausted with {len(actionable)} finding(s) still unresolved; "
+            "continuing to validate the retained changes before commit and push.",
+        )
     return BreakLoop()
 
 
@@ -1408,7 +1372,6 @@ def _actionable_verdicts(outcomes: dict[Any, dict[str, Any]]) -> list[str]:
 
 
 def _render_fix_outcome_summary(
-    dd: Path,
     items: list[dict[str, Any]],
     outcomes: dict[Any, dict[str, Any]],
 ) -> None:
@@ -1512,7 +1475,6 @@ async def finalize_retained_tree_after_test(
             ctx, state, "test produced no evidence", round_number=None
         )
     evidence = attempts[-1]
-    state.test_evidence = evidence
     ignored = result.ignored
 
     for pass_number in range(1, MAX_POST_TEST_STABILIZATION_PASSES + 1):
@@ -1535,6 +1497,7 @@ async def finalize_retained_tree_after_test(
             )
 
         if state.verifier_key != key:
+            prior_outcomes = deep_state.fix_outcomes or {}
             try:
                 outcomes = await verify_retained_tree(
                     ctx, snapshot, deep_state.items, pass_number=pass_number
@@ -1549,7 +1512,15 @@ async def finalize_retained_tree_after_test(
                 )
             state.verifier_key = key
             deep_state.fix_outcomes = outcomes
-            if _actionable_verdicts(outcomes):
+            if any(
+                outcome.get("verdict") == "regressed"
+                or (
+                    outcome.get("verdict") in ACTIONABLE_VERDICTS
+                    and prior_outcomes.get(uid, {}).get("verdict")
+                    not in {"unresolved", "wrong_target"}
+                )
+                for uid, outcome in outcomes.items()
+            ):
                 return _stabilization_stop(
                     ctx,
                     state,
@@ -1581,7 +1552,6 @@ async def finalize_retained_tree_after_test(
                     round_number=pass_number,
                 )
             attempts.append(evidence)
-            state.test_evidence = evidence
             ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
             _persist_test_verdict(
@@ -1672,27 +1642,9 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 attempts=list(result.attempts),
             )
         except Exception as exc:
-            confinement_error = _enforce_terminal_confinement(
-                ctx,
-                state,
-                phase="test_failure",
-                round_number=None,
-            )
-            print_error(console, "Test evidence failed", str(exc))
-            if confinement_error is not None:
-                print_error(console, "Test failure confinement failed", confinement_error)
-            return Stop(1)
+            return _confinement_stop(ctx, state, "test_failure", None, "Test evidence failed", str(exc))
     if not result.proceed:
-        confinement_error = _enforce_terminal_confinement(
-            ctx,
-            state,
-            phase="test_failure",
-            round_number=None,
-        )
-        print_warning(console, "Tests failed after fix attempt.")
-        if confinement_error is not None:
-            print_error(console, "Test failure confinement failed", confinement_error)
-        return Stop(1)
+        return _confinement_stop(ctx, state, "test_failure", None, "Tests failed after fix attempt.", warning=True)
     return await finalize_retained_tree_after_test(ctx, result)
 
 
@@ -1759,7 +1711,11 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             ctx.work,
             preexisting_untracked=set(state.preexisting_untracked),
             config=ctx.config,
-            items=deep_state.items_or_empty or [],
+            items=[
+                item for item in deep_state.items_or_empty or []
+                if (deep_state.fix_outcomes or {}).get(item.get("item_uid", ""), {}).get("verdict")
+                == "resolved"
+            ],
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,

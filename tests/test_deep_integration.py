@@ -11,6 +11,7 @@ import pytest
 
 from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
+from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 
 
@@ -201,60 +202,16 @@ class _DeepMockBackend(ScriptedBackend):
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence noisy UI helpers at their current production owners."""
-    noop = lambda *a, **kw: None  # noqa: E731 -- terse silencer
-    targets = {
-        "daydream.deep.orchestrator": (
-            "print_preflight_notice",
-            "print_info",
-            "print_warning",
-            "print_error",
-        ),
-        "daydream.deep.review_steps": (
-            "print_stage_progress",
-            "print_phase_hero",
-            "print_warning",
-            "print_error",
-            "print_dim",
-        ),
-        "daydream.deep.merge_steps": (
-            "print_stage_progress",
-            "print_info",
-            "print_warning",
-            "print_error",
-        ),
-        "daydream.deep.diagram_steps": (
-            "print_info",
-            "print_success",
-            "print_warning",
-            "print_error",
-        ),
-        "daydream.deep.fix_steps": (
-            "print_info",
-            "print_success",
-            "print_warning",
-            "print_error",
-            "print_verification_summary",
-        ),
-        "daydream.phases": (
-            "print_phase_hero",
-            "print_info",
-            "print_success",
-            "print_warning",
-            "print_error",
-            "print_dim",
-            "print_issues_table",
-        ),
-        "daydream.runner": (
-            "print_phase_hero",
-            "print_info",
-            "print_success",
-            "print_error",
-            "print_dim",
-        ),
-    }
-    for module, names in targets.items():
-        for name in names:
-            monkeypatch.setattr(f"{module}.{name}", noop)
+    for module in (
+        "daydream.deep.orchestrator",
+        "daydream.deep.review_steps",
+        "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps",
+        "daydream.deep.fix_steps",
+        "daydream.phases",
+        "daydream.runner",
+    ):
+        silence_module_console(monkeypatch, module)
 
 
 def _wire_mocks(monkeypatch: pytest.MonkeyPatch, backend: _DeepMockBackend) -> None:
@@ -309,13 +266,15 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), (
         "merged report missing after Claude-shape run"
     )
-    # Stages fired: intent, alternatives, at least one per-stack, merge. The
+    # The default design lens shares structural review instead of a separate
+    # alternatives stage. Intent, language review and merge still run. The
     # parse-<stack> stage was removed (issue #745) -- reviewers emit records
     # directly.
-    required = {"intent", "alternatives", "per-stack", "merge"}
+    required = {"intent", "structure", "per-stack", "merge"}
     assert required.issubset(set(backend.stages)), (
         f"missing stages; saw only: {sorted(set(backend.stages))}"
     )
+    assert "alternatives" not in backend.stages
 
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -420,20 +379,16 @@ async def test_structural_meta_stack_flows_end_to_end(
       1. ``detect_stacks`` returned ``structure`` as one of the stacks.
       2. ``phase_per_stack_reviews`` produced a ``stack-structure-review.md``
          artifact on disk.
-      3. The merge prompt received the ``stack-structure-records.json`` path
-         via ``structural_records_path``.
-      4. The final merged report on disk carries a ``## Structural Review``
+      3. The final merged report on disk carries a ``## Structural Review``
          header.
 
-    These are real observable side effects (files on disk, the path threaded
-    into the merge call, the rendered report header) — not dispatch bookkeeping.
-    If any wire in Tasks 2-7 were broken (structure stack not emitted, prompt
-    not routed, records not partitioned out and forwarded, section not
-    rendered) the corresponding assertion below fails.
+    These are real observable side effects (files on disk, the rendered report
+    header) — not dispatch bookkeeping. If any wire in Tasks 2-7 were broken
+    (structure stack not emitted, records not partitioned out and appended,
+    section not rendered) the corresponding assertion below fails.
     """
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep import detection as _detection
-    from daydream.deep import prompts as _prompts
     from daydream.deep.detection import StackAssignment
 
     detected_stacks: list[StackAssignment] = []
@@ -444,18 +399,8 @@ async def test_structural_meta_stack_flows_end_to_end(
         detected_stacks.extend(result)
         return result
 
-    merge_kwargs: dict[str, Any] = {}
-    real_build_merge = _prompts.build_merge_prompt
-
-    def _spy_merge(**kwargs: Any) -> Any:
-        merge_kwargs.update(kwargs)
-        return real_build_merge(**kwargs)
-
     # ``detect_stacks`` is imported into the orchestrator namespace; patch there.
     monkeypatch.setattr("daydream.deep.orchestrator.detect_stacks", _spy_detect)
-    # ``build_merge_prompt`` is imported lazily inside phase_cross_stack_merge;
-    # patch the source module so the late import resolves to the spy.
-    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _spy_merge)
 
     backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -478,17 +423,7 @@ async def test_structural_meta_stack_flows_end_to_end(
         "through build_structural_prompt or its agent never wrote the artifact"
     )
 
-    # (3) The merge prompt received the structural records path.
-    structural_records_path = merge_kwargs.get("structural_records_path")
-    assert structural_records_path is not None, (
-        "merge prompt did not receive structural_records_path -- orchestrator "
-        "failed to partition + forward the structural records"
-    )
-    assert structural_records_path.name == "stack-structure-records.json", (
-        f"unexpected structural records filename: {structural_records_path.name}"
-    )
-
-    # (4) The merged report on disk carries the dedicated structural section.
+    # (3) The merged report on disk carries the dedicated structural section.
     merged_report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert "## Structural Review" in merged_report, (
         "merged report is missing the ## Structural Review header"

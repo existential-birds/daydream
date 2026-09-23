@@ -30,7 +30,6 @@ import os
 import textwrap
 import time
 from collections.abc import AsyncGenerator, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -199,30 +198,10 @@ def _pin_first_message_end_receipt(monkeypatch: pytest.MonkeyPatch, pinned_ns: i
 # Claude: real ClaudeBackend through the actual SDK option surface
 
 
-@dataclass
-class _ClaudeAssistantWithUsage(MockAssistantMessage):
-    """Shared MockAssistantMessage plus the metrics fields the backend reads."""
-
-    model: str | None = None
-    message_id: str = ""
-    usage: dict[str, Any] | None = None
-
-
-@dataclass
-class _ClaudeResultWithUsage(MockResultMessage):
-    """Shared MockResultMessage plus duration/stop-reason/turn metadata."""
-
-    duration_ms: int | None = None
-    duration_api_ms: int | None = None
-    num_turns: int | None = None
-    stop_reason: str | None = None
-    usage: dict[str, Any] | None = None
-
-
 def _claude_messages(canary: str) -> list[Any]:
     usage = {"input_tokens": 60, "output_tokens": 12, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 5}
     return [
-        _ClaudeAssistantWithUsage(
+        MockAssistantMessage(
             content=[MockToolUseBlock(id="tool-claude-1", name="Read", input={"path": "src/main.py"})],
             model="claude-opus-4-5-20250901",
             usage=usage,
@@ -231,18 +210,17 @@ def _claude_messages(canary: str) -> list[Any]:
         MockUserMessage(
             content=[MockToolResultBlock(tool_use_id="tool-claude-1", content=f"tool result {canary}", is_error=False)]
         ),
-        _ClaudeAssistantWithUsage(
+        MockAssistantMessage(
             content=[MockTextBlock(f"done {canary}")],
             model="claude-opus-4-5-20250901",
             usage=usage,
             message_id="msg-claude-2",
         ),
-        _ClaudeResultWithUsage(
+        MockResultMessage(
             subtype="success",
             duration_ms=150,
             duration_api_ms=120,
             is_error=False,
-            num_turns=2,
             session_id="native-claude-session",
             stop_reason="end_turn",
             total_cost_usd=0.021,
@@ -284,9 +262,7 @@ async def test_claude_real_backend_runner_trace_sdk_options_and_config(
     captured: dict[str, Any] = {}
     messages = _claude_messages(canary)
     scripted = scripted_client(messages, captured=captured)
-    patch_claude_sdk(
-        monkeypatch, scripted, assistant_message=_ClaudeAssistantWithUsage, result_message=_ClaudeResultWithUsage
-    )
+    patch_claude_sdk(monkeypatch, scripted)
 
     requests: list[RequestEvent] = []
     backend = _RecordingClaudeBackend(requests, model="claude-opus-5")
@@ -357,9 +333,7 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
     captured: dict[str, Any] = {}
     requests: list[RequestEvent] = []
     scripted = scripted_client(_claude_messages(canary), captured=captured)
-    patch_claude_sdk(
-        monkeypatch, scripted, assistant_message=_ClaudeAssistantWithUsage, result_message=_ClaudeResultWithUsage
-    )
+    patch_claude_sdk(monkeypatch, scripted)
     agents = {
         "pattern-scanner": AgentDefinition(
             description="scan patterns",
@@ -991,34 +965,30 @@ async def test_grpc_outage_fails_open_and_review_completes(
 # Step 3 lifecycle matrix: real-runner retry with a failed billed attempt
 
 
-class _PiRetryFixture:
-    """Pi error-turn stream: a retryable 429 overload with a real billed attempt."""
-
-    def __init__(self, canary: str) -> None:
-        self.failed = [
-            json.dumps({"type": "session", "sessionId": "pi_ses_retry"}),
-            json.dumps({"type": "agent_start"}),
-            json.dumps({"type": "turn_start"}),
-            json.dumps(
-                {
-                    "type": "message_end",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "turn_end",
-                    "message": {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": "partial"}],
-                        "stopReason": "error",
-                        "errorMessage": "429 too many requests",
-                        "usage": {"input": 500, "output": 20, "cacheRead": 0, "cost": {"total": 0.003}},
-                    },
-                }
-            ),
-            json.dumps({"type": "agent_end", "messages": []}),
-        ]
+_PI_RETRY_FAILED_LINES = [
+    json.dumps({"type": "session", "sessionId": "pi_ses_retry"}),
+    json.dumps({"type": "agent_start"}),
+    json.dumps({"type": "turn_start"}),
+    json.dumps(
+        {
+            "type": "message_end",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
+        }
+    ),
+    json.dumps(
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "partial"}],
+                "stopReason": "error",
+                "errorMessage": "429 too many requests",
+                "usage": {"input": 500, "output": 20, "cacheRead": 0, "cost": {"total": 0.003}},
+            },
+        }
+    ),
+    json.dumps({"type": "agent_end", "messages": []}),
+]
 
 
 async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
@@ -1038,7 +1008,6 @@ async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
     surfaces to the caller.
     """
     _flow(ext_dir)
-    fixture = _PiRetryFixture(_CANARIES["pi"])
     # Pin zero retries: the retryable 429 would otherwise re-spawn the real
     # backend (DAYDREAM_PI_RETRY_ATTEMPTS defaults to 20); the retry-split is
     # proven at the runner seam in failure_integration, this leg proves the
@@ -1046,7 +1015,7 @@ async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
     backend = PiBackend()
     backend.retry_attempts = 0
     install_backend(backend)
-    install_fake_cli_process(monkeypatch, "pi", lines=fixture.failed)
+    install_fake_cli_process(monkeypatch, "pi", lines=_PI_RETRY_FAILED_LINES)
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
         with pytest.raises(Exception, match="429 too many requests"):

@@ -7,10 +7,6 @@ Covers the two pieces the real-path enforcement tests (in
    semantics (which ceiling fires, in what order).
 2. The config-file parser — ``group_max_*`` overrides parse from
    ``[tool.daydream]`` and junk values degrade to ``None`` (default applies).
-
-The token axis was removed: it can only bound multi-call fallback groups (the
-same population ``wall`` + ``serial`` already govern), where output tokens are
-collinear with wall-time and call-count, so it added no independent signal.
 """
 
 from __future__ import annotations
@@ -25,22 +21,7 @@ from daydream.config import (
 )
 from daydream.config_file import load_file_config
 from daydream.file_group_budget import FileGroupBudget
-from daydream.trajectory import (
-    DaydreamRunFlow,
-    TrajectoryRecorder,
-)
-
-
-def _group_budget_recorder(tmp_path: Path) -> TrajectoryRecorder:
-    """A FIX-phase recorder writing to ``tmp_path`` (mirrors test_agent_budget)."""
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
-    )
-
+from tests.harness.trajectory import make_recorder
 
 # -- FileGroupBudget -------------------------------------------------------
 
@@ -102,7 +83,7 @@ async def test_group_budget_event_records_the_ceiling_and_group_elapsed(
     from tests.harness.fake_clock import FakeClock
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
-    recorder = _group_budget_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
     budget = FileGroupBudget(max_wall_seconds=600.0, max_serial_items=6)
     fake.advance(700.0)
 

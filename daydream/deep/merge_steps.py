@@ -28,6 +28,7 @@ from daydream.deep.dedup import (
 )
 from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
 from daydream.deep.render import _PIPELINE_STAGE_NAMES, render_held_section, render_report
+from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
@@ -39,51 +40,18 @@ from daydream.phases import (
     phase_supervise_review,
     phase_suppression_review,
 )
+from daydream.review_budget import (
+    clear_review_budget_stop,
+    record_review_budget_stop,
+    render_review_warnings,
+    review_warnings,
+)
 from daydream.supervision import RuleBasedSupervisor, apply_findings_verdicts, revise_finding_fields
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, get_current_recorder, phase_scope
 from daydream.ui import print_error, print_info, print_stage_progress, print_warning
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
-
-
-def _precision_mode(config: RunConfig) -> bool:
-    """Resolve the precision-mode opt-in (issue #232).
-
-    Precedence (highest first), mirroring the composition root's fan-out threshold
-    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
-
-      1. ``RunConfig.precision_mode`` (CLI tier / direct construction).
-      2. ``DaydreamFileConfig.precision_mode`` (file-config scalar).
-      3. Built-in default ``False`` (byte-identical behavior: the suppression
-         predicate is never called and arbiter output is unchanged).
-
-    Uses truthiness rather than ``is not None``: ``False`` is the meaningful
-    "off" value, so a set-to-False file-config entry just falls through to the
-    default rather than acting as a distinct sentinel.
-    """
-    if config.precision_mode:
-        return True
-    file_config = config.file_config
-    if file_config is not None and file_config.precision_mode:
-        return True
-    return False
-
-
-def _approve_on_clean(config: RunConfig) -> bool:
-    """Resolve the approve-on-clean opt-in (issue #343).
-
-    Precedence mirrors ``_precision_mode``: 1) ``RunConfig.approve_on_clean``
-    (CLI tier), 2) ``DaydreamFileConfig.approve_on_clean`` (file-config
-    scalar), 3) built-in default ``False`` (byte-identical behavior: the
-    event stays COMMENT unless a repo explicitly opts in).
-    """
-    if config.approve_on_clean:
-        return True
-    file_config = config.file_config
-    if file_config is not None and file_config.approve_on_clean:
-        return True
-    return False
 
 
 def _supervisor_mode(config: RunConfig) -> str:
@@ -259,13 +227,9 @@ def _apply_adjudication_verdicts(
         if not verdict.get("keep", False):
             dropped.add(uid)
             continue
-        # Revise IN PLACE rather than rebuilding the dict. A copied ``uid``
-        # would survive a rebuild, so this is no longer the load-bearing
-        # constraint it was when the suppression call site keyed its
-        # arbiter-exclusion set by ``id(record)`` (#232) -- but in-place is still
-        # the correct shape: the caller holds this same list and
-        # ``_rewrite_stack_records`` persists these very dicts, so a fresh dict
-        # would have to be threaded back into both.
+        # Revise IN PLACE rather than rebuilding the dict: the caller holds this
+        # same list and ``_rewrite_stack_records`` persists these very dicts, so
+        # a fresh dict would have to be threaded back into both.
         revise_finding_fields(by_uid[uid], verdict)
 
     new_records: list[dict[str, Any]] = []
@@ -296,44 +260,28 @@ def _rewrite_stack_records(
 
     Routing is by the stack name encoded in each record's ``uid`` (issue
     #1111), falling back to the ``source`` string for a record carrying no uid
-    at all, and a record that still routes outside ``stack_record_paths`` is
-    reported loudly instead of vanishing -- see the comments in the loop for
-    both halves of the defect this replaced.
+    at all; a record that still routes outside ``stack_record_paths`` is
+    reported loudly instead of vanishing.
     """
     by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
     for record, source in zip(records, sources, strict=True):
-        # Route by the stack name in the record's own ``uid`` (issue #1111), not
-        # by the ``source`` string. ``source`` has two spellings -- the records
-        # filename on every path that loads records off disk, a bare stack name
-        # for the uncovered sweep's in-memory append -- and the branch that used
-        # to live here had to guess which one it held. The uid's stack half has
-        # exactly one spelling. ``sources`` stays zipped in (``strict=True``)
-        # both to assert the two lists are still aligned and to name the source
-        # in the warning below.
+        # Route by the uid's stack half (issue #1111): the ``source`` string has
+        # two spellings and cannot be trusted. ``sources`` stays zipped in to
+        # assert alignment and name the source in the warning below.
         uid = record_uid(record)
         if uid:
             dest = per_stack_records_path(deep_dir_path, stack_name_from_uid(uid))
         else:
-            # No uid at all: this is the case the uid-based routing above
-            # cannot cover, so fall back to ``source`` -- the sole routing
-            # signal before issue #1111 -- rather than letting the record fall
-            # through to the "unroutable" branch below and be erased from disk.
+            # No uid: fall back to ``source`` rather than let the record be
+            # erased by the "unroutable" branch below.
             dest = per_stack_records_path(deep_dir_path, stack_name_from_records_source(source))
         if dest in by_stack:
             by_stack[dest].append(record)
         else:
-            # There was no ``else`` here, and that was the second half of the
-            # defect (issue #1111). This function rewrites each records file
-            # WHOLESALE, so a record whose dest resolved outside
-            # ``stack_record_paths`` was not merely skipped -- it was ERASED
-            # from disk, silently. #1110 had to add the structural records path
-            # to ``stack_record_paths`` precisely to keep records out of this
-            # branch, and nothing would have failed loudly had that been missed.
-            # "Every adjudicated record routes to a file being rewritten" is a
-            # real invariant that was simply never enforced; this is where it is
-            # enforced now. A warning rather than a raise: the adjudicated
-            # verdicts for every OTHER record are already computed and belong on
-            # disk, so aborting the rewrite would lose more than it protects.
+            # A record routing outside ``stack_record_paths`` would be silently
+            # ERASED (the file is rewritten wholesale), so warn loudly (issue
+            # #1111). Warn rather than raise: every other verdict is already
+            # computed and belongs on disk.
             print_warning(
                 console,
                 f"Adjudicated record uid={record_uid(record) or '<none>'} (source {source}) "
@@ -349,17 +297,20 @@ def _rewrite_stack_records(
         # regardless so every worker -- merge resume, the coverage evidence
         # path -- reads the same shape whether or not arbitration fired.
         verdicts: list[Any] = []
+        incomplete = False
         if dest_path.is_file():
             try:
                 existing = json.loads(dest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 existing = None
             if isinstance(existing, dict):
+                incomplete = existing.get("incomplete") is True
                 existing_verdicts = existing.get("verdicts", [])
                 if isinstance(existing_verdicts, list):
                     verdicts = existing_verdicts
         dest_path.write_text(
-            json.dumps({"issues": stack_records, "verdicts": verdicts}, indent=2)
+            json.dumps({"issues": stack_records, "verdicts": verdicts,
+                        **({"incomplete": True} if incomplete else {})}, indent=2)
         )
 
 
@@ -394,24 +345,13 @@ def _rejoin_structural_records(
 
     ``structural_range`` (not the uid set) is what the caller must pass as
     :func:`~daydream.deep.arbiter.select_arbiter_targets`'s ``contested_only``:
-    that exemption from the severity branch must cover EVERY structural
-    record, including the no-uid edge case handled below, and a
-    ``record_uid(rec) in structural_ids`` membership test silently drops that
-    exemption for such a record (its uid is ``""``, which is never in
-    ``structural_ids``) -- reopening exactly the widening this function's
-    docstring says must never happen. Position cannot fail this way: it is
-    read here, immediately after ``adjudicated`` is built and before anything
-    reorders or compacts it.
+    it must cover EVERY structural record including the no-uid edge case below,
+    which a ``record_uid(rec) in structural_ids`` test would silently drop (its
+    uid is ``""``). The range is read before anything reorders ``adjudicated``.
 
-    The uid set still holds uids, not ``id()`` object identities (issue
-    #1111), because :func:`_split_structural_records` runs AFTER adjudication
-    may have rebuilt the record list, where a positional range no longer
-    identifies the same records. Object identity was the strictest possible
-    key for that later use and also the most fragile one: it was invalidated
-    by any stage that rebuilt a record as a fresh dict or round-tripped it
-    through JSON, and such a record escaped the set silently, with the escape
-    looking exactly like "not a structural record". A uid is carried inside
-    the dict, so it survives both.
+    The uid set holds uids rather than ``id()`` object identities (issue #1111):
+    ``_split_structural_records`` runs after adjudication may rebuild records,
+    and a uid survives any rebuild or JSON round-trip.
     """
     # A structural record with no uid cannot be named in this set and would come
     # back out of `_split_structural_records` as a language record -- i.e. into
@@ -487,21 +427,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     structural_records: list[dict[str, Any]] = deep_state.structural_records
     structural_sources: list[str] = deep_state.structural_record_sources
 
-    # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
-    # a single heavyweight arbiter now re-reviews ONLY the
-    # high-severity / contested findings and writes its verdicts back
-    # into the per-stack records before merge. A `--start-at merge`
-    # resume re-runs arbitration from the on-disk records UNLESS the
-    # completion marker proves a prior run already finalised them
-    # (#175): a crash between the parse write and the rewrite would
-    # otherwise let unarbitrated high-severity findings reach merge.
-    #
-    # The marker covers the WHOLE adjudication block (arbiter +, in
-    # precision mode, suppression): it is written once after BOTH passes
-    # have rewritten the per-stack records, so its presence proves the
-    # records are fully adjudicated -- not just arbitrated. Renamed from
-    # `arbiter_complete_path` so resume reasoning cannot under-read it as
-    # arbiter-only (#232 review).
+    # Scoped Opus arbiter (#168): re-review ONLY high-severity / contested
+    # findings and write verdicts back before merge. A `--start-at merge`
+    # resume skips this block only when the completion marker proves a prior
+    # run already finalised the whole adjudication (arbiter + suppression,
+    # #175, #232).
     adjudication_marker = adjudication_complete_path(dd)
     if (
         ctx.pipeline().arbitration.enabled
@@ -521,25 +451,12 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             contested_location=ctx.pipeline().arbitration.contested_location,
             contested_only=structural_range,
         )
-        # Capture the identities of records the arbiter will see, before
-        # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
-        # are indices into this pre-apply list; once records are dropped the
-        # indices shift, so suppression exclusion must be keyed by per-record
-        # identity -- not by the stale positional indices, and not by
-        # `(file, line)`: two findings can share one location while only one is
-        # arbitrated (a HIGH sibling arbitrated, a LOW sibling not), and a
-        # `(file, line)` key would wrongly exclude BOTH, silently skipping the
-        # LOW sibling from suppression.
-        #
-        # That identity is the record's `uid` (issue #1111). This used to be an
-        # `id(record)` set, which only worked because
-        # `_apply_adjudication_verdicts` happens to revise in place -- a stage
-        # that rebuilt a kept record as a fresh dict would have escaped the set
-        # silently and had it re-judged by the fail-CLOSED suppression pass. A
-        # uid is inside the dict, so no rebuild or JSON round-trip can shake it
-        # off. Records with no uid are left out of the set entirely rather than
-        # collapsing onto a shared `""` key; the empty-uid case is handled at
-        # the exclusion site below.
+        # Key suppression exclusion on the record's `uid`, not the stale
+        # pre-compaction indices (which shift when records are dropped) or
+        # `(file, line)` (two findings can share a location while only one is
+        # arbitrated, #232, #1111). A uid rides inside the dict, so a rebuild or
+        # JSON round-trip cannot shake it off; empty-uid records are left out
+        # and handled at the exclusion site below.
         arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
@@ -573,28 +490,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 dd, rewrite_paths, adjudicated, adjudicated_sources
             )
 
-        # Precision-mode suppression pass (#232). OPT-IN: when precision_mode is
-        # off (product default) this block never runs, `select_suppression_targets`
-        # is never called, and arbiter output is byte-identical. When on, it gives
-        # the borderline (LOW-confidence / low-severity uncontested) findings the
-        # arbiter never sees a skeptical second opinion (for the profile's
-        # ``Suppression.severity_classes`` severity classes), dropping any it cannot
-        # confirm (fail-CLOSED, the inverse of the arbiter). The arbiter target set
-        # is the exclusion set so nothing high-severity / contested is re-judged
-        # here. One batched agent call, resolved via the cheaper `suppression`
-        # phase key (Sonnet default) -- never per-finding Opus.
-        if ctx.pipeline().suppression.enabled or _precision_mode(config):
-            # Structural records join the exclusion set alongside the arbiter's
-            # targets (issue #1103). Suppression is fail-CLOSED and selects on
-            # low severity / LOW confidence; the structural lens is
-            # high-conviction by construction and was never in this pass's pool
-            # before, so letting the union widen it would drop structural
-            # findings as a side effect of fixing the duplicate-post bug.
-            # A record with no uid is excluded too (`not uid`): suppression is
-            # fail-CLOSED, so a record we cannot match against either set would
-            # otherwise be droppable on an identity we could not establish.
-            # Unreachable after `_step_per_stack_parse`, and deliberately biased
-            # toward keeping a finding rather than losing one.
+        # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
+        # opinion on borderline (LOW-confidence / low-severity uncontested)
+        # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
+        # arbiter's targets; one batched call via the cheaper `suppression` key.
+        if ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode"):
+            # Exclude structural records (high-conviction by construction,
+            # #1103) and any record with no uid: suppression is fail-CLOSED, so
+            # unidentifiable records must be kept rather than droppable.
             suppression_exclude = [
                 i
                 for i, r in enumerate(adjudicated)
@@ -602,7 +505,6 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             ]
             suppression_targets = select_suppression_targets(
                 adjudicated,
-                adjudicated_sources,
                 suppression_exclude,
                 severity_classes=ctx.pipeline().suppression.severity_classes,
                 confidence_classes=ctx.pipeline().suppression.confidence_classes,
@@ -710,15 +612,9 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
         if isinstance(b_uid, str) and b_uid:
             dropped_uids.add(b_uid)
             continue
-        # Within one run this is unreachable: ``dedup-candidates.json`` is
-        # written unconditionally by ``_step_cross_stack_merge`` in the same call
-        # that can go on to reach this salvage, from records
-        # ``_step_per_stack_parse`` guaranteed carry uids. The guard is for the
-        # artifact a resume reads back out of a deep dir written by an older run,
-        # from before the field existed. Skip the pair rather than falling back
-        # to the ``(id, file)`` key: that fallback is the bug documented above,
-        # and leaving a duplicate in a partial report is a far smaller error
-        # than deleting the finding the pair was supposed to preserve.
+        # Unreachable within one run; the guard is for a resume reading an
+        # older deep dir predating the field. Skip rather than fall back to the
+        # buggy ``(id, file)`` key -- a duplicate is a smaller error than a loss.
         unidentifiable_pairs.append(
             f"{pair.get('record_a_id')!r}/{pair.get('record_b_id')!r}"
         )
@@ -758,6 +654,8 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     aborting the run: the completed stacks' verdicts are consolidated into a
     partial ``merged-items.json`` + failure record, and the run stops resumably
     (``Stop(1)``) so a relaunch picks up without re-reviewing completed stacks.
+    Budget exhaustion uses the same salvage but continues to publish the partial
+    report successfully, with explicit incomplete-coverage diagnostics.
     """
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
@@ -809,14 +707,20 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 allow_standalone=ctx.allow_standalone_artifacts,
             )
         except CrossStackMergeError as exc:
-            phase.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
+            phase.finish(
+                LifecycleStatus.PARTIAL if exc.budget_reason else LifecycleStatus.FAILED,
+                LifecycleReasonCode.DOMAIN_FAILURE,
+            )
+            if exc.budget_reason:
+                record_review_budget_stop(dd, "Cross-stack merge", exc.budget_reason)
             _salvage_merge_failure(ctx, exc)
-            return Stop(1)
+            return None if exc.budget_reason else Stop(1)
         # Issue #361: a successful re-merge supersedes any stale salvage record, so
         # the structured ``MERGE_FAILURE_KEY`` entry is cleared here -- otherwise a
         # later ``--start-at merge``/``fix`` resume still warns 'merged results are
         # PARTIAL' even though the cross-stack merge has since succeeded.
         _clear_merge_failure(dd)
+        clear_review_budget_stop(dd, "Cross-stack merge")
     return None
 
 
@@ -838,29 +742,16 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     """
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
-    print_error(
-        console,
-        "Cross-stack merge failed",
-        f"{exc}; consolidating surviving per-stack records into a partial report. "
-        "Relaunch with --start-at fix to resume.",
-    )
+    message = f"{exc}; consolidating surviving per-stack records into a partial report."
+    if exc.budget_reason:
+        print_warning(console, message + " Continuing to review publication.")
+    else:
+        print_error(console, "Cross-stack merge failed", message + " Relaunch with --start-at fix to resume.")
 
-    # Build the partial canonical merged-items.json + review-output.md from the
-    # surviving per-stack records (reusing the single-stack write helper's shared
-    # structural-tagging + render epilogue). Recoverability comes from the
-    # structured ``__merge__`` failure record + resumable stop, not a root
-    # ``partial`` flag in merged-items.json (no consumer reads it -- issue #361
-    # follow-up). Apply the D-27 dedup pre-filter (issue #361): with no merge
-    # agent to adjudicate, drop the duplicate side of cross-stack record pairs so
-    # the partial list doesn't carry duplicates into the resume verifier/fix gate.
-    # Issue #1111: these items are host-written -- no merge agent ran, by
-    # definition of this path -- so their ``source_uids`` come from the records'
-    # own uids. That attribution is not repeated here: it lives in
-    # ``_write_single_stack_merged_items``, which is the single writer of this
-    # path's items, and duplicating it would give the salvage report a second
-    # spelling of provenance that could drift from the bypass's. The records
-    # reaching here are uid-stamped (``_step_per_stack_parse``) and pass through
-    # ``_drop_cross_stack_duplicates`` unmodified, so the uids survive.
+    # Build the partial canonical report from the surviving records via the
+    # single-stack write helper (recoverability comes from the ``__merge__``
+    # failure record + resumable stop, not a root flag, #361). Apply the D-27
+    # dedup pre-filter; these host-written items carry no merge-agent provenance.
     records = _drop_cross_stack_duplicates(dd, deep_state.records)
     _write_single_stack_merged_items(
         ctx.work.repo,
@@ -948,6 +839,12 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     # section is appended here, once the report exists, to both the canonical
     # report and its deep-dir copy.
     _append_coverage_section(dd, merged_report, merged_report_path(dd))
+
+    warning = render_review_warnings(review_warnings(dd))
+    if warning:
+        for report in (merged_report, merged_report_path(dd)):
+            if report.exists() and warning not in report.read_text():
+                report.write_text(warning + "\n\n" + report.read_text())
 
     deep_state.merged_report = merged_report
     deep_state.items_file = items_file
@@ -1082,6 +979,7 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
             ctx.config,
             findings_items,
             run_info=run_info.markdown,
+            review_warnings=review_warnings(deep_state.dd),
             renderers=resolve_review_renderers(ctx.registry),
             diagrams=diagrams,
             auth=ctx.github_execution.auth,
@@ -1119,6 +1017,9 @@ async def _step_supervise(ctx: FlowContext) -> None:
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
 
     report = render_report(kept)
+    warning = render_review_warnings(review_warnings(deep_state.dd))
+    if warning:
+        report = warning + "\n\n" + report
     held_section = render_held_section(held)
     if held_section:
         report = report.rstrip() + "\n\n" + held_section + "\n"
@@ -1154,11 +1055,14 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         print_warning(console, run_info.diagnostic)
 
     items_file: Path = deep_state.items_file
-    pr_kwargs = (
+    pr_kwargs: dict[str, Any] = (
         {"pr_number": ctx.config.pr_number}
         if ctx.config.pr_number is not None
         else {}
     )
+    warnings = review_warnings(deep_state.dd)
+    if warnings:
+        pr_kwargs["review_warnings"] = warnings
     outcome = await post_review_to_pr_from_report(
         ctx.work.repo,
         items_file,
@@ -1166,7 +1070,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         renderers=resolve_review_renderers(ctx.registry),
         console=console,
         post=deep_state.mode == "comment",
-        approve_on_clean=_approve_on_clean(ctx.config),
+        approve_on_clean=_resolve_opt_in(ctx.config, "approve_on_clean"),
         diagram_blocks=(deep_state.diagrams or {}).get("blocks"),
         run_context=ctx.run_context,
         auth=ctx.github_execution.auth,

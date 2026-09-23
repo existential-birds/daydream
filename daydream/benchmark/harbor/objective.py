@@ -223,9 +223,8 @@ class SuiteObjective:
     ``experiment_id`` is a stable SHA-256 derived from the canonicalized
     manifest plus the shared compatibility identity. ``identity`` is the
     (single, verified-shared) ``CompatibilityIdentity``; ``profile_digest`` is
-    always present (spec must-have). ``diagnostics`` carries per-entry
-    ``{index, workspace, run_id, error}`` records for the error/reporting path
-    -- never prose-only -- and is empty on a cleanly pooled suite.
+    always present (spec must-have). ``diagnostics`` is empty for pooled suites;
+    invalid entries raise ``ObjectiveError`` before a suite can be returned.
     """
 
     objective: Objective
@@ -248,8 +247,6 @@ class CompletedRun:
     task_rows: list[dict[str, object] | None] = field(default_factory=list)
     # Count-derived objective.
     objective: Objective | None = None
-    # The validated, contained job dir this run executed under.
-    job_dir: str = ""
 
 
 def read_completed_run(
@@ -305,7 +302,6 @@ def read_completed_run(
         identity=identity,
         task_rows=rows,
         objective=objective,
-        job_dir=job_dir,
     )
 
 
@@ -443,17 +439,10 @@ def aggregate_suite(
     entries = validate_suite_manifest(manifest)
 
     resolved: list[tuple[SuiteEntry, CompletedRun]] = []
-    diagnostics: list[dict[str, object]] = []
     for index, entry in enumerate(entries):
         try:
             run = read_completed_run(entry.workspace, entry.run_id, env=env)
         except ObjectiveError as exc:
-            diagnostics.append({
-                "index": index,
-                "workspace": str(entry.workspace),
-                "run_id": entry.run_id,
-                "error": str(exc),
-            })
             raise ObjectiveError(f"suite entry #{index} failed: {exc}") from exc
         resolved.append((entry, run))
 
@@ -495,7 +484,6 @@ def aggregate_suite(
         experiment_id=experiment_id,
         profile_digest=base.profile_digest,
         identity=base,
-        diagnostics=diagnostics,
     )
 
 

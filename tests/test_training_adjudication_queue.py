@@ -3,8 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from daydream.training.adjudication import queue as queue_module
+from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS as queue_set
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import project_findings
+from daydream.training.corpus_projection.tiers import _NON_DECISIVE_DISPOSITIONS as tiers_set
+from daydream.training.dispositions import NON_DECISIVE_DISPOSITIONS, is_decisive
 
 
 def _session(
@@ -84,8 +89,6 @@ def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
 
 
 def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.training.adjudication import queue as queue_module
-    from daydream.training.corpus_projection.projector import project_findings
 
     session = _session("s1", "fp-a", "ambiguous", "d1")
 
@@ -104,16 +107,6 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
 
 
 def test_disposition_sets_are_single_sourced() -> None:
-    from daydream.training.adjudication.queue import (
-        _NON_DECISIVE_DISPOSITIONS as queue_set,
-    )
-    from daydream.training.corpus_projection.tiers import (
-        _NON_DECISIVE_DISPOSITIONS as tiers_set,
-    )
-    from daydream.training.dispositions import (
-        NON_DECISIVE_DISPOSITIONS,
-        is_decisive,
-    )
 
     assert queue_set is NON_DECISIVE_DISPOSITIONS
     assert tiers_set is NON_DECISIVE_DISPOSITIONS

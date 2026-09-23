@@ -13,22 +13,32 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream import cli
-from daydream.archive.index import append_label_observation, upsert_run
+from daydream.archive.index import append_label_observation, readonly_connection, upsert_run
 from tests.harness.trajectory import make_manifest
 
 _OBSERVED = "2026-04-30T00:00:00+00:00"
 _VALID_AT = "2026-04-29T00:00:00+00:00"
 
 
-def _seed_session(root: Path, session_id: str, *, evidence_sha: str, labels: list[str]) -> None:
+def _seed_session(
+    root: Path,
+    session_id: str,
+    *,
+    evidence_sha: str,
+    labels: list[str],
+    **observation_kwargs: Any,
+) -> None:
     """One archived run + one auto label observation, via the real writer.
 
     The run gets per-session base/head SHAs so the identity fallback lookup
-    (repo_slug, base_sha, head_sha) -> session_id never collides.
+    (repo_slug, base_sha, head_sha) -> session_id never collides. Extra
+    keyword arguments forward to ``append_label_observation`` (e.g.
+    ``rubric_json``).
     """
     head = hashlib.sha256(session_id.encode()).hexdigest()
     base = hashlib.sha256(("base-" + session_id).encode()).hexdigest()
@@ -54,13 +64,14 @@ def _seed_session(root: Path, session_id: str, *, evidence_sha: str, labels: lis
         has_posterior=False,
         source="auto",
         observed_at=_OBSERVED,
+        **observation_kwargs,
     )
 
 
 def _source_row_count(roots: list[Path]) -> int:
     total = 0
     for root in roots:
-        conn = sqlite3.connect(f"file:{root / 'index.db'}?mode=ro", uri=True)
+        conn = readonly_connection(root)
         try:
             total += int(conn.execute("SELECT COUNT(*) FROM label_observations").fetchone()[0])
         finally:
@@ -85,7 +96,32 @@ def _import_args(
     if index_root is None:
         index_root = state_dir.parent / "idx"
         index_root.mkdir(exist_ok=True)
-        (index_root / "sessions.jsonl").write_text("", encoding="utf-8")
+        # An independent pinned inventory is required: an empty index cannot
+        # authorize backup rows by linking the backup to itself.
+        sessions = []
+        for source in roots:
+            if not (source / "index.db").is_file():
+                continue
+            conn = readonly_connection(source)
+            try:
+                source_runs = conn.execute("SELECT * FROM runs").fetchall()
+            finally:
+                conn.close()
+            for row in source_runs:
+                upsert_run(index_root, make_manifest(
+                    session_id=row["session_id"], repo_slug=row["repo_slug"],
+                    base_sha=row["base_sha"], head_sha=row["head_sha"],
+                ))
+                sessions.append({
+                    "session_id": row["session_id"], "trajectory_id": row["session_id"],
+                    "segment_id": row["session_id"], "resolutions": [{
+                        "fingerprint": "fp-" + row["session_id"], "disposition": "unanswered",
+                        "evidence": [], "evidence_digest": "d" * 64,
+                    }],
+                })
+        (index_root / "sessions.jsonl").write_text(
+            "".join(json.dumps(s) + "\n" for s in sessions), encoding="utf-8",
+        )
     if archive_dir is None:
         archive_dir = state_dir.parent / "archive"
     argv += [
@@ -102,6 +138,11 @@ def _materialized_snapshot(root: Path, session: str, fingerprint: str) -> Path:
     session shape) with one projected finding for *session* — the projector
     shape the import links per-finding evidence against."""
     root.mkdir(parents=True, exist_ok=True)
+    upsert_run(root, make_manifest(
+        session_id=session, repo_slug="org/repo",
+        head_sha=hashlib.sha256(session.encode()).hexdigest(),
+        base_sha=hashlib.sha256(("base-" + session).encode()).hexdigest(),
+    ))
     sessions = [{
         "session_id": session, "trajectory_id": session, "segment_id": session,
         "resolutions": [{
@@ -573,28 +614,12 @@ def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.Captur
     from daydream.archive.importer import REDACTED_PATH
 
     src = tmp_path / "src"
-    head = hashlib.sha256("sess-1".encode()).hexdigest()
-    base = hashlib.sha256(("base-" + "sess-1").encode()).hexdigest()
-    upsert_run(
-        src,
-        make_manifest(
-            session_id="sess-1",
-            repo_slug="org/repo",
-            head_sha=head,
-            base_sha=base,
-        ),
-    )
-    append_label_observation(
+    _seed_session(
         src,
         "sess-1",
-        labels=["accepted"],
-        pr_state=None,
-        labeler_version="980-rubric-r2",
         evidence_sha="e" * 64,
+        labels=["accepted"],
         rubric_json=json.dumps({"workdir": "/Users/k/proj/build", "note": "ok"}),
-        valid_at=_VALID_AT,
-        source="auto",
-        observed_at=_OBSERVED,
     )
 
     state = tmp_path / "state"
@@ -640,28 +665,7 @@ def test_cli_import_non_iso_stamp_fails_closed(tmp_path: Path, capsys: pytest.Ca
     """A hand-edited non-ISO observed_at aborts at the pre-write gate: exit 1
     and no state archive at all (no seeded runs, no partial appends)."""
     src = tmp_path / "src"
-    head = hashlib.sha256("sess-1".encode()).hexdigest()
-    base = hashlib.sha256(("base-" + "sess-1").encode()).hexdigest()
-    upsert_run(
-        src,
-        make_manifest(
-            session_id="sess-1",
-            repo_slug="org/repo",
-            head_sha=head,
-            base_sha=base,
-        ),
-    )
-    append_label_observation(
-        src,
-        "sess-1",
-        labels=["accepted"],
-        pr_state=None,
-        labeler_version="980-rubric-r2",
-        evidence_sha="e" * 64,
-        valid_at=_VALID_AT,
-        source="auto",
-        observed_at=_OBSERVED,
-    )
+    _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
     # Corrupt the stamp in place (the trigger requires a hand-edited/corrupt
     # source db; writer-produced values are always ISO-8601).
     write = sqlite3.connect(src / "index.db")

@@ -52,42 +52,26 @@ from daydream.ui.tools import (
 )
 
 
-class LiveThinkingPanel:
-    """Thinking panel rendered statically.
-
-    Displays the AI's thought process in a purple-styled panel
-    with a stable title, rendered immediately.
-    """
-
-    def __init__(self, console: Console, content: str, max_length: int = 300) -> None:
-        """Initialize the panel."""
-        self._console = console
-        self._content = content if len(content) <= max_length else content[:max_length] + "..."
-
-    def show(self) -> None:
-        """Render the thinking panel immediately."""
-        self._console.print()
-        self._console.print(
-            Panel(
-                Markdown(self._content),
-                title="💭 Thinking",
-                title_align="left",
-                box=box.ROUNDED,
-                border_style=STYLE_PURPLE,
-                style=Style(color=NEON_COLORS["purple"], italic=True),
-                padding=(0, 1),
-            )
-        )
-
-
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
     """Print a stable thinking panel.
 
     Displays the AI's thought process in a purple-styled panel
     with a static title, rendered immediately.
     """
-    panel = LiveThinkingPanel(console, content, max_length)
-    panel.show()
+    if len(content) > max_length:
+        content = content[:max_length] + "..."
+    console.print()
+    console.print(
+        Panel(
+            Markdown(content),
+            title="💭 Thinking",
+            title_align="left",
+            box=box.ROUNDED,
+            border_style=STYLE_PURPLE,
+            style=Style(color=NEON_COLORS["purple"], italic=True),
+            padding=(0, 1),
+        )
+    )
 
 
 class CrazySpinner:
@@ -165,14 +149,6 @@ class LiveToolPanel:
     with the actual result content.
 
     In quiet mode, renders the tool header only and skips result display.
-
-    Usage:
-        panel = LiveToolPanel(console, "Bash", {"command": "ls"})
-        panel.start()
-        # ... tool executes ...
-        panel.set_result("file1.txt\nfile2.txt", is_error=False)
-        panel.finish()
-
     """
 
     def __init__(
@@ -196,15 +172,9 @@ class LiveToolPanel:
         self._label = label
         self._result: str | None = None
         self._is_error: bool = False
-        self._live: Live | None = None
         self._spinner = CrazySpinner(num_spinners=3)
         self._quiet_mode = quiet_mode
         self._frame = 0  # Animation frame counter for Edit surgery visualization
-
-    @property
-    def name(self) -> str:
-        """Return the tool name."""
-        return self._name
 
     def _build_tool_header_content(self) -> Text:
         """Build the tool call header content.
@@ -407,35 +377,10 @@ class LiveToolPanel:
             padding=(0, 1),
         )
 
-    def __rich__(self) -> Panel:
-        """Return renderable for Rich Live refresh."""
-        return self._render_panel()
-
-    def start(self) -> None:
-        """Start Live context and show tool call with animated throbber."""
-        self._console.print()
-
-        self._live = Live(
-            self,
-            console=self._console,
-            refresh_per_second=10,
-            transient=False,
-        )
-        self._live.start()
-
     def set_result(self, content: str, is_error: bool = False) -> None:
         """Store result and update the display."""
         self._result = content
         self._is_error = is_error
-
-        if self._live is not None:
-            self._live.update(self._render_panel())
-
-    def finish(self) -> None:
-        """Stop Live context. Final panel state persists on screen."""
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
 
 
 class _ActivePanelsGroup:
@@ -471,7 +416,6 @@ class LiveToolPanelRegistry:
         panel = registry.create("tool-123", "Bash", {"command": "ls"})
         # ... tool executes ...
         panel.set_result("file1.txt", is_error=False)
-        panel.finish()
         registry.remove("tool-123")
 
     """

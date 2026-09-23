@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -36,6 +35,7 @@ from daydream.remote_ci import (
     write_remote_ci_verdict,
 )
 from tests.harness.fake_gh import FakeGh
+from tests.harness.processes import wait_for_process_group_exit
 
 PUSHED_SHA = "1" * 40
 MERGE_SHA = "2" * 40
@@ -1415,19 +1415,6 @@ async def _wait_for_pids(path: Path) -> dict[str, int]:
     raise AssertionError("blocking fake gh did not publish process ids")
 
 
-async def _wait_for_process_group_exit(pgid: int) -> None:
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            # EPERM means the pgid was recycled by a foreign-uid process,
-            # i.e. our same-uid group exited.
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"process group {pgid} survived cancellation")
-
-
 @pytest.mark.asyncio
 async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
     fake_gh: FakeGh, git_repo: Path, tmp_path: Path
@@ -1465,7 +1452,7 @@ async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await _wait_for_process_group_exit(pids["direct"])
+    await wait_for_process_group_exit(pids["direct"])
     await asyncio.sleep(0.05)
 
     assert [item.status for item in emitted] == ["cancelled"]
@@ -1525,7 +1512,7 @@ async def test_later_real_request_timeout_at_discovery_uses_trusted_empty_snapsh
         on_snapshot=emitted.append,
     )
     pids = await _wait_for_pids(pid_file)
-    await _wait_for_process_group_exit(pids["direct"])
+    await wait_for_process_group_exit(pids["direct"])
 
     assert verdict.status == "no_ci"
     assert [item.status for item in emitted] == ["pending", "pending", "no_ci"]

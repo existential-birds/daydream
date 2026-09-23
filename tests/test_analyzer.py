@@ -16,8 +16,11 @@ from typing import Any, cast
 
 import pytest
 
+from daydream import _tree_sitter_safety as safety
+from daydream.artifact_visibility import ArtifactEvidenceProvenance
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
+from daydream.eval import analyzer as analyzer_mod
 from daydream.eval.analyzer import (
     _agent_label,
     _files_read,
@@ -27,6 +30,7 @@ from daydream.eval.analyzer import (
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
+    analyze_exploration_utilization,
     analyze_findings,
     analyze_grounding,
     analyze_location,
@@ -44,6 +48,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     TrajectoryRecorder,
+    redact_text,
     run_directory,
     run_document_path,
     sibling_document_path,
@@ -500,7 +505,6 @@ def _artifact_provenance(
     session_id: str = "session-id",
 ) -> Any:
     """Construct exact current-owner provenance without assuming a default root."""
-    from daydream.artifact_visibility import ArtifactEvidenceProvenance
 
     live = private_base / workspace_key / "runs" / session_id / "live"
     return ArtifactEvidenceProvenance(
@@ -628,7 +632,6 @@ def test_artifact_evidence_never_earns_backend_coverage_or_grounding(
 
 def test_artifact_evidence_in_primary_and_redacted_rationale_is_rejected() -> None:
     """Exact raw/redacted owner paths stay visible but cannot earn grounding."""
-    from daydream.trajectory import redact_text
 
     public_source = Path("/Users/alice/project")
     daydream_dir = public_source / ".daydream"
@@ -684,7 +687,6 @@ def test_external_exploration_counts_only_current_owner_and_safe_relative_paths(
     tmp_path: Path,
 ) -> None:
     """Exploration utilization shares the exact owner-bound path classifier."""
-    from daydream.eval.analyzer import analyze_exploration_utilization
 
     public_source, daydream_dir, provenance = _owned_source(tmp_path)
     private_live = provenance.live_root
@@ -829,7 +831,6 @@ def test_analyze_session_redacts_artifact_primary_from_entire_result(
     tmp_path: Path,
 ) -> None:
     """A private primary citation never survives in serialized evaluation."""
-    from daydream.trajectory import redact_text
 
     public_source = tmp_path / "source"
     public_source.mkdir()
@@ -871,7 +872,6 @@ def test_analyze_session_redacts_artifact_primary_from_entire_result(
 
 
 def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
-    from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
         "main": None,
@@ -901,7 +901,6 @@ def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
 
 
 def test_exploration_utilization_counts_bash_mediated_reads() -> None:
-    from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
         "main": None,
@@ -1458,17 +1457,8 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(
         {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
     )
     daydream_dir = ws / ".daydream"
-    run_dir = daydream_dir / "runs" / "quality-real"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.6",
-                "session_id": "quality-real",
-                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        daydream_dir, "quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",
     )
 
     result = analyze_session(daydream_dir, session_id="quality-real")
@@ -1496,17 +1486,8 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(
 ) -> None:
     """Frozen artifact inputs and post-fix source quality use distinct roots."""
     daydream_dir = tmp_path / "frozen" / ".daydream"
-    run_dir = daydream_dir / "runs" / "quality-split"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.6",
-                "session_id": "quality-split",
-                "agent": {"name": "daydream", "model_name": "test"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        daydream_dir, "quality-split", schema_version="ATIF-v1.6", model_name="test",
     )
     code_workspace = _quality_workspace(
         tmp_path,
@@ -1561,31 +1542,6 @@ def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
     entry = result["per_file"]["app.py"]
     assert 0.0 <= entry["verbosity"] <= 1.0
     assert entry["verbosity"] == pytest.approx(1.0)
-
-
-def test_quality_erosion_counts_comprehension_filters_toward_cc(tmp_path: Path) -> None:
-    """A comprehension's generators and filters are real branch paths.
-
-    A function whose only decision points live inside a comprehension must
-    cross the CC>10 erosion threshold; previously they were invisible.
-    """
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(xs):\n"
-                "    return [x for x in xs "
-                + " ".join(f"if x != {i}" for i in range(10))
-                + "]\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["high_cc_functions"] == 1
-    assert entry["erosion"] == 1.0
 
 
 def test_quality_erosion_ignores_wildcard_match_case(tmp_path: Path) -> None:
@@ -1704,7 +1660,6 @@ def test_quality_candidate_empty_set_returns_empty_without_enumeration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An explicitly empty candidate set reports zero files without walking the workspace."""
-    from daydream.eval import analyzer as analyzer_mod
 
     ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n"})
 
@@ -1776,29 +1731,6 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(
     assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
 
 
-def test_quality_erosion_generator_expression_filters_count_toward_cc(
-    tmp_path: Path,
-) -> None:
-    """Generator-expression filters are real branch paths, like list comprehensions."""
-    ws = _quality_workspace(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(xs):\n"
-                "    return (x for x in xs "
-                + _TEN_COMPREHENSION_FILTERS
-                + ")\n"
-            )
-        },
-    )
-
-    result = analyze_quality(ws / ".daydream")
-
-    entry = result["per_file"]["app.py"]
-    assert entry["high_cc_functions"] == 1
-    assert entry["erosion"] == 1.0
-
-
 @pytest.mark.parametrize(
     ("comprehension", "label"),
     [
@@ -1811,7 +1743,12 @@ def test_quality_erosion_generator_expression_filters_count_toward_cc(
 def test_quality_erosion_comprehension_types_cc_parity(
     tmp_path: Path, comprehension: str, label: str
 ) -> None:
-    """List/set/dict/generator comprehensions count generators + filters identically."""
+    """List/set/dict/generator comprehensions count generators + filters identically.
+
+    A comprehension's generators and filters are real branch paths: a function
+    whose only decision points live inside one must cross the CC>10 erosion
+    threshold, which previously they were invisible to.
+    """
     ws = _quality_workspace(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
 
     result = analyze_quality(ws / ".daydream")
@@ -2086,32 +2023,12 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
 
 def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
     """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
-    items = []
-    for i in range(high):
-        items.append({
-            "id": i,
-            "description": f"high-{i}",
-            "file": "a.py",
-            "line": i + 1,
-            "confidence": "HIGH",
-            "rationale": "r",
-            "evidence": "a.py:1",
-            "lens": "per-stack",
-            "severity": "high",
-        })
-    for i in range(med):
-        items.append({
-            "id": high + i,
-            "description": f"med-{i}",
-            "file": "b.py",
-            "line": i + 1,
-            "confidence": "MEDIUM",
-            "rationale": "r",
-            "evidence": "b.py:1",
-            "lens": "per-stack",
-            "severity": "medium",
-        })
-    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    items = [
+        _item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
+        for i in range(high)
+    ]
+    items += [_item(high + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(med)]
+    seed_merged_items(deep, items)
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
@@ -2160,20 +2077,12 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     deep = dd / "deep"
     deep.mkdir(parents=True)
     # 4 per-stack + 4 wonder = 8 shipped items.
-    items = []
-    for i in range(4):
-        items.append({
-            "id": i, "description": f"high-{i}", "file": "a.py", "line": i + 1,
-            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
-            "lens": "per-stack", "severity": "high",
-        })
-    for i in range(4):
-        items.append({
-            "id": 4 + i, "description": f"wonder-{i}", "file": "w.py", "line": i + 1,
-            "confidence": "MEDIUM", "rationale": "r", "evidence": "w.py:1",
-            "lens": "wonder", "severity": "medium",
-        })
-    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    seed_shipped_items(deep, high=4, med=0)
+    shipped = json.loads((deep / "merged-items.json").read_text())["items"]
+    shipped += [
+        _item(4 + i, file="w.py", line=i + 1, description=f"wonder-{i}", lens="wonder") for i in range(4)
+    ]
+    seed_merged_items(deep, shipped)
     out = analyze_findings(dd)
     assert out["total"] == 8                     # wonder items are counted (issue #741)
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
@@ -2276,16 +2185,31 @@ def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None
     assert out["per_lens"]["per-stack"] == 0
 
 
-def seed_run_trajectory(dd: Path, session_id: str, *, total_cost_usd: float) -> None:
-    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with final metrics."""
+def seed_run_trajectory(
+    dd: Path,
+    session_id: str,
+    *,
+    total_cost_usd: float | None = None,
+    schema_version: str = "ATIF-v1.7",
+    model_name: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
+) -> None:
+    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with the requested fields."""
     run_dir = dd / "runs" / session_id
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(json.dumps({
+    run_dir.mkdir(parents=True, exist_ok=True)
+    agent: dict[str, Any] = {"name": "test"}
+    if model_name is not None:
+        agent["model_name"] = model_name
+    document: dict[str, Any] = {
+        "schema_version": schema_version,
         "session_id": session_id,
-        "final_metrics": {"total_cost_usd": total_cost_usd},
-        "agent": {"name": "test"},
+        "agent": agent,
+        "steps": [] if steps is None else steps,
         "extra": {},
-    }))
+    }
+    if total_cost_usd is not None:
+        document["final_metrics"] = {"total_cost_usd": total_cost_usd}
+    (run_dir / "trajectory.json").write_text(json.dumps(document))
 
 
 def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
@@ -2312,7 +2236,6 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(
     analysis by raising the typed guard error — the orchestrator's fail-open
     wrapper converts that into (None, reason); it must not silently skip.
     """
-    from daydream import _tree_sitter_safety as safety
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     # The factory is lru_cached; clear it so the guard inside the cached body
@@ -2329,7 +2252,6 @@ def test_analyze_quality_unchanged_on_good_install(
     """#1087 (M5): the guard is a no-op on valid installs — behavior identical
     to pre-regression, including the parser cache being consulted.
     """
-    from daydream import _tree_sitter_safety as safety
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.25.2")
     ws = _quality_workspace(tmp_path, {"mod.py": "def f():\n    return 1\n"})
@@ -2347,7 +2269,6 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     analyze_session -- the rest of the evaluation (and evaluation.json)
     survives instead of the typed escape dropping the whole run.
     """
-    from daydream import _tree_sitter_safety as safety
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     ws = _quality_workspace(
@@ -2355,17 +2276,8 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
         {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
     )
     daydream_dir = ws / ".daydream"
-    run_dir = daydream_dir / "runs" / "quality-bad"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.6",
-                "session_id": "quality-bad",
-                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        daydream_dir, "quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",
     )
 
     result = analyze_session(daydream_dir, session_id="quality-bad")
@@ -3266,17 +3178,8 @@ def test_analyze_session_reports_location_and_shipped_duplication(
             _item(2, line=4, description=WORKED_B, lens="structural"),
         ],
     )
-    run_dir = dd / "runs" / "loc-session"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.7",
-                "session_id": "loc-session",
-                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
-                "steps": [],
-            }
-        )
+    seed_run_trajectory(
+        dd, "loc-session", schema_version="ATIF-v1.7", model_name="claude-sonnet-4-5",
     )
 
     result = analyze_session(dd, session_id="loc-session")

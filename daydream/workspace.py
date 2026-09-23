@@ -395,7 +395,7 @@ def _prune_stale_locked_worktrees(
     removed = 0
     for path in paths:
         try:
-            locked_at = git_ops.worktree_lock_mtime(repo, path)
+            locked_at = git_ops.worktree_lock_mtime(path)
             if locked_at is not None and time.time() - locked_at <= stale_after_s:
                 # Live worktree (lock age near zero): never unlock or remove
                 # it, so a concurrent run mid-write is not destroyed.
@@ -490,15 +490,7 @@ def _warn_removal_failed(path: Path, exc: GitError, *, kind: str = "worktree") -
 
 def _dedupe_ordered(entries: Iterable[str | Path]) -> list[Path]:
     """De-duplicate path-like *entries*, preserving first-occurrence order."""
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for rel in entries:
-        rel_path = Path(rel)
-        if rel_path in seen:
-            continue
-        seen.add(rel_path)
-        unique.append(rel_path)
-    return unique
+    return list(dict.fromkeys(Path(entry) for entry in entries))
 
 
 def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> None:
@@ -633,7 +625,7 @@ def _retire_legacy_operational_worktrees(
                     raise ArtifactVisibilityError(
                         "legacy operational worktree has different Git ownership"
                     )
-                locked_at = git_ops.worktree_lock_mtime(source, entry)
+                locked_at = git_ops.worktree_lock_mtime(entry)
             except ArtifactVisibilityError:
                 raise
             except git_ops.NotAWorktreeError as exc:

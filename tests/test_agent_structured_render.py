@@ -7,8 +7,8 @@ Verified terminal-render harness (from Task 0):
     rec.export_text()  # captures the rendered agent text
 
 run_agent requires the keyword-only `phase=` argument (DaydreamPhase),
-imported from daydream.trajectory. MockBackend is imported from
-tests.test_agent_recorder_integration (the single canonical definition).
+imported from daydream.trajectory. ScriptedBackend is imported from
+tests.harness.backend (the single canonical definition).
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from daydream.backends import (
 )
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
-from tests.harness.stub_backend import MockBackend
+from tests.harness.backend import ScriptedBackend
 
 RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}'
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
@@ -39,7 +39,10 @@ PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source
 async def test_structured_output_text_is_not_rendered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
-    backend = MockBackend([TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)])
+    backend = ScriptedBackend(
+        events=[TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
     )
@@ -52,8 +55,12 @@ async def test_structured_output_text_is_not_rendered(monkeypatch: pytest.Monkey
 async def test_plain_text_still_renders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
-    backend = MockBackend(
-        [TextEvent(text="narration here"), ResultEvent(structured_output=None, continuation=None)]
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text="narration here"),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
     )
     await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()
@@ -68,14 +75,15 @@ async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     sentinel absent — while the returned structured result stays raw."""
     sentinel = "ghp_" + "x" * 16
     payload = {"status": "complete", "token": sentinel}
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text=f"token={sentinel}"),
             ThinkingEvent(text=f"thinking about {sentinel}"),
             ToolStartEvent(id="t", name="bash", input={"command": f"echo {sentinel}"}),
             ToolResultEvent(id="t", output=f"token={sentinel}", is_error=False),
             ResultEvent(structured_output=payload, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     result, _, _ = await run_agent(
         backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"},
@@ -99,7 +107,7 @@ async def test_log_mode_captures_structured_output(
         "token": sentinel,
         "nested": {"path": f"/Users/{sentinel}"},
     }
-    backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=payload, continuation=None)], model="mock-model")
     result, _, _ = await run_agent(
         backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"},
         run_context=RunContext(InteractionPolicy(log_mode=True)),
@@ -129,11 +137,12 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(
     """
     merge_prose = "All source artifacts are empty: `stack-python-records.json` is `[]`. Nothing to merge."
     payload: dict[str, Any] = {"items": []}
-    backend = MockBackend(
-        [
+    backend = ScriptedBackend(
+        events=[
             TextEvent(text=merge_prose),
             ResultEvent(structured_output=payload, continuation=None),
-        ]
+        ],
+        model="mock-model",
     )
     result, _, _ = await run_agent(
         backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema={"type": "object"},
@@ -159,20 +168,26 @@ async def test_structured_fallback_validates_against_output_schema(
     }
 
     # (a) valid-schema raw JSON -> returned as structured output
-    valid_backend = MockBackend([
-        TextEvent(text='{"file": "src/a.py"}'),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    valid_backend = ScriptedBackend(
+        events=[
+            TextEvent(text='{"file": "src/a.py"}'),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         valid_backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=schema
     )
     assert result == {"file": "src/a.py"}
 
     # (b) invalid-schema raw JSON (missing required "file") -> plain-text fallthrough
-    invalid_backend = MockBackend([
-        TextEvent(text='{"line": 3}'),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    invalid_backend = ScriptedBackend(
+        events=[
+            TextEvent(text='{"line": 3}'),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
     result2, _, _ = await run_agent(
         invalid_backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=schema
     )
@@ -205,10 +220,13 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
             "intent_docs": {"type": "array", "items": {"type": "string"}},
         },
     }
-    backend = MockBackend([
-        TextEvent(text='{"commands": [{"command": "make test"}]}'),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text='{"commands": [{"command": "make test"}]}'),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema,
         validate_structured_output=False,
@@ -251,10 +269,13 @@ async def test_structured_fallback_salvages_partial_dict(
             {"issue_id": 2, "verdict": "bogus"},  # missing required "evidence"
         ]
     }
-    backend = MockBackend([
-        TextEvent(text=json.dumps(partial)),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text=json.dumps(partial)),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema
     )
@@ -279,10 +300,13 @@ async def test_structured_fallback_bare_array_reaches_merge_shape(
         "properties": {"items": {"type": "array", "items": {"type": "object"}}},
     }
     items = [{"id": 1, "description": "x"}]
-    backend = MockBackend([
-        TextEvent(text=json.dumps(items)),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = ScriptedBackend(
+        events=[
+            TextEvent(text=json.dumps(items)),
+            ResultEvent(structured_output=None, continuation=None),
+        ],
+        model="mock-model",
+    )
     result, _, _ = await run_agent(
         backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema
     )

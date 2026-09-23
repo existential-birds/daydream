@@ -1,5 +1,4 @@
 """Review Merge And Verifier."""
-
 from __future__ import annotations
 
 import json
@@ -10,6 +9,22 @@ from typing import TYPE_CHECKING, Any
 import anyio
 import pytest
 
+from daydream import runner as _runner
+from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.deep import dedup as _dedup
+from daydream.deep import detection as _detection
+from daydream.deep import prompts as _prompts
+from daydream.deep.artifacts import (
+    arbiter_input_path,
+    deep_dir,
+    merged_items_path,
+    merged_report_path,
+    per_stack_records_path,
+    verdicts_path,
+)
+from daydream.deep.diff import _diff_changed_files
+from daydream.deep.prompts import build_merge_prompt
+from daydream.runner import RunConfig, _resolve_backend
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
 )
@@ -27,6 +42,7 @@ from tests.test_deep_orchestrator import (
     _twin_parse_by_stack,
     _write_plugin_registry,
 )
+from tests.test_finite_delegation_parse import _mark_delegated_artifacts
 
 if TYPE_CHECKING:
     from daydream.pr_review import ReviewRenderers
@@ -41,9 +57,6 @@ def _install_merge_captures(
     captured_dedup_records: dict[str, Any] | None = None,
 ) -> None:
     """Wrap the merge/dedup builders to capture their arguments."""
-    from daydream.deep import dedup as _dedup
-    from daydream.deep import prompts as _prompts
-
     real_build_merge = _prompts.build_merge_prompt
     real_build_dedup = _dedup.build_dedup_candidates
     real_build_record_dedup = _dedup.build_record_dedup_candidates
@@ -77,7 +90,6 @@ def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
 ) -> None:
     """Detected React files retain their own stack without the plugin registry."""
 
-    from daydream.deep import detection as _detection
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
@@ -109,8 +121,6 @@ def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
 
 def test_diff_changed_files_rename_single_entry() -> None:
     """Rename diff contributes only the destination path, not both sides."""
-    from daydream.deep.diff import _diff_changed_files
-
     rename_diff = (
         "diff --git a/foo.py b/foo.ts\n"
         "similarity index 85%\n"
@@ -127,8 +137,6 @@ def test_diff_changed_files_rename_single_entry() -> None:
 
 def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     """Non-rename diff shapes emit exactly one path each."""
-    from daydream.deep.diff import _diff_changed_files
-
     mixed = (
         "diff --git a/keep.py b/keep.py\n"
         "--- a/keep.py\n"
@@ -189,9 +197,7 @@ async def test_merge_prompt_lists_records_in_sorted_order(
 
 
 def test_merge_prompt_emits_related_files_instruction() -> None:
-    from pathlib import Path
 
-    from daydream.deep.prompts import build_merge_prompt
 
     prompt = build_merge_prompt(
         strategy=_default_strategy("merge"),
@@ -199,7 +205,6 @@ def test_merge_prompt_emits_related_files_instruction() -> None:
         intent_path=Path("intent.md"),
         alternatives_path=Path("alt.md"),
         dedup_candidates_path=Path("dedup.json"),
-        output_path=Path("o.json"),
     )
     assert "related_files" in prompt
 
@@ -211,8 +216,6 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     """A per-stack agent failure must: 1) persist to per-stack-failures.json under .daydream/deep/, 2) appear in
     the merge prompt under an 'Uncovered stacks' block, so the merge agent can call it out instead of silently
     ignoring the gap."""
-    import json as _json
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -232,7 +235,6 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     ) -> Any:
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
-
             async def _raise() -> None:
                 raise RuntimeError("simulated react failure")
 
@@ -259,7 +261,7 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
 
     failures_p = multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json"
     assert failures_p.is_file(), "failures file should be persisted for merge-resume"
-    failures_payload = _json.loads(failures_p.read_text())
+    failures_payload = json.loads(failures_p.read_text())
     assert "react" in failures_payload
     assert "simulated react failure" in failures_payload["react"]
 
@@ -314,12 +316,11 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     assert len(merge_calls) == 1
 
 
-async def test_orchestrator_threads_structural_records_to_merge(
+async def test_orchestrator_partitions_structural_records_from_merge(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural records are partitioned out of the dedup pre-filter pool."""
-
     captured_merge: dict[str, Any] = {}
     captured_dedup_records: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
@@ -346,10 +347,8 @@ async def test_orchestrator_threads_structural_records_to_merge(
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
-    # (1) The merge phase received structural_records_path; per_stack_records_paths
-    #     must NOT include the structural file (the host appends it separately).
-    assert captured_merge.get("structural_records_path") is not None
-    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
+    # (1) per_stack_records_paths must NOT include the structural file (the host
+    #     appends it separately).
     per_stack_paths = captured_merge["per_stack_records_paths"]
     assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
         f"structural records must be partitioned out: {per_stack_paths}"
@@ -369,12 +368,11 @@ async def test_orchestrator_threads_structural_records_to_merge(
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
 
-async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
+async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fresh-run path (no start_at) applies the same structural partition."""
-
     captured_merge: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
     _install_merge_captures(
@@ -390,8 +388,6 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
     assert exit_code == 0
 
     # Structural records file lives under the deep artifact dir.
-    assert captured_merge.get("structural_records_path") is not None
-    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
     per_stack_paths = captured_merge["per_stack_records_paths"]
     assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
         f"structural records must be partitioned out (fresh run): {per_stack_paths}"
@@ -410,13 +406,6 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
     structural_line: int,
 ) -> None:
     """Same-line and whole-file structural twins collapse to one high-severity finding."""
-    from daydream.deep.artifacts import (
-        arbiter_input_path,
-        deep_dir,
-        merged_items_path,
-        per_stack_records_path,
-    )
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_echo_records = True
@@ -443,8 +432,6 @@ async def test_precision_mode_suppression_never_sees_structural_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural records rejoin adjudication for the arbiter only (issue #1103)."""
-    from daydream.deep.artifacts import deep_dir, merged_items_path
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_echo_records = True
@@ -490,13 +477,37 @@ async def test_precision_mode_suppression_never_sees_structural_records(
     assert any("Low-severity structural erosion" in d for d in descriptions), descriptions
 
 
+async def test_precision_suppression_excludes_delegated_structure_on_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    stub.suppression_keep = False
+    deep = _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(description="Local borderline finding", severity="low", confidence="MEDIUM")],
+        react=[], generic=[],
+        structure=[_record(description="Delegated boundary mismatch", severity="low", confidence="MEDIUM",
+                           evidence="api.py:1")],
+    )
+    _mark_delegated_artifacts(deep, {
+        "python": ["api.py"], "react": ["App.tsx"], "generic": ["README.md"],
+    })
+    assert await _run_deep(multi_stack_target, start_at="merge", precision_mode=True) == 0
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert not any(item["description"] == "Local borderline finding" for item in items)
+    structural = [item for item in items if item["description"] == "Delegated boundary mismatch"]
+    assert len(structural) == 1
+    assert structural[0]["lens"] == "structural"
+    assert structural[0]["source_uids"] == ["structure:1"]
+
+
 async def test_distinct_structural_finding_survives_the_fold(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The fold is a duplicate check, not a structural-lens filter."""
-    from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_echo_records = True
@@ -516,8 +527,6 @@ async def test_distinct_structural_finding_survives_the_fold(
 
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--start-at fix must not call post_review_to_pr_from_report."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -579,8 +588,6 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     mute_side_effects: Mute,
 ) -> None:
     """The deep orchestrator resolves a backend for each required phase."""
-    from daydream import runner as _runner
-
     seen_phases: list[str] = []
     original = _runner._resolve_backend
 
@@ -628,16 +635,15 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     # Issue #745: the pre-merge parse-<stack> stage was removed (reviewers emit
     # records directly), so "parse" is no longer a resolved deep phase.
-    expected_phases = {"intent", "wonder", "per_stack_review", "merge", "fix", "test", "verify"}
+    expected_phases = {"intent", "per_stack_review", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
+    assert "wonder" not in captured  # The default design lens shares per_stack_review.
 
 
 def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC3: the ``intent`` phase resolves to ``claude-sonnet-5`` by default."""
-    from daydream.runner import RunConfig, _resolve_backend
-
     captured: dict[str, Any] = {}
 
     class _B:
@@ -690,8 +696,6 @@ async def test_verifier_runs_after_merge_before_fix(
     mute_side_effects: Mute,
 ) -> None:
     """Recommendation verifier runs as a sub-step of the fix gate."""
-    from daydream.deep.artifacts import verdicts_path
-
     # phase_fix stays REAL so verdict propagation is observable.
     stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
 
@@ -722,9 +726,8 @@ async def test_verifier_runs_after_merge_before_fix(
     assert expected_path == multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json"
     assert expected_path.is_file(), f"verdicts file missing at {expected_path}"
 
-    import json as _json
 
-    payload = _json.loads(expected_path.read_text())
+    payload = json.loads(expected_path.read_text())
     assert payload == {
         "verdicts": [
             {

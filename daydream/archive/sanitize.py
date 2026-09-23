@@ -11,8 +11,8 @@ Transformation pipeline per file:
   (the sole URL authority); every string leaf then runs through the same text
   pipeline the non-JSON branch uses, and the whole document through
   :func:`daydream.trajectory.redact_value`.
-* Text files: :func:`daydream.trajectory.redact_text` plus the scanner's
-  extended userinfo/query-param substitutions.
+* Text files: :func:`daydream.trajectory.redact_text`, which shares URL
+  credential patterns with the publication scanner.
 
 Release gate: every derivative is re-scanned with
 :func:`daydream.archive.scan.scan_run_dir`; a derivative carrying a *blocking*
@@ -109,26 +109,11 @@ def _sanitize_url_string(value: str) -> str:
     return value
 
 
-def _sanitize_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _sanitize_json_value(child) for key, child in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_json_value(child) for child in value]
-    if isinstance(value, str):
-        return _sanitize_url_string(value)
-    return value
-
-
 def _sanitize_json_document(doc: Any) -> Any:
     """Canonicalize URL leaves, then run every string leaf through the text pipeline.
 
-    ``_sanitize_json_value`` + :func:`redact_value` alone omit the three
-    scan-local substitutions that only :func:`_sanitize_text` carries, so a
-    JSON string leaf holding an SCP, token-only or query-credential shape — the
-    shape a trajectory tool observation routinely has — was quarantined instead
-    of sanitized, deterministically on every pass (issue #1170). Routing leaves
-    through :func:`_sanitize_text` is what makes that function's docstring claim
-    ("a rule added there applies here too") true for the JSON branch as well.
+    Tool observations routinely embed URLs inside prose, so URL normalization
+    alone is insufficient. Text and JSON leaves use the same redaction rules.
     """
     if isinstance(doc, dict):
         return {key: _sanitize_json_document(child) for key, child in doc.items()}
@@ -140,19 +125,8 @@ def _sanitize_json_document(doc: Any) -> Any:
 
 
 def _sanitize_text(text: str) -> str:
-    """Redact one text file body, then re-check with the scanner's extra rules.
-
-    The scanner's two local gaps (token-only userinfo, credential query params)
-    are applied from scan.py's own patterns, so a rule added there applies here
-    too and the derivative passes the release scan (M16). JSON string leaves
-    route through here as well (:func:`_sanitize_json_document`), so the claim
-    holds for both branches.
-    """
-    text = redact_text(text)
-    text = scan._TOKEN_ONLY_USERINFO_PATTERN.sub(r"\1[REDACTED_USER]@", text)
-    text = scan._SCP_USERINFO_PATTERN.sub(r"[REDACTED_USER]@\2", text)
-    text = scan._QUERY_CREDENTIAL_PATTERN.sub(r"\1\2=[REDACTED_CREDENTIAL]", text)
-    return text
+    """Use the live redactor's shared credential rules for text and JSON leaves."""
+    return redact_text(text)
 
 
 def _sanitize_derivative(derivative_dir: Path) -> None:
@@ -234,6 +208,20 @@ def _mark_done(sanitized_dir: Path, session_id: str, derivative_digest: str) -> 
     )
 
 
+def _append_quarantine_audit(sanitized_dir: Path, run_dir: Path, session_id: str) -> None:
+    """Append the fail-closed audit record for a quarantined bundle."""
+    _append_jsonl(
+        sanitized_dir / _AUDIT_FILENAME,
+        {
+            "source": str(run_dir),
+            "session_id": session_id,
+            "derivative_digest": "",
+            "status": "quarantined",
+            "completed_at": _now_iso_utc(),
+        },
+    )
+
+
 def _quarantine_derivative(
     derivative_dir: Path, sanitized_dir: Path, archive_dir: Path, run_dir: Path, session_id: str
 ) -> None:
@@ -256,16 +244,7 @@ def _quarantine_derivative(
             quarantine_dir = quarantine_dir.with_name(f"{session_id}.{int(time.time())}")
         shutil.move(str(derivative_dir), str(quarantine_dir))
         (quarantine_dir / _DERIVATIVE_MARKER).write_text(_now_iso_utc(), encoding="utf-8")
-    _append_jsonl(
-        sanitized_dir / _AUDIT_FILENAME,
-        {
-            "source": str(run_dir),
-            "session_id": session_id,
-            "derivative_digest": "",
-            "status": "quarantined",
-            "completed_at": _now_iso_utc(),
-        },
-    )
+    _append_quarantine_audit(sanitized_dir, run_dir, session_id)
 
 
 def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
@@ -280,16 +259,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
     so a bulk caller can continue with the next bundle.
     """
     sanitized_dir = archive_dir / "sanitized"
-    manifest: dict[str, Any] = {}
-    manifest_path = run_dir / "manifest.json"
-    if manifest_path.exists():
-        try:
-            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                manifest = loaded
-        except ValueError:
-            manifest = {}
-    session_id = str(manifest.get("session_id") or run_dir.name)
+    session_id = _resolve_session_id(run_dir)
     derivative_dir = sanitized_dir / session_id
 
     try:
@@ -329,16 +299,8 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
     except Exception:
         if derivative_dir.exists():
             shutil.rmtree(derivative_dir, ignore_errors=True)
-        _append_jsonl(  # unexpected failure: record quarantine, re-raise for bulk loop
-            sanitized_dir / _AUDIT_FILENAME,
-            {
-                "source": str(run_dir),
-                "session_id": session_id,
-                "derivative_digest": "",
-                "status": "quarantined",
-                "completed_at": _now_iso_utc(),
-            },
-        )
+        # Unexpected failure: record quarantine, re-raise for the bulk loop.
+        _append_quarantine_audit(sanitized_dir, run_dir, session_id)
         raise
 
     _append_jsonl(

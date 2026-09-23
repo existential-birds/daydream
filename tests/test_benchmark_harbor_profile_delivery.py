@@ -12,7 +12,11 @@ from typing import Any
 import pytest
 
 from daydream import review_profile as rp
+from daydream.benchmark import cli as bc
+from daydream.benchmark.harbor import calibrate, entrypoint, run
+from daydream.benchmark.harbor import run as run_mod
 from daydream.config_file import DaydreamFileConfig
+from daydream.review_profile import ProfileError
 
 _resolver_fixture = (
     'schema_version = 1\nname = "candidate"\n[strategies.intent]\n'
@@ -55,7 +59,6 @@ def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(
 def test_entrypoint_parses_and_validates_candidate_before_runconfig(
     tmp_path: Path,
 ) -> None:
-    from daydream.benchmark.harbor import entrypoint
 
     good = tmp_path / "good.toml"
     good.write_text('schema_version = 1\nname = "g"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
@@ -71,7 +74,6 @@ def test_entrypoint_parses_and_validates_candidate_before_runconfig(
 def test_entrypoint_invalid_candidate_fails_and_writes_no_review(
     tmp_path: Path,
 ) -> None:
-    from daydream.benchmark.harbor import entrypoint
 
     bad = tmp_path / "bad.toml"
     bad.write_text('schema_version = 99\nname = "bad"')
@@ -93,7 +95,6 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(
 def test_malicious_target_config_cannot_change_harbor_candidate(
     tmp_path: Path,
 ) -> None:
-    from daydream.benchmark.harbor import entrypoint
 
     # target repo .daydream.toml tries to point at its own profile
     evil = tmp_path / ".daydream.toml"
@@ -111,7 +112,6 @@ def test_malicious_target_config_cannot_change_harbor_candidate(
 
 # Task 12 (R12): Harbor ledger/receipt provenance.
 def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor import run
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -128,7 +128,6 @@ def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
 
 
 def test_receipt_invalidation_inputs_include_candidate_digest() -> None:
-    from daydream.benchmark.harbor import calibrate
 
     # calibrate._invalidation_inputs is the single source of truth for the
     # receipt contract (run.py's former duplicating helper is gone).
@@ -145,7 +144,6 @@ def test_receipt_invalidation_inputs_include_candidate_digest() -> None:
 # Legacy default runs (no digest) stay byte-stable. Without this the oracle
 # preflight always fails under a candidate.
 def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
-    from daydream.benchmark.harbor import calibrate
 
     sr = calibrate._load_judge_template()
     # With a candidate digest -> receipt contract includes profile_digest.
@@ -163,7 +161,6 @@ def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
 # reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the
 # in-container entrypoint runs in a different process (after the ledger row).
 def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from daydream.benchmark import cli as bc
 
     # No candidate -> digest key is None (legacy default runs stay byte-stable).
     monkeypatch.delenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", raising=False)
@@ -180,7 +177,6 @@ def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytes
     assert digest and isinstance(digest, str) and len(digest) == 64  # sha256
 
     # _handle_benchmark_run passes it through into the supervisor env.
-    from daydream.benchmark.harbor import run as run_mod
 
     captured = {}
 
@@ -197,8 +193,6 @@ def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytes
 
 
 def test_benchmark_run_invalid_candidate_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from daydream.benchmark import cli as bc
-    from daydream.review_profile import ProfileError
 
     bad = tmp_path / "bad.toml"
     bad.write_text('schema_version = 99\nname = "bad"')

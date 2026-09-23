@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.atif import validate as atif_validate
@@ -104,7 +105,6 @@ def test_invalid_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 )
 def test_phase_backend_override_via_config_file(global_backend: Any, overrides: Any, phase: Any, expected: Any) -> None:
     """Resolve phase-specific backends ahead of the global configured backend."""
-    # Per-phase backend overrides moved to the config file (Task 8); resolver still honours them.
     fc = DaydreamFileConfig(backend=global_backend, phases=overrides)
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
     assert _resolved_backend_name(config, phase) == expected
@@ -484,13 +484,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     )
 
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
-    _seed_remote_ci_pr(fake_gh, head_sha=subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip())
+    _seed_remote_ci_pr(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
     seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome=remote_outcome
     )
@@ -535,27 +529,9 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
 
     assert exc_info.value.code == expected_code
     assert hook_marker.read_text() == "ran\n"
-    pushed_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert subprocess.run(
-        ["git", "rev-parse", "refs/heads/feature"],
-        cwd=remote,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == pushed_sha
-    assert subprocess.run(
-        ["git", "config", "--get", "remote.origin.url"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == raw_remote
+    pushed_sha = git(project, "rev-parse", "HEAD")
+    assert git(remote, "rev-parse", "refs/heads/feature") == pushed_sha
+    assert git(project, "config", "--get", "remote.origin.url") == raw_remote
     verdict = json.loads(
         (project / ".daydream" / "deep" / "remote-ci-verdict.json").read_text()
     )
@@ -597,8 +573,6 @@ def test_print_issues_table_renders() -> None:
     assert "Missing test" in output
 
 
-# Per-phase model overrides — config-file path (cli-verb-redesign Task 8)
-
 
 @pytest.mark.parametrize(
     "phase,value",
@@ -624,8 +598,6 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path: Path) -> None:
     assert config.test_model is None
     assert config.exploration_model is None
 
-
-# Per-phase model/backend flags removed (cli-verb-redesign Task 8 — config-only)
 
 
 @pytest.mark.parametrize(
@@ -659,8 +631,6 @@ def test_per_phase_flag_rejected_with_config_pointer(
     assert flag in err
     assert f"[tool.daydream.phases.{phase}]" in err
 
-
-# Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
 
 
 def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
@@ -943,7 +913,31 @@ def test_signal_flushes_all_runner_recorders(
     ]
 
 
-# corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
+def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from daydream import cli
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])])
+
+    monkeypatch.setattr(anyio, "run", interrupted)
+    with pytest.raises(SystemExit) as caught:
+        cli.main([str(tmp_path), "--non-interactive"])
+    assert caught.value.code == 130
+
+
+def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from daydream import cli
+
+    failure = BaseExceptionGroup("task group", [KeyboardInterrupt(), RuntimeError("sibling failed")])
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(anyio, "run", interrupted)
+    with pytest.raises(BaseExceptionGroup) as caught:
+        cli.main([str(tmp_path), "--non-interactive"])
+    assert caught.value is failure
+
 
 
 def test_harvest_parser_accepts_repo_clone_root() -> None:

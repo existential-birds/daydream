@@ -109,22 +109,39 @@ def _stage_file(worktree: Path, relpath: str, content: str) -> None:
     _git(worktree, "add", relpath)
 
 
-def _copy_pre_commit_hook(worktree: Path) -> Path:
-    """Drop the real pre-commit script into a throwaway worktree."""
+def _run_pre_commit(
+    worktree: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    exit_code: dict[str, int] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
+    """Install the real pre-commit hook in *worktree*, run it under recording
+    PATH shims, and return ``(completed process, recorded commands)``.
+
+    Staging must happen before this call so git sees the intended index and the
+    setup stays out of the command log.
+    """
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = worktree / "scripts" / "hooks"
     script_dir.mkdir(parents=True, exist_ok=True)
     hook = script_dir / "pre-commit"
     shutil.copy(repo_root / "scripts" / "hooks" / "pre-commit", hook)
     hook.chmod(0o755)
-    return hook
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"), exit_code=exit_code)
+    proc = subprocess.run(
+        [str(hook)],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    return proc, _read_command_records(log)
 
 
 def test_pre_commit_runs_ruff_only_on_staged_python_files(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _main_repo, worktree = linked_worktree
-    _copy_pre_commit_hook(worktree)
     # Stage scratch files BEFORE the shims shadow `git` on PATH (the shim
     # delegates anyway, but this keeps the staging setup unrecorded).
     _stage_file(worktree, "daydream/spike_a.py", "x = 1\n")
@@ -138,15 +155,8 @@ def test_pre_commit_runs_ruff_only_on_staged_python_files(
     # name to ruff.
     _stage_file(worktree, "daydream/\u00e9t\u00e9.py", "x = 4\n")
 
-    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
-    proc = subprocess.run(
-        [str(worktree / "scripts" / "hooks" / "pre-commit")],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    proc, recs = _run_pre_commit(worktree, tmp_path, monkeypatch)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    recs = _read_command_records(log)
     uv_calls = [r for r in recs if r["command"] == "uv"]
     # One ruff invocation per staged .py file, each fed that file's INDEX
     # content via stdin (--stdin-filename; nothing is read from the working
@@ -171,7 +181,6 @@ def test_pre_commit_lints_index_content_not_working_tree(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _main_repo, worktree = linked_worktree
-    _copy_pre_commit_hook(worktree)
     # Stage a clean file, then leave a DIFFERENT (lint-breaking) state in the
     # working tree un-staged. The gate must lint the STAGED bytes, so the
     # un-staged experiment cannot block (or wrongly clear) the commit.
@@ -179,15 +188,8 @@ def test_pre_commit_lints_index_content_not_working_tree(
     _stage_file(worktree, "daydream/scope.py", "STAGED_VALUE = 1\n")
     scope_py.write_text("STAGED_VALUE = import os  # unstaged experiment\n", encoding="utf-8")
 
-    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
-    proc = subprocess.run(
-        [str(worktree / "scripts" / "hooks" / "pre-commit")],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    proc, recs = _run_pre_commit(worktree, tmp_path, monkeypatch)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    recs = _read_command_records(log)
     uv_calls = [r for r in recs if r["command"] == "uv"]
     assert len(uv_calls) == 1
     call = uv_calls[0]
@@ -201,24 +203,16 @@ def test_pre_commit_exits_zero_without_staged_python(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _main_repo, worktree = linked_worktree
-    _copy_pre_commit_hook(worktree)
-    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
-    proc = subprocess.run(
-        [str(worktree / "scripts" / "hooks" / "pre-commit")],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    proc, recs = _run_pre_commit(worktree, tmp_path, monkeypatch)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     # No ruff invocation when nothing relevant is staged — the speed contract.
-    assert not [r for r in _read_command_records(log) if r["command"] == "uv"]
+    assert not [r for r in recs if r["command"] == "uv"]
 
 
 def test_pre_commit_skips_python_files_outside_lint_scope(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _main_repo, worktree = linked_worktree
-    _copy_pre_commit_hook(worktree)
     # The commit gate is scoped to the canonical lint surface (`make lint` /
     # `make check`: root `daydream tests` plus the standalone rl project). A
     # staged .py under scripts/ or mypy_stubs/ is tracked by no lint scope, so
@@ -227,15 +221,9 @@ def test_pre_commit_skips_python_files_outside_lint_scope(
     _stage_file(worktree, "scripts/out_of_scope.py", "y = 2\n")
     _stage_file(worktree, "mypy_stubs/out_of_scope.py", "z = 3\n")
 
-    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
-    proc = subprocess.run(
-        [str(worktree / "scripts" / "hooks" / "pre-commit")],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    proc, recs = _run_pre_commit(worktree, tmp_path, monkeypatch)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    uv_calls = [r for r in _read_command_records(log) if r["command"] == "uv"]
+    uv_calls = [r for r in recs if r["command"] == "uv"]
     # Only the in-scope staged file is linted; the others are skipped.
     assert len(uv_calls) == 1
     call = uv_calls[0]
@@ -247,17 +235,10 @@ def test_pre_commit_propagates_ruff_failure(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _main_repo, worktree = linked_worktree
-    _copy_pre_commit_hook(worktree)
     _stage_file(worktree, "daydream/broken.py", "x = 1\n")
     # The uv shim exits 1 like ruff does on a lint error; the hook must
     # propagate that status, never swallow it.
-    _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"), exit_code={"uv": 1})
-    proc = subprocess.run(
-        [str(worktree / "scripts" / "hooks" / "pre-commit")],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    proc, _ = _run_pre_commit(worktree, tmp_path, monkeypatch, exit_code={"uv": 1})
     assert proc.returncode != 0
     # Failure output names the gate and how to fix it:
     assert "ruff" in proc.stdout.lower() or "ruff" in proc.stderr.lower()

@@ -1,18 +1,9 @@
-"""Phase-seam render tests for the de-silenced structured phases (Task 3).
+"""Phase-seam render tests for the de-silenced structured phases.
 
-After Task 1 suppressed raw structured-output JSON in ``run_agent``, the
-structured phases (parse-feedback, cross-stack merge, arbiter) produced no
-visible terminal output. These tests drive the real phase entrypoints with a
-``MockBackend`` whose ``ResultEvent.structured_output`` matches each phase's
-schema and assert the restored summaries render observable content (counts,
-a table) without dumping raw JSON.
-
-Verified harness (from Task 0): record console is
-``Console(file=StringIO(), record=True, force_terminal=True, width=100)``; tests patch the
-importing module's binding via ``monkeypatch.setattr("daydream.phases.console", rec)``.
-``MockBackend`` mirrors tests/test_agent_recorder_integration.py:61-96 and
-accounts for ``run_agent``'s keyword-only ``phase`` argument (passed by the
-phases themselves, not the backend).
+These tests drive the real phase entrypoints with a ``ScriptedBackend`` whose
+``ResultEvent.structured_output`` matches each phase's schema and assert the
+restored summaries render observable content (counts, a table) without dumping
+raw JSON.
 """
 from __future__ import annotations
 
@@ -33,7 +24,6 @@ from daydream.phases import (
 )
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.stub_backend import MockBackend
 
 
 def _rec(monkeypatch: Any) -> Console:
@@ -62,7 +52,10 @@ async def test_merge_prints_item_count(
         }
         for i in range(1, 4)
     ]
-    backend = MockBackend([ResultEvent(structured_output={"items": items}, continuation=None)])
+    backend = ScriptedBackend(
+        events=[ResultEvent(structured_output={"items": items}, continuation=None)],
+        model="mock-model",
+    )
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True, exist_ok=True)
@@ -110,7 +103,10 @@ async def test_arbiter_prints_kept_dropped(
         {"arb_id": 2, "keep": True, "severity": "high", "confidence": "HIGH", "description": "d2", "rationale": "r"},
         {"arb_id": 3, "keep": False, "severity": "low", "confidence": "LOW", "description": "d3", "rationale": "r"},
     ]
-    backend = MockBackend([ResultEvent(structured_output={"findings": findings}, continuation=None)])
+    backend = ScriptedBackend(
+        events=[ResultEvent(structured_output={"findings": findings}, continuation=None)],
+        model="mock-model",
+    )
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True, exist_ok=True)

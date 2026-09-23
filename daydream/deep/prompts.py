@@ -51,16 +51,11 @@ DOC_REVIEW_NOTICE = (
     "generic-fallback agent (D-20)."
 )
 
-# Repo-wide cross-file symbol existence check (issue #310). Embedded inline as
-# instruction text for the same reason as ``ANTI_SLOP_RUBRIC_INSTRUCTION``: the
-# structural reviewer runs with cwd set to the reviewed repo, so a bare
-# skill-file read resolves against that repo and silently drops the gate.
-# Demands Gate-2 evidence (``rg`` the definition) before flagging any symbol
-# referenced outside the diff, so cross-file bug classes -- a subcommand invoked
-# by a CLI wrapper that does not exist, a trait method implemented by generated
-# code whose contract differs from its call site, a config field read by a
-# different module than the one that writes it -- are verified against the repo
-# rather than asserted from the call site alone.
+# Repo-wide cross-file symbol existence check (issue #310). All rubric
+# constants below are embedded inline as instruction text because reviewers run
+# with cwd set to the reviewed repo, so a bare skill-file read resolves against
+# that repo and silently drops the gate. Demands Gate-2 evidence (``rg`` the
+# definition) before flagging any symbol referenced outside the diff.
 CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "Cross-file symbol existence check (apply before flagging anything about a "
     "symbol defined OUTSIDE the diff):\n"
@@ -76,32 +71,26 @@ CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "the missing definition is real, never when you simply failed to locate it."
 )
 
-# Per-stack config-flow trace (issue #310). Embedded inline as instruction text
-# for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``: per-stack
-# reviewers run with cwd set to the reviewed repo, so a bare skill-file read
-# resolves against that repo and silently drops the gate. Targets the
-# plumbed-config bug class: a field parsed in a config struct but silently
-# dropped before it reaches the request, or the same value read twice at
+# Per-stack config-flow trace (issue #310). Targets the plumbed-config bug
+# class: a field parsed but silently dropped, or the same value read twice at
 # different points with the source able to change between reads (TOCTOU).
 CONFIG_FLOW_TRACE_INSTRUCTION = (
     "Config/env flow trace (apply to every config field or env var plumbed "
     "through layers):\n"
     "  1. Trace the full path of each plumbed field: config struct -> driver "
     "config -> request construction.\n"
-    "  2. Emit a one-line trace statement per field naming where it is parsed, "
-    "where it is forwarded, and where (if anywhere) it reaches the request.\n"
+    "  2. During investigation, identify where each field is parsed, forwarded, "
+    "and reaches the request. This is an investigation method, not extra output: "
+    "report only substantiated findings inside the required schema.\n"
     "  3. Flag silent drops -- a field parsed but never forwarded to the next "
     "layer.\n"
     "  4. Flag double-resolves -- the same value read twice at different points "
     "with the source able to change between reads (TOCTOU)."
 )
 
-# Trust-model check (issue #310). Embedded inline as instruction text for the
-# same reason as the other rubrics: reviewers run with cwd set to the reviewed
-# repo, so a bare skill-file read resolves against that repo and drops the
-# gate. Targets security-relevant markers -- cache-control injection across a
-# trust boundary, escaping, credential forwarding -- by demanding an explicit
-# trust-model sentence before a finding is reported.
+# Trust-model check (issue #310). Targets security-relevant markers by demanding
+# an explicit trust-model sentence before a finding is reported: cache-control
+# injection across a trust boundary, escaping, credential forwarding.
 TRUST_MODEL_INSTRUCTION = (
     "Trust-model check (apply to every security-relevant marker: cache-control "
     "injection, trust boundaries, escaping, credential forwarding):\n"
@@ -113,25 +102,22 @@ TRUST_MODEL_INSTRUCTION = (
 )
 
 # Shared verification-protocol instruction for structural and generic-fallback
-# builders (issue #229). The gates are embedded inline as instruction text and
-# no skill-file read is required: these two reviewers run with cwd set to the
-# reviewed repo, so a bare ``read`` of the protocol skill file resolves against
-# that repo and fails ("skill doesn't exist as a file"), silently dropping the
-# gates. Both reviewers are language-agnostic (repo-wide structural / non-stack
-# the protocol's language-specific valid-pattern tables add little here — the
-# gate discipline is what matters, and it is self-contained below. Mirrors the
-# inline gate-0 embedding in ``build_verification_prompt``.
+# builders (issue #229). Both reviewers are language-agnostic, so the protocol's
+# language-specific valid-pattern tables add little; the gate discipline is
+# self-contained below. Mirrors the inline gate-0 embedding in
+# ``build_verification_prompt``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
     "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
-    "you are judging — file:line plus the cited code, read freshly in THIS turn, "
-    "not recalled. The source is the only truth; never infer a finding from the "
-    "branch name, cwd, or memory. A finding without a same-turn echo of its "
-    "target is INVALID.\n"
-    "  A `clean` verdict for a file also requires a same-turn read of that file: "
+    "you are judging — file:line plus the cited code from completed source reads "
+    "in this logical review. The source is the only truth; never infer a finding from the "
+    "branch name, cwd, or memory. A finding without completed source evidence of its "
+    "target is INVALID. Completed source excerpts supplied to finalization satisfy "
+    "this gate; paths and speculative notes do not.\n"
+    "  A `clean` verdict for a file also requires a completed read in this logical review: "
     "absent the read, mark the file `not reviewed`, never `clean`.\n"
-    "  Gate 1 (anchor): read the full enclosing symbol/module, not just the diff "
+    "  Gate 1 (anchor): read the full enclosing symbol or configuration section, not just the diff "
     "hunk; state the file path and line range you are judging.\n"
     "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
     'tool output, a file:line citation, or an explicit "none" / "N matches" '
@@ -174,30 +160,20 @@ TEST_QUALITY_RUBRIC_INSTRUCTION = (
 # instruction text for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``:
 # per-stack and structural reviewers run with cwd set to the reviewed repo, so a
 # bare skill-file read resolves against that repo and silently drops the rubric.
-# Targets the SlopCodeBench degradation patterns -- structural erosion, verbosity,
-# duplication -- in the code hunks, with severity calibrated so it flags
-# maintainability regressions without over-applying to legitimate structure.
+# Require a concrete consequence or an established repository convention;
+# function size alone is not a maintainability defect.
 ANTI_SLOP_RUBRIC_INSTRUCTION = (
-    "Apply the anti-slop rubric to every code hunk in the diff "
-    "(stated inline here -- no skill file read is required). It targets the "
-    "SlopCodeBench degradation patterns -- structural erosion, verbosity, "
-    "duplication:\n"
-    "  1. Flag complexity concentration: when a hunk adds logic to a function "
-    "that is already large/high-complexity (cyclomatic complexity > ~10, or > ~80 "
-    "lines), require extraction into focused callables -- especially when the "
-    "same pattern (flag pair, branch ladder, error guard) is repeated verbatim.\n"
-    "  2. Verbosity: flag redundant code -- identity comprehensions instead of "
-    "filter/map, empty-list guards inside loops, single-use intermediate "
-    "variables, casts to dodge type checking, trivial wrapper functions, "
-    "nested ladders.\n"
-    "  3. Duplication: flag the same hunk structure repeated (e.g. N flags x 2 "
-    "branches) that should be a loop/helper/template.\n"
-    "  4. Severity: maintainability findings are medium/low -- never high -- "
-    "under this rubric, full stop. The structural lens may flag real erosion, "
-    "but anti-slop findings never escalate to high.\n"
-    "  5. Scope: when erosion is pre-existing-and-growing, flag the growth, not "
-    "the whole function -- report only the newly introduced growth, scoped to "
-    "this diff's contribution."
+    "Apply the maintainability rubric to code changed by this diff "
+    "(stated inline here -- no skill file read is required):\n"
+    "  1. Report added complexity or duplication only when it creates a concrete "
+    "maintenance consequence or violates an established repository convention. "
+    "Explain that consequence or cite the convention and its applicable source.\n"
+    "  2. Check existing canonical helpers and surrounding ownership before "
+    "recommending extraction or reuse. Size, single-use variables, and wrappers "
+    "alone do not establish a defect.\n"
+    "  3. Maintainability-only findings are medium/low, never high.\n"
+    "  4. Report only newly introduced or worsened problems, scoped to this "
+    "diff's contribution. Omit subjective refactoring preferences."
 )
 
 
@@ -219,6 +195,21 @@ def _context_pointers(
     nothing else — for callers running concurrently with the wonder pass, whose
     ``alternatives.json`` does not exist yet.
     """
+    from daydream.prompt_budget import inline_context_file
+
+    captured_intent = inline_context_file(intent_path)
+    if captured_intent is not None:
+        head = (
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n"
+            "TTT intent summary (complete captured artifact; do not re-read intent.md):\n"
+            + json.dumps(captured_intent, ensure_ascii=False)
+        )
+        if intent_authoritative:
+            head += ("\nThis records the author's stated intent from the pull-request description.\n"
+                     f"{AUTHORITATIVE_INTENT_BLOCK}")
+        if include_alternatives:
+            head += f"\nTTT alternative-review findings are at {alternatives_path}."
+        return head
     alternatives_paragraph = (
         f"TTT alternative-review findings are at {alternatives_path}. Use them as a "
         f"starting point -- you may deepen, confirm, or dismiss each finding with "
@@ -239,6 +230,44 @@ def _context_pointers(
     return f"{head}\n{alternatives_paragraph}" if include_alternatives else head
 
 
+def _review_context_parts(
+    exploration_dir: Path | None,
+    cwd: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    *,
+    intent_authoritative: bool = False,
+    include_alternatives: bool = True,
+    prior_commits: str | None = None,
+) -> list[str]:
+    """Shared context block for the review/adjudication prompts: exploration
+    pointer, settled-decisions block, CWD grounding, and TTT context pointers."""
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
+    parts.append(_context_pointers(
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        intent_authoritative=intent_authoritative,
+        include_alternatives=include_alternatives,
+    ))
+    return parts
+
+
+def _artifact_footer(output_path: Path) -> str:
+    """The host-managed review-artifact instruction shared by the review builders."""
+    return (
+        f"Host-managed review artifact: {output_path}. "
+        "Return only the JSON object required by the output schema, with issues and verdicts. "
+        "Do not write review files or return a separate markdown report; the host persists the result."
+    )
+
+
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     """Host-owned scope/verdict envelope for a reviewed stack scope.
 
@@ -252,8 +281,11 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
         f"You are reviewing the {stack_name} stack. Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
         f"parallel and will be merged afterwards.\n"
-        f"After the review, output ONE verdict line per assigned file, as: "
-        f"`<path>` | `<lines read>` | `clean | has_findings | not_reviewed`. "
+        "Read another stack's file only to resolve a concrete candidate in your assigned "
+        "changed behavior. End that context trace when the candidate is resolved; do "
+        "not independently audit the other stack's workflow, tests, or configuration.\n"
+        f"Return ONE entry per assigned file in the JSON verdicts array with "
+        f"path, lines_read, verdict (clean | has_findings | not_reviewed), and n_findings. "
         f"A file you did not read in this same review must be marked "
         f"`not_reviewed`, never `clean`."
     )
@@ -611,21 +643,10 @@ def build_per_stack_prompt(
             include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
             the intent phase was grounded by a fresh, head-matched PR description.
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-            include_alternatives=include_alternatives,
-        )
+    parts = _review_context_parts(
+        exploration_dir, cwd, intent_path, alternatives_path,
+        intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
+        prior_commits=prior_commits,
     )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
@@ -642,7 +663,7 @@ def build_per_stack_prompt(
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
-    parts.append(f"Write your full review to {output_path}.")
+    parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
 
 
@@ -710,7 +731,7 @@ def build_structural_prompt(
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
-    parts.append(f"Write your full review to {output_path}.")
+    parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
 
 
@@ -746,17 +767,8 @@ def build_arbiter_prompt(
             include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
             the intent phase was grounded by a fresh, head-matched PR description.
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-        )
+    parts = _review_context_parts(
+        exploration_dir, cwd, intent_path, alternatives_path, intent_authoritative=intent_authoritative
     )
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(arbiter_input_path=arbiter_input_path))
@@ -809,12 +821,7 @@ def build_supervise_prompt(
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts = _review_context_parts(exploration_dir, cwd, intent_path, alternatives_path)
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(supervise_input_path=supervise_input_path))
     parts.append(
@@ -863,12 +870,7 @@ def build_suppression_prompt(
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
     """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts = _review_context_parts(exploration_dir, cwd, intent_path, alternatives_path)
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(suppression_input_path=suppression_input_path))
     parts.append(
@@ -900,10 +902,8 @@ def build_merge_prompt(
     intent_path: Path,
     alternatives_path: Path,
     dedup_candidates_path: Path,
-    output_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
-    structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
     resumed_from_arbiter: bool = False,
 ) -> str:
@@ -936,24 +936,16 @@ def build_merge_prompt(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
-        output_path: Deep-dir report path. Retained for call-site compatibility;
-            the rendered report is written by ``phase_cross_stack_merge``, so the
-            prompt no longer instructs the agent to write a file here.
         exploration_dir: Pre-scan exploration directory (if available).
         failed_stacks: Optional stack_name -> failure reason for stacks whose
             per-stack agent raised. The merge prompt includes an explicit
             "Uncovered stacks" block so missing coverage is surfaced instead of
             silently pretending the run was complete.
-        structural_records_path: Optional path to the parsed structural-stack
-            records JSON. Retained for call-site compatibility; structural
-            findings are appended by ``phase_cross_stack_merge`` in Python (not
-            via this prompt), so the agent is never pointed at this file.
         intent_authoritative: Issue #279. When True, the context lines include
             the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
             the TTT intent summary line, because the intent phase was grounded
             by a fresh, head-matched PR description.
     """
-    del output_path, structural_records_path  # appended/rendered by the host, not the prompt
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -973,8 +965,10 @@ def build_merge_prompt(
             f"  - {name}: {reason}" for name, reason in sorted(failed_stacks.items())
         )
         parts.append(
-            "Uncovered stacks (per-stack agent raised; no records available):\n"
+            "Uncovered stacks (review did not complete):\n"
             f"{failed_block}\n"
+            "Some inputs may contain validated partial records from these stacks. Retain their "
+            "substantiated findings while keeping coverage explicitly incomplete.\n"
             "Note these uncovered stacks in your reasoning. Do NOT silently omit "
             "them -- downstream readers must be able to tell 'no findings' apart "
             "from 'this stack never ran'."
@@ -1285,19 +1279,11 @@ def build_generic_fallback_prompt(
     parts: list[str] = []
     if is_docs_only:
         parts.append(DOC_REVIEW_NOTICE)
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-            include_alternatives=include_alternatives,
+    parts.extend(
+        _review_context_parts(
+            exploration_dir, cwd, intent_path, alternatives_path,
+            intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
+            prior_commits=prior_commits,
         )
     )
     parts.append(_confidence_and_convention_instructions())
@@ -1313,7 +1299,7 @@ def build_generic_fallback_prompt(
     parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
-    parts.append(f"Write your full review to {output_path}.")
+    parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
 
 

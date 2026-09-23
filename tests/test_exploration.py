@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -124,19 +123,6 @@ async def test_safe_explore_returns_empty_on_failure() -> None:
     assert result.raw_notes == ""
 
 
-@patch("daydream.ui.print_warning")
-@patch("daydream.ui.create_console")
-async def test_safe_explore_shows_warning_on_failure(mock_create_console: Any, mock_print_warning: Any) -> None:
-    mock_console = object()
-    mock_create_console.return_value = mock_console
-
-    async def failing_explore() -> ExplorationContext:
-        raise RuntimeError("SDK timeout")
-
-    await safe_explore(failing_explore)
-    mock_print_warning.assert_called_once_with(mock_console, "Exploration failed -- proceeding with review only")
-
-
 def test_merge_pattern_scanner_result() -> None:
     partial = ExplorationContext(
         conventions=[Convention(name="snake_case", description="use snake_case for functions", source="inferred")]
@@ -215,6 +201,7 @@ def test_merge_contexts_dedups_dependencies() -> None:
     b = ExplorationContext(dependencies=[Dependency("a.py", "b.py", "imports")])
     merged = merge_contexts(a, b)
     assert len(merged.dependencies) == 1
+    assert merged.dependencies[0] is dep
 
 
 def test_merge_contexts_dedups_conventions_and_guidelines() -> None:
@@ -228,7 +215,8 @@ def test_merge_contexts_dedups_conventions_and_guidelines() -> None:
     )
     merged = merge_contexts(a, b)
     assert len(merged.conventions) == 1
-    assert len(merged.guidelines) == 2
+    assert merged.conventions[0] is a.conventions[0]
+    assert merged.guidelines == ["use type hints", "no print statements"]
 
 
 def test_merge_contexts_joins_raw_notes() -> None:

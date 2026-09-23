@@ -10,7 +10,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from daydream import git_ops
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.deep.artifacts import deep_dir
+from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
+from daydream.extensions import Registry
+from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.flows.engine import FlowContext
+from daydream.runner import RunConfig
+from daydream.workspace import WorkContext
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
@@ -163,10 +171,9 @@ def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
     The deep pipeline may inject an extra structural finding into a file group, so
     the group size is derived from the batched prompt rather than hard-coded.
     """
-    import re as _re
 
     for c in stub.calls:
-        m = _re.search(r"^Fix these (\d+) issues in (.+):$", c["prompt"], _re.M)
+        m = re.search(r"^Fix these (\d+) issues in (.+):$", c["prompt"], re.M)
         if m is not None and Path(m.group(2)).name == file_basename:
             return int(m.group(1))
     raise AssertionError(f"no batched fix turn found for {file_basename}")
@@ -181,14 +188,13 @@ def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict
     (whose allowed-files clause names api.py). Filtering on the ``File:`` line
     captures only the calls actually fixing *file_basename*.
     """
-    import re as _re
 
     out: list[dict[str, Any]] = []
     for c in stub.calls:
         prompt = c["prompt"]
         if not prompt.lower().startswith("fix this issue"):
             continue
-        m = _re.search(r"^File: (.+)$", prompt, _re.M)
+        m = re.search(r"^File: (.+)$", prompt, re.M)
         if m is not None and Path(m.group(1).strip()).name == file_basename:
             out.append(c)
     return out
@@ -546,7 +552,6 @@ async def _fresh_uid_run(
     mute_side_effects: Mute,
 ) -> Path:
     """Run the standard multi-stack fixture and return its deep artifact directory."""
-    from daydream.deep.artifacts import deep_dir
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -568,11 +573,6 @@ def _direct_fix_context(
     start_at: str = "review",
 ) -> Any:
     """Build the smallest real-Git FlowContext for fix-boundary unit tests."""
-    from daydream import git_ops
-    from daydream.extensions import Registry
-    from daydream.flows.engine import FlowContext
-    from daydream.runner import RunConfig
-    from daydream.workspace import WorkContext
 
     dd = repo / ".daydream" / "deep"
     dd.mkdir(parents=True, exist_ok=True)
@@ -603,9 +603,6 @@ def _direct_fix_context(
 
 
 def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str]) -> Any:
-    from daydream import git_ops
-    from daydream.deep.fix_steps import FixCycleState
-    from daydream.fix_footprint import AuthorizedFixFootprint
 
     footprint = AuthorizedFixFootprint.build(ctx.work.repo, reviewed, items)
     state = FixCycleState(
@@ -622,6 +619,16 @@ def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str])
     return state
 
 
+def _base_repo(tmp_path: Path, name: str) -> Path:
+    """Init ``tmp_path/name`` with a single committed ``a.py`` base file."""
+    repo = tmp_path / name
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    return repo
+
+
 def _remote_identity_context(
     tmp_path: Path,
     fake_gh: Any,
@@ -631,13 +638,8 @@ def _remote_identity_context(
     base_ref: str = "main",
     configured_pr: int = 7,
 ) -> tuple[Any, str]:
-    from daydream import git_ops
 
-    repo = tmp_path / "remote-identity"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "remote-identity")
     _git(repo, "checkout", "-b", "feature")
     (repo / "a.py").write_text("A = 2\n")
     _git(repo, "add", "a.py")
@@ -671,13 +673,8 @@ def _remote_identity_context(
 
 
 def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
-    from daydream.deep.fix_steps import capture_retained_tree
 
-    repo = tmp_path / "finalization"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    _git(repo, "add", "a.py")
-    _commit(repo, "base")
+    repo = _base_repo(tmp_path, "finalization")
     items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": []}]
     ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
     state = _direct_fix_state(ctx, items, {"a.py"})
