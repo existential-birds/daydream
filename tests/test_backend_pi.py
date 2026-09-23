@@ -7,6 +7,7 @@ payloads.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -18,7 +19,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daydream.atif import validate
 from daydream.backends import (
+    BackendExecutionInput,
     ContinuationToken,
     CostEvent,
     GenerationEndEvent,
@@ -27,20 +30,24 @@ from daydream.backends import (
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ThinkingEvent,
     ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    create_backend,
     unix_ms_to_ns,
 )
 from daydream.backends._subprocess import StreamStalledError
+from daydream.backends._transport import CliTransport
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     _PI_DEFAULT_RETRY_BASE_DELAY,
     _PI_DEFAULT_RETRY_MAX_DELAY,
     _PI_STDOUT_LIMIT_BYTES,
+    _PI_SYSTEM_PREAMBLE,
     PiBackend,
     PiError,
     _is_retryable_exit_code,
@@ -52,9 +59,13 @@ from daydream.backends.pi import (
     _render_tool_result,
     _schema_instruction,
 )
+from daydream.config import DEFAULT_PI_MODEL
 from daydream.retry_policy import parse_message_retry_hint
+from daydream.runner import run
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.fake_cli_process import BlockingStdout, ImmediateStdout, LimitAwareStdout, blocking_cli_process
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
+from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.stub_backend import silence as _silence
 
@@ -68,7 +79,6 @@ Mute = Callable[..., None]
 def test_backend_execution_input_is_immutable_parsed_and_returns_fresh_environment(
     tmp_path: Path,
 ) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     source = {
         "HOME": str(tmp_path / "home"),
@@ -103,7 +113,6 @@ def test_backend_execution_input_is_immutable_parsed_and_returns_fresh_environme
 
 
 def test_backend_execution_input_uses_backend_specific_defaults(tmp_path: Path) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     environment = {"HOME": str(tmp_path), "PATH": "/run/bin"}
 
@@ -119,7 +128,6 @@ def test_backend_execution_input_uses_backend_specific_defaults(tmp_path: Path) 
 
 
 def test_backend_execution_input_rejects_explicit_osprey() -> None:
-    from daydream.backends import BackendExecutionInput
 
     with pytest.raises(ValueError, match="osprey"):
         BackendExecutionInput.from_environment({}, backend="osprey")
@@ -129,9 +137,7 @@ def test_backend_execution_input_rejects_explicit_osprey() -> None:
 async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hashlib
 
-    from tests.harness.protocol_cli import install_protocol_cli
 
     target = (tmp_path / "model cwd with spaces").resolve()
     target.mkdir()
@@ -161,7 +167,6 @@ async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd
     assert argv[argv.index("--provider") + 1] == "nous"
     assert argv[argv.index("--model") + 1] == "fixture-model"
     assert "--append-system-prompt" in argv and "--no-skills" in argv
-    from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
     # Neither the prompt nor the preamble is recorded verbatim -- only digests.
     observation_bytes = next(fixture.observations.glob("*.json")).read_bytes()
@@ -214,7 +219,6 @@ async def _collect_events(
 async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.backends import BackendExecutionInput, RetryPolicy
 
     execution = BackendExecutionInput.from_environment(
         {
@@ -536,7 +540,6 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
 @pytest.mark.asyncio
 async def test_cancel_terminates_then_kills() -> None:
     """cancel() sends SIGTERM to all tracked processes, SIGKILL on timeout."""
-    from daydream.backends._transport import CliTransport
 
     backend = PiBackend(model="glm-5.2")
 
@@ -770,8 +773,6 @@ async def test_execute_always_passes_no_skills_never_skill(tmp_path: Path, monke
 
 
 def test_create_backend_pi_returns_pi_backend_with_default_model() -> None:
-    from daydream.backends import create_backend
-    from daydream.config import DEFAULT_PI_MODEL
 
     backend = create_backend("pi")
     assert isinstance(backend, PiBackend)
@@ -783,7 +784,6 @@ def test_create_backend_pi_returns_pi_backend_with_default_model() -> None:
 
 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
-    from daydream.backends import create_backend
 
     with pytest.raises(ValueError, match="pi"):
         create_backend("invalid")
@@ -838,8 +838,6 @@ async def test_live_pi_smoke() -> None:
 async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
     """A Pi-driven run must produce a trajectory.json that passes the ATIF v1.7
     validator (plan §8.3) — the replay/trajectory proof."""
-    from daydream.atif import validate
-    from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
@@ -1116,7 +1114,6 @@ async def test_runner_real_path_pi_provider_axis(
     is isolated to an empty temp dir so no settings.json exists and the
     code-level fallback fires.
     """
-    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -1157,7 +1154,6 @@ async def test_append_system_prompt_preamble_in_args() -> None:
     exhausts its tool-call budget during exploration. The flag must appear in
     every run, not gated on env vars or read_only.
     """
-    from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
     backend = PiBackend(model="glm-5.2")
     flat_args, _ = await _run_and_capture_args(backend)
@@ -1228,7 +1224,6 @@ def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) ->
     category branch (or letting a generic permanent token win) would silently strip
     retry coverage from a real provider-throttle response.
     """
-    from daydream.backends.pi import _pi_retryable_for
 
     category = _pi_error_category(message)
 
@@ -1238,7 +1233,6 @@ def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) ->
 
 def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: Path) -> None:
     """The embedded path materialises the operator's env knob into the RetryPolicy."""
-    from daydream.backends import BackendExecutionInput
 
     source = {"HOME": str(tmp_path), "PATH": "/run/bin"}
 
