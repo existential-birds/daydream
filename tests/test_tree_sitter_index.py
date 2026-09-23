@@ -5,9 +5,11 @@ from typing import Any
 
 import pytest
 
+from daydream import _tree_sitter_safety as safety
 from daydream import git_ops, tree_sitter_index
 from daydream.tree_sitter_index import (
     _MAX_IMPORTERS,
+    _PARSER_CACHE,
     BRANCH_NODE_TYPES,
     PYTHON_DEF_QUERY,
     TERMINAL_CALL_NAMES,
@@ -405,8 +407,6 @@ def test_detect_affected_files_refuses_known_bad_tree_sitter(
 ) -> None:
     """#1087 (M6): the shared guard covers every native-analysis entry point,
     not just the quality analyzer — index consumers refuse bad installs too."""
-    from daydream import _tree_sitter_safety as safety
-
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     with pytest.raises(safety.TreeSitterBadVersionError):
         detect_affected_files(
@@ -424,9 +424,6 @@ def test_get_parser_refuses_known_bad_tree_sitter(
     """#1087 (M6): get_parser is the true Parser construction site, so the
     shared guard must fire there too — otherwise deep-sharding's
     build_import_graph can still construct a native parser on a bad install."""
-    from daydream import _tree_sitter_safety as safety
-    from daydream.tree_sitter_index import _PARSER_CACHE, get_parser
-
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     _PARSER_CACHE.clear()
     try:

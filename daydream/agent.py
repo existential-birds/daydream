@@ -32,8 +32,6 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     DiagnosticEvent,
-    GenerationEndEvent,
-    GenerationStartEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -1167,19 +1165,18 @@ async def _run_agent(
                                 observed.observe(event)
                                 if review_evidence is not None:
                                     review_evidence.observe(event)
+                                # Recorder-only parser/transport evidence and the
+                                # invocation ledger must be forwarded before any
+                                # branch-specific break; _dispatch is UI-free and
+                                # ignores RequestEvent (the one armless member).
+                                if inv is not None:
+                                    inv.observe(event)
                                 if use_callback and not isinstance(
                                     event, (TextEvent, DiagnosticEvent)
                                 ):
                                     await _flush_callback_text()
 
-                                if isinstance(event, DiagnosticEvent):
-                                    # Recorder-only parser/transport evidence. It
-                                    # must not affect UI, callbacks, supervision,
-                                    # tool bookkeeping, or invocation budgets.
-                                    if inv is not None:
-                                        inv.observe(event)
-
-                                elif isinstance(event, TextEvent):
+                                if isinstance(event, TextEvent):
                                     output_parts.append(event.text)
 
                                     if policy.log_mode:
@@ -1191,9 +1188,6 @@ async def _run_agent(
                                         # the returned structured result — don't echo it to the terminal.
                                         agent_renderer.append(event.text)
 
-                                    if inv is not None:
-                                        inv.observe(event)
-
                                 elif isinstance(event, ThinkingEvent):
                                     if policy.log_mode:
                                         _print_log(f"[thinking] {event.text}")
@@ -1201,9 +1195,6 @@ async def _run_agent(
                                         if agent_renderer.has_content:
                                             agent_renderer.finish()
                                         print_thinking(console, event.text)
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, ToolStartEvent):
                                     if policy.log_mode:
@@ -1223,9 +1214,6 @@ async def _run_agent(
                                         if agent_renderer.has_content:
                                             agent_renderer.finish()
                                         tool_registry.create(event.id, event.name, event.input)
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                     if tool_supervisor is not None:
                                         try:
@@ -1279,29 +1267,12 @@ async def _run_agent(
                                                 panel.set_result(event.output, event.is_error)
                                                 tool_registry.remove(event.id)
 
-                                    if inv is not None:
-                                        inv.observe(event)
-
                                 elif isinstance(event, MetricsEvent):
                                     if policy.log_mode:
                                         _print_log(
                                             f"[metrics] prompt={event.prompt_tokens} "
                                             f"completion={event.completion_tokens}",
                                         )
-                                    # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
-                                    # CostEvent branch so isinstance order is correct.
-                                    if inv is not None:
-                                        inv.observe(event)
-
-                                elif isinstance(event, (GenerationStartEvent, GenerationEndEvent)):
-                                    # P18 T1/T2 seam: the pending-generation ledger is
-                                    # recorder-only evidence (no UI, no logging). The
-                                    # telemetry observer already saw the event at the
-                                    # top of the loop; forward it so the invocation
-                                    # ledger seals drafts and resolves the single
-                                    # billing owner before the attempt scope exits.
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, CostEvent):
                                     if policy.log_mode:
@@ -1312,20 +1283,6 @@ async def _run_agent(
                                             agent_renderer.finish()
                                         console.print()
                                         print_cost(console, event.cost_usd)
-
-                                    if inv is not None:
-                                        inv.observe(event)
-
-                                elif isinstance(event, TurnEndEvent):
-                                    # Per-turn close (issue #747): forward the
-                                    # turn boundary so each turn's already-emitted
-                                    # MetricsEvent lands on its own Step instead of
-                                    # collapsing into one. Pure recorder
-                                    # forwarding — no UI, no logging. The recorder's
-                                    # no-open-step no-op guard prevents empty-step
-                                    # invention.
-                                    if inv is not None:
-                                        inv.observe(event)
 
                                 elif isinstance(event, ResultEvent):
                                     # Capture the structured result unconditionally: the log-mode
@@ -1359,9 +1316,6 @@ async def _run_agent(
                                                         formatted.append(f"[{i.get('id', '?')}] {label}")
                                                 agent_renderer.append("\n".join(formatted))
                                     result_continuation = event.continuation
-
-                                    if inv is not None:
-                                        inv.observe(event)
 
                             if use_callback:
                                 await _flush_callback_text()

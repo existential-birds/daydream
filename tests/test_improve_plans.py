@@ -793,6 +793,27 @@ def _authored_new_file_plan() -> dict[str, Any]:
     return plan
 
 
+def _declare_makefile_out_of_scope(plan: dict[str, Any]) -> None:
+    plan["scope"]["out_of_scope_paths"].append(
+        {
+            "path": "Makefile",
+            "reason": "The catalog change adds no new build or test entry point.",
+        }
+    )
+
+
+def _add_readme_change(plan: dict[str, Any]) -> None:
+    plan["steps"][0]["changes"].append(
+        {
+            "path": "README.md",
+            "symbol": "Catalog service",
+            "operation": "modify",
+            "instruction": "Document that catalog item loading is now batched.",
+            "target_state": "README.md states catalog loading issues one query.",
+        }
+    )
+
+
 def _assembled(
     repo: Path,
     plan: dict[str, Any] | None = None,
@@ -3002,21 +3023,8 @@ def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_s
         "def test_placeholder():\n    assert True\n",
         encoding="utf-8",
     )
-    plan["scope"]["out_of_scope_paths"].append(
-        {
-            "path": "Makefile",
-            "reason": "The catalog change adds no new build or test entry point.",
-        }
-    )
-    plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
-    )
+    _declare_makefile_out_of_scope(plan)
+    _add_readme_change(plan)
 
     assembled = _assembled(repo, plan)
 
@@ -3046,21 +3054,8 @@ def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(
     head_sha: str,
 ) -> None:
     plan = _authored_plan()
-    plan["scope"]["out_of_scope_paths"].append(
-        {
-            "path": "Makefile",
-            "reason": "The catalog change adds no new build or test entry point.",
-        }
-    )
-    plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
-    )
+    _declare_makefile_out_of_scope(plan)
+    _add_readme_change(plan)
 
     assembled = _assembled(repo, plan)
 
@@ -3098,15 +3093,7 @@ def test_step_editing_the_sole_out_of_scope_path_still_blocks(repo: Path) -> Non
     already produces for a path declared both in scope and out of scope.
     """
     plan = _authored_plan()
-    plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
-    )
+    _add_readme_change(plan)
 
     issues = _issues(repo, plan)
 

@@ -12,7 +12,9 @@ from typing import Any
 
 import pytest
 
+from daydream.archive import get_archive_dir
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.runner import run
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
@@ -32,8 +34,6 @@ async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
     no_ci_remote: NoCIRemote,
 ) -> None:
     """Remaining findings cannot strand a tested fix; new regressions still block."""
-    from daydream.runner import run
-
     repo = tmp_path / "partial-fixes"
     _init_repo(repo)
     (repo / "api.py").write_text("A = 1\n")
@@ -118,8 +118,6 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     new_file_permissions: int,
 ) -> None:
     """Real host-test/Git path retains A/B/T and restores C + user scratch."""
-    from daydream.runner import run
-
     repo = tmp_path / "footprint-run"
     _init_repo(repo)
     for name, value in (("api.py", "A = 1\n"), ("sibling.py", "B = 1\n"), ("other.py", "C = 1\n")):
@@ -291,8 +289,6 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     assert outcomes["evidence_key"] == capture["evidence_key"] == audit["evidence_key"]
     assert verdict["attempts"][-1]["input_tree_key"] == capture["tree_key"]
     assert verdict["attempts"][-1]["output_tree_key"] == capture["tree_key"]
-    from daydream.archive import get_archive_dir
-
     archived = get_archive_dir() / "runs" / audit["session_id"]
     assert json.loads((archived / "deep/fix-footprint.json").read_text()) == audit
     for artifact in (

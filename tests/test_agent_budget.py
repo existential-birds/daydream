@@ -32,13 +32,10 @@ from daydream.backends import (
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
 from daydream.retry_policy import derive_retry_summary
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.trajectory import (
-    DaydreamPhase,
-    DaydreamRunFlow,
-    TrajectoryRecorder,
-)
+from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+from tests.harness.trajectory import make_recorder
 
 
 def _burst_backend(*, count: int = 200, sleep_s: float = 0.0) -> ScriptedBackend:
@@ -108,16 +105,6 @@ def _retryable_then_succeeding_backend(
     )
 
 
-def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
-    )
-
-
 def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
     agent_steps: list[dict[str, Any]] = [s for s in traj["steps"] if s["source"] == "agent"]
     for step in agent_steps:
@@ -129,7 +116,7 @@ def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
 async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     """A 200-event burst with tool_call_budget=5 returns under budget, marked aborted."""
     backend = _burst_backend(count=200, sleep_s=0.0)
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -252,7 +239,7 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
 
     fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -278,7 +265,7 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
     """A slow stream with wall_budget_s=0.2 returns, step marked wall_budget_exceeded."""
     backend = _burst_backend(count=200, sleep_s=0.05)
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -326,7 +313,7 @@ async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
 
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     backend = _ClockAdvancingBurstBackend(fake.advance, 200.0)
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -592,7 +579,7 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
     # 5000 (+300 attempt 1) -> 5300 -> retry -> 5600 (+300 retry) -> deadline spent.
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -640,7 +627,7 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
     # 1000 (+300 attempt 1) -> 1300 -> 100 s backoff -> 1400 = the deadline.
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=100.0, max_delay_s=100.0))
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -676,7 +663,7 @@ async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
 
     fake = FakeClock(monotonic_value=2_000.0).install(monkeypatch)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=250.0)
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -745,7 +732,7 @@ async def test_every_ladder_ending_records_one_budget_stop(
 ) -> None:
     """Each way a retry ladder ends leaves exactly one budget-stop record."""
     fake, backend, run_context = _ending_backend(monkeypatch, ending)
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -838,7 +825,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
 
     probe_ladder = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
     setattr(probe_ladder, "retry_policy", RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0))
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with recorder:
@@ -864,7 +851,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     # While that probe is outstanding, a second ladder gets no probe of its own.
     sibling = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
     setattr(sibling, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
-    sibling_recorder = _make_recorder(tmp_path)
+    sibling_recorder = make_recorder(tmp_path)
 
     with anyio.fail_after(5):
         async with sibling_recorder:

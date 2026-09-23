@@ -5,14 +5,22 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from daydream import git_ops
 from daydream.backends import AgentEvent
+from daydream.deep.artifacts import diff_key, diff_key_path
 from daydream.eval.analyzer import _records_issues
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.pr_review import PRInfo
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
+from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
+from daydream.runner import RunConfig, run
+from daydream.workspace import _resolve_base
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
@@ -20,9 +28,6 @@ from tests.harness.stub_backend import PARTIAL_FIX_MARKER, StubBackend, force_in
 
 if TYPE_CHECKING:
     from daydream.config_file import DaydreamFileConfig
-    from daydream.pr_review import PRInfo
-    from daydream.review_profile import ResolvedProfile
-    from daydream.runner import RunConfig
 
 _PARTIAL_FIX_MARKER = PARTIAL_FIX_MARKER
 
@@ -99,10 +104,6 @@ def _install_model_capturing_stubs(
 
 def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
     """Build a test ResolvedProfile with the default strategies + pipeline overrides."""
-    from dataclasses import replace
-
-    from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
-
     pipeline = "\n".join(f"{key} = {json.dumps(value)}" for key, value in overrides.items())
     parsed = parse_profile(f"[pipeline]\n{pipeline}")
     return ResolvedProfile(
@@ -119,8 +120,6 @@ async def _run_deep(
     approve_on_clean: bool = False,
     review_profile: "ResolvedProfile | None" = None,
 ) -> int:
-    from daydream.runner import RunConfig, run
-
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
     config = RunConfig(
         target=str(target),
@@ -221,10 +220,6 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
     These primed artifacts stand in for a prior run over the same diff, so the
     key must match what ``run_deep``'s preamble computes.
     """
-    from daydream import git_ops
-    from daydream.deep.artifacts import diff_key, diff_key_path
-    from daydream.workspace import _resolve_base
-
     base = _resolve_base(target, None, None)
     diff = git_ops.diff(target, base)
     diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
@@ -279,8 +274,6 @@ async def _ok(*_a: Any, **kwargs: Any) -> Any:
     Kept for the sibling modules that import it (tests/test_archive_data_capture.py);
     tests in this module use the ``mute_side_effects`` fixture instead.
     """
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
-
     key = kwargs["capture_tree_key"]()
     return TestAndHealResult(
         passed=True,
@@ -307,9 +300,6 @@ async def _noop_commit(*_a: Any, **_k: Any) -> None:
 
 def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
     """Provide the PR metadata required by the findings-out artifact."""
-    from daydream import git_ops
-    from daydream.pr_review import PRInfo
-
     head = git_ops.head_sha(target)
     base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
         ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
@@ -541,8 +531,6 @@ async def _run_quality_gate_fixture(
     The stub merge emits one high-severity api.py item; the fix agent appends
     ``fix_edit_line`` to the tracked file. Returns the run exit code.
     """
-    from daydream.runner import run
-
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
@@ -614,8 +602,6 @@ def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
 def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool) -> None:
     """Assert the precedence rule AND the #579 untrusted framing are present/absent
     in every finding-producing prompt."""
-    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
-
     by_kind = _review_prompts_by_kind(stub)
     missing = [k for k, prompts in by_kind.items() if not prompts]
     assert not missing, f"expected prompts for all five kinds, missing: {missing}"
