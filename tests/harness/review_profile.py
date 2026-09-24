@@ -8,9 +8,16 @@ from daydream.review_profile import ResolvedProfile, build_default_profile
 
 
 def default_strategy(stage: str) -> str:
-    from daydream import review_profile as _rp
+    return build_default_profile().strategies[stage].content
 
-    return _rp.build_default_profile().strategies[stage].content
+
+def exploration_strategies() -> dict[str, str]:
+    """Return the default profile's exploration.* strategy content by key."""
+    return {
+        name: value.content
+        for name, value in build_default_profile().strategies.items()
+        if name.startswith("exploration.")
+    }
 
 
 def independent_alternatives_profile() -> ResolvedProfile:

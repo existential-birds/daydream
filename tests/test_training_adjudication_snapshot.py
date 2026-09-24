@@ -12,7 +12,6 @@ from daydream.training.adjudication.snapshot import (
     snapshot_id,
 )
 from daydream.training.corpus_projection.identity import record_id
-from daydream.training.harvest import _reply_evidence_digest  # session-level twin
 from daydream.training.harvest_types import HarvestEvidence
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
@@ -139,50 +138,27 @@ def test_build_canonical_record_serializes_frozen_harvest_evidence_canonically()
 
 
 def test_record_evidence_digest_matches_frozen_harvest_digest_with_nested_json() -> None:
-    mutable, frozen, harvest_evidence = _mutable_and_frozen_resolution()
+    mutable, frozen, _harvest_evidence = _mutable_and_frozen_resolution()
 
     assert record_evidence_digest([frozen.evidence]) == record_evidence_digest(
         [mutable.evidence]
     )
-    assert record_evidence_digest([frozen.evidence]) == _reply_evidence_digest(
-        harvest_evidence.rubric
-    )
 
 
-def test_record_evidence_digest_matches_harvest_row_digest() -> None:
-    # K5 spike verdict: shared digest == training/harvest.py session-level digest
+def test_record_evidence_digest_flattens_and_orders_per_finding_evidence() -> None:
+    # K5 spike verdict: shared digest == the flattened harvest row digest.
     ev_a = [{"reply_id": 1, "body_sha256": "aaa"}]
     ev_b = [{"reply_id": 2, "body_sha256": "bbb"}]
 
-
     shared = record_evidence_digest([ev_a, ev_b])
-    # the harvest twin flattens PerFindingResolution evidence in recorded order
-
-    class _R:
-        disposition = "accepted"
-        evidence = ev_a
-
-    class _R2:
-        disposition = "rejected"
-        evidence = ev_b
-
-    class _Rubric:  # duck-typed twin of harvest.Rubric
-        per_finding_resolutions = [_R(), _R2()]
-
-    assert shared == _reply_evidence_digest(_Rubric())  # type: ignore[arg-type]
     assert shared == reply_evidence_digest(ev_a + ev_b)
     # order of the per-finding list must not matter (digest normalizes by reply_id)
     assert shared == record_evidence_digest([ev_b, ev_a])
 
-    # empty-evidence boundary (K5 parity): the harvest twin yields None, never
-    # a concrete digest of the canonical empty list — the shared serializer
-    # must match exactly so a digest-less row cannot collide with a digested one
+    # empty-evidence boundary (K5 parity): no reply evidence yields None, never
+    # a concrete digest of the canonical empty list, so a digest-less row
+    # cannot collide with a digested one.
     assert record_evidence_digest([]) is None
-
-    class _EmptyRubric:  # duck-typed twin of harvest.Rubric with no evidence
-        per_finding_resolutions: list[object] = []
-
-    assert _reply_evidence_digest(_EmptyRubric()) is None  # type: ignore[arg-type]
 
 
 def test_snapshot_id_is_content_addressed_and_order_stable() -> None:

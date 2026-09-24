@@ -12,7 +12,6 @@ import anyio
 import pytest
 
 import daydream.exploration_runner as er
-from daydream import review_profile as rp
 from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext, FileInfo
 from daydream.exploration_runner import (
@@ -38,6 +37,7 @@ from daydream.prompts.grounding import (
 from tests.harness.backend import Responder, ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_profile import exploration_strategies
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
 )
@@ -50,6 +50,16 @@ from tests.harness.trajectory import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
+
+# Shelfspace diff paths reused by the mapper-targeting and static-prescan tests.
+SHELFSPACE_PATHS = [
+    ".github/workflows/daydream.yml", "Makefile", "docs/README.md", "docs/daydream-review.md",
+    "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
+    "frontend/app/components/shelf/ShelfNameInput.tsx",
+    "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
+    "quality-workspaces.json", "scripts/daydream-workflow.test.mjs",
+    "scripts/github-actions-workflow-policy.mjs",
+]
 
 
 def _dispatch_steps(trajectory: dict[str, Any], *, phase: str) -> list[dict[str, Any]]:
@@ -200,8 +210,7 @@ def _specialist_backend(
 
 async def specialist_pre_scan(*args: Any, **kwargs: Any) -> ExplorationContext:
     """Exercise opted-in specialist behavior rather than the default static shortcut."""
-    defaults = rp.build_default_profile().strategies
-    strategies = {name: value.content for name, value in defaults.items() if name.startswith("exploration.")}
+    strategies = exploration_strategies()
     strategies["exploration.dependency_trace"] += "\nCustom specialist dispatch requested."
     kwargs.setdefault("strategies", strategies)
     return await pre_scan(*args, **kwargs)
@@ -449,14 +458,7 @@ def test_change_overview_byte_limit_handles_many_long_unicode_paths() -> None:
 
 
 def test_shelfspace_mapper_targets_only_changed_production_sources() -> None:
-    paths = [
-        ".github/workflows/daydream.yml", "Makefile", "docs/README.md", "docs/daydream-review.md",
-        "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
-        "frontend/app/components/shelf/ShelfNameInput.tsx",
-        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
-        "quality-workspaces.json", "scripts/daydream-workflow.test.mjs",
-        "scripts/github-actions-workflow-policy.mjs",
-    ]
+    paths = SHELFSPACE_PATHS
     prompt = build_test_mapper_prompt(
         [FileInfo(path, "modified") for path in paths], "main...HEAD", cwd=Path("/repo"), strategy="mapper",
     )
@@ -491,13 +493,7 @@ def test_pre_scan_skips_mapper_when_no_changed_source_targets(tmp_path: Path) ->
 def test_modest_default_prescan_is_static_and_captures_guidance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths = [
-        ".github/workflows/daydream.yml", "Makefile", "docs/README.md", "docs/daydream-review.md",
-        "frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
-        "frontend/app/components/shelf/ShelfNameInput.tsx",
-        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
-        "quality-workspaces.json", "scripts/daydream-workflow.test.mjs", "scripts/github-actions-workflow-policy.mjs",
-    ]
+    paths = SHELFSPACE_PATHS
     memberships = [FileInfo(path, "modified") for path in paths] + [FileInfo("frontend/constants.ts", "imports")]
     monkeypatch.setattr("daydream.exploration_runner.detect_affected_files", lambda *_: memberships)
     (tmp_path / "AGENTS.md").write_text("Guideline evidence: keep shared helpers canonical.")
@@ -524,8 +520,7 @@ def test_static_prescan_retains_specialists_for_large_changes(tmp_path: Path, la
 
 
 def test_custom_mapper_runs_without_default_source_targets(tmp_path: Path) -> None:
-    defaults = rp.build_default_profile().strategies
-    strategies = {name: value.content for name, value in defaults.items() if name.startswith("exploration.")}
+    strategies = exploration_strategies()
     strategies["exploration.test_mapping"] = "custom mapping of config contract tests"
     backend = _specialist_backend()
     diff = _multifile_diff(["a.json", "b.json", "c.json", "d.json"])
@@ -834,13 +829,7 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pyt
 def test_pre_scan_threads_profile_strategy(tmp_path: Path) -> None:
 
 
-    p = rp.build_default_profile()
-    strategies = {
-        "exploration.repository_survey": p.strategies["exploration.repository_survey"].content,
-        "exploration.pattern_scan": p.strategies["exploration.pattern_scan"].content,
-        "exploration.dependency_trace": p.strategies["exploration.dependency_trace"].content,
-        "exploration.test_mapping": p.strategies["exploration.test_mapping"].content,
-    }
+    strategies = exploration_strategies()
     sig = inspect.signature(er.pre_scan)
     assert "strategies" in sig.parameters
 

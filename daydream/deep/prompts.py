@@ -35,6 +35,7 @@ from daydream.phases import (
 from daydream.prompt_budget import (  # noqa: F401
     INLINE_DIFF_BUDGET_BYTES,
     fits_inline_diff_budget,
+    inline_context_file,
     truncate_utf8_to_budget,
 )
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
@@ -195,8 +196,6 @@ def _context_pointers(
     nothing else — for callers running concurrently with the wonder pass, whose
     ``alternatives.json`` does not exist yet.
     """
-    from daydream.prompt_budget import inline_context_file
-
     captured_intent = inline_context_file(intent_path)
     if captured_intent is not None:
         head = (
