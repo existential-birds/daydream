@@ -81,10 +81,12 @@ reviews therefore keep separate credentials and execution settings.
 
 Harbor removes unrelated provider keys, GitHub tokens, App credentials, and
 `GH_HOST` even for read-only reviews. The GitHub transport also omits the selected
-model provider's credential. Supplied home and configuration paths retain their
-normal filesystem lookup behavior. A profile candidate comes only from the
-explicit control-plane input. These runtime capabilities stay outside
-configuration, artifacts, and trajectories. Ordinary Daydream CLI callers omit
+model provider's credential. `daydream/benchmark/harbor/env_policy.py` is the
+single declaration of which environment names are let through and which are
+scrubbed. Supplied home and configuration paths retain their normal filesystem
+lookup behavior. A profile candidate comes only from the explicit control-plane
+input. These runtime capabilities stay outside configuration, artifacts, and
+trajectories. Ordinary Daydream CLI callers omit
 the runtime input and retain their existing environment inheritance.
 
 ### Privacy rule
