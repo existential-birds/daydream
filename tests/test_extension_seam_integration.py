@@ -48,21 +48,7 @@ _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuat
 
 
 
-async def _no_post(
-    target_dir: Path,
-    merged_items_path: Path,
-    *,
-    console: Any,
-    run_info: str,
-    renderers: pr_review.ReviewRenderers,
-    post: bool = False,
-    approve_on_clean: bool = False,
-    pr_number: int | None = None,
-    diagram_blocks: str | None = None,
-    run_context: RunContext | None = None,
-    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-) -> None:
-    assert run_context is not None
+async def _no_post(*_args: object, **_kwargs: object) -> None:
     return None
 
 
@@ -303,20 +289,7 @@ async def test_report_only_review_mode_never_enters_pr_posting(
     )
     ctx.data["mode"] = "review"
 
-    async def _post_forbidden(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: pr_review.ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    ) -> None:
+    async def _post_forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("report-only review mode must not resolve or post to a PR")
 
     monkeypatch.setattr(
