@@ -1706,7 +1706,7 @@ def test_plan_anchor_git_timeout_blocks_plan(
     diagnostic = result["diagnostics"][0]
     assert diagnostic["stage"] == "semantic"
     assert diagnostic["disposition"] == "blocked"
-    assert diagnostic["validation_errors"] == [
+    assert diagnostic["errors"] == [
         {"code": "PLANNED_AT_CHECK_FAILED", "pointer": "/"}
     ]
     sidecar = json.loads(
@@ -2639,10 +2639,10 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
         "fp-authoring": ("authoring", "blocked"),
         "fp-success": ("success", "success"),
     }
-    assert diagnostics["fp-transport"]["validation_errors"] == [
+    assert diagnostics["fp-transport"]["errors"] == [
         {"code": "NO_STRUCTURED_OBJECT", "pointer": "/"}
     ]
-    assert diagnostics["fp-authoring"]["validation_errors"] == [
+    assert diagnostics["fp-authoring"]["errors"] == [
         {
             "code": "AUTHOR_SCHEMA_INVALID",
             "pointer": "/title",

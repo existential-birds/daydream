@@ -267,7 +267,6 @@ def _attempt_diagnostic(
         "disposition": disposition,
         "stage": stage,
         "errors": [_validation_error(error) for error in errors],
-        "validation_errors": [_validation_error(error) for error in errors],
         "received": _received_metadata(received),
         "artifact": artifact,
     }

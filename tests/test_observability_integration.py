@@ -406,10 +406,8 @@ async def test_workspace_failure_exports_root_before_a_trajectory_exists(
 
 
 def receiver_requests_resource(request: dict[str, Any]) -> dict[str, Any]:
-    from tests.harness.otlp import attributes as decode_attributes
-
     first = request["body"]["resourceSpans"][0]
-    return decode_attributes(first["resource"])
+    return attributes(first["resource"])
 
 
 def resources_on_wire(receiver: TraceCollector) -> list[dict[str, Any]]:
