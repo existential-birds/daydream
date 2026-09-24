@@ -18,6 +18,7 @@ def test_host_channel_declares_the_host_child_env_sets() -> None:
     """The host channel is today's fail-closed allowlist, verbatim."""
     host = env_policy.HOST
     assert env_policy.REVIEW_CHANNEL_PREFIX == "DAYDREAM_REVIEW_"
+    assert host.posture == "allowlist"
     assert host.keep_prefixes == (env_policy.REVIEW_CHANNEL_PREFIX,)
     assert host.required_process_vars == frozenset({"PATH", "HOME", "LANG"})
     assert host.banned_vars == frozenset({
@@ -33,3 +34,24 @@ def test_host_channel_declares_the_host_child_env_sets() -> None:
     })
     assert host.claude_exempt_vars == frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"})
     assert host.claude_exempt_prefix == "ANTHROPIC_"
+
+
+def test_container_channel_declares_the_container_scrub_sets() -> None:
+    """The container channel is today's scrub-list posture, verbatim (spec D3)."""
+    container = env_policy.CONTAINER
+    assert container.posture == "scrub-list"
+    assert container.github_credential_vars == frozenset({
+        "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN",
+        "GH_HOST", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY",
+    })
+    assert container.unselected_pi_credentials == frozenset({"ZAI_API_KEY", "NOUS_API_KEY"})
+    assert container.scrub_prefixes == frozenset({
+        "DAYDREAM_JUDGE_", "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "OPENROUTER_", "PI_",
+        "DAYDREAM_APP_",
+    })
+    assert container.control_plane_aliases == frozenset({
+        "DAYDREAM_REVIEW_API_KEY", "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_SKILLS_DIR",
+    })
+    assert container.github_subprocess_drops == frozenset({
+        "PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    })
