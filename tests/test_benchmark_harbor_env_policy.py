@@ -9,6 +9,27 @@ import pytest
 
 from daydream.benchmark.harbor import env_policy
 from daydream.benchmark.harbor.agent import build_child_env
+from daydream.benchmark.harbor.entrypoint import _sanitize_reviewer_environment
+
+
+def test_container_sanitiser_derives_its_sets_from_the_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing the declaration's container view changes the sanitised map (spec M2)."""
+    extended = replace(
+        env_policy.CONTAINER,
+        scrub_prefixes=env_policy.CONTAINER.scrub_prefixes | {"PROBE_"},
+    )
+    monkeypatch.setattr(env_policy, "CONTAINER", extended)
+    sanitized = _sanitize_reviewer_environment(
+        {
+            "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
+            "DAYDREAM_REVIEW_API_KEY": "k",
+            "PROBE_X": "leak",
+        },
+        backend="pi",
+    )
+    assert "PROBE_X" not in sanitized
 
 
 def test_host_builder_derives_its_sets_from_the_declaration(

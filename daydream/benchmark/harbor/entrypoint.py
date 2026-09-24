@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from daydream.backends import BackendExecutionInput
-from daydream.benchmark.harbor import candidate
+from daydream.benchmark.harbor import candidate, env_policy
 from daydream.config_file import DaydreamFileConfig
 from daydream.git_ops import StaticGitHubAuth
 from daydream.github_app import GitHubExecutionInput
@@ -37,23 +37,19 @@ _DEFAULT_REPO_DIR = "/workspace/repo"
 _DEFAULT_ARTIFACT_PATH = "/logs/artifacts/review.json"
 _DEFAULT_TRAJECTORY_PATH = Path("/logs/agent/trajectory.json")
 
-_CASE_ID_ENV = "DAYDREAM_REVIEW_CASE_ID"
-_BASE_REF_ENV = "DAYDREAM_REVIEW_BASE_REF"
-_HEAD_REF_ENV = "DAYDREAM_REVIEW_HEAD_REF"
-_BACKEND_ENV = "DAYDREAM_REVIEW_BACKEND"
+_CASE_ID_ENV = env_policy.CASE_ID_ENV
+_BASE_REF_ENV = env_policy.BASE_REF_ENV
+_HEAD_REF_ENV = env_policy.HEAD_REF_ENV
+_BACKEND_ENV = env_policy.BACKEND_ENV
 # Shared allowlist backing both the host-side agent gate and the in-container
 # gate; any new reviewer backend must be added here.
 _SUPPORTED_BACKENDS: tuple[str, ...] = ("pi", "claude")
-_API_KEY_ENV = "DAYDREAM_REVIEW_API_KEY"
-_BASE_URL_ENV = "DAYDREAM_REVIEW_BASE_URL"
-_REPO_DIR_ENV = "DAYDREAM_REVIEW_REPO_DIR"
-_ARTIFACT_PATH_ENV = "DAYDREAM_REVIEW_ARTIFACT_PATH"
-_TRAJECTORY_PATH_ENV = "DAYDREAM_REVIEW_TRAJECTORY_PATH"
-# Control-plane candidate channel (R10/R11): a dedicated var, distinct from the
-# normal-run ``DAYDREAM_REVIEW_PROFILE``, so a benchmarked repository can never
-# configure its own evaluator. Carried into the container through the
-# ``DAYDREAM_REVIEW_*`` child-env allowlist (agent.build_child_env).
-_CANDIDATE_ENV = "DAYDREAM_REVIEW_PROFILE_CANDIDATE"
+_API_KEY_ENV = env_policy.API_KEY_ENV
+_BASE_URL_ENV = env_policy.BASE_URL_ENV
+_REPO_DIR_ENV = env_policy.REPO_DIR_ENV
+_ARTIFACT_PATH_ENV = env_policy.ARTIFACT_PATH_ENV
+_TRAJECTORY_PATH_ENV = env_policy.TRAJECTORY_PATH_ENV
+_CANDIDATE_ENV = env_policy.CANDIDATE_ENV
 
 
 class EntrypointError(Exception):
@@ -81,27 +77,6 @@ class ParsedReviewerInput:
     execution: RunnerExecutionInput = field(repr=False, compare=False)
 
 
-_GITHUB_CREDENTIAL_VARS = (
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITHUB_ENTERPRISE_TOKEN",
-    "GH_ENTERPRISE_TOKEN",
-    "GH_HOST",
-    "DAYDREAM_APP_ID",
-    "DAYDREAM_APP_PRIVATE_KEY",
-)
-_UNSELECTED_PI_CREDENTIALS = ("ZAI_API_KEY", "NOUS_API_KEY")
-_SCRUB_PREFIXES = (
-    "DAYDREAM_JUDGE_",
-    "ANTHROPIC_",
-    "CLAUDE_CODE_",
-    "OPENAI_",
-    "OPENROUTER_",
-    "PI_",
-    "DAYDREAM_APP_",
-)
-
-
 def require_supported_backend(environment: Mapping[str, str]) -> str:
     """Validate the selected Harbor reviewer backend from its container map."""
     backend = environment.get(_BACKEND_ENV, "pi").strip().lower()
@@ -125,28 +100,26 @@ def _sanitize_reviewer_environment(
 ) -> dict[str, str]:
     """Return a native backend map with all unrelated credentials removed."""
     source = dict(environment)
+    container = env_policy.CONTAINER
     sanitized = {
         key: value
         for key, value in source.items()
-        if key not in _GITHUB_CREDENTIAL_VARS
-        and key not in _UNSELECTED_PI_CREDENTIALS
-        and not any(key.startswith(prefix) for prefix in _SCRUB_PREFIXES)
+        if key not in container.github_credential_vars
+        and key not in container.unselected_pi_credentials
+        and not any(key.startswith(prefix) for prefix in container.scrub_prefixes)
     }
-    # Credentials are mapped into the backend-native names below. Keeping their
-    # control-plane aliases would let downstream code choose an ambient path.
-    sanitized.pop(_API_KEY_ENV, None)
-    sanitized.pop(_BASE_URL_ENV, None)
-    sanitized.pop("DAYDREAM_SKILLS_DIR", None)
+    for alias in container.control_plane_aliases:
+        sanitized.pop(alias, None)
 
     if backend == "claude":
-        api_key = (source.get("ANTHROPIC_API_KEY") or "").strip()
-        auth_token = (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        api_key = (source.get(env_policy.ANTHROPIC_API_KEY_ENV) or "").strip()
+        auth_token = (source.get(env_policy.ANTHROPIC_AUTH_TOKEN_ENV) or "").strip()
         if not api_key and not auth_token:
             raise EntrypointError(
                 "claude backend requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN "
                 "in the reviewer environment"
             )
-        base_url = (source.get("ANTHROPIC_BASE_URL") or "").strip()
+        base_url = (source.get(env_policy.ANTHROPIC_BASE_URL_ENV) or "").strip()
         if base_url:
             parsed = urllib.parse.urlsplit(base_url)
             if (
@@ -156,11 +129,11 @@ def _sanitize_reviewer_environment(
                 or parsed.password is not None
             ):
                 raise EntrypointError("ANTHROPIC_BASE_URL must be an HTTPS endpoint")
-            sanitized["ANTHROPIC_BASE_URL"] = base_url
+            sanitized[env_policy.ANTHROPIC_BASE_URL_ENV] = base_url
         if api_key:
-            sanitized["ANTHROPIC_API_KEY"] = api_key
+            sanitized[env_policy.ANTHROPIC_API_KEY_ENV] = api_key
         if auth_token:
-            sanitized["ANTHROPIC_AUTH_TOKEN"] = auth_token
+            sanitized[env_policy.ANTHROPIC_AUTH_TOKEN_ENV] = auth_token
         return sanitized
 
     api_key = (source.get(_API_KEY_ENV) or "").strip()
@@ -184,7 +157,7 @@ def _sanitize_reviewer_environment(
             "missing required environment variable 'DAYDREAM_REVIEW_API_KEY'"
         )
     sanitized["PI_PROVIDER"] = "openrouter"
-    sanitized["PI_API_KEY"] = api_key
+    sanitized[env_policy.PI_API_KEY_ENV] = api_key
     sanitized["PI_TELEMETRY"] = "0"
     for control in ("PI_THINKING", "PI_CODING_AGENT_DIR"):
         if control in source:
@@ -199,7 +172,7 @@ def parse_reviewer_environment(environment: Mapping[str, str]) -> ParsedReviewer
     sanitized = _sanitize_reviewer_environment(source, backend=backend)
     backend_execution = BackendExecutionInput.from_environment(sanitized, backend=backend)
     github_environment = dict(sanitized)
-    for credential in ("PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for credential in env_policy.CONTAINER.github_subprocess_drops:
         github_environment.pop(credential, None)
     execution = RunnerExecutionInput(
         backend=backend_execution,
@@ -207,7 +180,7 @@ def parse_reviewer_environment(environment: Mapping[str, str]) -> ParsedReviewer
     )
     return ParsedReviewerInput(
         backend=backend,
-        model=source.get("DAYDREAM_REVIEW_MODEL"),
+        model=source.get(env_policy.MODEL_ENV),
         repo_dir=Path(source.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)),
         artifact_path=Path(source.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)),
         trajectory_path=Path(source.get(_TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))),
