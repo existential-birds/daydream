@@ -527,9 +527,7 @@ class ImproveStubBackend:
             category = next(name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt)
         elif "You are the improve vet." in prompt:
             marker = "vet"
-        elif "You are writing a self-contained implementation plan" in prompt or (
-            isinstance(output_schema, dict) and "false_assumption" in output_schema.get("properties", {})
-        ):
+        elif _is_plan_writer_prompt(prompt, output_schema):
             marker = "plan-writer"
             if self.on_first_plan_write is not None:
                 hook, self.on_first_plan_write = self.on_first_plan_write, None
@@ -792,13 +790,7 @@ class ImproveStubBackend:
             if self.plan_ungate_steps:
                 # The shape a plan takes when recon verified no commands: the
                 # contract tells the writer to use null verification everywhere.
-                for step in plan["steps"]:
-                    step["verification"] = None
-                for case in plan["test_plan"]["cases"]:
-                    case["verification"] = None
-                for criterion in plan["done_criteria"]:
-                    criterion["verification"] = None
-                plan["additional_command_refs"] = []
+                plan = _without_verification_commands(plan)
             if self.plan_sloppy:
                 plan["debug_notes"] = (
                     "Planner scratch notes that must never reach the artifact."

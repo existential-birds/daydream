@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from rich.markup import escape as escape_markup
 
+from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for, artifact_session_active
 from daydream.config import (
@@ -708,7 +709,6 @@ async def _run_review_spine(
     artifact_session = None if run_artifacts is None else run_artifacts.session
     run_context = resolve_run_context(run_context)
     # Late imports to avoid circular dependency with runner.
-    from daydream import git_ops
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.hunk_index import write_hunk_index
     from daydream.phases import _git_branch, _git_log

@@ -3828,18 +3828,7 @@ async def _do_commit(
         except GitError:
             sha_before = None
 
-    message = build_commit_message(
-        items=items or [], run_id=work.run_id, version=daydream.__version__,
-    )
-    # Issue #726 task 12: the commit is its own trajectory phase, so the
-    # manifest can time it and tell it apart from test/hook/push phases.
-    async with host_phase_scope(DaydreamPhase.COMMIT):
-        if strict_commit:
-            git_ops.commit_staged(work.repo, message)
-        else:
-            git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
-
-    if strict_commit:
+    def _verify_strict(checked: str) -> None:
         assert sha_before is not None
         assert retained_paths is not None
         try:
@@ -3854,9 +3843,23 @@ async def _do_commit(
         except GitError as exc:
             local_sha = git_ops.head_sha(work.repo)
             raise GitError(
-                f"Local commit {local_sha} was created, but post-commit validation "
+                f"Local commit {local_sha} was created, but {checked} validation "
                 f"failed; push blocked: {exc}"
             ) from exc
+
+    message = build_commit_message(
+        items=items or [], run_id=work.run_id, version=daydream.__version__,
+    )
+    # Issue #726 task 12: the commit is its own trajectory phase, so the
+    # manifest can time it and tell it apart from test/hook/push phases.
+    async with host_phase_scope(DaydreamPhase.COMMIT):
+        if strict_commit:
+            git_ops.commit_staged(work.repo, message)
+        else:
+            git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
+
+    if strict_commit:
+        _verify_strict("post-commit")
     elif sha_before is not None:
         _verify_commit_scope(work, sha_before, stage)
 
@@ -3889,23 +3892,7 @@ async def _do_commit(
                 )
 
             if strict_commit:
-                assert sha_before is not None
-                assert retained_paths is not None
-                try:
-                    _verify_strict_commit_and_worktree(
-                        work,
-                        sha_before=sha_before,
-                        retained_paths=retained_paths,
-                        staged_states=staged_states,
-                        precommit_paths=precommit_paths,
-                        precommit_states=precommit_states,
-                    )
-                except GitError as exc:
-                    local_sha = git_ops.head_sha(work.repo)
-                    raise GitError(
-                        f"Local commit {local_sha} was created, but post-hook "
-                        f"validation failed; push blocked: {exc}"
-                    ) from exc
+                _verify_strict("post-hook")
 
     push_receipt: PushReceipt | None = None
     if push:

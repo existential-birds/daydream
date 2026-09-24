@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from daydream import git_ops
 from daydream.agent import console
 from daydream.deep.state import DeepState
 from daydream.fix_footprint import AuthorizedFixFootprint
@@ -51,8 +52,6 @@ def enforce_authorized_fix_footprint(
     The index is snapshotted at entry and restored byte-for-byte after the
     worktree-only recovery operation.
     """
-    from daydream import git_ops
-
     repo = work.repo
     index_before = git_ops.snapshot_index(repo)
     tracked_changed = set(git_ops.changed_paths_z(repo, stable_ref, include_untracked=False))
@@ -211,8 +210,6 @@ def _file_scope_issue(
     of landing it in the PR. Filing is best-effort: a failed ``gh issue create``
     (no auth, cross-org, offline) logs a warning and the restore stands.
     """
-    from daydream import git_ops
-
     try:
         url = git_ops.gh_issue_create(repo, title=title, body=body, auth=auth)
         print_warning(console, f"Filed out-of-scope {noun} as issue: {url}")
@@ -232,8 +229,6 @@ def _scope_already_filed(repo: Path, marker: str, *, auth: GitHubAuth) -> bool:
     The marker is computed once by the caller and threaded in, so the edit's
     fingerprint is not recomputed for both the dedup lookup and the issue body.
     """
-    from daydream import git_ops
-
     issues = git_ops.gh_issue_list(repo, search="out-of-scope", auth=auth)
     return any(marker in (issue.get("body") or "") for issue in issues)
 

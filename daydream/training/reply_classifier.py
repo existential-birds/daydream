@@ -19,34 +19,34 @@ _DAYDREAM_AGENT_LOGINS = frozenset({"daydream-agent", "daydream-bot"})
 
 _QUALIFYING_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
-# (pattern, kind) pairs. Matching is per-line, case-insensitive, whole-phrase
-# with word boundaries — never bare substrings.
-_ACCEPT_RULES: tuple[tuple[str, str], ...] = (
-    (r"fixed\s+in\s+\b[0-9a-f]{6,40}\b", "sha"),
-    (r"\bapplied\b", "applied"),
-    (r"\bgood\s+catch\b", "agree"),
-    (r"\bagreed\b,?\s*(the\s+)?fix", "agree"),
+# Whole-phrase patterns. Matching is per-line, case-insensitive, with word
+# boundaries — never bare substrings.
+_ACCEPT_RULES: tuple[str, ...] = (
+    r"fixed\s+in\s+\b[0-9a-f]{6,40}\b",
+    r"\bapplied\b",
+    r"\bgood\s+catch\b",
+    r"\bagreed\b,?\s*(the\s+)?fix",
 )
 
-_REJECT_RULES: tuple[tuple[str, str], ...] = (
-    (r"\bnot\s+applicable\b", "na"),
-    (r"\balready\s+(?:handled|exists)\b", "handled"),
-    (r"\bfalse\s+positive\b", "fp"),
-    (r"\bintentional\b", "intentional"),
+_REJECT_RULES: tuple[str, ...] = (
+    r"\bnot\s+applicable\b",
+    r"\balready\s+(?:handled|exists)\b",
+    r"\bfalse\s+positive\b",
+    r"\bintentional\b",
 )
 
 #: "won't fix" is only a rejection when a dispute phrase co-occurs.
-_DISPUTE_RULES: tuple[tuple[str, str], ...] = (
-    (r"won'?t\s+fix", "wontfix"),
-    (r"\bwrong\b", "wrong"),
-    (r"\bincorrect\b", "incorrect"),
-    (r"\bnot\s+a\s+bug\b", "notabug"),
-    (r"\bthe\s+code\s+already\b", "codealready"),
+_DISPUTE_RULES: tuple[str, ...] = (
+    r"won'?t\s+fix",
+    r"\bwrong\b",
+    r"\bincorrect\b",
+    r"\bnot\s+a\s+bug\b",
+    r"\bthe\s+code\s+already\b",
 )
 
-_FACTUAL_DISAGREEMENT_RULES: tuple[tuple[str, str], ...] = (
-    (r"\bdisagree\b", "disagree"),
-    (r"\bthe\s+docs\s+say\b", "docs"),
+_FACTUAL_DISAGREEMENT_RULES: tuple[str, ...] = (
+    r"\bdisagree\b",
+    r"\bthe\s+docs\s+say\b",
 )
 
 _NEGATION_TOKENS = re.compile(r"\b(?:not|never)\b|\bn't\b", re.IGNORECASE)
@@ -73,8 +73,8 @@ def _sentence_offset(sentence: str, text: str, start: int) -> int:
     return start - idx if idx >= 0 else start
 
 
-def _match_rules(text: str, rules: tuple[tuple[str, str], ...], *, guard_negation: bool) -> bool:
-    for pattern, _kind in rules:
+def _match_rules(text: str, rules: tuple[str, ...], *, guard_negation: bool) -> bool:
+    for pattern in rules:
         for m in re.finditer(pattern, text, re.IGNORECASE):
             if guard_negation and _is_negated(text, m.start()):
                 continue
@@ -84,7 +84,7 @@ def _match_rules(text: str, rules: tuple[tuple[str, str], ...], *, guard_negatio
 
 def _dispute_present(text: str) -> bool:
     """Any dispute marker, un-negated, co-occurring in the body."""
-    for pattern, _kind in _DISPUTE_RULES[1:]:
+    for pattern in _DISPUTE_RULES[1:]:
         for m in re.finditer(pattern, text, re.IGNORECASE):
             if not _is_negated(text, m.start()):
                 return True
@@ -100,7 +100,7 @@ def _direction(body: str) -> str:
         if not line.strip():
             continue
         has_accept = _match_rules(line, _ACCEPT_RULES, guard_negation=True)
-        has_wontfix = bool(re.search(_DISPUTE_RULES[0][0], line, re.IGNORECASE))
+        has_wontfix = bool(re.search(_DISPUTE_RULES[0], line, re.IGNORECASE))
         has_dispute = _dispute_present(line)
         has_reject = _match_rules(line, _REJECT_RULES, guard_negation=True) or (has_wontfix and has_dispute)
         has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES, guard_negation=True)

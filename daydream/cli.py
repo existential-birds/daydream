@@ -1190,6 +1190,18 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     )
 
 
+def _add_archive_dir_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the shared ``--archive-dir`` option to a corpus subcommand parser."""
+    parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        dest="archive_dir",
+        metavar="PATH",
+        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
+    )
+
+
 def _build_harvest_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream corpus harvest [...]``.
 
@@ -1228,14 +1240,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Directory backing the gh-api backfill cache (default: ~/.daydream/harvest-cache/).",
     )
-    parser.add_argument(
-        "--archive-dir",
-        type=Path,
-        default=None,
-        dest="archive_dir",
-        metavar="PATH",
-        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
-    )
+    _add_archive_dir_argument(parser)
     parser.add_argument(
         "--repo-clone-root",
         type=Path,
@@ -2020,14 +2025,7 @@ def _build_label_parser() -> argparse.ArgumentParser:
         choices=["accepted", "contested", "rejected", "unknown"],
         help="Human outcome label to record.",
     )
-    parser.add_argument(
-        "--archive-dir",
-        type=Path,
-        default=None,
-        dest="archive_dir",
-        metavar="PATH",
-        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
-    )
+    _add_archive_dir_argument(parser)
     return parser
 
 

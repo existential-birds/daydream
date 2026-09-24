@@ -3650,31 +3650,27 @@ class ArtifactSession:
                 return projected
         return None
 
-    def durable_path_for(self, path: Path, *, repo: Path) -> Path:
-        """Project one registered live write path to its durable destination."""
+    def _projected_path(
+        self, path: Path, *, repo: Path, source: str, target: str
+    ) -> Path:
         self._route_repo(repo)
         declared = _projection_path(path)
-        projected = self._project_explicit_route(declared, "write_path", "requested")
+        projected = self._project_explicit_route(declared, source, target)
         if projected is None:
-            projected = self._project_public_subtree(declared, "write_path", "requested")
+            projected = self._project_public_subtree(declared, source, target)
         if projected is None:
             raise ArtifactVisibilityError(
                 "path is not owned by a registered artifact destination"
             )
         return projected
 
+    def durable_path_for(self, path: Path, *, repo: Path) -> Path:
+        """Project one registered live write path to its durable destination."""
+        return self._projected_path(path, repo=repo, source="write_path", target="requested")
+
     def live_path_for(self, path: Path, *, repo: Path) -> Path:
         """Project one registered durable destination to its live write path."""
-        self._route_repo(repo)
-        declared = _projection_path(path)
-        projected = self._project_explicit_route(declared, "requested", "write_path")
-        if projected is None:
-            projected = self._project_public_subtree(declared, "requested", "write_path")
-        if projected is None:
-            raise ArtifactVisibilityError(
-                "path is not owned by a registered artifact destination"
-            )
-        return projected
+        return self._projected_path(path, repo=repo, source="requested", target="write_path")
 
     def _require_active(self) -> None:
         if self._state is not _SessionState.ACTIVE:

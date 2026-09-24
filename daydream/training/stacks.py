@@ -42,7 +42,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_C5_EXCLUDED_REPO,
     REASON_CODE_C8_COPYLEFT_UNOPTED,
 )
-from daydream.training.corpus_projection.splits import Split, assign_split
+from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.exclusion import (
     is_copyleft,
     load_copyleft_list,
@@ -53,7 +53,6 @@ __all__ = [
     "V2Projection",
     "load_dataset_v2",
     "load_v2_projection",
-    "recompute_split_from_record_id",
 ]
 
 _SPLIT_FILENAMES = {
@@ -82,23 +81,6 @@ class V2Projection:
     by_split: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     lineage: dict[str, object] = field(default_factory=dict)
     digest: str = ""
-
-
-def recompute_split_from_record_id(
-    record_id: str,
-    *,
-    salt: str,
-    holdout_rate: float,
-    val_rate: float,
-) -> Split:
-    """Recompute the frozen content-derived split for one record id.
-
-    Thin named wrapper over :func:`assign_split` so the drift gate and its
-    tests share one call site for the recompute side of the comparison.
-    """
-    return assign_split(
-        record_id, salt=salt, holdout_rate=holdout_rate, val_rate=val_rate
-    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -170,7 +152,7 @@ def _enforce_split_consistency(
         lineage_obj = record.get("lineage")
         if isinstance(lineage_obj, dict):
             recorded = lineage_obj.get("split")
-        expected = recompute_split_from_record_id(
+        expected = assign_split(
             record_id, salt=salt, holdout_rate=holdout_rate, val_rate=val_rate
         )
         if recorded != expected:
