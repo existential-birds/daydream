@@ -111,14 +111,10 @@ def build_queue(
     """
     items: list[dict[str, object]] = []
     for session in sessions:
-        if include_decisive or prior_observations:
-            records, adjudication = project_findings(session, return_adjudication=True)
-            entries = adjudication + [
-                r for r in records if is_decisive(str(r.get("disposition")))
-            ]
-        else:
-            _, adjudication = project_findings(session, return_adjudication=True)
-            entries = adjudication
+        records, adjudication = project_findings(session, return_adjudication=True)
+        entries = adjudication + [
+            r for r in records if is_decisive(str(r.get("disposition")))
+        ]
         for entry in adjudication:
             if entry["disposition"] not in _NON_DECISIVE_DISPOSITIONS:
                 raise ValueError(

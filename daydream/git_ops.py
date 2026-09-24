@@ -30,6 +30,7 @@ from urllib.parse import quote, urlparse
 
 from daydream.backends._subprocess import terminate_process
 from daydream.repository_paths import git_observed_path_is_confined, valid_repository_file_path
+from daydream.trajectory import redact_text
 
 _logger = logging.getLogger(__name__)
 
@@ -2572,8 +2573,6 @@ def _safe_url_desc(url: str) -> str:
     credentials. HTTP(S) URLs are reduced to ``host/path``; anything else
     (local paths, scp-form remotes) passes through :func:`redact_text`.
     """
-    from daydream.trajectory import redact_text
-
     try:
         parsed = urlparse(url)
     except ValueError:
@@ -2601,14 +2600,10 @@ def _run_clone(
             env=env,
         )
     except (subprocess.SubprocessError, OSError) as exc:
-        from daydream.trajectory import redact_text
-
         raise GitError(
             f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
         ) from exc
     if proc.returncode != 0:
-        from daydream.trajectory import redact_text
-
         raise GitError(
             f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
         )

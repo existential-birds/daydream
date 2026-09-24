@@ -3,14 +3,28 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
+from daydream.benchmark.harbor import build, candidate, entrypoint, env_policy
+from daydream.benchmark.harbor import package as pkg
+from daydream.benchmark.harbor import verifier_core as vc
+from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent, build_child_env
+from daydream.benchmark.harbor.package import render_job_config
+from daydream.config_file import DaydreamFileConfig
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.stub_backend import install_stub_backend
+from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
 
 def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -18,9 +32,6 @@ def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -
     opaque case key through a real compile, stays byte-deterministic, and is
     accepted by Harbor's Task model (skip-guarded: Harbor is an optional extra)."""
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor import build
-    from daydream.benchmark.harbor import package as pkg
-    from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     ver = importlib.metadata.version("daydream")
@@ -50,8 +61,6 @@ def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -
 
 
 def test_build_candidate_findings_maps_and_skips() -> None:
-    from daydream.benchmark.harbor import candidate
-    from daydream.benchmark.harbor import verifier_core as vc
 
     items = [
         {"file": "src/cache.py", "line": 42,
@@ -84,7 +93,6 @@ def test_build_candidate_findings_maps_and_skips() -> None:
 
 
 def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None:
-    from daydream.benchmark.harbor import candidate
 
     case_id = "case-abc123def456"
     # A verbose canonical description is preserved in the body while the
@@ -114,8 +122,6 @@ def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None
 
 
 def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor import candidate
-    from daydream.benchmark.harbor import verifier_core as vc
 
     case_id = "case-abc123def456"
     over = [{"title": f"t{i}", "body": "b", "severity": "low",
@@ -145,8 +151,6 @@ def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
 def test_assembled_candidate_finding_rejects_verifier_invalid_content(
     field: str, value: object
 ) -> None:
-    from daydream.benchmark.harbor import candidate
-    from daydream.benchmark.harbor import verifier_core as vc
 
     finding: dict[str, object] = {
         "candidate_id": "", "title": "Title", "body": "Body", "severity": "low",
@@ -166,7 +170,6 @@ def test_assembled_candidate_finding_rejects_verifier_invalid_content(
 
 
 def test_artifact_write_failure_raises(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor import candidate
 
     dest = tmp_path / "adir"                                # a directory -> replace fails
     dest.mkdir()
@@ -181,9 +184,7 @@ def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh)
     """The rendered job config passes DAYDREAM_REVIEW_BACKEND
     through with a pi default; the value is a pi|claude selection validated
     downstream by the agent/entrypoint allowlist, not pi-locked here."""
-    import yaml
 
-    from daydream.benchmark.harbor.package import render_job_config
 
     data = yaml.safe_load(render_job_config(oracle=False).decode())
     env = data["agents"][0]["env"]
@@ -197,7 +198,6 @@ def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh)
 
 
 def test_render_task_toml_host_policy_and_case_env() -> None:
-    from daydream.benchmark.harbor import package as pkg
 
     toml = pkg.render_task_toml(
         "case-abc123def456",
@@ -224,7 +224,6 @@ def test_render_task_toml_host_policy_and_case_env() -> None:
 
 
 def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
-    from daydream.benchmark.harbor import package as pkg
 
     toml = pkg.render_task_toml(
         "case-abc123def456",
@@ -242,8 +241,6 @@ def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
 
 
 def test_entrypoint_build_run_config_is_controlled() -> None:
-    from daydream.benchmark.harbor import entrypoint
-    from daydream.config_file import DaydreamFileConfig
 
     cfg = entrypoint.build_run_config(
         repo_dir="/workspace/repo",
@@ -265,7 +262,6 @@ def test_entrypoint_build_run_config_is_controlled() -> None:
 
 
 def test_entrypoint_backend_fail_closed() -> None:
-    from daydream.benchmark.harbor import entrypoint
 
     with pytest.raises(entrypoint.EntrypointError) as exc:
         entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": "codex"})
@@ -273,14 +269,12 @@ def test_entrypoint_backend_fail_closed() -> None:
 
 
 def test_entrypoint_backend_allowlist_pi_and_claude_pass() -> None:
-    from daydream.benchmark.harbor import entrypoint
 
     for value in ("pi", "claude", "CLAUDE", " claude "):
         assert entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value}) == value.strip().lower()
 
 
 def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
-    from daydream.benchmark.harbor import entrypoint
 
     for value in ("codex", "opencode"):
         with pytest.raises(entrypoint.EntrypointError) as exc:
@@ -292,7 +286,6 @@ def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
 
 
 def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
-    from daydream.benchmark.harbor import candidate, entrypoint
 
     # missing merged output -> fail-closed, never a silent clean review
     with pytest.raises(candidate.CandidateError) as missing:
@@ -343,9 +336,6 @@ def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
 
 
 
-import subprocess  # noqa: E402
-
-
 def test_agent_package_import_does_not_pull_harbor() -> None:
     """Importing the daydream.benchmark package must not import Harbor (a lazy,
     optional extra); ``daydream/benchmark/__init__.py`` keeps exporting only stable
@@ -360,7 +350,6 @@ def test_agent_package_import_does_not_pull_harbor() -> None:
 
 
 def test_agent_lifecycle_and_lazy_harbor() -> None:
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     assert DaydreamReviewAgent.SUPPORTS_ATIF is True
     assert callable(DaydreamReviewAgent.name) and callable(DaydreamReviewAgent.version)
@@ -373,7 +362,6 @@ def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
 
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     class Env:
         def __init__(self) -> None:
@@ -407,7 +395,6 @@ def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
 
-    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path)
 
@@ -440,7 +427,6 @@ _BANNED = [
 
 
 def test_build_child_env_is_exact_allowlist() -> None:
-    from daydream.benchmark.harbor.agent import build_child_env
 
     parent = {
         **{k: "secret" for k in _BANNED},
@@ -471,7 +457,6 @@ def test_build_child_env_is_exact_allowlist() -> None:
 
 
 def test_build_child_env_keeps_anthropic_for_claude_scrubs_for_pi() -> None:
-    from daydream.benchmark.harbor.agent import build_child_env
 
     parent = {
         "ANTHROPIC_API_KEY": "sk-ant",
@@ -500,7 +485,6 @@ def test_build_child_env_keeps_anthropic_for_claude_scrubs_for_pi() -> None:
 
 
 def test_build_child_env_bans_claude_code_prefix() -> None:
-    from daydream.benchmark.harbor.agent import build_child_env
 
     parent = {
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth-tok",
@@ -521,7 +505,6 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
     from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(
         logs_dir=tmp_path,
@@ -563,7 +546,6 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     traj_dir = tmp_path / "agent"
     traj_dir.mkdir(parents=True)
@@ -594,7 +576,6 @@ def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path: Path)
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path)  # no agent/trajectory.json
     ctx = AgentContext()
@@ -607,7 +588,6 @@ def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Pa
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     traj_dir = tmp_path / "agent"
     traj_dir.mkdir(parents=True)
@@ -628,8 +608,6 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
 
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor import package as pkg
-    from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     ver = importlib.metadata.version("daydream")
@@ -671,9 +649,6 @@ def _seed_defect_repo(tmp_path: Path) -> Path:
     named ``base`` (what the entrypoint's ``RunConfig.base="base"`` resolves
     against).
     """
-    from tests.harness.git_helpers import commit as _commit
-    from tests.harness.git_helpers import git as _git
-    from tests.harness.git_helpers import init_repo as _init_repo
 
     project = tmp_path / "fixture"
     project.mkdir()
@@ -705,9 +680,6 @@ def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytes
     """A real temp git repo/task plus a fake backend drives the production entrypoint
     through the in-process runner and publishes the exact findings and an explicit
     empty review (AC 3 / AC 5 gate)."""
-    from daydream.benchmark.harbor import entrypoint
-    from daydream.benchmark.harbor import verifier_core as vc
-    from tests.harness.stub_backend import install_stub_backend
 
     repo = _seed_defect_repo(tmp_path)
     install_stub_backend(monkeypatch, repo)
@@ -791,18 +763,11 @@ def test_local_harbor_task_with_fake_backend(
     executed, not skipped. Only the in-docker nftables sandbox itself needs a
     Harbor-capable runtime this host does not provide; that half is
     documented, but the runnable gate is a genuine executed pass."""
-    import importlib.util
 
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor import build, entrypoint, env_policy
-    from daydream.benchmark.harbor import package as pkg
-    from daydream.benchmark.harbor import verifier_core as vc
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
-    from tests.harness.stub_backend import install_stub_backend
-    from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     # Compile the wheel + validate the compiled tree, including the custom-agent
     # same-interpreter preflight.
@@ -926,10 +891,6 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor import entrypoint, env_policy
-    from daydream.benchmark.harbor import verifier_core as vc
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
-    from tests.harness.stub_backend import install_stub_backend
 
     repo = _seed_defect_repo(tmp_path)
     install_stub_backend(monkeypatch, repo)
@@ -1015,7 +976,6 @@ def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) ->
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
 
-    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(
         logs_dir=tmp_path,
