@@ -227,6 +227,27 @@ def _parse_envelope(envelope: dict[str, Any]) -> ExplorationContext:
     )
 
 
+def _finish_exploration_dispatch(
+    dispatch: DispatchHandle | None,
+    timeout_scope: Any,
+    specialist_failed: bool,
+    results: object,
+) -> None:
+    """Close a specialist dispatch with the shared timeout/failure policy.
+
+    A cancelled scope is TIMED_OUT; otherwise a failed specialist closes the
+    dispatch PARTIAL when ``results`` holds a success, else ALL_CHILDREN_FAILED.
+    """
+    if dispatch is None:
+        return
+    if timeout_scope.cancel_called:
+        dispatch.finish(
+            LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
+        )
+    elif specialist_failed:
+        finish_partial_or_failed(dispatch, results)
+
+
 @bind_resolved_run_context
 async def pre_scan(
     backend: Backend,
@@ -435,13 +456,7 @@ async def pre_scan(
                                 ].content,
                             ), TEST_MAPPER_SCHEMA, dispatch,
                         )
-        if dispatch is not None:
-            if timeout_scope.cancel_called:
-                dispatch.finish(
-                    LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
-                )
-            elif specialist_failed:
-                finish_partial_or_failed(dispatch, results)
+        _finish_exploration_dispatch(dispatch, timeout_scope, specialist_failed, results)
 
     if not results:
         static_context.completed = not (specialist_failed or timeout_scope.cancel_called)
@@ -548,16 +563,7 @@ async def repo_scan(
     ) as dispatch:
         with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
             await _run_specialist(dispatch)
-        if dispatch is not None:
-            if timeout_scope.cancel_called:
-                dispatch.finish(
-                    LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
-                )
-            elif specialist_failed:
-                dispatch.finish(
-                    LifecycleStatus.FAILED,
-                    LifecycleReasonCode.ALL_CHILDREN_FAILED,
-                )
+        _finish_exploration_dispatch(dispatch, timeout_scope, specialist_failed, survey)
 
     return ExplorationContext(
         conventions=_coerce_conventions(survey.get("conventions")),

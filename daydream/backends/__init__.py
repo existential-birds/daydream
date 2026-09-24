@@ -41,7 +41,7 @@ from daydream.retry_policy import (
     decode_retry_recovery_allowance,
     undeclared_retry_allowance_message,
 )
-from daydream.trajectory import now_iso
+from daydream.trajectory import now_iso, redact_structured_text
 
 logger = logging.getLogger(__name__)
 
@@ -364,8 +364,6 @@ def _changed_by_redaction(value: str) -> bool:
     like a credential must never be emitted verbatim into telemetry; the
     admission boundary drops it with a fixed diagnostic instead.
     """
-    from daydream.trajectory import redact_structured_text
-
     return redact_structured_text(value) != value
 
 

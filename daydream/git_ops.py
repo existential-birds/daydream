@@ -29,7 +29,7 @@ from typing import Any, Literal, Protocol, overload
 from urllib.parse import quote, urlparse
 
 from daydream.backends._subprocess import terminate_process
-from daydream.repository_paths import valid_repository_file_path
+from daydream.repository_paths import git_observed_path_is_confined, valid_repository_file_path
 
 _logger = logging.getLogger(__name__)
 
@@ -1539,39 +1539,8 @@ def _literal_pathspec(path: str) -> str:
     return f":(literal){path}"
 
 
-def _git_path_parent_is_confined(repo: Path, value: str) -> bool:
-    """Confinement check that may inspect, but never follows, the leaf."""
-    if not value or "\0" in value or value.startswith("/"):
-        return False
-    parts = value.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        return False
-    root = repo.resolve()
-    candidate = repo
-    for part in parts[:-1]:
-        candidate /= part
-        try:
-            if candidate.is_symlink():
-                return False
-            if not candidate.exists():
-                break
-        except OSError:
-            return False
-    try:
-        return candidate.resolve(strict=False).is_relative_to(root)
-    except OSError:
-        return False
-
-
 def _require_git_path_confined(repo: Path, path: str, *, allow_leaf_symlink: bool = False) -> None:
-    from daydream.repository_paths import git_observed_path_is_confined
-
-    confined = (
-        _git_path_parent_is_confined(repo, path)
-        if allow_leaf_symlink
-        else git_observed_path_is_confined(repo, path)
-    )
-    if not confined:
+    if not git_observed_path_is_confined(repo, path, allow_leaf_symlink=allow_leaf_symlink):
         raise GitError("Git-observed path is not confined to the repository")
 
 

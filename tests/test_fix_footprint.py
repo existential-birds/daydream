@@ -193,6 +193,21 @@ def test_git_observed_confinement_accepts_non_model_names_but_rejects_escapes(tm
     assert not git_observed_path_is_confined(repo, "/outside")
 
 
+def test_git_observed_confinement_leaf_symlink_only_with_flag(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    (repo / "leaf").symlink_to(outside / "target.txt")
+    (repo / "dirlink").symlink_to(outside, target_is_directory=True)
+
+    # A symlink leaf is an escape by default; inspecting the leaf itself is
+    # allowed only when the caller opts in, and a symlinked parent is never.
+    assert not git_observed_path_is_confined(repo, "leaf")
+    assert git_observed_path_is_confined(repo, "leaf", allow_leaf_symlink=True)
+    assert not git_observed_path_is_confined(repo, "dirlink/target.txt", allow_leaf_symlink=True)
+
+
 def test_footprint_uses_item_uids_and_exact_item_group_and_run_unions(tmp_path: Path) -> None:
     footprint = AuthorizedFixFootprint.build(tmp_path, {"README.md", "./src/a.py"}, _items())
 

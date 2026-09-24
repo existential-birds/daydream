@@ -159,7 +159,7 @@ def build_queue(
                     f"{session_id!r} is missing required field 'evidence_digest'"
                 )
             item: dict[str, object] = {
-                "record_id": record_id(session_id, trajectory_id, segment_id, fingerprint),
+                "record_id": finding_id,
                 "fingerprint": fingerprint,
                 "disposition": disposition,
                 "evidence": entry["evidence"],

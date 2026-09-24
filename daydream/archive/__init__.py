@@ -29,7 +29,16 @@ from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest_from_snapshot
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.run_snapshot import ArchiveRunSnapshot
-from daydream.trajectory import RUNS_DIRNAME, DaydreamRunFlow
+from daydream.trajectory import (
+    PARTIAL_SUFFIX,
+    RUNS_DIRNAME,
+    DaydreamRunFlow,
+    run_directory,
+    run_document_path,
+    sibling_document_path,
+    siblings_directory,
+    snapshot_trajectories,
+)
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import (
@@ -217,7 +226,6 @@ def finalize_archive_run(
     dump_started = False
     try:
         from daydream.archive.provenance import capture_executable_provenance
-        from daydream.trajectory import run_directory, snapshot_trajectories
 
         archive_dir = get_archive_dir()
         run_dir = run_directory(archive_dir, session_id)
@@ -447,13 +455,6 @@ def _project_documents(
 
     ``session_id`` additionally binds every document to the archived run.
     """
-    from daydream.trajectory import (
-        PARTIAL_SUFFIX,
-        run_document_path,
-        sibling_document_path,
-        siblings_directory,
-    )
-
     root_path = run_document_path(run_dir)
     root_path.unlink(missing_ok=True)
     shutil.rmtree(siblings_directory(run_dir), ignore_errors=True)
