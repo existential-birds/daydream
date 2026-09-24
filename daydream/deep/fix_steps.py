@@ -346,6 +346,42 @@ async def _capture_quality_before(
         return None, f"{type(exc).__name__}: {exc}"
 
 
+@dataclass(frozen=True)
+class QualityGateThresholds:
+    """The four resolved quality-gate thresholds threaded through one fix round."""
+
+    erosion_delta: float
+    verbosity_delta: float
+    erosion_absolute: float
+    verbosity_absolute: float
+
+    @classmethod
+    def from_config(cls, config: RunConfig) -> "QualityGateThresholds":
+        return cls(
+            erosion_delta=_quality_gate_threshold(
+                config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
+            ),
+            verbosity_delta=_quality_gate_threshold(
+                config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
+            ),
+            erosion_absolute=_quality_gate_threshold(
+                config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
+            ),
+            verbosity_absolute=_quality_gate_threshold(
+                config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
+            ),
+        )
+
+    def payload(self) -> dict[str, float]:
+        """The threshold fields exactly as persisted in the gate artifact."""
+        return {
+            "erosion_delta_threshold": self.erosion_delta,
+            "verbosity_delta_threshold": self.verbosity_delta,
+            "erosion_absolute_threshold": self.erosion_absolute,
+            "verbosity_absolute_threshold": self.verbosity_absolute,
+        }
+
+
 def _quality_delta(before: float | None, after: float | None) -> float | None:
     """Rounded per-file metric delta; ``None`` when either side is undefined."""
     if before is None or after is None:
@@ -361,10 +397,7 @@ def _quality_flagged(
     verbosity_before: float | None,
     verbosity_after: float | None,
     verbosity_delta: float | None,
-    erosion_threshold: float,
-    verbosity_threshold: float,
-    erosion_absolute_threshold: float,
-    verbosity_absolute_threshold: float,
+    thresholds: QualityGateThresholds,
 ) -> bool:
     """Whether a fixed file regressed past a threshold (#315).
 
@@ -379,13 +412,13 @@ def _quality_flagged(
     function (erosion ``None`` pre-fix) is still caught. A metric with both
     sides undefined never flags.
     """
-    if erosion_delta is not None and erosion_delta > erosion_threshold:
+    if erosion_delta is not None and erosion_delta > thresholds.erosion_delta:
         return True
-    if verbosity_delta is not None and verbosity_delta > verbosity_threshold:
+    if verbosity_delta is not None and verbosity_delta > thresholds.verbosity_delta:
         return True
-    if erosion_before is None and erosion_after is not None and erosion_after > erosion_absolute_threshold:
+    if erosion_before is None and erosion_after is not None and erosion_after > thresholds.erosion_absolute:
         return True
-    if verbosity_before is None and verbosity_after is not None and verbosity_after > verbosity_absolute_threshold:
+    if verbosity_before is None and verbosity_after is not None and verbosity_after > thresholds.verbosity_absolute:
         return True
     return False
 
@@ -466,10 +499,7 @@ def _persist_quality_gate_unavailable(
     stage: str,
     reason: str,
     session_id: str | None,
-    erosion_delta_threshold: float,
-    verbosity_delta_threshold: float,
-    erosion_absolute_threshold: float,
-    verbosity_absolute_threshold: float,
+    thresholds: QualityGateThresholds,
 ) -> None:
     """Persist an auditable ``unavailable`` round entry for THIS round.
 
@@ -483,10 +513,7 @@ def _persist_quality_gate_unavailable(
         json.dumps(
             {
                 "enabled": True,
-                "erosion_delta_threshold": erosion_delta_threshold,
-                "verbosity_delta_threshold": verbosity_delta_threshold,
-                "erosion_absolute_threshold": erosion_absolute_threshold,
-                "verbosity_absolute_threshold": verbosity_absolute_threshold,
+                **thresholds.payload(),
                 "session_id": session_id,
                 "rounds": rounds,
             },
@@ -502,10 +529,7 @@ def _persist_quality_gate_unavailable(
 async def _evaluate_quality_gate(
     *,
     enabled: bool,
-    erosion_delta_threshold: float,
-    verbosity_delta_threshold: float,
-    erosion_absolute_threshold: float,
-    verbosity_absolute_threshold: float,
+    thresholds: QualityGateThresholds,
     daydream_dir: Path,
     code_workspace: Path,
     dd: Path,
@@ -554,10 +578,7 @@ async def _evaluate_quality_gate(
                 stage="candidates",
                 reason="could not enumerate files changed by the fix pass against the pre-fix snapshot",
                 session_id=session_id,
-                erosion_delta_threshold=erosion_delta_threshold,
-                verbosity_delta_threshold=verbosity_delta_threshold,
-                erosion_absolute_threshold=erosion_absolute_threshold,
-                verbosity_absolute_threshold=verbosity_absolute_threshold,
+                thresholds=thresholds,
             )
             return
         if before is None:
@@ -568,10 +589,7 @@ async def _evaluate_quality_gate(
                 stage="before",
                 reason=before_unavailable_reason or "pre-fix quality snapshot unavailable",
                 session_id=session_id,
-                erosion_delta_threshold=erosion_delta_threshold,
-                verbosity_delta_threshold=verbosity_delta_threshold,
-                erosion_absolute_threshold=erosion_absolute_threshold,
-                verbosity_absolute_threshold=verbosity_absolute_threshold,
+                thresholds=thresholds,
             )
             return
         try:
@@ -592,10 +610,7 @@ async def _evaluate_quality_gate(
                 stage="after",
                 reason=f"{type(exc).__name__}: {exc}",
                 session_id=session_id,
-                erosion_delta_threshold=erosion_delta_threshold,
-                verbosity_delta_threshold=verbosity_delta_threshold,
-                erosion_absolute_threshold=erosion_absolute_threshold,
-                verbosity_absolute_threshold=verbosity_absolute_threshold,
+                thresholds=thresholds,
             )
             return
         before_per_file: dict[str, Any] = before.get("per_file") or {}
@@ -665,20 +680,14 @@ async def _evaluate_quality_gate(
                     verbosity_before=verbosity_before,
                     verbosity_after=verbosity_after,
                     verbosity_delta=verbosity_delta,
-                    erosion_threshold=erosion_delta_threshold,
-                    verbosity_threshold=verbosity_delta_threshold,
-                    erosion_absolute_threshold=erosion_absolute_threshold,
-                    verbosity_absolute_threshold=verbosity_absolute_threshold,
+                    thresholds=thresholds,
                 ),
             }
         rounds = [r for r in rounds if r.get("round") != round_no]
         rounds.append({"round": round_no, "per_file": per_file})
         payload = {
             "enabled": True,
-            "erosion_delta_threshold": erosion_delta_threshold,
-            "verbosity_delta_threshold": verbosity_delta_threshold,
-            "erosion_absolute_threshold": erosion_absolute_threshold,
-            "verbosity_absolute_threshold": verbosity_absolute_threshold,
+            **thresholds.payload(),
             "session_id": session_id,
             "rounds": rounds,
         }
@@ -719,10 +728,7 @@ async def _evaluate_quality_gate(
                 stage="persist",
                 reason=f"{type(exc).__name__}: {exc}",
                 session_id=session_id,
-                erosion_delta_threshold=erosion_delta_threshold,
-                verbosity_delta_threshold=verbosity_delta_threshold,
-                erosion_absolute_threshold=erosion_absolute_threshold,
-                verbosity_absolute_threshold=verbosity_absolute_threshold,
+                thresholds=thresholds,
             )
         except Exception as inner:  # noqa: BLE001 - nothing left to persist; stay fail-open
             print_warning(
@@ -1208,18 +1214,7 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
     try:
         await _evaluate_quality_gate(
             enabled=quality_enabled,
-            erosion_delta_threshold=_quality_gate_threshold(
-                config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
-            ),
-            verbosity_delta_threshold=_quality_gate_threshold(
-                config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
-            ),
-            erosion_absolute_threshold=_quality_gate_threshold(
-                config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
-            ),
-            verbosity_absolute_threshold=_quality_gate_threshold(
-                config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
-            ),
+            thresholds=QualityGateThresholds.from_config(config),
             daydream_dir=artifact_dir_for(
                 ctx.work.repo,
                 session=ctx.artifacts,
