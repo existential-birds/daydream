@@ -68,6 +68,26 @@ def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
     return exporter, registry
 
 
+def _observe_generation(attempt: Any, *, text: bool = False, metrics: bool = False) -> None:
+    """Emit the canonical generation start/end pair shared by the generation tests."""
+    attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
+    attempt.observe(
+        GenerationEndEvent(
+            generation_id="gen-1",
+            native_started_at_unix_ms=1788690314289,
+            ended_at_unix_ns=1788690709621000000,
+            end_source="host_observed_message_end",
+            choice_parts=(TextChoicePart(text="hello"),) if text else (),
+            response_id="resp-1",
+            model_name="pi-model",
+            provider_name="pi",
+            finish_reason="stop",
+        )
+    )
+    if metrics:
+        attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
+
+
 @pytest.mark.anyio
 async def test_owned_span_tree_usage_and_content() -> None:
     exporter, registry = _memory_tracing()
@@ -1057,21 +1077,7 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="requested"):
             async with attempt_scope(1) as attempt:
-                attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-                attempt.observe(
-                    GenerationEndEvent(
-                        generation_id="gen-1",
-                        native_started_at_unix_ms=1788690314289,
-                        ended_at_unix_ns=1788690709621000000,
-                        end_source="host_observed_message_end",
-                        choice_parts=(TextChoicePart(text="hello"),),
-                        response_id="resp-1",
-                        model_name="pi-model",
-                        provider_name="pi",
-                        finish_reason="stop",
-                    )
-                )
-                attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
+                _observe_generation(attempt, text=True, metrics=True)
     spans = exporter.get_finished_spans()
     generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
@@ -1110,19 +1116,7 @@ async def test_generation_span_carries_session_identity_and_aliases() -> None:
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="requested"):
             async with attempt_scope(1) as attempt:
-                attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-                attempt.observe(
-                    GenerationEndEvent(
-                        generation_id="gen-1",
-                        native_started_at_unix_ms=1788690314289,
-                        ended_at_unix_ns=1788690709621000000,
-                        end_source="host_observed_message_end",
-                        response_id="resp-1",
-                        model_name="pi-model",
-                        provider_name="pi",
-                        finish_reason="stop",
-                    )
-                )
+                _observe_generation(attempt)
     spans = exporter.get_finished_spans()
     generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
     root = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "run")
@@ -1204,21 +1198,7 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="requested"):
             async with attempt_scope(1) as attempt:
-                attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-                attempt.observe(
-                    GenerationEndEvent(
-                        generation_id="gen-1",
-                        native_started_at_unix_ms=1788690314289,
-                        ended_at_unix_ns=1788690709621000000,
-                        end_source="host_observed_message_end",
-                        choice_parts=(TextChoicePart(text="hello"),),
-                        response_id="resp-1",
-                        model_name="pi-model",
-                        provider_name="pi",
-                        finish_reason="stop",
-                    )
-                )
-                attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
+                _observe_generation(attempt, text=True, metrics=True)
     spans = exporter.get_finished_spans()
     generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")

@@ -5,7 +5,7 @@ import json
 import json as _json
 import os
 import shlex
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
@@ -3525,15 +3525,10 @@ async def test_summarizer_invoked_read_only_normal_calls_mutating(
     silence_console: Callable[..., None],
 ) -> None:
     """The summarizer runs read_only=True; the preceding test run does not."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-    backend = _HealBackend(script=[_FAIL_TURN, _handoff_turn("# H")])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
-
-    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    backend, _, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("# H"),
+    )
 
     # First call = the failing test run (mutating allowed); second = summarizer (read-only).
     assert backend.read_only_calls == [False, True]
@@ -3570,6 +3565,44 @@ def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_wri
     return fake
 
 
+async def _run_option4_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    turn: Sequence[AgentEvent | BaseException],
+    *,
+    recorder: bool = True,
+    clipboard: bool = False,
+    prompt_fn: Callable[..., Any] | None = None,
+    prepare: Callable[[_HealBackend, Any], None] | None = None,
+) -> tuple[_HealBackend, bool, int]:
+    """Drive ``phase_test_and_heal`` through the interactive "4" handoff path.
+
+    Installs the recorder fixture (or clears it), stubs ``clipboard_available``,
+    scripts ``_FAIL_TURN`` followed by *turn*, and answers the menu with "4".
+    ``prepare`` runs after the recorder and backend exist but before the phase
+    executes, so a caller can wrap ``backend.execute`` or recorder bookkeeping.
+    Returns ``(backend, success, retries)``.
+    """
+    from daydream.phases import phase_test_and_heal
+
+    fake_recorder = _install_recorder(monkeypatch, tmp_path) if recorder else None
+    if not recorder:
+        monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: clipboard)
+    monkeypatch.setattr(
+        "daydream.run_context._prompt_user",
+        prompt_fn if prompt_fn is not None else (lambda *a, **k: "4"),
+    )
+    backend = _HealBackend(script=[_FAIL_TURN, turn])
+    if prepare is not None:
+        prepare(backend, fake_recorder)
+    success, retries, _ = await phase_test_and_heal(
+        backend, make_work(tmp_path), allow_standalone=True,
+    )
+    return backend, success, retries
+
+
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
     tmp_path: Path,
@@ -3578,23 +3611,11 @@ async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
     silence_console: Callable[..., None],
 ) -> None:
     """Option 4 → handoff.md written to <target>/.daydream/runs/<session_id>/."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        _handoff_turn("# Handoff\n\nbody here"),
-    ])
-
-    choices = iter(["4"])
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
+    _, success, retries = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("# Handoff\n\nbody here"),
     )
-
-    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     assert retries == 0
@@ -3611,11 +3632,7 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
     silence_console: Callable[..., None],
 ) -> None:
     """When pbcopy is on PATH → user is offered; 'y' triggers copy_to_clipboard."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: True)
 
     copied: list[str] = []
     def _copy_to_clipboard(text: Any) -> bool:
@@ -3624,15 +3641,12 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
 
     monkeypatch.setattr("daydream.phases.copy_to_clipboard", _copy_to_clipboard)
 
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        _handoff_turn("BODY"),
-    ])
-
     # Abort at the menu, then approve copying the handoff.
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "4" if "Choice" in a[1] else "y")
-
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    _, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("BODY"),
+        clipboard=True,
+        prompt_fn=lambda *a, **kw: "4" if "Choice" in a[1] else "y",
+    )
 
     assert success is False
     assert copied == ["BODY"]
@@ -3646,11 +3660,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     silence_console: Callable[..., None],
 ) -> None:
     """No clipboard tool on PATH → graceful skip line printed, no offer."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     infos: list[str] = []
     monkeypatch.setattr(
@@ -3665,8 +3675,6 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
         user_prompts.append(message)
         return next(answers, "n")
 
-    monkeypatch.setattr("daydream.run_context._prompt_user", fake_prompt)
-
     copy_called = False
 
     def fake_copy(text: str) -> bool:
@@ -3676,12 +3684,9 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
 
     monkeypatch.setattr("daydream.phases.copy_to_clipboard", fake_copy)
 
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        _handoff_turn("BODY"),
-    ])
-
-    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("BODY"), prompt_fn=fake_prompt,
+    )
 
     assert any("clipboard unavailable" in m for m in infos)
     # Only the menu "Choice" prompt fires — no clipboard confirmation prompt.
@@ -3697,23 +3702,11 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
     silence_console: Callable[..., None],
 ) -> None:
     """No active recorder → handoff written under <repo>/.daydream/handoff-*.md, note included."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: None)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        _handoff_turn("AGENT_BODY"),
-    ])
-
-    choices = iter(["4"])
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
+    backend, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("AGENT_BODY"),
+        recorder=False,
     )
-
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert success is False
 
     fallback_dir = tmp_path / ".daydream"
@@ -3735,23 +3728,10 @@ async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
     silence_console: Callable[..., None],
 ) -> None:
     """Summarizer raising → minimal handoff is written anyway."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        (RuntimeError("scripted summarizer failure"),),
-    ])
-
-    choices = iter(["4"])
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
+    _, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, (RuntimeError("scripted summarizer failure"),),
     )
-
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
@@ -3771,23 +3751,10 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
     silence_console: Callable[..., None],
 ) -> None:
     """Summarizer returning a structured_output without 'handoff_prompt' → minimal fallback."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        _structured_turn({"unexpected": "shape"}),
-    ])
-
-    choices = iter(["4"])
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
+    _, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _structured_turn({"unexpected": "shape"}),
     )
-
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
@@ -3804,15 +3771,10 @@ async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
     silence_console: Callable[..., None],
 ) -> None:
     """Real path: option-4 drives the summarizer with the facts/hypotheses contract."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-    backend = _HealBackend(script=[_FAIL_TURN, _handoff_turn("# H\nbody")])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
-
-    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    backend, _, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("# H\nbody"),
+    )
 
     # The code we own is the prompt sent to the summarizer (agent output mocked).
     summarizer_prompt = backend.prompts[-1]
@@ -3836,15 +3798,10 @@ async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
     MUST carry the facts/hypotheses split, quote the failing output, and state
     the cause is unknown — never assert a fabricated cause as fact.
     """
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-    backend = _HealBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **k: "4")
-
-    await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    _, _, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, (RuntimeError("scripted summarizer failure"),),
+    )
 
     body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(
         encoding="utf-8",
@@ -4133,12 +4090,7 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     that never landed on disk and would have to scroll back to find the
     summarizer's output.
     """
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
-    # Force the write to fail.
     monkeypatch.setattr("daydream.phases._write_handoff", lambda *a, **kw: False)
 
     printed: list[str] = []
@@ -4152,17 +4104,10 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
         lambda console_arg, message: warnings.append(message),  # noqa
     )
 
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
+    _, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work,
         _handoff_turn("FULL_BODY_LINE_1\nFULL_BODY_LINE_2"),
-    ])
-
-    choices = iter(["4"])
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
     )
-
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     # A warning explaining the failure was emitted.
@@ -4755,46 +4700,39 @@ async def test_option4_calls_write_partial_before_summarizer(
     silence_console: Callable[..., None],
 ) -> None:
     """Abort flushes the trajectory before invoking the summarizer."""
-    from daydream.phases import phase_test_and_heal
-
     silence_console("daydream.phases")
-    fake = _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
     events: list[str] = []
+    fake_recorder: Any = None
 
-    write_partial = fake.write_partial
+    def _prepare(backend: _HealBackend, recorder: Any) -> None:
+        nonlocal fake_recorder
+        fake_recorder = recorder
+        write_partial = recorder.write_partial
 
-    def record_write_partial() -> None:
-        events.append("write_partial")
-        write_partial()
+        def record_write_partial() -> None:
+            events.append("write_partial")
+            write_partial()
 
-    fake.write_partial = record_write_partial
+        recorder.write_partial = record_write_partial
 
-    backend = _HealBackend(script=[
-        _FAIL_TURN,
-        _handoff_turn("BODY"),
-    ])
-    execute = backend.execute
+        execute = backend.execute
 
-    async def record_execute(*args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
-        events.append("backend_execute")
-        async for event in execute(*args, **kwargs):
-            yield event
+        async def record_execute(*args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+            events.append("backend_execute")
+            async for event in execute(*args, **kwargs):
+                yield event
 
-    monkeypatch.setattr(backend, "execute", record_execute)
+        monkeypatch.setattr(backend, "execute", record_execute)
 
-    choices = iter(["4"])
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "3"),
+    _, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("BODY"), prepare=_prepare,
     )
-
-    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is False
     # The first backend call runs the failing test; write_partial must occur
     # before the second call, which invokes the failure summarizer.
     assert events == ["backend_execute", "write_partial", "backend_execute"]
-    assert fake.partial_writes == 1
+    assert fake_recorder.partial_writes == 1
 
 
 # Task 6: every phase hero is followed by a dim ``Model: <name>`` line.

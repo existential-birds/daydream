@@ -524,6 +524,14 @@ def _owned_source(tmp_path: Path, **kwargs: Any) -> tuple[Path, Path, Any]:
     return public_source, public_source / ".daydream", provenance
 
 
+def _deep_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """Create and return ``(daydream_dir, deep_dir)`` under ``tmp_path``."""
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    return dd, deep
+
+
 def _seed_diff(daydream_dir: Path, *files: str) -> None:
     """Write a ``diff.patch`` naming exactly *files* as the reviewed diff."""
     daydream_dir.mkdir(parents=True, exist_ok=True)
@@ -2059,9 +2067,7 @@ def seed_review_output(deep: Path, *, count: int) -> None:
 
 
 def test_shipped_count_wins_over_per_stack_records(tmp_path: Path) -> None:
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_shipped_items(deep, high=4, med=4)     # merged-items.json: 8 items (4 HIGH, 4 MEDIUM)
     seed_stack_records(deep, "python", n=4)     # stack-python-records.json: 4 HIGH
     out = analyze_findings(dd)
@@ -2073,9 +2079,7 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     # Issue #741: wonder-lens merged items are shipped findings and MUST count
     # toward total_findings (they were dropped by the pre-fix renderer, inflating
     # cost_per_finding ~2x). The analyzer counts every merged-items.json item.
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     # 4 per-stack + 4 wonder = 8 shipped items.
     seed_shipped_items(deep, high=4, med=0)
     shipped = json.loads((deep / "merged-items.json").read_text())["items"]
@@ -2092,9 +2096,7 @@ def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> No
     # ``_shipped_counts`` documents present-but-corrupt merged-items.json as a
     # data-integrity error. A well-formed file with the wrong shape must surface
     # that error too, not silently yield a bogus count behind the fallback.
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
     # ``items`` present but a non-list, and a top-level list, are both wrong
     # shapes, as is a missing ``items`` key -- the writer always emits it.
@@ -2104,9 +2106,7 @@ def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> No
 
 
 def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     (deep / "merged-items.json").write_text(json.dumps({}))
     with pytest.raises(ValueError):
         analyze_findings(dd)
@@ -2116,9 +2116,7 @@ def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(
     tmp_path: Path,
 ) -> None:
     # A *syntax*-invalid merged-items.json surfaces, not the fallback.
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
     (deep / "merged-items.json").write_text("{not json")
     with pytest.raises(json.JSONDecodeError):
@@ -2128,9 +2126,7 @@ def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(
 def test_shipped_count_falls_back_to_regex_when_merged_items_absent(
     tmp_path: Path,
 ) -> None:
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_review_output(deep, count=8)           # review-output.md: 8 numbered [ items
     seed_stack_records(deep, "python", n=4)
     out = analyze_findings(dd)
@@ -2138,9 +2134,7 @@ def test_shipped_count_falls_back_to_regex_when_merged_items_absent(
 
 
 def test_shipped_count_never_zero_without_artifacts(tmp_path: Path) -> None:
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
     out = analyze_findings(dd)
     assert out["total"] == 4                    # pre-merge fallback, never 0
@@ -2149,9 +2143,7 @@ def test_shipped_count_never_zero_without_artifacts(tmp_path: Path) -> None:
 def test_per_lens_attribution_reads_alternatives_and_stack_buckets(
     tmp_path: Path,
 ) -> None:
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     (deep / "alternatives.json").write_text(json.dumps([{"id": 1}, {"id": 2}]))
     seed_stack_records(deep, "python", n=3)
     seed_stack_records(deep, "uncovered", n=1)
@@ -2167,18 +2159,14 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(
 
 def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
     # A malformed optional alternatives file must not take down analysis.
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     (deep / "alternatives.json").write_text("{not json")
     out = analyze_findings(dd)
     assert out["per_lens"]["wonder"] == 0
 
 
 def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None:
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
     out = analyze_findings(dd)
     assert out["per_lens"]["wonder"] == 6
@@ -2417,9 +2405,7 @@ def _item(
 
 def _worked_example_dirs(tmp_path: Path) -> tuple[Path, Path]:
     """``(.daydream, .daydream/deep)`` with the issue's diff already seeded."""
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_diff_patch(dd)  # svc/loader.py, single hunk (85, 92)
     return dd, deep
 
@@ -2622,9 +2608,7 @@ def test_location_hunk_source_falls_back_to_diff_patch(tmp_path: Path) -> None:
 
 def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
     """With neither artifact, "not measured" must be distinguishable from "clean"."""
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_merged_items(deep, [_item(1, line=4)])   # would be beyond_tolerance
 
     location = analyze_location(dd)
@@ -2978,9 +2962,7 @@ def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(
     separate ``shipped_duplication`` axis. The old key is gone (it had no
     readers anywhere in ``daydream/`` or ``rl/``).
     """
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_dedup_candidates(
         deep,
         record_alt_pairs=[{"similarity": 0.75}, {"similarity": 0.55}],
@@ -3166,9 +3148,7 @@ def test_analyze_session_reports_location_and_shipped_duplication(
     tmp_path: Path,
 ) -> None:
     """The two new axes reach ``analyze_session``'s result under their own keys."""
-    dd = tmp_path / ".daydream"
-    deep = dd / "deep"
-    deep.mkdir(parents=True)
+    dd, deep = _deep_dirs(tmp_path)
     seed_diff_patch(dd)
     seed_hunk_index(dd, {"svc/loader.py": [(85, 92)]})
     seed_merged_items(

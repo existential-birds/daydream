@@ -96,7 +96,6 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
         )
-    _raise_on_uncheckpointed_wal(index_root / "index.db")
     rows = _query_runs_readonly(index_root / "index.db")
     if not rows:
         raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
@@ -255,33 +254,14 @@ def _trajectory_resolutions_readonly(
     return resolutions
 
 
-def _raise_on_uncheckpointed_wal(db_path: Path) -> None:
-    """Fail loudly when the hydrated index has an uncheckpointed WAL.
-
-    The archive's writer (``index._get_connection``) runs in persistent WAL
-    mode, so a crashed/interrupted writer between commit and close leaves
-    committed rows in ``index.db-wal``. The read-only adapters below open with
-    ``immutable=1``, which by design skips ``-wal``/``-shm`` entirely — such
-    rows would then be silently dropped and preview/materialize would serve
-    fewer sessions with no error and no sidecar. A surviving ``index.db-wal``
-    is therefore a loud error: the operator must checkpoint/recover the index
-    (or let an active writer finish) before the read-only guarantee holds.
-    """
-    try:
-        readonly_connection(db_path.parent).close()
-    except ValueError as exc:
-        raise HubUnavailableError(str(exc)) from exc
-
-
 def _readonly_query(
     db_path: Path, sql: str, params: tuple[Any, ...] = ()
 ) -> list[dict[str, Any]]:
     """Run one SELECT over a **read-only** ``mode=ro&immutable=1`` URI —
     never ``_get_connection``, which opens read-write and runs WAL pragmas
     against the hydrated staging index; ``immutable=1`` also keeps a WAL-mode
-    db from materializing ``-shm``/``-wal`` sidecars on read. Callers must
-    reject an uncheckpointed ``index.db-wal`` first
-    (``_raise_on_uncheckpointed_wal``): ``immutable=1`` skips it entirely.
+    db from materializing ``-shm``/``-wal`` sidecars on read, while a surviving
+    uncheckpointed ``index.db-wal`` is rejected by ``readonly_connection``.
     """
     try:
         conn = readonly_connection(db_path.parent)

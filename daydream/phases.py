@@ -21,12 +21,15 @@ import daydream
 from daydream import git_ops
 from daydream import review_profile as _rp
 from daydream.agent import (
+    _validates_schema,
     console,
     detect_test_success,
     is_environmental_failure,
     resolve_gate,
     run_agent,
 )
+from daydream.archive import get_archive_dir
+from daydream.archive.git_safe import normalize_remote_url
 from daydream.artifact_visibility import (
     ArtifactSession,
     ArtifactVisibilityError,
@@ -47,8 +50,39 @@ from daydream.config import (
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_WALL_BUDGET_S,
+    STRUCTURE_STACK_NAME,
     TEST_WALL_BUDGET_S,
 )
+from daydream.config_file import DaydreamFileConfig
+from daydream.deep.artifacts import (
+    arbiter_input_path,
+    deep_dir,
+    merged_items_path,
+    merged_report_path,
+    per_stack_records_path,
+    per_stack_review_path,
+    suppression_input_path,
+    verdicts_path,
+)
+from daydream.deep.dedup import (
+    FOLD_SIM_THRESHOLD,
+    bigrams,
+    descriptions_match,
+    jaccard,
+    normalize_title,
+)
+from daydream.deep.detection import GENERIC_STACK
+from daydream.deep.location_validator import validate_records
+from daydream.deep.records import (
+    RECORD_SOURCE_UIDS_KEY,
+    item_source_uids,
+    record_uid,
+    stack_name_from_records_source,
+    stamp_item_uids,
+    stamp_record_uids,
+    union_source_uids,
+)
+from daydream.deep.render import render_report
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -62,6 +96,7 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.hunk_index import load_hunk_index
 from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
@@ -69,6 +104,7 @@ from daydream.prompt_budget import (
     PreparedSanctionedInputs,
     SanctionedInputTransport,
     fits_inline_diff_budget,
+    inline_context_file,
     prepare_sanctioned_inputs,
     select_advisory_inputs,
     truncate_utf8_to_budget,
@@ -672,8 +708,6 @@ def _resolve_handoff_paths(
         # the bundle to <archive_root>/runs/<session_id>/. Write the
         # handoff alongside the archived artifacts so the bundle is
         # self-contained and post-cleanup references stay valid.
-        from daydream.archive import get_archive_dir
-
         artifact_root = run_directory(get_archive_dir(), recorder.session_id)
         diff_path = artifact_root / "diff.patch"
         deep_dir = artifact_root / "deep"
@@ -1202,12 +1236,6 @@ def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     fields, including demotion annotations, are preserved; inputs are never
     mutated. Raises ``ValueError`` if ``raw`` is not a list.
     """
-    # Function-local import: ``daydream.deep.records`` sits under the
-    # ``daydream.deep`` package, whose ``__init__`` imports the orchestrator,
-    # which imports this module. A module-level import would close that cycle.
-    # Same pattern as every other ``daydream.deep`` import in this file.
-    from daydream.deep.records import stamp_item_uids
-
     if not isinstance(raw, list):
         raise ValueError(f"normalize_items expected a list, got {type(raw).__name__}")
     normalized: list[dict[str, Any]] = [
@@ -1286,9 +1314,6 @@ def _evidence_gate_then_validate(
     ``dropped_source_uids``) when any item is dropped, then returns the
     survivors after snap/demote location validation.
     """
-    from daydream.deep.location_validator import validate_records
-    from daydream.deep.records import item_source_uids, record_uid
-    from daydream.hunk_index import load_hunk_index
 
     evidenced: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
@@ -1539,7 +1564,6 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
             f"Pre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
             "for the structural/import file map before fixing."
         )
-    from daydream.prompt_budget import inline_context_file
 
     summary = inline_context_file(exploration_dir / "summary.md")
     affected = inline_context_file(exploration_dir / "affected_files.md")
@@ -1819,11 +1843,6 @@ async def phase_verify_recommendations(
 ) -> tuple[Path, dict[str, Any]]:
     """Verify proposed recommendations against author intent and concrete evidence."""
     run_context = resolve_run_context(run_context)
-    # Late imports avoid circular dependency with daydream.deep (which imports
-    # from daydream.phases). Same pattern used by phase_per_stack_reviews and
-    # phase_cross_stack_merge above.
-    from daydream.deep.artifacts import verdicts_path
-
     output_path = verdicts_path(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
@@ -3073,8 +3092,6 @@ def _canonical_test_cmd(config: Any) -> list[str] | None:
     becomes mandatory. The fallback is deprecated: an agent-reported verdict
     is prose, not an exit status.
     """
-    from daydream.config_file import DaydreamFileConfig
-
     file_config = getattr(config, "file_config", None)
     if not isinstance(file_config, DaydreamFileConfig):
         file_config = DaydreamFileConfig()
@@ -3097,8 +3114,6 @@ def _test_command_wall_budget(config: Any) -> float:
     merged file config, or absent/unset (legacy callers) — the default then
     applies. ``None`` (unset) falls through to the orchestrator default.
     """
-    from daydream.config_file import DaydreamFileConfig
-
     file_config = getattr(config, "file_config", None)
     if isinstance(file_config, DaydreamFileConfig):
         configured = file_config.test_command_wall_s
@@ -3897,8 +3912,6 @@ async def _do_commit(
         # The push + remote verification is its own trajectory phase
         # (issue #726 task 12).
         async with host_phase_scope(DaydreamPhase.PUSH):
-            from daydream.archive.git_safe import normalize_remote_url
-
             remote = "origin"
             branch = git_ops.current_branch(work.repo)
             if branch is None:
@@ -4317,12 +4330,8 @@ async def phase_per_stack_reviews(
     """Run scoped per-stack reviews under the backend fan-out limit and record each result."""
     active_registry = registry if registry is not None else get_registry()
     run_context = resolve_run_context(run_context)
-    # Every ``daydream.deep.*`` import in this module is function-local, and must
-    # stay that way: ``daydream.deep.__init__`` imports ``orchestrator``, which
-    # imports this module, so a module-level import here closes an import cycle.
-    from daydream.config import STRUCTURE_STACK_NAME
-    from daydream.deep.artifacts import deep_dir as _deep_dir
-    from daydream.deep.artifacts import per_stack_records_path, per_stack_review_path
+    # ``daydream.deep.finite_review``/``coverage``/``prompts`` stay function-local:
+    # they import this module at load time, so a module-level import closes a cycle.
     from daydream.deep.finite_review import (
         FiniteReview,
         delegate_structural_review,
@@ -4330,9 +4339,8 @@ async def phase_per_stack_reviews(
         run_finite_review,
     )
     from daydream.deep.prompts import _diff_blocks_for_files
-    from daydream.deep.records import stamp_record_uids
 
-    deep_dir_path = _deep_dir(
+    deep_dir_path = deep_dir(
         work.repo,
         session=artifact_session,
         allow_standalone=allow_standalone,
@@ -4464,8 +4472,6 @@ async def phase_per_stack_reviews(
                 # Issue #172 Fix B: inline the relevant diff hunks for this
                 # stack when diff_text is supplied AND the blocks fit the byte
                 # budget. ``None`` falls back to the diff_path pointer.
-                from daydream.deep.detection import GENERIC_STACK
-
                 if stack.stack_name == GENERIC_STACK:
                     prompt = active_registry.prompt("generic-fallback")(
                         strategy=strategies["discovery.generic_fallback"],
@@ -4567,8 +4573,6 @@ async def phase_per_stack_reviews(
                     failures[stack_name] = (
                         "evidence incomplete: required context unavailable or review unfinished"
                     )
-                from daydream.agent import _validates_schema
-
                 if delegated_owner:
                     if not _validates_schema(structured, record_schema):
                         failures[stack_name] = "invalid delegated structured output"
@@ -4759,8 +4763,6 @@ async def phase_supervise_review(
 ) -> dict[int, dict[str, Any]]:
     """Adjudicate canonical merged findings in one batched LLM call."""
     run_context = resolve_run_context(run_context)
-    from daydream.deep.artifacts import deep_dir
-
     print_phase_hero(console, "SUPERVISE", phase_subtitle("SUPERVISE"))
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Supervising {len(items)} merged finding(s)")
@@ -4841,8 +4843,6 @@ async def phase_supervise_review(
 
 def _index_records(records: list[dict[str, Any]], id_key: str) -> list[dict[str, Any]]:
     """Index records by stable host identity for arbiter and merge use."""
-    from daydream.deep.records import record_uid
-
     return [
         {
             id_key: i,
@@ -4891,8 +4891,6 @@ async def phase_arbiter_review(
 ) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
     """Arbitrate high-severity or contested records before cross-stack merge."""
     run_context = resolve_run_context(run_context)
-    from daydream.deep.artifacts import arbiter_input_path, deep_dir
-
     print_phase_hero(console, "ARBITRATE", phase_subtitle("ARBITRATE"))
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Arbitrating {len(selected_records)} high-severity/contested finding(s)")
@@ -4995,8 +4993,6 @@ async def phase_suppression_review(
 ) -> dict[int, dict[str, Any]]:
     """Suppress unsupported borderline findings after scoped skeptical review."""
     run_context = resolve_run_context(run_context)
-    from daydream.deep.artifacts import deep_dir, suppression_input_path
-
     print_phase_hero(console, "SUPPRESS", phase_subtitle("SUPPRESS"))
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Suppression-reviewing {len(selected_records)} borderline finding(s)")
@@ -5075,20 +5071,6 @@ def _fold_structural_duplicates(
     to the ``folded-structural.json`` sidecar beside ``items_path``. Returns
     the structural items that found no twin, in input order.
     """
-    from daydream.deep.dedup import (
-        FOLD_SIM_THRESHOLD,
-        bigrams,
-        descriptions_match,
-        jaccard,
-        normalize_title,
-    )
-    from daydream.deep.records import (
-        RECORD_SOURCE_UIDS_KEY,
-        item_source_uids,
-        record_uid,
-        union_source_uids,
-    )
-
     surviving: list[dict[str, Any]] = []
     fold_records: list[dict[str, Any]] = []
     for item in structural_items:
@@ -5230,14 +5212,6 @@ def _append_structural_and_write_merged(
     canonical_path: Path,
 ) -> None:
     """Append structural records, evidence-gate and normalize items, then write the merged artifact."""
-    from daydream.deep.records import (
-        RECORD_SOURCE_UIDS_KEY,
-        record_uid,
-        stamp_record_uids,
-        union_source_uids,
-    )
-    from daydream.deep.render import render_report
-
     # Append structural findings in Python, tagged lens="structural". They parse
     # with the severity-bearing PER_STACK_RECORD_SCHEMA (issue #314), so each
     # record carries the structural reviewer's own severity/confidence -- the
@@ -5345,9 +5319,6 @@ def _write_single_stack_merged_items(
     allow_standalone: bool = False,
 ) -> None:
     """Normalize single-stack records and structural findings into the merged artifact."""
-    from daydream.deep.artifacts import merged_items_path, merged_report_path
-    from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
-
     canonical_path = review_output_path_for(
         repo,
         session=artifact_session,
@@ -5432,8 +5403,6 @@ def _validate_agent_source_uids(
     an item left with nothing ships ``[]`` (the honest "no known provenance"
     answer). Every dict item comes out carrying a ``source_uids`` list.
     """
-    from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
-
     # Build the pool schema-free. These files were written by an earlier phase
     # of this same run, but a --start-at merge resume can hand us artifacts from
     # an older run, so every load degrades to "contributes no uids" rather than
@@ -5559,9 +5528,6 @@ async def phase_cross_stack_merge(
             (no silent ``[]`` fallback that would mask a broken merge).
     """
     run_context = resolve_run_context(run_context)
-    from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
-    from daydream.deep.records import stack_name_from_records_source
-
     dd = deep_dir(
         work.repo,
         session=artifact_session,

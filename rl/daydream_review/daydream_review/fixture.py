@@ -98,42 +98,27 @@ if __name__ == "__main__":
     unittest.main()
 '''
 
-_TESTS_V2 = '''import unittest
+_TESTS_V2 = _TESTS_V1.replace(
+    "from calc import add\n",
+    "from calc import add, divide\n",
+).replace(
+    "        self.assertEqual(add(2, 2), 4)\n",
+    "        self.assertEqual(add(2, 2), 4)\n"
+    "\n"
+    "    def test_divide(self) -> None:\n"
+    "        self.assertEqual(divide(6, 3), 2.0)\n",
+)
 
-from calc import add, divide
-
-
-class TestCalc(unittest.TestCase):
-    def test_add(self) -> None:
-        self.assertEqual(add(2, 2), 4)
-
-    def test_divide(self) -> None:
-        self.assertEqual(divide(6, 3), 2.0)
-
-
-if __name__ == "__main__":
-    unittest.main()
-'''
-
-_TESTS_V3 = '''import unittest
-
-from calc import add, divide, mean
-
-
-class TestCalc(unittest.TestCase):
-    def test_add(self) -> None:
-        self.assertEqual(add(2, 2), 4)
-
-    def test_divide(self) -> None:
-        self.assertEqual(divide(6, 3), 2.0)
-
-    def test_mean(self) -> None:
-        self.assertEqual(mean([1, 2, 3]), 2.0)
-
-
-if __name__ == "__main__":
-    unittest.main()
-'''
+_TESTS_V3 = _TESTS_V2.replace(
+    "from calc import add, divide\n",
+    "from calc import add, divide, mean\n",
+).replace(
+    "        self.assertEqual(divide(6, 3), 2.0)\n",
+    "        self.assertEqual(divide(6, 3), 2.0)\n"
+    "\n"
+    "    def test_mean(self) -> None:\n"
+    "        self.assertEqual(mean([1, 2, 3]), 2.0)\n",
+)
 
 _TESTS_RED = _TESTS_V3.replace("self.assertEqual(add(2, 2), 4)", "self.assertEqual(add(2, 2), 5)")
 

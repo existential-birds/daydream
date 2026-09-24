@@ -460,6 +460,23 @@ class ImproveStubBackend:
     ) -> None:
         """Per-turn hook run after the dispatch body has been fully consumed."""
 
+    def _record_call(self, cwd: Path, prompt: str, marker: str, **turn_kwargs: Any) -> None:
+        """Append one per-turn call record, stamped with the model observed here."""
+        self.calls.append(
+            {
+                "cwd": cwd,
+                "prompt": prompt,
+                "output_schema": turn_kwargs.get("output_schema"),
+                "agents": turn_kwargs.get("agents"),
+                "max_turns": turn_kwargs.get("max_turns"),
+                "read_only": turn_kwargs.get("read_only", False),
+                "persist_session": turn_kwargs.get("persist_session", True),
+                "marker": marker,
+                "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
+            }
+        )
+
     async def execute(
         self,
         cwd: Path,
@@ -517,20 +534,15 @@ class ImproveStubBackend:
             if self.on_first_plan_write is not None:
                 hook, self.on_first_plan_write = self.on_first_plan_write, None
                 hook()
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": output_schema,
-                "agents": agents,
-                "max_turns": max_turns,
-                "read_only": read_only,
-                "persist_session": persist_session,
-                "marker": marker,
-                # Observed at the execute seam: what this turn actually ran on.
-                "model": self.model,
-                "reasoning_effort": self.reasoning_effort,
-            }
+        self._record_call(
+            cwd,
+            prompt,
+            marker,
+            output_schema=output_schema,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
         )
         if self._attempt_write and not self._write_attempted:
             self._write_attempted = True
@@ -959,26 +971,10 @@ class ProductionPathBackend(ImproveStubBackend):
         self,
         cwd: Path,
         prompt: str,
-        output_schema: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
         **turn_kwargs: Any,
     ) -> list[AgentEvent] | None:
         if "IMPROVE_RECON" in prompt:
-            self.calls.append(
-                {
-                    "cwd": cwd,
-                    "prompt": prompt,
-                    "output_schema": output_schema,
-                    "agents": agents,
-                    "max_turns": max_turns,
-                    "read_only": read_only,
-                    "persist_session": persist_session,
-                    "marker": "recon",
-                }
-            )
+            self._record_call(cwd, prompt, "recon", **turn_kwargs)
             return [
                 ResultEvent(
                     structured_output={
@@ -995,18 +991,7 @@ class ProductionPathBackend(ImproveStubBackend):
             category = next(
                 name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt
             )
-            self.calls.append(
-                {
-                    "cwd": cwd,
-                    "prompt": prompt,
-                    "output_schema": output_schema,
-                    "agents": agents,
-                    "max_turns": max_turns,
-                    "read_only": read_only,
-                    "persist_session": persist_session,
-                    "marker": "audit",
-                }
-            )
+            self._record_call(cwd, prompt, "audit", **turn_kwargs)
             # One finding per category, from the first partition group only:
             # numbering by category keeps the selected set identical no matter
             # how the audit fans out or in what order the agents complete.
@@ -1040,7 +1025,7 @@ class ProductionPathBackend(ImproveStubBackend):
                 )
             ]
 
-        if _is_plan_writer_prompt(prompt, output_schema):
+        if _is_plan_writer_prompt(prompt, turn_kwargs.get("output_schema")):
             finding = _finding_from_prompt(prompt)
             if self.plan_active >= 2:
                 raise _ProductionPathRateLimitError(

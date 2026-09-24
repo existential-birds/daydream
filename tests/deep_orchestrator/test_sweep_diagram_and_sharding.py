@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,7 +15,6 @@ from daydream.config import (
     DEFAULT_DEEP_SHARD_MAX_FILES,
 )
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep import orchestrator as o
 from daydream.deep.orchestrator import (
     DIAGRAM_STEPS,
     STEPS,
@@ -754,20 +753,3 @@ def test_structural_gate_resolver_reads_profile_pipeline() -> None:
     assert _config_pipeline(RunConfig(target="/tmp/x")).structural_enabled is True
     off = _profile_with_pipeline(structural_enabled=False)
     assert _config_pipeline(RunConfig(target="/tmp/x", review_profile=off)).structural_enabled is False
-
-
-def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-
-    class _Ctx:
-        class _Cfg:
-            start_at = "review"
-
-        class _P:
-            uncovered_sweep_enabled = False
-
-        config = _Cfg()
-
-        def pipeline(self) -> Any:
-            return _Ctx._P()
-
-    assert o._uncovered_sweep_enabled(cast(FlowContext, _Ctx())) is False
