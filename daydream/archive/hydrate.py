@@ -542,6 +542,14 @@ def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _require_manifest_dict(bundle_dir: Path, *, label: str) -> dict[str, Any]:
+    """Read a derivative manifest fail-closed; ``label`` names it in the error."""
+    data = _read_manifest_dict(bundle_dir)
+    if data is None:
+        raise HydrationError(redact_text(f"{label} has an unreadable manifest"))
+    return data
+
+
 def _read_manifest_field(data: dict[str, Any], key: str) -> Any:
     """Read a provenance field from a produced manifest, with flat fallback.
 
@@ -847,11 +855,7 @@ def apply_license_gate(
     runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-                )
+            data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
             sid = str(data.get("session_id") or derivative.name)
             if not _is_bare_segment(sid):
                 raise HydrationError(
@@ -937,11 +941,7 @@ def rebuild_index(stage: Path) -> None:
     if not runs_dir.is_dir():
         return
     for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-        data = _read_manifest_dict(derivative)
-        if data is None:
-            raise HydrationError(
-                redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-            )
+        data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
         # ``daydream`` provenance is a nested dict in produced manifests; the
         # index expects the executable-provenance object, so it is dropped from
         # the hydrated rebuild (never coerced into a Manifest field).
@@ -1124,11 +1124,7 @@ def _policy_binding(
     runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-                )
+            data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
             decision = resolve_repo_decision(
                 _manifest_repo_slug(data) or "",
                 _manifest_license_evidence(data),
@@ -1154,13 +1150,7 @@ def _policy_binding(
     excluded_dir = stage / "excluded"
     if excluded_dir.is_dir():
         for derivative in sorted(p for p in excluded_dir.iterdir() if p.is_dir()):
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(
-                        f"excluded derivative {derivative.name} has an unreadable manifest"
-                    )
-                )
+            data = _require_manifest_dict(derivative, label=f"excluded derivative {derivative.name}")
             sid = str(data.get("session_id") or derivative.name)
             entry = recorded_excluded.get(sid) or {}
             code = entry.get("reason_code")
@@ -1408,11 +1398,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             name = derivative.name
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(f"admitted derivative {name} has an unreadable manifest")
-                )
+            data = _require_manifest_dict(derivative, label=f"admitted derivative {name}")
             sid = str(data.get("session_id") or name)
             if not _is_bare_segment(sid):
                 # M4: the manifest's session id must never be joined into a
