@@ -32,15 +32,23 @@ def make_recorder(
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
     agent_model_name: str = "opus",
     on_write: Any = None,
+    path: Path | None = None,
+    session_id: str = "test",
+    **overrides: Any,
 ) -> TrajectoryRecorder:
-    """Construct a TrajectoryRecorder rooted in tmp_path."""
+    """Construct a TrajectoryRecorder rooted in tmp_path.
+
+    ``path``/``session_id`` and any ``overrides`` (backend identity fields)
+    replace the shared defaults without rebuilding the common kwargs.
+    """
     return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
+        path=path if path is not None else tmp_path / ".daydream" / "trajectory.json",
         run_flow=run_flow,
         target_dir=tmp_path,
         agent_model_name=agent_model_name,
-        session_id="test",
+        session_id=session_id,
         on_write=on_write,
+        **overrides,
     )
 
 
