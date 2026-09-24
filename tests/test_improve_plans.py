@@ -59,7 +59,6 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
-from daydream.improve.render import render_plan as real_render
 from daydream.improve.repo_commands import enumerate_repository_commands
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
@@ -4511,7 +4510,7 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
         if calls["n"] == 1:
             raise RuntimeError("first re-anchor render fails")
         # second render (re-anchor of the next finding) succeeds
-        return real_render(*args, **kwargs)
+        return render_plan(*args, **kwargs)
 
     monkeypatch.setattr("daydream.improve.plans.render_plan", _boom)
 

@@ -58,7 +58,6 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
       feed the 80% denominator.
     """
     adjudicated = 0
-    decisive_total = 0
     silver_task_only = 0
     accepted = 0
     rejected = 0
@@ -104,7 +103,6 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         )
         if decisive:
             if outcome_bearing:
-                decisive_total += 1
                 adjudicated += 1
                 if not has_human_decision:
                     unresolved += 1
@@ -126,9 +124,9 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
             ):
                 inter_rater_agreeing += 1
 
-    gate_passes = decisive_total > 0 and adjudicated * 5 >= decisive_total * 4
+    gate_passes = adjudicated > 0 and adjudicated * 5 >= adjudicated * 4
     return {
-        "outcome_coverage": {"adjudicated": adjudicated, "total": decisive_total},
+        "outcome_coverage": {"adjudicated": adjudicated, "total": adjudicated},
         "silver_task_only_count": silver_task_only,
         "class_balance": {"accepted": accepted, "rejected": rejected},
         "unresolved": unresolved,
@@ -137,7 +135,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         "evidence_after_as_of": sorted(evidence_after_as_of),
         "admission_gate": {
             "outcome_bearing_total": adjudicated,
-            "total": decisive_total,
+            "total": adjudicated,
             "passes_80pct": gate_passes,
             "class_balance_ok": accepted > 0 and rejected > 0,
             "gate_version": _ADMISSION_GATE_VERSION,

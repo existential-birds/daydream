@@ -98,7 +98,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
 | `deep/diagram_{types,trigger,schema,grounding,render}.py` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
-| `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility; `improve/services.py` is a re-export shim |
+| `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility |
 | `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
 | `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |

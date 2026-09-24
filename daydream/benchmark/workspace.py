@@ -775,11 +775,8 @@ def _case_curation_states(
     for case in manifest.cases:
         doc = docs[case.case_file]
         state = doc.curation.state
-        if state == "ready":
-            from daydream.benchmark.harbor.build import task_spec_approval
-
-            if task_spec_approval(doc.model_dump(mode="json")).state == "stale":
-                state = "stale"
+        if state == "ready" and _task_spec_approval_state(doc) == "stale":
+            state = "stale"
         states.append({"curation_state": state})
     return states
 
