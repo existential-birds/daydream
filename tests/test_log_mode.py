@@ -19,6 +19,7 @@ from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import anyio
 import pytest
 
 from daydream.agent import _LogRedactingConsole, _print_log, _summarize_input, _summarize_output
@@ -64,8 +65,6 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
 
     try:
         # Run the actual runner.run function
-        import anyio
-
         exit_code = anyio.run(run, config)
         assert exit_code == 0, "Expected successful run"
     finally:
