@@ -208,11 +208,9 @@ class LiveToolPanel:
         if self._name == "TaskOutput" and not self._is_error:
             match = re.search(r"<output>(.*?)</output>", self._result, re.DOTALL)
             snippet = match.group(1).strip() if match else self._result
-            result, _ = _build_result_content(snippet, self._is_error, max_lines)
-            return result
+            return _build_result_content(snippet, self._is_error, max_lines)
 
-        result, _ = _build_result_content(self._result, self._is_error, max_lines)
-        return result
+        return _build_result_content(self._result, self._is_error, max_lines)
 
     def _build_glob_result(self, max_lines: int = _GLOB_MAX_LINES) -> Text:
         """Build formatted Glob result showing file count and paths."""
@@ -253,7 +251,7 @@ class LiveToolPanel:
 
         result = _found_count_header(total_matches, "match", "matches")
 
-        content, _ = _build_result_content(self._result, self._is_error, max_lines)
+        content = _build_result_content(self._result, self._is_error, max_lines)
 
         return Group(result, content)
 

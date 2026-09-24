@@ -27,10 +27,8 @@ from daydream import cli as top_cli
 from daydream import git_ops
 from daydream.benchmark import curation as cu
 from daydream.benchmark import github_import as gi
-from daydream.benchmark import github_import as gi_mod
 from daydream.benchmark import schema, storage
 from daydream.benchmark import snapshot as sn
-from daydream.benchmark import snapshot as snapshot_mod
 from daydream.benchmark.cli import _handle_benchmark_command, _handle_benchmark_status
 from daydream.benchmark.harbor import build
 from daydream.benchmark.harbor.build import task_spec_digest
@@ -2214,8 +2212,8 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(
         return {"data": ok}
 
     monkeypatch.setattr("daydream.git_ops.gh_api", flaky_gh_api)
-    monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
-    threads = gi_mod._graphql_review_threads(ws, "o/r", 101)
+    monkeypatch.setattr(gi, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
+    threads = gi._graphql_review_threads(ws, "o/r", 101)
     assert threads == []
     assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
 
@@ -2416,9 +2414,9 @@ def test_graphql_review_threads_records_rate_limit_after_retries(
         raise RateLimitError("graphql rate limited", retry_after=0.0)
 
     monkeypatch.setattr("daydream.git_ops.gh_api", always_limited)
-    monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
-    with pytest.raises(gi_mod._ImportRateLimitError):
-        gi_mod._graphql_review_threads(ws, "o/r", 101)
+    monkeypatch.setattr(gi, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
+    with pytest.raises(gi._ImportRateLimitError):
+        gi._graphql_review_threads(ws, "o/r", 101)
 
 
 def test_corrupt_prior_import_fails_before_network(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -2996,8 +2994,8 @@ def test_refresh_reuses_persisted_facts_and_preserves_curation(
     def boom(*a: Any, **kw: Any) -> str:
         raise AssertionError("mirror probe re-ran on a no-op refresh")
 
-    monkeypatch.setattr(snapshot_mod, "commit_relation", boom)
-    monkeypatch.setattr(snapshot_mod, "anchor_delta", boom)
+    monkeypatch.setattr(sn, "commit_relation", boom)
+    monkeypatch.setattr(sn, "anchor_delta", boom)
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
     ) == 0

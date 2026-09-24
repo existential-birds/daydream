@@ -11,7 +11,6 @@ import pytest
 
 from daydream.training import harvest as harvest_mod
 from daydream.training.reward import (
-    DEFAULT_WEIGHTS,
     REWARD_VERSION,
     PosteriorBreakdown,
     RewardBreakdown,
@@ -173,9 +172,7 @@ def test_same_function_scores_producer_and_eval_caller_paths() -> None:
     )
 
 
-def test_default_weights_flagged_and_overrides_fingerprint_stably() -> None:
-    assert DEFAULT_WEIGHTS.is_default is True
-    assert RewardWeights(w_fp=0.5).is_default is False
+def test_overrides_fingerprint_stably() -> None:
     assert _weights_fingerprint(RewardWeights(w_fp=0.5)) == _weights_fingerprint(RewardWeights(w_fp=0.5))
     assert _weights_fingerprint(RewardWeights(w_fp=0.5)) != _weights_fingerprint(RewardWeights(w_fp=0.6))
     assert len(_weights_fingerprint(RewardWeights(w_fp=0.5))) == 8

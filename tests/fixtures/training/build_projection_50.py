@@ -235,13 +235,7 @@ def build_projection_50(tmp_path: Path) -> Path:
     # payload files (mirroring the bundle's own manifest) and the bundle's
     # curation-manifest.json, both before nothing depends on ordering — the
     # loader's digest is computed over whatever the directory holds.
-    sums_lines = []
-    for path in sorted(proj_dir.rglob("*")):
-        if not path.is_file() or path.name in {"SHA256SUMS", "_SUCCESS"}:
-            continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        sums_lines.append(f"{digest}  {path.relative_to(proj_dir).as_posix()}\n")
-    (proj_dir / "SHA256SUMS").write_text("".join(sums_lines))
+    _write_sumsums(proj_dir)
     shutil.copyfile(bundle_dir / "curation-manifest.json", proj_dir / "curation-manifest.json")
     return proj_dir
 

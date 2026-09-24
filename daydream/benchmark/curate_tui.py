@@ -387,14 +387,6 @@ def _service_error(exc: BaseException, outcome: str = "continue") -> str:
     return outcome
 
 
-def _editor_fragment_new() -> str:
-    """One blank template finding as an editable YAML fragment."""
-    return yaml.safe_dump({"findings": [{
-        "title": "", "body": "", "severity": None,
-        "location": None, "source_ids": [],
-    }]}, sort_keys=False)
-
-
 def _editor_fragment_edit(finding: dict[str, Any]) -> str:
     """The existing *finding* as one editable YAML fragment atom."""
     atom = {
@@ -481,7 +473,7 @@ def _action_new(
     """The ``[n]`` author action: edit a blank fragment, add every atom."""
     del binding
     return _edit_and_stage_fragment(
-        _editor_fragment_new(),
+        _editor_fragment_authored([]),
         lambda atoms: cu.add_findings(root, case_id, findings=atoms),
         success=lambda n: f"added {n} authored finding(s)",
         err_outcome="rerender",

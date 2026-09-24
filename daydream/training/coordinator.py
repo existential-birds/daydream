@@ -656,7 +656,6 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
 
     out_dir = Path(config.out_dir)
     stage_entries: dict[str, dict[str, Any]] = {}
-    stage_records: dict[str, dict[str, Any]] = {}
     gate_report: GateReport | None = None
 
     # M18/AC4 resume guard, hoisted ahead of the stage loop: the prior
@@ -684,7 +683,6 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                 config, records, stage_dir, projection=projection
             )
             stage_entries[stage] = entry
-            stage_records[stage] = {"records": records}
             split_digest = frozen_split.digest
             continue
 
@@ -709,12 +707,10 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                 # itself is skipped.
                 _run_gpu_stage_shim(config, records, stage, stage_dir)
             stage_entries[stage] = {"status": "skipped_dry"}
-            stage_records[stage] = {"records": records}
             continue
 
         entry = _run_gpu_stage_shim(config, records, stage, stage_dir)
         stage_entries[stage] = entry
-        stage_records[stage] = {"records": records}
 
     # The split is frozen only by Stage 0, so its digest is rechecked against
     # the prior run here; every other locked field was compared pre-loop.
@@ -735,7 +731,7 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         "run_identity": identity.to_dict(),
         "dry_run": dry_run,
         "stages": stage_entries,
-        "stage_digests": stage_digests(stage_records),
+        "stage_digests": stage_digests({stage: {"records": records} for stage in stage_entries}),
         "adapter_path": adapter_path,
         "corpus": str(corpus_path),
     }
