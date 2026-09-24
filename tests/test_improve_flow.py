@@ -78,6 +78,7 @@ from tests.harness.improve_backend import (
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import force_interactive as _force_interactive
+from tests.harness.trajectory import root_trajectory as _root_run_trajectory
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -1020,14 +1021,6 @@ def _untracked(repo: Path) -> list[str]:
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-
-
-def _root_run_trajectory(repo: Path) -> dict[str, Any]:
-    paths = list((repo / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(paths) == 1
-    payload = json.loads(paths[0].read_text(encoding="utf-8"))
-    assert isinstance(payload, dict)
-    return payload
 
 
 def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:

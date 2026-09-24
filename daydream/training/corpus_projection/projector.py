@@ -129,6 +129,15 @@ def _dump_jsonl(records: list[Record]) -> str:
     )
 
 
+def _write_artifact(path: Path, data: bytes) -> None:
+    """Write one projection artifact, skipping fsync and mode.
+
+    Projection outputs are re-derivable from the bundle, so the durability
+    knobs ``atomic_write_bytes`` offers by default are deliberately omitted.
+    """
+    atomic_write_bytes(path, data, fsync=False, dir_fsync=False, mode=None)
+
+
 @dataclass(frozen=True)
 class BuildFrozenCorpusConfig:
     """Configuration for the frozen projection (pure — no git, no network)."""
@@ -1133,38 +1142,17 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             valid_at = str(rec_valid_at)
 
     canonical = _dump_jsonl(records)
-    atomic_write_bytes(
-        config.out_dir / "corpus.jsonl",
-        canonical.encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
-    )
+    _write_artifact(config.out_dir / "corpus.jsonl", canonical.encode("utf-8"))
     for split_name, filename in _SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
-        atomic_write_bytes(
-            config.out_dir / filename,
-            _dump_jsonl(split_records).encode("utf-8"),
-            fsync=False,
-            dir_fsync=False,
-            mode=None,
-        )
-    atomic_write_bytes(
+        _write_artifact(config.out_dir / filename, _dump_jsonl(split_records).encode("utf-8"))
+    _write_artifact(
         config.out_dir / "adjudication-report.json",
         (json.dumps(adjudication, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
     )
 
     schema_src = Path(__file__).parent.parent / "schema" / "record-schema.json"
-    atomic_write_bytes(
-        config.out_dir / "schema.json",
-        schema_src.read_text(encoding="utf-8").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
-    )
+    _write_artifact(config.out_dir / "schema.json", schema_src.read_text(encoding="utf-8").encode("utf-8"))
 
     split_counts = {name: 0 for name in _SPLIT_FILENAMES}
     for r in records:
@@ -1235,12 +1223,9 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         },
         "license_decision_distribution": _license_decision_distribution(decisions),
     }
-    atomic_write_bytes(
+    _write_artifact(
         config.out_dir / "lineage.json",
         (json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
     )
 
     # Human license report (issue #1080 M7): the digest-pinned policy, the C5
@@ -1258,24 +1243,15 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         )),
         "distribution": _license_decision_distribution(decisions),
     }
-    atomic_write_bytes(
+    _write_artifact(
         config.out_dir / "license-report.json",
         (json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
     )
 
     # Completeness marker (mirrors the bundle's own ``_SUCCESS`` gate): the
     # projection file set is only consumable once every member is in place,
     # so a mid-write failure never leaves a partial projection behind.
-    atomic_write_bytes(
-        config.out_dir / "_SUCCESS",
-        b"ok\n",
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
-    )
+    _write_artifact(config.out_dir / "_SUCCESS", b"ok\n")
 
     return {
         "total": len(records),

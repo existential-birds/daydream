@@ -184,6 +184,41 @@ def write_split_sidecar(
     return sidecar_path.name
 
 
+def _build_frozen_split(
+    labels_path: str | Path,
+    *,
+    train_rows: list[dict[str, Any]],
+    held_out_rows: list[dict[str, Any]],
+    seed: int,
+    held_out_fraction: float,
+) -> FrozenSplit:
+    """Assemble a :class:`FrozenSplit` and write its digest sidecar.
+
+    Shared by the labels-file :func:`freeze_split` producer and the projected-
+    corpus frozen-boundary producer in :mod:`daydream.training.coordinator`, so
+    the two cannot drift on the digest/sidecar/FrozenSplit shape.
+    """
+    held_out_ids = [str(r["comment_id"]) for r in held_out_rows]
+    digest = _split_digest(held_out_ids, seed)
+    digest_path = write_split_sidecar(
+        labels_path,
+        digest=digest,
+        seed=seed,
+        held_out_fraction=held_out_fraction,
+        held_out_ids=held_out_ids,
+        train_ids=[str(r["comment_id"]) for r in train_rows],
+    )
+    return FrozenSplit(
+        digest=digest,
+        fingerprint=digest[:8],
+        digest_path=digest_path,
+        train_rows=train_rows,
+        held_out_rows=held_out_rows,
+        seed=seed,
+        held_out_fraction=held_out_fraction,
+    )
+
+
 def freeze_split(
     labels_path: str | Path, *, held_out_fraction: float, seed: int
 ) -> FrozenSplit:
@@ -231,21 +266,8 @@ def freeze_split(
             f"held_out_fraction={held_out_fraction}); add rows or lower the fraction"
         )
 
-    held_out_ids = [str(r["comment_id"]) for r in held_out_rows]
-    digest = _split_digest(held_out_ids, seed)
-    digest_path = write_split_sidecar(
+    return _build_frozen_split(
         labels_path,
-        digest=digest,
-        seed=seed,
-        held_out_fraction=held_out_fraction,
-        held_out_ids=held_out_ids,
-        train_ids=[str(r["comment_id"]) for r in train_rows],
-    )
-
-    return FrozenSplit(
-        digest=digest,
-        fingerprint=digest[:8],
-        digest_path=digest_path,
         train_rows=train_rows,
         held_out_rows=held_out_rows,
         seed=seed,

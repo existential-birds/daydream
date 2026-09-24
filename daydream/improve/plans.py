@@ -7,7 +7,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -475,25 +475,7 @@ def _fully_covered(identities: tuple[frozenset[str], ...], coverage: set[str] | 
 
 
 def _entry_payload(entry: PlanIndexEntry) -> dict[str, Any]:
-    return {
-        "number": entry.number,
-        "slug": entry.slug,
-        "title": entry.title,
-        "fingerprint": entry.fingerprint,
-        "package_fingerprint": entry.package_fingerprint,
-        "member_fingerprints": list(entry.member_fingerprints),
-        "member_aliases": list(entry.member_aliases),
-        "priority": entry.priority,
-        "effort": entry.effort,
-        "risk": entry.risk,
-        "category": entry.category,
-        "planned_at": entry.planned_at,
-        "status": entry.status,
-        "host_blocked": entry.host_blocked,
-        "change_shape": entry.change_shape,
-        "maintenance_signals": list(entry.maintenance_signals),
-        "reuse_target": entry.reuse_target,
-    }
+    return asdict(entry)
 
 
 def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:

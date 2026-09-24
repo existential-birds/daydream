@@ -52,6 +52,7 @@ from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.trajectory import root_trajectory as _root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
@@ -200,14 +201,6 @@ def review_run(
 async def _dispatch_run(config: Any) -> int:
 
     return await run(config)
-
-
-def _root_trajectory(target: Path) -> dict[str, Any]:
-    paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(paths) == 1
-    payload = json.loads(paths[0].read_text(encoding="utf-8"))
-    assert isinstance(payload, dict)
-    return payload
 
 
 def _diagram_lifecycle(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:

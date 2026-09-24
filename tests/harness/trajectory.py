@@ -57,6 +57,15 @@ def read_trajectory(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
+def root_trajectory(repo: Path) -> dict[str, Any]:
+    """Load the single run trajectory written under ``repo/.daydream/runs``."""
+    paths = list((repo / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    payload = read_trajectory(paths[0])
+    assert isinstance(payload, dict)
+    return payload
+
+
 def dispatch_descriptors(step: dict[str, Any]) -> list[str]:
     return [
         result["content"].removeprefix("Dispatched to ")

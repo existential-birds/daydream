@@ -498,6 +498,10 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
 
 # control-plane leakage scan (issue #778)
 
+#: A URL carrying userinfo (``scheme://user@host``) — a credential leak. Shared by
+#: the leak rules and the raw bundle-inventory check so the two cannot drift.
+_AUTHENTICATED_URL_PATTERN = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@")
+
 _LEAK_RULES = [
     ("original-git-sha", re.compile(r"\b[0-9a-f]{40}\b")),
     ("authoring-case-id", re.compile(r"\bpr-\d{6}-[0-9a-f]{12}\b")),
@@ -511,7 +515,7 @@ _LEAK_RULES = [
     ("credential",
      re.compile(r"(?i)\b(sk-[a-z0-9]{16,}|ghp_[a-z0-9]{20,}|gho_[a-z0-9]{20,}|"
                 r"github_pat_[a-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b")),
-    ("authenticated-url", re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@")),
+    ("authenticated-url", _AUTHENTICATED_URL_PATTERN),
     ("pull-number", re.compile(r"\bpull/[0-9]+\b")),
 ]
 
@@ -573,7 +577,7 @@ def validate_bundle_inventory(bundle_path: Path) -> None:
             "expected exactly refs/heads/base and refs/heads/head"
         )
     raw = bundle_path.read_bytes().decode("utf-8", errors="replace")
-    m = re.search(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@", raw)
+    m = _AUTHENTICATED_URL_PATTERN.search(raw)
     if m is not None:
         raise CompileError(f"bundle {bundle_path} contains a credential-bearing URL")
     return None
