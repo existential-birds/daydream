@@ -2332,11 +2332,9 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
 
     session = "sess-fold-0001"
     daydream_dir = tmp_path / ".daydream"
-    recorder = TrajectoryRecorder(
+    recorder = make_recorder(
+        tmp_path,
         path=daydream_dir / "runs" / session / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
         session_id=session,
     )
     async with recorder:
@@ -2367,12 +2365,8 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
 
 
 async def test_build_trajectory_extra_records_backend_identity(tmp_path: Path) -> None:
-    recorder = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
+    recorder = make_recorder(
+        tmp_path,
         backend_name="codex",
         review_backend_name="pi",
         fix_backend_name="claude",
@@ -2391,13 +2385,7 @@ async def test_build_trajectory_extra_records_backend_identity(tmp_path: Path) -
 
 
 async def test_build_trajectory_omits_backend_when_unset(tmp_path: Path) -> None:
-    recorder = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
-    )
+    recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="hello"))
@@ -2413,12 +2401,9 @@ async def test_build_trajectory_omits_empty_per_phase_backend_keys(
     tmp_path: Path,
 ) -> None:
     """Per-phase backend keys are omitted when their name is empty (improve flow)."""
-    recorder = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
+    recorder = make_recorder(
+        tmp_path,
         run_flow=DaydreamRunFlow.IMPROVE,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
         backend_name="codex",
         review_backend_name="codex",
         fix_backend_name="",
@@ -2436,12 +2421,8 @@ async def test_build_trajectory_omits_empty_per_phase_backend_keys(
 
 
 async def test_fork_child_inherits_backend_identity(tmp_path: Path) -> None:
-    parent = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="test",
+    parent = make_recorder(
+        tmp_path,
         backend_name="codex",
         review_backend_name="codex",
         fix_backend_name="pi",
