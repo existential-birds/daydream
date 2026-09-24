@@ -6,10 +6,42 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+import yaml
 
 from daydream.benchmark.harbor import env_policy
 from daydream.benchmark.harbor.agent import build_child_env
 from daydream.benchmark.harbor.entrypoint import _sanitize_reviewer_environment
+from daydream.benchmark.harbor.package import render_job_config
+
+
+def test_job_config_renderer_derives_its_env_from_the_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A placeholder added to the declaration reaches the rendered bytes (spec M2)."""
+    extended = replace(
+        env_policy.RENDERER,
+        judge_placeholders=MappingProxyType(
+            {**env_policy.RENDERER.judge_placeholders, "DAYDREAM_JUDGE_PROBE": "${DAYDREAM_JUDGE_PROBE:-}"}
+        ),
+    )
+    monkeypatch.setattr(env_policy, "RENDERER", extended)
+    job = yaml.safe_load(render_job_config(oracle=False).decode())
+    assert job["verifier"]["env"]["DAYDREAM_JUDGE_PROBE"] == "${DAYDREAM_JUDGE_PROBE:-}"
+
+
+def test_rendered_env_key_order_is_unchanged() -> None:
+    """The job config bytes are part of the compiled-tree contract; key order is load-bearing."""
+    job = yaml.safe_load(render_job_config(oracle=False).decode())
+    assert list(job["agents"][0]["env"]) == [
+        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
+        "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    ]
+    assert list(job["verifier"]["env"]) == [
+        "DAYDREAM_JUDGE_PROVIDER", "DAYDREAM_JUDGE_MODEL", "DAYDREAM_JUDGE_API_KEY",
+        "DAYDREAM_JUDGE_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    ]
 
 
 def test_container_sanitiser_derives_its_sets_from_the_declaration(

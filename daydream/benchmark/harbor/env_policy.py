@@ -139,11 +139,19 @@ class RendererChannel:
 
 RENDERER = RendererChannel(
     reviewer_placeholders=MappingProxyType({
+        # Backend selection passes through verbatim; agent/entrypoint validate pi|claude.
         BACKEND_ENV: "${DAYDREAM_REVIEW_BACKEND:-pi}",
         MODEL_ENV: "${DAYDREAM_REVIEW_MODEL}",
+        # Mutually exclusive credentials get empty fallbacks so an unset
+        # alternative never aborts rendering: the selected provider's
+        # credential is present and the unused one resolves to "", which
+        # downstream fail-closed checks treat as missing.
         API_KEY_ENV: "${DAYDREAM_REVIEW_API_KEY:-}",
         BASE_URL_ENV: "${DAYDREAM_REVIEW_BASE_URL:-}",
         CANDIDATE_ENV: "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
+        # ANTHROPIC_* carries claude-backend credentials into the container
+        # (agent.build_child_env keep-set, entrypoint claude branch); the
+        # API key and auth token are alternatives, the base URL optional.
         ANTHROPIC_API_KEY_ENV: "${ANTHROPIC_API_KEY:-}",
         ANTHROPIC_AUTH_TOKEN_ENV: "${ANTHROPIC_AUTH_TOKEN:-}",
         ANTHROPIC_BASE_URL_ENV: "${ANTHROPIC_BASE_URL:-}",
@@ -153,6 +161,11 @@ RENDERER = RendererChannel(
         JUDGE_MODEL_ENV: "${DAYDREAM_JUDGE_MODEL}",
         JUDGE_API_KEY_ENV: "${DAYDREAM_JUDGE_API_KEY:-}",
         JUDGE_BASE_URL_ENV: "${DAYDREAM_JUDGE_BASE_URL:-}",
+        # CLAUDE_CODE_* feeds the keyless claude-cli judge client; the
+        # nonessential-traffic gate defaults on (fail-safe direction).
+        # The oauth token is an alternative to DAYDREAM_JUDGE_API_KEY, so
+        # it gets the same empty fallback; downstream fail-closed checks
+        # treat "" as missing.
         CLAUDE_CODE_OAUTH_TOKEN_ENV: "${CLAUDE_CODE_OAUTH_TOKEN:-}",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}",
     }),
