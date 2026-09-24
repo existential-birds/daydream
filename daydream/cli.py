@@ -1773,21 +1773,34 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
     if summary.license_admission:
-        buckets = summary.license_admission
-        print_info(
-            console,
-            "license admission: "
-            f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
-            f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
-            f"evidence-missing {buckets['license_evidence_missing']}",
-        )
+        _print_license_admission(console, summary.license_admission)
     if summary.dry_run_incomplete_manifests:
-        print_warning(
-            console,
-            "hydration yield reduced: incomplete manifest(s) discovered and "
-            "dropped: " + redact_text("; ".join(summary.dry_run_incomplete_manifests)),
+        _print_incomplete_manifests(
+            console, summary.dry_run_incomplete_manifests, prefix="hydration"
         )
     return 0
+
+
+def _print_license_admission(console: Any, buckets: Any) -> None:
+    """Print the value-free license-admission tally shared by hydrate paths."""
+    print_info(
+        console,
+        "license admission: "
+        f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
+        f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
+        f"evidence-missing {buckets['license_evidence_missing']}",
+    )
+
+
+def _print_incomplete_manifests(console: Any, manifests: Any, *, prefix: str) -> None:
+    """Print the reduced-yield warning shared by hydrate paths."""
+    from daydream.trajectory import redact_text
+
+    print_warning(
+        console,
+        f"{prefix} yield reduced: incomplete manifest(s) discovered and "
+        "dropped: " + redact_text("; ".join(manifests)),
+    )
 
 
 def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
@@ -1889,14 +1902,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
     if license_admission:
-        print_info(
-            console,
-            "license admission: "
-            f"admitted {license_admission['admitted']}; "
-            f"c5-excluded {license_admission['c5_excluded']}; "
-            f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
-            f"evidence-missing {license_admission['license_evidence_missing']}",
-        )
+        _print_license_admission(console, license_admission)
     for repo_slug in sorted(per_repo):
         buckets = per_repo[repo_slug]
         print_info(
@@ -1909,11 +1915,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         )
     incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
     if incomplete:
-        print_warning(
-            console,
-            "dry-run yield reduced: incomplete manifest(s) discovered and "
-            "dropped: " + redact_text("; ".join(incomplete)),
-        )
+        _print_incomplete_manifests(console, incomplete, prefix="dry-run")
     return 0
 
 

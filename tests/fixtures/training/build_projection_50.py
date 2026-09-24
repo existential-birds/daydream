@@ -34,7 +34,10 @@ from pathlib import Path
 from typing import Any
 
 from daydream.training.corpus_projection.identity import record_id
-from daydream.training.corpus_projection.projector import build_frozen_corpus
+from daydream.training.corpus_projection.projector import (
+    BuildFrozenCorpusConfig,
+    build_frozen_corpus,
+)
 from daydream.training.corpus_projection.splits import assign_split
 from tests.test_corpus_projection import (
     _policy_file,
@@ -204,8 +207,6 @@ def build_projection_50(tmp_path: Path) -> Path:
             task-only records) — a broken fixture is a test-authoring bug,
             never a silently accepted projection.
     """
-    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
-
     work = tmp_path / "projection-fixture"
     bundle_dir = _write_bundle(work)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
@@ -245,7 +246,6 @@ def main() -> None:
     directory to ``--out`` (content-only — the loader's directory digest is
     computed over file bytes, never mtimes)."""
     import argparse
-    import shutil
     import tempfile
 
     parser = argparse.ArgumentParser(description=__doc__)

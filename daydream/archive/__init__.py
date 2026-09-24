@@ -404,10 +404,10 @@ def _read_session_bound_json_artifact(
     """
     if session_id is None:
         return None
-    data = _read_json_artifact(resolver(target_dir / ".daydream" / "deep"), dict)
-    if data is None:
-        return None
-    if not isinstance(data, dict) or data.get("session_id") != session_id:
+    data: dict[str, Any] | None = _read_json_artifact(
+        resolver(target_dir / ".daydream" / "deep"), dict
+    )
+    if data is None or data.get("session_id") != session_id:
         return None
     return data
 

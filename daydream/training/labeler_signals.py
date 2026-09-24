@@ -358,6 +358,33 @@ def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool
     return all(line in haystack_lines for line in added_lines)
 
 
+def _count_present_hunks(
+    repo_clone: Path,
+    hunks: list[_Hunk],
+    ref: str,
+    file_at_fetcher: Callable[[Path, str, str], str],
+    *,
+    only_files: set[str] | None = None,
+) -> int:
+    """Count hunks whose added lines appear verbatim in each file at *ref*.
+
+    Each distinct file is fetched once. ``only_files`` restricts the walk to a
+    subset of paths (the fix-applied cascade's changed-file overlap).
+    """
+    present = 0
+    cache: dict[str, str] = {}
+    for hunk in hunks:
+        if only_files is not None and hunk.file not in only_files:
+            continue
+        content = cache.get(hunk.file)
+        if content is None:
+            content = file_at_fetcher(repo_clone, hunk.file, ref)
+            cache[hunk.file] = content
+        if _hunk_lines_present(hunk.added_lines, content):
+            present += 1
+    return present
+
+
 def _archive_is_recommended_patch_aware(archive_path: Path) -> bool:
     """Return True if *archive_path*'s manifest was written by recommended.patch-aware daydream.
 
@@ -537,18 +564,10 @@ def fix_applied_signal(
             window_commits=list(window),
         )
 
-    hunks_applied = 0
     post_sha = window[-1]
-    file_content_cache: dict[str, str] = {}
-    for hunk in hunks:
-        if hunk.file not in overlap:
-            continue
-        post_content = file_content_cache.get(hunk.file)
-        if post_content is None:
-            post_content = file_at_fetcher(repo_clone, hunk.file, post_sha)
-            file_content_cache[hunk.file] = post_content
-        if _hunk_lines_present(hunk.added_lines, post_content):
-            hunks_applied += 1
+    hunks_applied = _count_present_hunks(
+        repo_clone, hunks, post_sha, file_at_fetcher, only_files=overlap
+    )
 
     if hunks_total > 0 and (hunks_applied / hunks_total) >= 0.5:
         verdict: Literal["applied", "not_applied", "unknown"] = "applied"
@@ -847,14 +866,8 @@ def _default_branch_applied(
         return LocalCommitAppliedSignal(verdict="unknown")
 
     for ref in (f"origin/{base_branch}", base_branch):
-        file_content_cache: dict[str, str] = {}
-        for hunk in hunks:
-            content = file_content_cache.get(hunk.file)
-            if content is None:
-                content = file_at_fetcher(repo_clone, hunk.file, ref)
-                file_content_cache[hunk.file] = content
-            if _hunk_lines_present(hunk.added_lines, content):
-                return LocalCommitAppliedSignal(verdict="applied")
+        if _count_present_hunks(repo_clone, hunks, ref, file_at_fetcher):
+            return LocalCommitAppliedSignal(verdict="applied")
 
     return LocalCommitAppliedSignal(verdict="unknown")
 
@@ -920,14 +933,8 @@ def local_commit_applied_signal(
         return LocalCommitAppliedSignal(verdict="rejected")
 
     for commit in commits:
-        file_content_cache: dict[str, str] = {}
-        for hunk in hunks:
-            content = file_content_cache.get(hunk.file)
-            if content is None:
-                content = file_at_fetcher(repo_clone, hunk.file, commit)
-                file_content_cache[hunk.file] = content
-            if _hunk_lines_present(hunk.added_lines, content):
-                return LocalCommitAppliedSignal(verdict="applied")
+        if _count_present_hunks(repo_clone, hunks, commit, file_at_fetcher):
+            return LocalCommitAppliedSignal(verdict="applied")
 
     return LocalCommitAppliedSignal(verdict="rejected")
 

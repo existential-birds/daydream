@@ -59,14 +59,13 @@ def is_generated_file(path: str, content: str | bytes | None = None) -> bool:
     header_lines: list[str] = []
     for line in content.splitlines()[:_GENERATED_MARKER_HEADER_LINES]:
         stripped = line.strip()
-        if not stripped:
-            header_lines.append(line)
-        elif stripped.startswith(_HEADER_COMMENT_PREFIXES):
-            header_lines.append(line)
-        elif _GENERATED_MARKER.fullmatch(stripped):
-            header_lines.append(line)
-        else:
+        if (
+            stripped
+            and not stripped.startswith(_HEADER_COMMENT_PREFIXES)
+            and not _GENERATED_MARKER.fullmatch(stripped)
+        ):
             break
+        header_lines.append(line)
     header = "\n".join(header_lines)
     return bool(_GENERATED_MARKER.search(header))
 

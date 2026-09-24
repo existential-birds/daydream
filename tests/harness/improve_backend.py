@@ -310,27 +310,17 @@ def _menu_ids(prompt: str) -> list[str]:
     return _MENU_ID.findall(prompt)
 
 
-def _gate_plan_on(plan: dict[str, Any], command_id: str) -> dict[str, Any]:
-    """Point every verification slot at one recon id, run verbatim."""
+def _set_plan_verification(
+    plan: dict[str, Any], verification: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Point every verification slot at one value (a recon ref, or ``None``)."""
     plan["additional_command_refs"] = []
     for step in plan["steps"]:
-        step["verification"] = _plan_ref(command_id)
+        step["verification"] = verification
     for case in plan["test_plan"]["cases"]:
-        case["verification"] = _plan_ref(command_id)
+        case["verification"] = verification
     for criterion in plan["done_criteria"]:
-        criterion["verification"] = _plan_ref(command_id)
-    return plan
-
-
-def _without_verification_commands(plan: dict[str, Any]) -> dict[str, Any]:
-    """Represent a useful plan when recon found no host-verified commands."""
-    plan["additional_command_refs"] = []
-    for step in plan["steps"]:
-        step["verification"] = None
-    for case in plan["test_plan"]["cases"]:
-        case["verification"] = None
-    for criterion in plan["done_criteria"]:
-        criterion["verification"] = None
+        criterion["verification"] = verification
     return plan
 
 
@@ -773,7 +763,7 @@ class ImproveStubBackend:
             if self.plan_gate_on_first_menu_id:
                 # A writer can only gate on what the menu actually offers.
                 offered = _menu_ids(prompt)
-                plan = _gate_plan_on(plan, offered[0]) if offered else plan
+                plan = _set_plan_verification(plan, _plan_ref(offered[0])) if offered else plan
             if self.plan_file_role_override is not None:
                 plan["scope"]["existing_paths"][0]["role"] = (
                     self.plan_file_role_override
@@ -790,7 +780,7 @@ class ImproveStubBackend:
             if self.plan_ungate_steps:
                 # The shape a plan takes when recon verified no commands: the
                 # contract tells the writer to use null verification everywhere.
-                plan = _without_verification_commands(plan)
+                plan = _set_plan_verification(plan, None)
             if self.plan_sloppy:
                 plan["debug_notes"] = (
                     "Planner scratch notes that must never reach the artifact."
@@ -830,7 +820,7 @@ class ImproveStubBackend:
                     }
                 )
             if self.all_recon_commands_invalid:
-                plan = _without_verification_commands(plan)
+                plan = _set_plan_verification(plan, None)
             if self.return_secret_invalid_enum or (
                 self.return_secret_invalid_enum_once
                 and self.plan_writer_calls == 1
