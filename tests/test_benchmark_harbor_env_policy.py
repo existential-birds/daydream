@@ -13,6 +13,108 @@ from daydream.benchmark.harbor.agent import build_child_env
 from daydream.benchmark.harbor.entrypoint import _sanitize_reviewer_environment
 from daydream.benchmark.harbor.package import render_job_config, render_task_toml
 
+_PROBES = frozenset({"OPENAI_API_KEY", "DAYDREAM_UNRELATED_PROBE"})
+
+
+def _synthetic_parent(backend: str) -> dict[str, str]:
+    parent = dict.fromkeys(env_policy.declared_names() | _PROBES, "probe")
+    parent.update({
+        "DAYDREAM_REVIEW_BACKEND": backend,
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    })
+    return parent
+
+
+_EXPECTED_HOST_KEEP: dict[str, frozenset[str]] = {
+    "pi": frozenset({
+        "PATH", "HOME", "LANG",
+        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
+        "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
+        "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR", "DAYDREAM_REVIEW_ARTIFACT_PATH",
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH", "DAYDREAM_REVIEW_CASE_ID",
+        "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
+    }),
+    "claude": frozenset({
+        "PATH", "HOME", "LANG",
+        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
+        "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
+        "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR", "DAYDREAM_REVIEW_ARTIFACT_PATH",
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH", "DAYDREAM_REVIEW_CASE_ID",
+        "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    }),
+}
+
+_EXPECTED_CONTAINER_KEEP: dict[str, frozenset[str]] = {
+    "pi": frozenset({
+        "PATH", "HOME", "LANG", "PI_API_KEY", "HF_TOKEN",
+        "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR", "DAYDREAM_UNRELATED_PROBE",
+        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL",
+        "DAYDREAM_REVIEW_PROFILE_CANDIDATE", "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR",
+        "DAYDREAM_REVIEW_ARTIFACT_PATH", "DAYDREAM_REVIEW_TRAJECTORY_PATH",
+        "DAYDREAM_REVIEW_CASE_ID", "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
+    }),
+    "claude": frozenset({
+        "PATH", "HOME", "LANG", "HF_TOKEN",
+        "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR", "DAYDREAM_UNRELATED_PROBE",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL",
+        "DAYDREAM_REVIEW_PROFILE_CANDIDATE", "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR",
+        "DAYDREAM_REVIEW_ARTIFACT_PATH", "DAYDREAM_REVIEW_TRAJECTORY_PATH",
+        "DAYDREAM_REVIEW_CASE_ID", "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
+    }),
+}
+
+_EXPECTED_RENDERER_PRESENT = frozenset({
+    "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
+    "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "DAYDREAM_JUDGE_PROVIDER", "DAYDREAM_JUDGE_MODEL", "DAYDREAM_JUDGE_API_KEY",
+    "DAYDREAM_JUDGE_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+})
+
+# Names no consumer keeps: adding one to the declaration without recording its
+# outcome fails test_every_declared_name_has_a_recorded_outcome.
+_EXPECTED_DROPPED_EVERYWHERE = frozenset({
+    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_HOST",
+    "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "ZAI_API_KEY",
+    "NOUS_API_KEY", "DAYDREAM_SKILLS_DIR", "DAYDREAM_JUDGE_ALLOWED_HOSTS",
+    "DAYDREAM_JUDGE_ARTIFACT_PATH", "DAYDREAM_JUDGE_OUT_PATH",
+})
+
+
+def test_every_declared_name_has_a_recorded_outcome() -> None:
+    """Adding a name to the declaration without recording its outcome fails here."""
+    recorded = (
+        set().union(*_EXPECTED_HOST_KEEP.values())
+        | set().union(*_EXPECTED_CONTAINER_KEEP.values())
+        | _EXPECTED_RENDERER_PRESENT
+        | _EXPECTED_DROPPED_EVERYWHERE
+    ) - _PROBES
+    assert recorded == env_policy.declared_names()
+
+
+@pytest.mark.parametrize("backend", ["pi", "claude"])
+def test_host_child_env_table(backend: str) -> None:
+    child = build_child_env(_synthetic_parent(backend), backend=backend)
+    assert set(child) == _EXPECTED_HOST_KEEP[backend]
+
+
+@pytest.mark.parametrize("backend", ["pi", "claude"])
+def test_container_sanitised_env_table(backend: str) -> None:
+    sanitized = _sanitize_reviewer_environment(_synthetic_parent(backend), backend=backend)
+    observed = set(sanitized) & (env_policy.declared_names() | _PROBES)
+    assert observed == _EXPECTED_CONTAINER_KEEP[backend]
+
+
+@pytest.mark.parametrize("backend", ["pi", "claude"])
+def test_rendered_job_config_table(backend: str) -> None:
+    job = yaml.safe_load(render_job_config(oracle=False).decode())
+    present = set(job["agents"][0]["env"]) | set(job["verifier"]["env"])
+    assert present & (env_policy.declared_names() | _PROBES) == _EXPECTED_RENDERER_PRESENT
+
 
 def test_task_toml_renderer_derives_its_injected_env_from_the_declaration(
     monkeypatch: pytest.MonkeyPatch,
