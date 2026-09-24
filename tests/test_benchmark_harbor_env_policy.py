@@ -202,7 +202,7 @@ def test_task_toml_renderer_derives_its_injected_env_from_the_declaration(
     )
 
 
-def test_harbour_layers_declare_no_policy_name_literal() -> None:
+def test_harbor_layers_declare_no_policy_name_literal() -> None:
     """No credential or control-plane name remains a bare literal outside the
     declaration (spec M4) — a re-export from env_policy is allowed, a local
     string equal to a policy name is not."""
