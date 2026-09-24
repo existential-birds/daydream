@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Final, cast
 
 MAX_ARTIFACT_BYTES = 1_048_576
@@ -465,32 +465,7 @@ class Reward:
 
     def to_dict(self) -> dict[str, float | int]:
         """Numeric-only dict with exactly the 24 §10 keys."""
-        return {
-            "reward": self.reward,
-            "tp": self.tp,
-            "fp": self.fp,
-            "fn": self.fn,
-            "precision": self.precision,
-            "recall": self.recall,
-            "f1": self.f1,
-            "gold_count": self.gold_count,
-            "candidate_count": self.candidate_count,
-            "clean_task": self.clean_task,
-            "clean_pass": self.clean_pass,
-            "verifier_error": self.verifier_error,
-            "location_exact": self.location_exact,
-            "location_near": self.location_near,
-            "location_file": self.location_file,
-            "location_miss": self.location_miss,
-            "location_credit": self.location_credit,
-            "location_present": self.location_present,
-            "severity_exact": self.severity_exact,
-            "severity_within_1": self.severity_within_1,
-            "severity_mean_distance": self.severity_mean_distance,
-            "severity_credit": self.severity_credit,
-            "severity_pairs": self.severity_pairs,
-            "severity_present": self.severity_present,
-        }
+        return asdict(self)
 
 
 LOCATION_TOLERANCE: Final = 3

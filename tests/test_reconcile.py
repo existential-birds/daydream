@@ -79,14 +79,26 @@ _REST_REVIEWS: list[dict[str, Any]] = [
 ]
 
 
-def _fake_gh_api_two_pages(repo: Any, endpoint: str, **kwargs: Any) -> Any:
-    """Canned gh_api: a two-page GraphQL thread inventory + one REST reviews page."""
-    if endpoint == "graphql":
-        cursor = kwargs["input_data"]["variables"].get("cursor")
-        return _GRAPHQL_PAGE_2 if cursor == "CURSOR_1" else _GRAPHQL_PAGE_1
-    if endpoint.endswith("/pulls/7/reviews"):
-        return _REST_REVIEWS
-    raise AssertionError(f"unexpected gh_api endpoint: {endpoint}")
+def _fake_gh(
+    threads: list[dict[str, Any]],
+    reviews: list[dict[str, Any]],
+    *,
+    pages: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Canned gh_api: GraphQL thread page(s) + one REST reviews page.
+
+    ``pages`` supplies successive GraphQL responses for pagination; otherwise
+    every GraphQL call returns one page containing ``threads``.
+    """
+    def _api(repo: Any, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint == "graphql":
+            if pages is None:
+                return _page(threads)
+            return pages.pop(0) if pages else _page([])
+        if endpoint.endswith("/pulls/7/reviews"):
+            return reviews
+        raise AssertionError(f"unexpected gh_api endpoint: {endpoint}")
+    return _api
 
 
 # --- Tests ------------------------------------------------------------------
@@ -107,7 +119,7 @@ def test_partition_new_matched_stale_and_respects_human_resolution() -> None:
 
 
 def test_fetch_prior_findings_parses_markers_across_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(git_ops, "gh_api", _fake_gh_api_two_pages)  # canned GraphQL + REST pages
+    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([], _REST_REVIEWS, pages=[_GRAPHQL_PAGE_1, _GRAPHQL_PAGE_2]))
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream-bot")
     assert prior["a" * 64].thread_id == "RT_1" and prior["b" * 64].thread_id is None
 
@@ -118,17 +130,10 @@ def test_fetch_prior_findings_ignores_marker_from_non_bot_author(
 ) -> None:
     # A thread whose comment carries the marker but is authored by a human.
     fp = "a" * 64
-    pages = [_page([
+    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([
         _thread("RT_1", comment_node_id="PRRC_1", database_id=101,
                 body=finding_marker(fp), author="evil-attacker"),  # no viewerDidAuthor
-    ])]
-    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
-        if endpoint == "graphql":
-            return pages.pop(0) if pages else _page([])
-        if endpoint.endswith("/pulls/7/reviews"):
-            return []
-        raise AssertionError(endpoint)
-    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    ], []))
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
     assert prior == {}   # forged marker ignored -> not trusted
 
@@ -138,28 +143,20 @@ def test_fetch_prior_findings_ignores_review_marker_from_non_bot_user(
     tmp_path: Path,
 ) -> None:
     fp = "b" * 64
-    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
-        if endpoint == "graphql":
-            return _page([])
-        if endpoint.endswith("/pulls/7/reviews"):
-            return [{"id": 9, "node_id": "PRR_9", "body": finding_marker(fp),
-                     "user": {"login": "evil-attacker"}}]
-        raise AssertionError(endpoint)
-    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([], [
+        {"id": 9, "node_id": "PRR_9", "body": finding_marker(fp),
+         "user": {"login": "evil-attacker"}},
+    ]))
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
     assert prior == {}
 
 
 def test_fetch_prior_findings_trusts_bot_login_match(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fp = "c" * 64
-    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
-        if endpoint == "graphql":
-            return _page([_thread("RT_2", comment_node_id="PRRC_2", database_id=102,
-                                  body=finding_marker(fp), author="daydream[bot]")])
-        if endpoint.endswith("/pulls/7/reviews"):
-            return []
-        raise AssertionError(endpoint)
-    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([
+        _thread("RT_2", comment_node_id="PRRC_2", database_id=102,
+                body=finding_marker(fp), author="daydream[bot]"),
+    ], []))
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
     assert fp in prior and prior[fp].thread_id == "RT_2"
 
@@ -169,14 +166,10 @@ def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(
     tmp_path: Path,
 ) -> None:
     fp = "d" * 64
-    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
-        if endpoint == "graphql":
-            return _page([_thread("RT_3", comment_node_id="PRRC_3", database_id=103,
-                                  body=finding_marker(fp), viewer_did_author=True)])
-        if endpoint.endswith("/pulls/7/reviews"):
-            return []
-        raise AssertionError(endpoint)
-    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([
+        _thread("RT_3", comment_node_id="PRRC_3", database_id=103,
+                body=finding_marker(fp), viewer_did_author=True),
+    ], []))
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None)  # misconfigured
     assert fp in prior   # viewerDidAuthor still proves authorship
 
