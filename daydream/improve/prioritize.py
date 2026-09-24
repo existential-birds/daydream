@@ -18,19 +18,7 @@ _SAME_LOCATION_SIMILARITY = 0.5
 _CROSS_CATEGORY_SIMILARITY = 0.7
 _WORK_PACKAGE_MAX_FINDINGS = 5
 _WORK_PACKAGE_MAX_PATHS = 8
-_IMPACT_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
-_EFFORT_UNITS = {"S": 1, "M": 2, "L": 3}
-_RISK_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
-_CONFIDENCE_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
-_SEVERITY_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
-_CHANGE_SHAPES = {
-    "delete",
-    "reuse",
-    "consolidate",
-    "neutral",
-    "additive",
-    "unknown",
-}
+_AXIS_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _CHANGE_SHAPE_PREFERENCE = {
     "delete": 0,
     "reuse": 1,
@@ -321,13 +309,13 @@ def _merge_work_package(findings: list[dict[str, Any]]) -> dict[str, Any]:
     merged["maintenance_signals"] = sorted({signal for member in members for signal in _maintenance_signals(member)})
     merged["reuse_target"] = _common_reuse_target(members)
     merged["change_shape"] = _combined_change_shape(members)
-    merged["impact"] = _conservative_axis(members, "impact", _IMPACT_ORDER, "LOW")
+    merged["impact"] = _conservative_axis(members, "impact", _AXIS_ORDER, "LOW")
     merged["effort"] = _combined_effort(members)
-    merged["risk"] = _conservative_axis(members, "risk", _RISK_ORDER, "HIGH")
+    merged["risk"] = _conservative_axis(members, "risk", _AXIS_ORDER, "HIGH")
     merged["confidence"] = _conservative_axis(
         members,
         "confidence",
-        _CONFIDENCE_ORDER,
+        _AXIS_ORDER,
         "LOW",
         highest=False,
     )
@@ -341,7 +329,7 @@ def _merge_work_package(findings: list[dict[str, Any]]) -> dict[str, Any]:
         if "severity" in member and (axis := _map_axis_severity(member["severity"])) is not None
     ]
     if severity_values:
-        merged["severity"] = max(severity_values, key=_SEVERITY_ORDER.__getitem__)
+        merged["severity"] = max(severity_values, key=_AXIS_ORDER.__getitem__)
     merged["leverage"] = round(leverage_score(merged), 2)
 
     if len(members) > 1:
@@ -435,7 +423,7 @@ def _combined_change_shape(findings: list[dict[str, Any]]) -> str:
     shapes = {
         shape
         for finding in findings
-        if isinstance((shape := finding.get("change_shape")), str) and shape in _CHANGE_SHAPES
+        if isinstance((shape := finding.get("change_shape")), str) and shape in _CHANGE_SHAPE_PREFERENCE
     }
     if not shapes:
         return "unknown"
@@ -481,7 +469,7 @@ def _conservative_axis(
 
 
 def _combined_effort(findings: list[dict[str, Any]]) -> str:
-    units = sum(_EFFORT_UNITS.get(str(finding.get("effort") or ""), 3) for finding in findings)
+    units = sum(_EFFORT.get(str(finding.get("effort") or ""), 3) for finding in findings)
     if units <= 1:
         return "S"
     return "M" if units <= 3 else "L"

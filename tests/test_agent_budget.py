@@ -113,6 +113,14 @@ def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
     raise AssertionError(f"no agent step carried extra['stop_reason']: {agent_steps}")
 
 
+def _budget_stop(recorder: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Recorded trajectory plus the single ``agent_budget_stop`` metadata."""
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    assert len(stops) == 1
+    return traj, stops[0]["metadata"]
+
+
 async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     """A 200-event burst with tool_call_budget=5 returns under budget, marked aborted."""
     backend = _burst_backend(count=200, sleep_s=0.0)
@@ -249,10 +257,7 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
             )
 
     assert reason == "wall_budget_exceeded"
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    meta = stops[0]["metadata"]
+    traj, meta = _budget_stop(recorder)
     # The deadline is the limit that expired, and the ladder had already flown one
     # retry, so this is a retry-ladder stop: its counters are retry-scoped.
     assert meta["limit_expired"] == "caller_deadline"
@@ -327,14 +332,12 @@ async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
     assert backend.delivered == 3             # 1000->1200->1400->1600: the 4th event is past it
     assert backend.cancel_calls == 0          # sibling isolation: no backend-wide cancel
     assert "partial-output-sentinel-2" in output   # text emitted before expiry survives
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    traj, meta = _budget_stop(recorder)
     assert _agent_step_with_stop_reason(traj)["extra"]["stop_reason"] == "wall_budget_exceeded"
     # The deadline interrupted an in-flight attempt, so the stop record must say
     # its partials were kept -- the two deadline shapes are not interchangeable.
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    assert stops[0]["metadata"]["partial_edit_handling"] == "kept"
-    assert stops[0]["metadata"]["retry_stop_reason"] is None
+    assert meta["partial_edit_handling"] == "kept"
+    assert meta["retry_stop_reason"] is None
 
 
 async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
@@ -590,10 +593,7 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
 
     assert reason == "wall_budget_exceeded"
     assert backend.call_count == 2
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    meta = stops[0]["metadata"]
+    traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
     assert meta["limit_expired"] == "caller_deadline"
     # Retry-scoped counters: the one dispatched retry and its 300 s of backend
@@ -638,10 +638,7 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
 
     assert reason == "wall_budget_exceeded"
     assert backend.call_count == 1                  # the retry never got to dispatch
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    meta = stops[0]["metadata"]
+    traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
     assert meta["attempts"] == 0               # no retry attempt was dispatched
     assert meta["backend_s"] == 0.0
@@ -674,10 +671,7 @@ async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
                 )
 
     assert backend.call_count == 1
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    meta = stops[0]["metadata"]
+    traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == "retry_recovery_allowance_exhausted"
     assert meta["attempts"] == 0
     assert meta["backend_s"] == 0.0 and meta["backoff_s"] == 0.0
@@ -747,10 +741,7 @@ async def test_every_ladder_ending_records_one_budget_stop(
                     run_context=run_context,
                 )
 
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    meta = stops[0]["metadata"]
+    traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == expected_stop
     assert meta["partial_edit_handling"] == expected_partial
     assert meta["circuit_state"] in {"closed", "open", "half_open"}
@@ -839,10 +830,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
                     run_context=run_context,
                 )
 
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
-    assert len(stops) == 1
-    meta = stops[0]["metadata"]
+    traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == "retry_attempts_exhausted"
     # The half-open grant survives its own dispatch: the probe is still outstanding,
     # so the state reported at the next stop is the probe's, not a re-opened circuit.
@@ -865,14 +853,8 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
                     run_context=run_context,
                 )
 
-    sibling_stops = [
-        e
-        for e in json.loads(sibling_recorder.path.read_text(encoding="utf-8"))["extra"][
-            "phase_events"
-        ]
-        if e["event"] == "agent_budget_stop"
-    ]
-    assert sibling_stops[0]["metadata"]["retry_stop_reason"] == "circuit_open"
+    _sibling_traj, sibling_meta = _budget_stop(sibling_recorder)
+    assert sibling_meta["retry_stop_reason"] == "circuit_open"
     assert sibling.call_count == 1  # suppressed before its own probe could dispatch
 
 

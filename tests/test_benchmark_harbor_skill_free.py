@@ -211,36 +211,24 @@ def _seed_host_ws(tmp_path: Path, reviewer_hosts: list[str]) -> Path:
     return ws
 
 
-def test_host_preflight_accepts_allowlisted_claude_proxy_without_pi_var(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("reviewer_hosts", "blocked"),
+    [
+        pytest.param(["claude-proxy.internal"], False, id="allowlisted"),
+        pytest.param(["review.example"], True, id="non-allowlisted"),
+    ],
+)
+def test_host_preflight_resolves_claude_proxy_against_reviewer_allowlist(
+    tmp_path: Path, reviewer_hosts: list[str], blocked: bool
 ) -> None:
     # A claude reviewer whose ANTHROPIC_BASE_URL is in the compiled reviewer
     # allowed_hosts passes preflight with no pi-era DAYDREAM_REVIEW_BASE_URL
     # set (regression: "cannot resolve reviewer host: missing
-    # DAYDREAM_REVIEW_BASE_URL" blocked the documented claude surface).
-
-    ws = _seed_host_ws(tmp_path, ["claude-proxy.internal"])
-
-    def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
-        return pkg.DockerNetworkPolicyCapability(supported=True)
-
-    errs = run_mod._preflight(ws, oracle=True, env={
-        "DAYDREAM_REVIEW_BACKEND": "claude",
-        "DAYDREAM_REVIEW_CASE_ID": "case-parser-proxy",
-        "ANTHROPIC_API_KEY": "sk-ant",
-        "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
-        "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9",
-    }, docker_ok=_docker_ok)
-    assert not any("reviewer host" in e for e in errs)
-    assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
-
-
-def test_host_preflight_blocks_non_allowlisted_claude_proxy(tmp_path: Path) -> None:
-    # A proxy ANTHROPIC_BASE_URL outside the compiled reviewer allowed_hosts
-    # must be rejected host-side, before any paid review starts (previously it
-    # passed setup+preflight and failed only in-container at the SDK call).
-
-    ws = _seed_host_ws(tmp_path, ["review.example"])
+    # DAYDREAM_REVIEW_BASE_URL" blocked the documented claude surface). A
+    # proxy outside that allowlist must be rejected host-side, before any paid
+    # review starts (previously it passed setup+preflight and failed only
+    # in-container at the SDK call).
+    ws = _seed_host_ws(tmp_path, reviewer_hosts)
 
     def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
         return pkg.DockerNetworkPolicyCapability(supported=True)
@@ -253,7 +241,10 @@ def test_host_preflight_blocks_non_allowlisted_claude_proxy(tmp_path: Path) -> N
         "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9",
     }, docker_ok=_docker_ok)
     reviewer_errs = [e for e in errs if "reviewer host" in e]
-    assert any("claude-proxy.internal" in e for e in reviewer_errs)
+    if blocked:
+        assert any("claude-proxy.internal" in e for e in reviewer_errs)
+    else:
+        assert not reviewer_errs
     assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
 
 

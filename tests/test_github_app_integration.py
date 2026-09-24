@@ -42,12 +42,30 @@ def _minimal_backend() -> ScriptedBackend:
 
     return ScriptedBackend(responder=respond, model="mock")
 
+
+@pytest.fixture(autouse=True)
+def _fake_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: _minimal_backend())
+
+
+def _app_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv(
+        "DAYDREAM_APP_PRIVATE_KEY",
+        "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----",
+    )
+
+
+def _no_app_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+
 async def test_app_identity_shown_and_token_injected(
     feature_branch_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+    _app_creds(monkeypatch)
 
     # ``pr_repo`` supplies owner/repo so installation-token minting resolves
     # without a real git remote (the temp repo has none).
@@ -65,8 +83,7 @@ async def test_app_identity_shown_and_token_injected(
     with patch("daydream.github_app._mint_installation_token",
                return_value=SimpleNamespace(
                    token="ghs_injected", identity="my-app[bot]", expires_at=float("inf")
-               )) as mock_mint, \
-         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
+               )) as mock_mint:
         exit_code = await run(config)
 
     out = rec.export_text()
@@ -81,15 +98,13 @@ async def test_fallback_identity_without_app_creds(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    _no_app_creds(monkeypatch)
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
                        output_mode="review", shallow=True, stack="python", quiet=False)
 
     with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
-         patch("daydream.github_app._mint_installation_token") as mock_mint, \
-         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
+         patch("daydream.github_app._mint_installation_token") as mock_mint:
         exit_code = await run(config)
 
     out = capsys.readouterr().out
@@ -104,8 +119,7 @@ async def test_fallback_run_cannot_replace_an_existing_session_auth(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    _no_app_creds(monkeypatch)
 
     existing_auth = git_ops.StaticGitHubAuth(
         {"GH_TOKEN": "ghs_existing_session_1234567890"}
@@ -114,8 +128,7 @@ async def test_fallback_run_cannot_replace_an_existing_session_auth(
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
                        output_mode="review", shallow=True, stack="python", quiet=False)
 
-    with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
-         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
+    with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"):
         exit_code = await run(config)
 
     out = capsys.readouterr().out
@@ -132,8 +145,7 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+    _app_creds(monkeypatch)
 
     # Posting mode (--comment) with no pr_repo and no resolvable remote: the
     # run must abort rather than let gh fall back to ambient auth.
@@ -141,8 +153,7 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
                        output_mode="comment", shallow=True, stack="python", quiet=False)
 
     with patch("daydream.git_ops.gh_repo_view", return_value=None), \
-         patch("daydream.github_app._mint_installation_token") as mock_mint, \
-         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
+         patch("daydream.github_app._mint_installation_token") as mock_mint:
         exit_code = await run(config)
 
     out = capsys.readouterr().out
@@ -156,16 +167,14 @@ async def test_minting_failure_aborts_run(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+    _app_creds(monkeypatch)
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
                        output_mode="comment", shallow=True, stack="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
     with patch("daydream.github_app._mint_installation_token",
-               side_effect=ValueError("no App installation found for owner 'myorg'")), \
-         patch("daydream.runner.create_backend", return_value=_minimal_backend()):
+               side_effect=ValueError("no App installation found for owner 'myorg'")):
         exit_code = await run(config)
 
     out = capsys.readouterr().out

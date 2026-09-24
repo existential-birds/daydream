@@ -13,7 +13,6 @@ from unittest.mock import patch
 import jwt as pyjwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import git_ops, github_app
 from daydream.github_app import (
@@ -29,6 +28,7 @@ from daydream.github_app import (
     resolve_user_identity,
 )
 from tests.harness.fake_gh import block_real_gh
+from tests.harness.rsa import generate_rsa_pem
 
 
 @pytest.fixture(autouse=True)
@@ -338,15 +338,11 @@ def test_session_dtos_hide_and_ignore_execution_credentials() -> None:
 
 
 def test_mint_jwt_is_rs256_with_expected_claims() -> None:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
+    pem = generate_rsa_pem()
+    private_key = serialization.load_pem_private_key(pem.encode(), password=None)
 
     token = mint_jwt(12345, pem)
-    decoded = pyjwt.decode(token, key.public_key(), algorithms=["RS256"])
+    decoded = pyjwt.decode(token, private_key.public_key(), algorithms=["RS256"])
     assert decoded["iss"] == "12345" or decoded["iss"] == 12345
     assert decoded["exp"] - decoded["iat"] <= 600
 
@@ -370,17 +366,8 @@ def test_build_app_jwt_auth_uses_static_sanitized_environment() -> None:
     assert headers == {"Authorization": f"Bearer {environment['GH_TOKEN']}"}
 
 
-def _real_pem() -> str:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    return key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
-
-
 def test_mint_installation_token_happy_path() -> None:
-    pem = _real_pem()
+    pem = generate_rsa_pem()
     calls = []
 
     def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
@@ -409,7 +396,7 @@ def test_mint_installation_token_happy_path() -> None:
 
 def test_mint_installation_token_missing_app_slug_yields_unknown_identity() -> None:
     """A missing/empty app_slug is cosmetic: the mint succeeds, identity is 'unknown'."""
-    pem = _real_pem()
+    pem = generate_rsa_pem()
 
     def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
         if "access_tokens" in endpoint:
@@ -424,7 +411,7 @@ def test_mint_installation_token_missing_app_slug_yields_unknown_identity() -> N
 
 
 def test_mint_installation_token_no_matching_installation() -> None:
-    pem = _real_pem()
+    pem = generate_rsa_pem()
 
     with patch("daydream.git_ops.gh_api", return_value=[{"id": 1, "account": {"login": "other"}}]):
         with pytest.raises(ValueError, match="installation"):
@@ -433,7 +420,7 @@ def test_mint_installation_token_no_matching_installation() -> None:
 
 def test_mint_installation_token_wraps_gh_api_failure() -> None:
     """A gh api failure (GitError) surfaces as the module's ValueError abort channel."""
-    pem = _real_pem()
+    pem = generate_rsa_pem()
 
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
         with pytest.raises(ValueError, match="failed to list App installations"):
@@ -442,7 +429,7 @@ def test_mint_installation_token_wraps_gh_api_failure() -> None:
 
 def test_mint_installation_token_uses_one_explicit_jwt_auth() -> None:
     """Both App calls use one static JWT auth without ambient state."""
-    pem = _real_pem()
+    pem = generate_rsa_pem()
     seen_auth: list[Any] = []
 
     def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
@@ -578,7 +565,7 @@ def test_resolve_user_identity_returns_unknown_on_failure(tmp_path: Path) -> Non
         assert resolve_user_identity(tmp_path) == "unknown"
 
 
-_TEST_PEM = _real_pem()
+_TEST_PEM = generate_rsa_pem()
 
 
 def test_exchange_manifest_code_returns_credentials_and_slug() -> None:

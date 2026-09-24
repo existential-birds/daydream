@@ -1,5 +1,4 @@
 """Tests for the projection share-cap stage and its build wiring."""
-import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -14,6 +13,7 @@ from tests.test_corpus_projection import (
     _admit_second_batch,
     _cfg,
     _policy_file,
+    _write_ann_sumsums,
     _write_annotations_snapshot,
     _write_bundle,
 )
@@ -312,13 +312,7 @@ class TestBuildWiring:
         rows[-1]["profile"]["profile_name"] = "quick-review"
         snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
         ann_dir = snap.parent
-        rel = sorted(
-            p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
-            if p.is_file() and p.name != "SHA256SUMS"
-        )
-        (ann_dir / "SHA256SUMS").write_text("".join(
-            f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-        ))
+        _write_ann_sumsums(ann_dir)
 
         out = tmp_path / "out"
         summary = build_frozen_corpus(self._share_cfg(
@@ -412,13 +406,7 @@ class TestCliShareFlags:
             row["profile"]["profile_name"] = "quick-review"
         snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
         ann_dir = snap.parent
-        rel = sorted(
-            p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
-            if p.is_file() and p.name != "SHA256SUMS"
-        )
-        (ann_dir / "SHA256SUMS").write_text("".join(
-            f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-        ))
+        _write_ann_sumsums(ann_dir)
         return [
             "--bundle-root", str(bundle_dir),
             "--annotation-bundle-root", str(snap.parent),

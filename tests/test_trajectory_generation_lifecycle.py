@@ -85,6 +85,14 @@ def _end_event(
     )
 
 
+def _seal_generations(inv: Invocation, count: int) -> None:
+    """Start and seal ``count`` complete generations with deterministic ids."""
+    for i in range(count):
+        gid = f"g{i:04d}"
+        inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
+        inv.observe(_end_event(generation_id=gid))
+
+
 def _sealed_invocation(
     tmp_path: Path,
     *,
@@ -357,10 +365,7 @@ class TestPendingBounds:
     def test_draft_count_cap_drains_with_fixed_count_only_diagnostic(self, tmp_path: Path) -> None:
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
-        for i in range(512):
-            gid = f"g{i:04d}"
-            inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
-            inv.observe(_end_event(generation_id=gid))
+        _seal_generations(inv, 512)
         assert _summary(inv)["drafts"][-1]["ended"] is False  # cap not yet hit
         # 513th seal trips the cap: everything drains immediately.
         inv.observe(GenerationStartEvent(generation_id="g512", observed_at_unix_ns=1_000))
@@ -410,10 +415,7 @@ class TestUnbilledOrNoneCapOwner:
     def test_cap_drain_with_later_authoritative_total_locks_structural(self, tmp_path: Path) -> None:
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
-        for i in range(513):
-            gid = f"g{i:04d}"
-            inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
-            inv.observe(_end_event(generation_id=gid))
+        _seal_generations(inv, 513)
         _total(recorder, inv, input_tokens=1, output_tokens=1)
         inv.finish()
         assert _summary(inv)["billing_owner"] == "structural_attempt"
@@ -452,10 +454,7 @@ class TestUnbilledOrNoneCapOwner:
     def test_cap_drain_without_total_owner_none(self, tmp_path: Path) -> None:
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
-        for i in range(513):
-            gid = f"g{i:04d}"
-            inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
-            inv.observe(_end_event(generation_id=gid))
+        _seal_generations(inv, 513)
         inv.finish()
         assert _summary(inv)["billing_owner"] == "none"
 
