@@ -1,6 +1,7 @@
 """Policy declarations and per-layer consumption for the harbor env policy."""
 
 import ast
+import re
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -11,7 +12,7 @@ import yaml
 from daydream.benchmark.harbor import agent, entrypoint, env_policy, package
 from daydream.benchmark.harbor.agent import build_child_env
 from daydream.benchmark.harbor.entrypoint import _sanitize_reviewer_environment
-from daydream.benchmark.harbor.package import render_job_config, render_task_toml
+from daydream.benchmark.harbor.package import render_job_config, render_task_toml, template_text
 
 _PROBES = frozenset({"OPENAI_API_KEY", "DAYDREAM_UNRELATED_PROBE"})
 
@@ -83,6 +84,72 @@ _EXPECTED_DROPPED_EVERYWHERE = frozenset({
     "NOUS_API_KEY", "DAYDREAM_SKILLS_DIR", "DAYDREAM_JUDGE_ALLOWED_HOSTS",
     "DAYDREAM_JUDGE_ARTIFACT_PATH", "DAYDREAM_JUDGE_OUT_PATH",
 })
+
+
+def test_renderer_anthropic_placeholders_equal_the_claude_keep_set() -> None:
+    """M7(a): rendered agent env and host Claude exemptions must agree."""
+    env = yaml.safe_load(render_job_config(oracle=False).decode())["agents"][0]["env"]
+    assert {k for k in env if k.startswith(env_policy.CLAUDE_KEEP_PREFIX)} == set(
+        env_policy.HOST.claude_keep_vars
+    )
+
+
+def test_every_rendered_reviewer_placeholder_is_a_declared_operator_channel_name() -> None:
+    """M7(b): the renderer emits exactly the operator-supplied reviewer names."""
+    env = yaml.safe_load(render_job_config(oracle=False).decode())["agents"][0]["env"]
+    operator_names = {
+        n for n, provenance in env_policy.REVIEWER_CONTROL_PLANE.items() if provenance == "operator"
+    }
+    assert operator_names <= set(env)
+    assert {n for n in env if n in env_policy.REVIEWER_CONTROL_PLANE} == operator_names
+
+
+def test_judge_asset_declared_names_are_owned_by_the_judge_channel() -> None:
+    """M7(c): compare the packaged judge asset's names with its policy channel."""
+    text = template_text("tests/score_review.py")
+    declared = set(re.findall(r'^_[A-Za-z_]+ = "([A-Z][A-Z0-9_]*)"', text, re.M))
+    assert declared == {
+        "DAYDREAM_JUDGE_PROVIDER", "DAYDREAM_JUDGE_MODEL", "DAYDREAM_JUDGE_API_KEY",
+        "DAYDREAM_JUDGE_BASE_URL", "DAYDREAM_JUDGE_ALLOWED_HOSTS",
+        "DAYDREAM_JUDGE_ARTIFACT_PATH", "DAYDREAM_JUDGE_OUT_PATH", "CLAUDE_CODE_OAUTH_TOKEN",
+    }
+    assert declared <= set(env_policy.JUDGE.renderer_emitted) | env_policy.JUDGE.host_supplied
+    assert declared - set(env_policy.JUDGE.renderer_emitted) == env_policy.JUDGE.host_supplied
+
+
+@pytest.mark.parametrize("prefix", sorted(env_policy.HOST.banned_prefixes))
+def test_host_builder_denies_each_declared_banned_prefix(prefix: str) -> None:
+    """M7(d): each host deny prefix is enforced by its consumer."""
+    child = build_child_env({"PATH": "/usr/bin", f"{prefix}PROBE": "secret"}, backend="pi")
+    assert f"{prefix}PROBE" not in child
+
+
+@pytest.mark.parametrize("prefix", sorted(env_policy.CONTAINER.scrub_prefixes))
+def test_container_scrub_denies_each_declared_prefix(prefix: str) -> None:
+    sanitized = _sanitize_reviewer_environment(
+        _synthetic_parent("pi") | {f"{prefix}PROBE": "secret"}, backend="pi"
+    )
+    assert f"{prefix}PROBE" not in sanitized
+
+
+def test_claude_exemption_is_exactly_the_declared_exempt_set() -> None:
+    """Undeclared Anthropic names are scrubbed even in Claude mode."""
+    parent = {
+        "PATH": "/usr/bin",
+        "ANTHROPIC_PROBE": "leak",
+        "ANTHROPIC_API_KEY": "k",
+        "ANTHROPIC_AUTH_TOKEN": "t",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    }
+    claude = build_child_env(parent, backend="claude")
+    assert set(claude) - {"PATH"} == set(env_policy.HOST.claude_keep_vars)
+    assert not [k for k in build_child_env(parent, backend="pi") if k.startswith("ANTHROPIC_")]
+
+
+def test_oracle_render_path_applies_no_policy_view() -> None:
+    """S3: the oracle path remains env-free."""
+    oracle = yaml.safe_load(render_job_config(oracle=True).decode())
+    assert oracle["agents"] == [{"name": "oracle"}]
 
 
 def test_every_declared_name_has_a_recorded_outcome() -> None:
