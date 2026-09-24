@@ -19,7 +19,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from daydream.training import labeler_versions
-from daydream.training.backfill_cache import CACHE_TTL_SECONDS, BackfillCache
+from daydream.training.backfill_cache import CACHE_TTL_SECONDS, BackfillCache, GHApiFn
+
+
+def _counting_gh(calls: list[tuple[str, str]]) -> GHApiFn:
+    def real_gh(repo: str, endpoint: str, **kwargs: object) -> dict[str, object]:
+        calls.append((repo, endpoint))
+        return {"merged": True, "n": len(calls)}
+
+    return real_gh
 
 
 def test_cache_refetches_stale_response(tmp_path: Path) -> None:
@@ -31,11 +39,7 @@ def test_cache_refetches_stale_response(tmp_path: Path) -> None:
     """
     calls: list[tuple[str, str]] = []
 
-    def real_gh(repo: str, endpoint: str, **kwargs: object) -> dict[str, object]:
-        calls.append((repo, endpoint))
-        return {"merged": True, "n": len(calls)}
-
-    cache = BackfillCache(cache_dir=tmp_path, inner=real_gh)
+    cache = BackfillCache(cache_dir=tmp_path, inner=_counting_gh(calls))
     first = cache("org/repo", "repos/org/repo/pulls/42")
     assert first == {"merged": True, "n": 1}
     assert calls == [("org/repo", "repos/org/repo/pulls/42")]
@@ -52,11 +56,7 @@ def test_cache_refetches_stale_response(tmp_path: Path) -> None:
 def test_cache_returns_cached_response_on_second_call(tmp_path: Path) -> None:
     calls: list[tuple[str, str]] = []
 
-    def real_gh(repo: str, endpoint: str, **kwargs: object) -> dict[str, object]:
-        calls.append((repo, endpoint))
-        return {"merged": True, "n": len(calls)}
-
-    cache = BackfillCache(cache_dir=tmp_path, inner=real_gh)
+    cache = BackfillCache(cache_dir=tmp_path, inner=_counting_gh(calls))
     first = cache("org/repo", "repos/org/repo/pulls/42")
     second = cache("org/repo", "repos/org/repo/pulls/42")
     assert first == second == {"merged": True, "n": 1}

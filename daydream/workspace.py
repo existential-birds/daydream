@@ -605,10 +605,6 @@ def _retire_legacy_operational_worktrees(
             if not stat.S_ISDIR(metadata.st_mode):
                 # A plain file cannot be a registered git worktree, so it is
                 # provable residue regardless of name.
-                _logger.warning(
-                    "retiring unrecognized legacy operational entry %s",
-                    entry,
-                )
                 actions.append(("retire-entry", entry, None))
                 continue
             # Real directory: probe FIRST, before trusting the name pattern.

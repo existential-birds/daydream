@@ -23,6 +23,8 @@ import os
 import sys
 from pathlib import Path
 
+from daydream import git_ops
+
 
 def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
@@ -490,7 +492,6 @@ def _handle_benchmark_curate(args: argparse.Namespace) -> int:
     """
     from pydantic import ValidationError
 
-    from daydream import git_ops
     from daydream.benchmark import curation as cu
     from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import anyio
 from rich.markup import escape as escape_markup
 
+from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import artifact_dir_for, review_output_path_for
 from daydream.config import (
@@ -160,8 +161,6 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     if not decision:
         print_success(console, f"Report written to {deep_state.merged_report}. Exiting.")
         return Stop(0)
-
-    from daydream import git_ops
 
     # A rejected index preflight must preserve prior artifacts as well as
     # source bytes. Only an admitted run may start a new evidence session.
@@ -783,8 +782,6 @@ def _fix_cycle_state(ctx: FlowContext) -> FixCycleState:
 
 
 def _capture_full_delta_key(work: WorkContext, state: FixCycleState) -> str:
-    from daydream import git_ops
-
     return git_ops.tree_key(
         git_ops.snapshot_worktree_delta(
             work.repo,
@@ -806,8 +803,6 @@ def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTr
     names them; authorization cannot silently enroll that private draft in a
     commit. New related files created after the gate are still retained.
     """
-    from daydream import git_ops
-
     changed = set(git_ops.changed_paths_z(work.repo, state.stable_head))
     paths = frozenset(
         (changed & set(state.footprint.run_allowed_paths)) - set(state.preexisting_untracked)
@@ -908,8 +903,6 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
 
 def _round_rollback_snapshot(state: FixCycleState, work: WorkContext) -> WorktreeRollbackSnapshot:
     """Capture one exact rollback point for all authorized group paths."""
-    from daydream import git_ops
-
     return WorktreeRollbackSnapshot(
         ref=state.stable_ref,
         index=git_ops.snapshot_index(work.repo),
@@ -931,7 +924,6 @@ def _strict_scope_and_scrub(
 ) -> bool:
     """Apply the run-wide guard and quote scrub, returning whether bytes changed."""
     deep_state = DeepState(ctx.data)
-    from daydream import git_ops
 
     before = _capture_full_delta_key(ctx.work, state)
     generated_restores: list[str] = []
@@ -1166,8 +1158,6 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
     except Exception as exc:
         return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failure audit failed", str(exc))
     if exception_failures:
-        from daydream import git_ops
-
         confinement_error = _enforce_terminal_confinement(
             ctx,
             state,
@@ -1749,7 +1739,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
 
 def _resolve_remote_ci_target(ctx: FlowContext, receipt: PushReceipt) -> RemoteCITarget:
     """Bind the pushed repository/ref to one configured P04 pull request."""
-    from daydream import git_ops, pr_review
+    from daydream import pr_review
     from daydream.remote_ci import RemoteCITarget
 
     configured_repo = ctx.config.pr_repo

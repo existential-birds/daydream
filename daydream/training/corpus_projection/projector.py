@@ -885,9 +885,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     # under ``emit_process_traces`` — removed from the exclusion count.
     materialized_adjudications: set[tuple[str, str]] = set()
     exclusions_by_reason: dict[str, int] = {}
-    # lineage valid_at is pinned over the emitted records' evidence only —
-    # annotation rows for sessions never admitted/emitted must not drift it.
-    valid_at = config.as_of
     for batch in bundle.admitted:
         if batch.manifest_relpath is not None:
             manifest_path = config.bundle_dir / batch.manifest_relpath
@@ -992,11 +989,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                         rec_valid_at = _max_valid_at(
                             cast(list[Record], rec["evidence"]), config.as_of
                         )
-                        if rec_valid_at is not None and (
-                            valid_at is None
-                            or datetime.fromisoformat(rec_valid_at) > datetime.fromisoformat(valid_at)
-                        ):
-                            valid_at = rec_valid_at
                         rec["profile"] = prov["profile"]
                         rec["stack"] = prov["stack"]
                         rec["lineage"] = {

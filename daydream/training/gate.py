@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -135,15 +135,7 @@ class GateReport:
     held_out_rows: int
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "passed": self.passed,
-            "separation": self.separation,
-            "calibration": self.calibration,
-            "accepted_ratio": self.accepted_ratio,
-            "evidence_digest": self.evidence_digest,
-            "thresholds": dict(self.thresholds),
-            "held_out_rows": self.held_out_rows,
-        }
+        return asdict(self)
 
 
 def _split_digest(held_out_ids: list[str], seed: int) -> str:

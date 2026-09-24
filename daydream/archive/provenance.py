@@ -18,7 +18,7 @@ Exports:
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import daydream
@@ -50,13 +50,7 @@ class ExecutableProvenance:
 
     def to_dict(self) -> dict[str, str | bool]:
         """Return exactly the five provenance fields (unknowns as strings)."""
-        return {
-            "version": self.version,
-            "install_source": self.install_source,
-            "commit": self.commit,
-            "dirty": self.dirty,
-            "container_digest": self.container_digest,
-        }
+        return asdict(self)
 
 
 def _resolve_install_source() -> str:

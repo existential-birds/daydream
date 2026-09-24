@@ -476,16 +476,14 @@ async def _run_lifecycle_flow(
     install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
     backend: object,
-    events: list[AgentEvent],
     body: str | None = None,
 ) -> TraceCollector:
     """One real runner.run() over a scripted backend, returning the collector."""
     _flow(ext_dir, body=body) if body is not None else _flow(ext_dir)
     install_backend(backend)
     with otlp_collector() as collector:
-        _config(make_config, repo, collector.base_url, monkeypatch)
-        assert await runner.run(make_config(repo, flow_name="trace-failures",
-                                            observability=ObservabilityConfig(destinations=("otlp",)))) == 0
+        config = _config(make_config, repo, collector.base_url, monkeypatch)
+        assert await runner.run(config) == 0
     return collector
 
 
@@ -528,7 +526,7 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     """
     backend = _ExactAllocationBackend()
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend, []
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "generation_children"
@@ -590,7 +588,7 @@ async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
     """
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _LateMissingMetricsBackend(), [],
+        _LateMissingMetricsBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "structural_attempt"
@@ -639,7 +637,7 @@ async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
     """
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _DuplicateMetricsBackend(), [],
+        _DuplicateMetricsBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "none"
@@ -682,7 +680,7 @@ async def test_runner_duplicate_identical_totals_are_idempotent(
 ) -> None:
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _DuplicateIdempotentBackend(), [],
+        _DuplicateIdempotentBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "generation_children"
@@ -722,7 +720,7 @@ async def test_runner_residual_unallocated_total_folds_onto_chain(
     """
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _ResidualTotalBackend(), [],
+        _ResidualTotalBackend(),
     )
     attempt = _kind(collector.spans, "attempt")[0]
     meta = attributes(attempt)
@@ -766,7 +764,7 @@ async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
     """
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _ToolErrorAfterSealBackend(), [],
+        _ToolErrorAfterSealBackend(),
     )
     spans = collector.spans
     tool = _kind(spans, "tool")[0]
@@ -814,7 +812,7 @@ async def test_runner_pending_count_cap_drains_children_stay_unbilled(
     """
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _PendingCapBackend(), [],
+        _PendingCapBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "structural_attempt"
@@ -862,7 +860,7 @@ async def test_runner_resume_native_conversation_distinct_from_daydream_session(
         ],
     )
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend, [],
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend,
         body="""
 first_output, continuation, _ = await run_agent(
     ctx.backend_for("review"), ctx.work.repo, "original logical prompt",

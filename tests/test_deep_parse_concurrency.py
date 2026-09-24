@@ -18,11 +18,6 @@ from daydream.runner import RunConfig, run
 from tests.harness.stub_backend import install_stub_backend
 
 
-async def _run_deep(target: Path) -> int:
-
-    return await run(RunConfig(target=str(target), cleanup=False))
-
-
 async def test_shard_names_flow_through_parse_and_sort_deterministically(
     shard_many_python_target: Path,
     monkeypatch: pytest.MonkeyPatch,

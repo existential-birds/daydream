@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 import yaml
 
+from daydream.json_utils import _fsync_directory as _fsync_dir
 from daydream.json_utils import atomic_write_bytes
 
 
@@ -234,7 +235,6 @@ class _TargetState:
     original_existed: bool
     before_digest: str | None
     after_digest: str | None
-    applied: bool = False
 
 
 class Transaction:
@@ -442,7 +442,6 @@ class Transaction:
         rel = _resolve_target(self._root, rel)
         target = self._root / rel
         ensure_private_dir(target.parent)
-        st.applied = True
         self._applied_count += 1
         self._write_journal()
         _fsync_file(self._journal_path())
@@ -508,14 +507,6 @@ class Transaction:
 def _fsync_file(path: Path) -> None:
     with open(path, "rb", buffering=0) as f:
         os.fsync(f.fileno())
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 @lru_cache(maxsize=None)

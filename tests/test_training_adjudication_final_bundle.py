@@ -153,9 +153,7 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
         index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out,
         observations_path=obs_path,
     )
-    for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                 "coverage-report.json", "lineage.json", "preview-manifest.json",
-                 "policy-binding.json"):
+    for name in FINAL_IDENTITY_FILES:
         assert (out / name).is_file(), name
     lineage = json.loads((out / "lineage.json").read_text())
     assert lineage["curation_id"] == pin["curation_id"]
@@ -205,9 +203,7 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
     assert ".publish-stage" not in summary["files"]
     assert final_snapshot_id(out) == original_identity
     assert (stage / "annotations.jsonl").read_text() == "stale-stage"
-    for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                 "coverage-report.json", "lineage.json", "preview-manifest.json",
-                 "policy-binding.json"):
+    for name in FINAL_IDENTITY_FILES:
         assert (out / name).is_file(), name
 
 
@@ -262,9 +258,7 @@ def test_build_final_bundle_is_byte_identical_on_re_run(tmp_path: Path) -> None:
     build_final_bundle(
         index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out_two
     )
-    for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                 "coverage-report.json", "lineage.json", "preview-manifest.json",
-                 "policy-binding.json"):
+    for name in FINAL_IDENTITY_FILES:
         assert (out_one / name).read_bytes() == (out_two / name).read_bytes(), name
 
 

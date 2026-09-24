@@ -298,10 +298,7 @@ def _fake_gh_reviews() -> Any:
         ],
     }
 
-    def responder(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
-        return responses[(repo, endpoint)]
-
-    return responder
+    return _fake_gh_responder(responses)
 
 
 def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> None:

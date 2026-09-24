@@ -226,16 +226,6 @@ def _read_review_output(run_dir: Path) -> str | None:
     return None
 
 
-def _read_review_output_length(run_dir: Path) -> int | None:
-    """Return the review-output char count, or ``None`` when absent.
-
-    Delegates to :func:`_read_review_output`; see that function for the
-    fallback order and error semantics.
-    """
-    text = _read_review_output(run_dir)
-    return len(text) if text is not None else None
-
-
 def assemble_scoring_inputs(run_dir: Path, row: Mapping[str, Any]) -> ScoringInputs:
     """Reduce one run's bronze artifacts to intrinsic :class:`ScoringInputs`.
 
@@ -289,11 +279,12 @@ def assemble_scoring_inputs(run_dir: Path, row: Mapping[str, Any]) -> ScoringInp
             except json.JSONDecodeError:
                 format_valid = False
 
+    review_text = _read_review_output(run_dir)
     return ScoringInputs(
         verifier_verdicts=verifier_verdicts,
         grounding_rate=row.get("grounding_rate"),
         format_valid=format_valid,
-        length=_read_review_output_length(run_dir),
+        length=len(review_text) if review_text is not None else None,
     )
 
 

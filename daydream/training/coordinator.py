@@ -52,7 +52,7 @@ from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests,
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
-from daydream.training.stacks import V2Projection, load_v2_projection, recompute_split_from_record_id
+from daydream.training.stacks import V2Projection, load_v2_projection
 from daydream.trajectory import RUNS_DIRNAME
 
 __all__ = ["PipelineConfig", "run_pipeline"]
@@ -439,12 +439,11 @@ def _frozen_split_from_projection(
     boundary instead of re-freezing at runtime.
 
     The projection was split deterministically at build time
-    (``lineage.split`` per record, drift-gated by the loader). Stage 0 maps
-    that three-way boundary onto its two-way partition — train+validation
-    rows train, holdout rows evaluate — and verifies the boundary fail-closed:
-    every gold record's recorded ``lineage.split`` must match the split
-    recomputed from its record id under the lineage's pinned salt/rates, the
-    same recompute comparison the loader enforces.
+    (``lineage.split`` per record); :func:`load_v2_projection` already
+    drift-gates every record's recorded split against the id-recomputed
+    value, so Stage 0 trusts that boundary. It maps the three-way partition
+    onto its two-way form — train+validation rows train, holdout rows
+    evaluate.
 
     The split digest is the same content address :func:`freeze_split` emits
     (SHA-256 over the sorted held-out comment ids plus the seed), and the
@@ -457,8 +456,7 @@ def _frozen_split_from_projection(
     contract ("the fraction that determined the partition size").
 
     Raises:
-        RuntimeError: On boundary drift (recorded vs recomputed split) or a
-            holdout side with no gold outcome rows.
+        RuntimeError: When the holdout side has no gold outcome rows.
     """
     train = _outcome_rows(
         [*projection.by_split["train"], *projection.by_split["validation"]],
@@ -470,24 +468,7 @@ def _frozen_split_from_projection(
             "stage0 refused: the projection frozen split has no gold outcome rows in "
             "its holdout split; the gate would evaluate against nothing and refuses closed"
         )
-    salt = str(projection.lineage["salt"])
     holdout_rate = float(cast(float, projection.lineage["holdout_rate"]))
-    val_rate = float(cast(float, projection.lineage["val_rate"]))
-    for rec in projection.records:
-        lineage_obj = rec.get("lineage")
-        recorded = lineage_obj.get("split") if isinstance(lineage_obj, dict) else None
-        recomputed = recompute_split_from_record_id(
-            str(rec.get("record_id", "")),
-            salt=salt,
-            holdout_rate=holdout_rate,
-            val_rate=val_rate,
-        )
-        if recorded != recomputed:
-            raise RuntimeError(
-                f"stage0 refused: projection record {rec.get('record_id')!r} boundary "
-                f"drift — recorded split {recorded!r} != recomputed {recomputed!r}; "
-                "the frozen split is not trusted over recomputation"
-            )
     held_out_ids = [str(r["comment_id"]) for r in held_out]
     digest = gate_mod._split_digest(held_out_ids, seed)
     digest_path = gate_mod.write_split_sidecar(

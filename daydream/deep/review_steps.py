@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from daydream import git_ops
 from daydream.agent import console, run_agent
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import effective_fanout_concurrency
@@ -217,7 +218,6 @@ async def _step_intent(ctx: FlowContext) -> None:
     to include the authoritative-intent precedence rule in their prompts.
     """
     deep_state = DeepState(ctx.data)
-    from daydream import git_ops
     from daydream.backends.pi import PiBackend
     from daydream.deep.diff import _diff_changed_files
     from daydream.exploration import FileInfo
