@@ -53,11 +53,9 @@ def record_evidence_digest(
     """Digest over the session's flattened per-finding reply evidence.
 
     Delegates to ``labeler_versions.reply_evidence_digest`` — the shared
-    implementation, never a re-implementation (K4/K5; spike-verified
-    byte-identical to ``training/harvest.py:_reply_evidence_digest``).
-    ``None`` when no reply evidence was collected, matching the harvest twin
-    so a digest-less row never collides with a digested one under the
-    versioned dedup key.
+    implementation, never a re-implementation (K4/K5). ``None`` when no reply
+    evidence was collected, so a digest-less row never collides with a
+    digested one under the versioned dedup key.
     """
     evidence = [thaw_json(entry) for per_finding in per_finding_evidence_lists for entry in per_finding]
     return reply_evidence_digest(evidence) if evidence else None
