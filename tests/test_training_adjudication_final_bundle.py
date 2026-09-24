@@ -182,12 +182,7 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
 def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path) -> None:
     """With no human observations the 80% admission gate must FAIL, not pass
     trivially on every automatic decisive record (issue #336 finding 1)."""
-    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-    out = tmp_path / "final-bundle"
-    build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-    )
+    _index_root, _mat, _archive_dir, out = _built_final_bundle(tmp_path)
     report = json.loads((out / "coverage-report.json").read_text())
     assert report["outcome_coverage"] == {"adjudicated": 0, "total": 0}
     assert report["unresolved"] == 0
@@ -198,12 +193,7 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
     """A legacy publish left ``.publish-stage/`` in the bundle dir; the next
     construction/dry-run over the same dir must treat it as publish scratch,
     never foreign content (issue #336 finding 5)."""
-    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-    out = tmp_path / "final-bundle"
-    build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-    )
+    index_root, mat, archive_dir, out = _built_final_bundle(tmp_path)
     original_identity = final_snapshot_id(out)
     stage = out / ".publish-stage"
     stage.mkdir()
@@ -223,12 +213,7 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
 
 @pytest.mark.parametrize("kind", ["file", "directory-symlink", "file-symlink"])
 def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path) -> None:
-    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-    out = tmp_path / "final-bundle"
-    build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-    )
+    index_root, mat, archive_dir, out = _built_final_bundle(tmp_path)
     stage = out / ".publish-stage"
     outside = tmp_path / "outside"
     if kind == "file":
@@ -272,13 +257,8 @@ def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) 
 
 
 def test_build_final_bundle_is_byte_identical_on_re_run(tmp_path: Path) -> None:
-    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-    out_one = tmp_path / "bundle-one"
+    index_root, mat, archive_dir, out_one = _built_final_bundle(tmp_path)
     out_two = tmp_path / "bundle-two"
-    build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out_one
-    )
     build_final_bundle(
         index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out_two
     )
@@ -314,7 +294,7 @@ def test_build_final_bundle_fails_closed_on_missing_materialized_outputs(
         )
 
 
-def _built_final_bundle(tmp_path: Path) -> tuple[Path, Path]:
+def _built_final_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
     out = tmp_path / "final-bundle"
@@ -324,11 +304,11 @@ def _built_final_bundle(tmp_path: Path) -> tuple[Path, Path]:
         archive_dir=archive_dir,
         out_dir=out,
     )
-    return index_root, out
+    return index_root, mat, archive_dir, out
 
 
 def test_build_final_bundle_copies_semantically_bound_policy_and_preview(tmp_path: Path) -> None:
-    index_root, out = _built_final_bundle(tmp_path)
+    index_root, _mat, _archive, out = _built_final_bundle(tmp_path)
 
     assert tuple(sorted(path.name for path in out.iterdir())) == tuple(sorted(FINAL_IDENTITY_FILES))
     assert (out / "preview-manifest.json").read_bytes() == (
@@ -391,7 +371,7 @@ def test_policy_binding_requires_producer_canonical_bytes(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("name", FINAL_IDENTITY_FILES)
 def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: Path) -> None:
-    _index_root, out = _built_final_bundle(tmp_path)
+    _index_root, _mat, _archive, out = _built_final_bundle(tmp_path)
     before, before_digests = final_snapshot_id(out)
 
     (out / name).write_bytes((out / name).read_bytes() + b" ")
@@ -403,7 +383,7 @@ def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: 
 
 def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Path) -> None:
 
-    index_root, out = _built_final_bundle(tmp_path)
+    index_root, _mat, _archive, out = _built_final_bundle(tmp_path)
     sums = "".join(
         f"{hashlib.sha256((out / name).read_bytes()).hexdigest()}  {name}\n"
         for name in sorted(FINAL_IDENTITY_FILES)

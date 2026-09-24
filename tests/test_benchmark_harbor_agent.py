@@ -369,7 +369,6 @@ def test_agent_lifecycle_and_lazy_harbor() -> None:
 
 
 def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
@@ -387,7 +386,6 @@ def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
         logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "pi"}
     )
     env_pi = Env()
-    import asyncio
     asyncio.run(pi_agent.setup(env_pi))
     assert "shutil.which('pi')" in env_pi.captured
     assert pi_agent.version() in env_pi.captured
@@ -405,7 +403,6 @@ def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
 
 def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
     """A failed setup probe surfaces as a typed failure, never a silent pass."""
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
@@ -419,7 +416,6 @@ def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
             self.captured = command
             return ExecResult(return_code=1, stdout="", stderr="boom")
 
-    import asyncio
 
     with pytest.raises(AgentError):
         asyncio.run(agent.setup(Env()))
@@ -520,7 +516,6 @@ def test_build_child_env_bans_claude_code_prefix() -> None:
 
 
 def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
@@ -533,7 +528,6 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
         extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"},
     )
     with pytest.raises(AgentError) as refused:                     # before any reviewing
-        import asyncio
 
         asyncio.run(agent.run("instruction", object(), AgentContext()))
     assert "pi" in str(refused.value)
@@ -553,7 +547,6 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
             return ExecResult(return_code=0, stdout="", stderr="")
 
     env = Env()
-    import asyncio
 
     asyncio.run(agent_ok.run("instruction", env, AgentContext()))
     cmd, cwd, child = env.captured
@@ -566,7 +559,6 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
 
 
 def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
@@ -598,7 +590,6 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
 
 
 def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
@@ -612,7 +603,6 @@ def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path: Path)
 
 
 def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
@@ -635,9 +625,7 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import importlib
 
-    import pytest
 
     pytest.importorskip("harbor")
     from daydream.benchmark.harbor import package as pkg
@@ -803,11 +791,8 @@ def test_local_harbor_task_with_fake_backend(
     executed, not skipped. Only the in-docker nftables sandbox itself needs a
     Harbor-capable runtime this host does not provide; that half is
     documented, but the runnable gate is a genuine executed pass."""
-    import asyncio
-    import importlib
     import importlib.util
 
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
@@ -936,9 +921,7 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     default ``backend="pi"`` scrub at the call site (the regression), the
     in-container claude branch raises EntrypointError and rc != 0.
     """
-    import asyncio
 
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
@@ -1027,9 +1010,7 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
 def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) -> None:
     """setup() gates on the shared ``_SUPPORTED_BACKENDS`` allowlist before any
     probe: an unsupported backend value must never probe a wrong SDK."""
-    import asyncio
 
-    import pytest
 
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult

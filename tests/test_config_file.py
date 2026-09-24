@@ -149,45 +149,20 @@ def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixt
     )
 
 
-def test_precision_mode_true_parses_as_bool(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text("precision_mode = true\n")
+@pytest.mark.parametrize("key", ["precision_mode", "approve_on_clean", "scope_issue_filing"])
+def test_bool_key_true_parses_as_bool(tmp_path: Path, key: str) -> None:
+    (tmp_path / ".daydream.toml").write_text(f"{key} = true\n")
     cfg = load_file_config(tmp_path)
-    assert cfg.precision_mode is True
+    assert getattr(cfg, key) is True
 
 
-def test_precision_mode_non_bool_degrades_to_none(tmp_path: Path) -> None:
-    # bool-only coercion (mirrors raw_precision): a truthy int is NOT enabled, it
-    # degrades to None (unset) rather than crashing or coercing to True.
-    (tmp_path / ".daydream.toml").write_text("precision_mode = 1\n")
+@pytest.mark.parametrize("key", ["precision_mode", "approve_on_clean", "scope_issue_filing"])
+def test_bool_key_non_bool_degrades_to_none(tmp_path: Path, key: str) -> None:
+    # bool-only coercion: a truthy int is NOT enabled, it degrades to None (unset)
+    # rather than crashing or coercing to True.
+    (tmp_path / ".daydream.toml").write_text(f"{key} = 1\n")
     cfg = load_file_config(tmp_path)
-    assert cfg.precision_mode is None
-
-
-def test_approve_on_clean_true_parses_as_bool(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text("approve_on_clean = true\n")
-    cfg = load_file_config(tmp_path)
-    assert cfg.approve_on_clean is True
-
-
-def test_approve_on_clean_non_bool_degrades_to_none(tmp_path: Path) -> None:
-    # bool-only coercion: a truthy int is NOT enabled, it degrades to None (unset).
-    (tmp_path / ".daydream.toml").write_text("approve_on_clean = 1\n")
-    cfg = load_file_config(tmp_path)
-    assert cfg.approve_on_clean is None
-
-
-def test_scope_issue_filing_true_parses_as_bool(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text("scope_issue_filing = true\n")
-    cfg = load_file_config(tmp_path)
-    assert cfg.scope_issue_filing is True
-
-
-def test_scope_issue_filing_non_bool_degrades_to_none(tmp_path: Path) -> None:
-    # Mirrors approve_on_clean: an accidental ``scope_issue_filing = 1`` is
-    # unset, not enabled — an int must never silently opt a repo into filing.
-    (tmp_path / ".daydream.toml").write_text("scope_issue_filing = 1\n")
-    cfg = load_file_config(tmp_path)
-    assert cfg.scope_issue_filing is None
+    assert getattr(cfg, key) is None
 
 
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:

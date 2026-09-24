@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, cast
 
 MAX_ARTIFACT_BYTES = 1_048_576
@@ -595,13 +595,7 @@ def _f1(precision: float, recall: float) -> float:
 
 
 def _read_id(finding: object, key: str, label: str) -> str:
-    if isinstance(finding, dict):
-        try:
-            value = finding[key]
-        except KeyError as exc:
-            raise VerifierError(f"missing {label}") from exc
-    else:
-        value = getattr(finding, key)
+    value = _finding_component(finding, key)
     if not isinstance(value, str):
         raise VerifierError(f"{label} must be a string")
     return value
@@ -721,8 +715,8 @@ def score_review(
     precision = tp / (tp + fp) if (tp + fp) else 1.0
     recall = tp / (tp + fn) if (tp + fn) else 1.0
     f1 = 0.0 if tp == 0 else _f1(precision, recall)
-    axes = _score_axes(gold, candidates, matches)
-    return Reward(
+    return replace(
+        _score_axes(gold, candidates, matches),
         reward=f1,
         tp=tp,
         fp=fp,
@@ -732,17 +726,6 @@ def score_review(
         f1=f1,
         gold_count=gold_count,
         candidate_count=candidate_count,
-        location_exact=axes.location_exact,
-        location_near=axes.location_near,
-        location_file=axes.location_file,
-        location_miss=axes.location_miss,
-        location_credit=axes.location_credit,
-        location_present=axes.location_present,
-        severity_exact=axes.severity_exact,
-        severity_within_1=axes.severity_within_1,
-        severity_mean_distance=axes.severity_mean_distance,
-        severity_credit=axes.severity_credit,
-        severity_present=axes.severity_present,
     )
 
 

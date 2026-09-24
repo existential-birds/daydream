@@ -71,6 +71,28 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tu
 _SEED_SEQ = {"n": 0}
 
 
+def _seed_ready_workspace(
+    tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3
+) -> tuple[Any, str, str, str]:
+    """Initialize a workspace and seed a real local bare origin for PR 101.
+
+    Returns ``(ws, origin_url, base_sha, head_sha)``; callers seed their
+    evidence responses, then run :func:`_finish_import`.
+    """
+    _SEED_SEQ["n"] += 1
+    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
+    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
+    return ws, origin_url, base_sha, head_sha
+
+
+def _finish_import(ws: Path, origin_url: str) -> str:
+    """Run the real import and return the first frozen case id."""
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    return load_yaml_strict(ws / "benchmark.yaml")["cases"][0]["case_id"]
+
+
 def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candidate: bool = False) -> tuple[Any, ...]:
     """Seed a genuine frozen ``ready`` workspace for one imported PR.
 
@@ -79,11 +101,7 @@ def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candida
     ``(ws, case_id, head_sha)``. With *candidate* True, seeds one REST inline
     comment so the case has one exact-acceptable candidate.
     """
-    _SEED_SEQ["n"] += 1
-    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
-    _seed_preflight(ws, fake_gh)
-    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
+    ws, origin_url, _, head_sha = _seed_ready_workspace(tmp_path, fake_gh, lines=lines)
     if candidate:
         comment = {
             "id": 1,
@@ -103,9 +121,7 @@ def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candida
             "html_url": "https://github.com/o/r/pull/101#discussion_r1",
         }
         fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [comment])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id = raw["cases"][0]["case_id"]
+    case_id = _finish_import(ws, origin_url)
     return ws, case_id, head_sha
 
 
@@ -118,11 +134,7 @@ def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -
     evidence-only, plus one exact candidate and one non-exact candidate.
     Returns ``(ws, case_id, head_sha)``.
     """
-    _SEED_SEQ["n"] += 1
-    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
-    _seed_preflight(ws, fake_gh)
-    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
+    ws, origin_url, _, head_sha = _seed_ready_workspace(tmp_path, fake_gh, lines=lines)
     reviews = [
         {
             "id": 100,
@@ -197,19 +209,15 @@ def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", reviews)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", inline_comments)
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", issue_comments)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id = raw["cases"][0]["case_id"]
+    case_id = _finish_import(ws, origin_url)
     return ws, case_id, head_sha
 
 
 def test_spike_head_file_line_count_from_mirror(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The frozen head tree is readable via ``git cat-file blob <head>:<path>``
     with cwd in the shared bare mirror — the location-vs-head read source."""
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
-    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=7)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    ws, origin_url, base_sha, head_sha = _seed_ready_workspace(tmp_path, fake_gh, lines=7)
+    _finish_import(ws, origin_url)
     m = sn.mirror(ws)
     assert m.exists()
     proc = git_ops._run_git(m, ["cat-file", "blob", f"{head_sha}:feature.py"], retries=0)
