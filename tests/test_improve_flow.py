@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, cast
@@ -15,7 +17,7 @@ from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,
 )
-from daydream.backends import AgentEvent, Backend, TextEvent
+from daydream.backends import AgentEvent, Backend, ClaudeBackend, TextEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.deep.detection import StackAssignment
@@ -23,6 +25,7 @@ from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError, head_sha
+from daydream.improve import artifacts
 from daydream.improve.command_contract import validate_recon_commands
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
@@ -45,6 +48,7 @@ from daydream.improve.prompts import (
     build_audit_prompt,
     build_vet_prompt,
 )
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.runner import RunConfig, run
 from daydream.services import Service, enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
@@ -81,8 +85,6 @@ MakeConfig = Callable[..., RunConfig]
 def test_improve_dir_uses_active_artifact_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.improve import artifacts
-
     routed = tmp_path / "private" / ".daydream"
     monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target, **_kwargs: routed)
 
@@ -159,8 +161,6 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     tmp_path: Path,
 ) -> None:
     """Every backend precedence seam fails before any backend can execute."""
-    from daydream.backends import ClaudeBackend
-
     execute_calls: list[str] = []
 
     async def _execute_canary(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -244,9 +244,6 @@ async def test_branch_improve_redacts_malformed_external_git_probe_before_model(
     make_config: MakeConfig,
     tmp_path: Path,
 ) -> None:
-    import shutil
-    import sys
-
     repo = improve_monorepo_target
     head = head_sha(repo)
     before_status = _git_status_porcelain(repo)
@@ -389,8 +386,6 @@ class _SymlinkGuardBackend(ImproveStubBackend):
         self.external_enumeration_attempted = False
 
     async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        from daydream.backends.claude import ClaudeBackend
-
         if cwd not in self.audit_paths:
             self.audit_paths.append(cwd)
         if self.glob_denied is None:
@@ -1334,8 +1329,6 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
     assert "`apps/svc00`" in prompt and "`frontend`" in prompt
     assert "Return the per-subtree build, test, and lint commands" in prompt
     assert "`in-scope-paths`" in prompt
-    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
     assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index("Existing repository scan:")
     # The exploration summary embedded below the recon header already opened with

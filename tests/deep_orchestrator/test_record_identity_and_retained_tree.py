@@ -43,6 +43,7 @@ from tests.test_deep_orchestrator import (
     _run_deep,
     _silence,
 )
+from tests.test_finite_delegation_parse import _mark_delegated_artifacts
 
 
 async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
@@ -453,8 +454,6 @@ async def test_structural_fold_survivor_inherits_both_provenances(
         structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1")],
     )
     if delegated:
-        from tests.test_finite_delegation_parse import _mark_delegated_artifacts
-
         _mark_delegated_artifacts(multi_stack_target / ".daydream/deep", {
             "python": ["api.py"], "react": ["App.tsx"], "generic": ["README.md"],
         })

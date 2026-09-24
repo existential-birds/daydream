@@ -5,8 +5,15 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
-from daydream.pr_review import finding_marker
-from daydream.reconcile import PriorFinding, fetch_prior_findings, partition
+from daydream.git_ops import GitError
+from daydream.pr_review import diagram_marker, finding_marker
+from daydream.reconcile import (
+    PriorFinding,
+    fetch_prior_diagram_comments,
+    fetch_prior_findings,
+    minimize_comment,
+    partition,
+)
 
 # --- Canned gh_api responses for fetch_prior_findings ----------------------
 
@@ -191,9 +198,6 @@ def test_fetch_prior_diagram_comments_trusts_only_the_bot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Marker present AND author proven; kinds come back de-duplicated, in order."""
-    from daydream.pr_review import diagram_marker
-    from daydream.reconcile import fetch_prior_diagram_comments
-
     sha = "a" * 40
     comments = [
         _issue_comment("IC_1", body=f"{diagram_marker('flowchart', sha)}\n{diagram_marker('sequence', sha)}"),
@@ -218,8 +222,6 @@ def test_fetch_prior_diagram_comments_harvests_nothing_without_a_bot_login(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """REST has no ``viewerDidAuthor``, so an unresolved login must not query at all."""
-    from daydream.reconcile import fetch_prior_diagram_comments
-
     def _forbidden(*_args: Any, **_kw: Any) -> Any:
         raise AssertionError("must not call GitHub with an unresolved bot login")
 
@@ -231,9 +233,6 @@ def test_minimize_comment_reports_failure_instead_of_raising(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Every transport/shape failure is False; only a proven fold is True."""
-    from daydream.git_ops import GitError
-    from daydream.reconcile import minimize_comment
-
     monkeypatch.setattr(
         git_ops,
         "gh_api",

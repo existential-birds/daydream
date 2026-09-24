@@ -28,6 +28,7 @@ from daydream import artifact_visibility, git_ops
 from daydream.artifact_visibility import (
     ArtifactVisibilityError,
     PrivateWorkspaceOwner,
+    open_artifact_session,
     private_root_locations,
     resolve_private_workspace_owner,
 )
@@ -536,8 +537,6 @@ async def test_open_workspace_removes_emptied_legacy_roots_after_migration(
 
         # The reviewer's empirical repro: open an artifact session on the
         # migrated checkout in the SAME run window. Must not raise.
-        from daydream.artifact_visibility import open_artifact_session
-
         async with open_artifact_session(
             work, session_id="post-migration", owner=owner
         ) as session:

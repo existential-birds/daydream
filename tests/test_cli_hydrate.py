@@ -10,9 +10,16 @@ from typing import Any
 import pytest
 
 from daydream import cli
-from daydream.archive import hydrate
+from daydream.archive import hydrate, license_enrich
 from daydream.archive.hydrate_client import FakeHub
-from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+from daydream.archive.license_enrich import EnrichedEvidence
+from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
+from tests.fixtures.training.build_hub_snapshot import (
+    SNAPSHOT_REVISION,
+    _snapshot_manifest,
+    _snapshot_trajectory,
+    build_snapshot,
+)
 
 
 @dataclass
@@ -277,8 +284,6 @@ def test_production_policy_file_loads_and_rejects_copyleft() -> None:
     """The checked-in production SPDX policy validates (M10 discipline) and
     fail-closes: missing evidence -> reject, GPL without opt-in -> reject,
     MIT -> admit, exact opt-in -> admit the named repo only."""
-    from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
-
     policy_path = pathlib.Path("daydream/training/schema/license-policy-production.json")
     policy, digest = load_license_policy(policy_path)
     assert len(digest) == 64
@@ -309,8 +314,6 @@ class _FakeLicenseResolver:
         self._mit = {slug.casefold() for slug in mit_repos}
 
     def resolve(self, repo_slug: str, repo_commit: str | None) -> Any:
-        from daydream.archive.license_enrich import EnrichedEvidence
-
         if repo_slug.casefold() not in self._mit:
             return None
         commit = "c" * 40
@@ -321,11 +324,6 @@ class _FakeLicenseResolver:
 
 def _seed_three_repo_hub() -> FakeHub:
     """Three-session hub over three repo outcomes: 2x MIT repo, 1x unresolvable."""
-    from tests.fixtures.training.build_hub_snapshot import (
-        _snapshot_manifest,
-        _snapshot_trajectory,
-    )
-
     files: dict[str, bytes] = {}
     for session_id, repo_slug in zip(
         ("acme-run-1", "acme-run-2", "ghost-run-1"), SEED_THREE_REPO, strict=True
@@ -352,8 +350,6 @@ def run_dry_run_capture(
     to the four license-admission buckets parsed from the printed per-repo
     lines, and ``report["discovered"]`` is the discovered-candidate count.
     """
-    from daydream.archive import license_enrich
-
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
     monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: resolver)

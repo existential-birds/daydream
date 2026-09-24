@@ -24,6 +24,17 @@ import pytest
 import daydream.improve.prompts as improve_prompts
 import daydream.phases as phases
 import daydream.severity as severity
+from daydream import pr_comment_renderer
+from daydream.benchmark.harbor import verifier_core
+from daydream.pr_review import (
+    ParsedIssue,
+    PRInfo,
+    ReviewRenderers,
+    _ClassifiedIssues,
+    build_payload,
+    default_render_finding,
+    default_render_summary,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -210,17 +221,6 @@ def test_no_two_sites_share_one_enum_list_object() -> None:
 def test_pr_review_severity_breakdown_follows_the_declaration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream import pr_comment_renderer
-    from daydream.pr_review import (
-        ParsedIssue,
-        PRInfo,
-        ReviewRenderers,
-        _ClassifiedIssues,
-        build_payload,
-        default_render_finding,
-        default_render_summary,
-    )
-
     # Declaration reversed: the model-facing order must follow it, so a hand-written
     # tuple at the call site renders "1 high, 1 low" and fails here.
     monkeypatch.setattr(severity, "CANONICAL_LEVELS", ("high", "medium", "low"))
@@ -251,8 +251,6 @@ def test_pr_review_severity_breakdown_follows_the_declaration(
 def test_fenced_verifier_accepts_exactly_the_canonical_vocabulary() -> None:
     """verifier_core deploys byte-for-byte into a daydream-free image, so it keeps its
     literal; this test is the drift protection instead of an import (spec requirement 11)."""
-    from daydream.benchmark.harbor import verifier_core
-
     base = {
         "candidate_id": "a" * 64,
         "title": "t",

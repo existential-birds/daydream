@@ -38,6 +38,7 @@ from tests.test_deep_orchestrator import (
     _run_deep,
     _silence,
 )
+from tests.test_finite_delegation_parse import _mark_delegated_artifacts
 
 
 @pytest.mark.parametrize(
@@ -432,8 +433,6 @@ async def test_ac_merge_resume_on_tiny_diff(
     )
 
     if delegated:
-        from tests.test_finite_delegation_parse import _mark_delegated_artifacts
-
         _mark_delegated_artifacts(tiny_diff_target / ".daydream/deep", {"generic": ["api.py"]})
 
     rc = await run(make_config(tiny_diff_target, start_at="merge"))
