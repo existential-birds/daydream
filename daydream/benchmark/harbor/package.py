@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from daydream.benchmark import schema
+from daydream.benchmark.harbor import env_policy
 from daydream.benchmark.harbor.build import CompileError
 
 GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format requirements-txt"
@@ -397,27 +398,11 @@ def runtime_lock_header_fields(text: str) -> dict[str, str]:
 
 def render_job_config(*, oracle: bool) -> bytes:
     """Render a deterministic Harbor job or Oracle configuration."""
+    renderer = env_policy.RENDERER
     agents: list[dict[str, Any]] = [{"name": "oracle"}] if oracle else [{
         "import_path": "daydream.benchmark.harbor.agent:DaydreamReviewAgent",
-        # DAYDREAM_REVIEW_BACKEND is a pi|claude selection passed through verbatim;
-        # supported values are validated downstream by the agent/entrypoint allowlist.
-        "env": {
-            "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-pi}",
-            # Mutually exclusive credentials get empty fallbacks so an unset
-            # alternative never aborts rendering: the selected provider's
-            # credential is present and the unused one resolves to "", which
-            # downstream fail-closed checks treat as missing.
-            "DAYDREAM_REVIEW_MODEL": "${DAYDREAM_REVIEW_MODEL}",
-            "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY:-}",
-            "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL:-}",
-            "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
-            # ANTHROPIC_* carries claude-backend credentials into the container
-            # (agent.build_child_env keep-set, entrypoint claude branch); the
-            # API key and auth token are alternatives, the base URL optional.
-            "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:-}",
-            "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN:-}",
-            "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL:-}",
-        },
+        # Placeholder semantics and credential alternatives are declared in env_policy.
+        "env": dict(renderer.reviewer_placeholders),
     }]
     document = {
         "jobs_dir": "jobs",
@@ -425,21 +410,7 @@ def render_job_config(*, oracle: bool) -> bytes:
         "n_concurrent_trials": 4,
         "environment": {"type": "docker", "delete": True},
         "agents": agents,
-        "verifier": {"env": {
-            "DAYDREAM_JUDGE_PROVIDER": "${DAYDREAM_JUDGE_PROVIDER}",
-            "DAYDREAM_JUDGE_MODEL": "${DAYDREAM_JUDGE_MODEL}",
-            "DAYDREAM_JUDGE_API_KEY": "${DAYDREAM_JUDGE_API_KEY:-}",
-            "DAYDREAM_JUDGE_BASE_URL": "${DAYDREAM_JUDGE_BASE_URL:-}",
-            # CLAUDE_CODE_* feeds the keyless claude-cli judge client; the
-            # nonessential-traffic gate defaults on (fail-safe direction).
-            # The oauth token is an alternative to DAYDREAM_JUDGE_API_KEY, so
-            # it gets the same empty fallback; downstream fail-closed checks
-            # treat "" as missing.
-            "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN:-}",
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": (
-                "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
-            ),
-        }},
+        "verifier": {"env": dict(renderer.judge_placeholders)},
         "datasets": [{"path": "."}],
         "metrics": [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}],
     }
@@ -579,13 +550,18 @@ def render_task_toml(
     rendering, and compilation fails closed (``PackageError``) on a missing,
     empty, or invalid list rather than silently defaulting to a host.
 
-    The ``[environment.env]`` block threads the opaque per-case task key and the
-    deterministic ``base``/``head`` ref names into the agent container (Harbor
-    natively injects ``[environment].env`` into the environment). No judge/
-    credential/archive configuration is ever rendered onto the agent surface.
+    The ``[environment.env]`` block comes from ``env_policy.TASK.injected``:
+    it threads the opaque per-case task key and the deterministic ``base``/``head``
+    ref names into the agent container (Harbor natively injects
+    ``[environment].env`` into the environment). No judge/credential/archive
+    configuration is ever rendered onto the agent surface.
     """
     reviewer = _normalized_allowed_hosts(reviewer_hosts, "reviewer")
     judge = _normalized_allowed_hosts(judge_hosts, "judge")
+    injected_env = "\n".join(
+        f'{name} = "{value.format(opaque_key=opaque_key)}"'
+        for name, value in env_policy.TASK.injected.items()
+    )
     # TOML is intentionally rendered directly: fixed ordering and no timestamp
     # make these bytes part of the deterministic compiled-tree contract.
     # json.dumps renders each list as a double-quoted TOML inline array.
@@ -609,9 +585,7 @@ memory_mb = 4096
 storage_mb = 10240
 
 [environment.env]
-DAYDREAM_REVIEW_CASE_ID = "{opaque_key}"
-DAYDREAM_REVIEW_BASE_REF = "base"
-DAYDREAM_REVIEW_HEAD_REF = "head"
+{injected_env}
 
 [verifier]
 timeout_sec = 900.0

@@ -1,0 +1,216 @@
+"""Harbor control-plane environment policy declarations.
+
+``HOST`` records the host-side child-env allowlist for
+``agent.build_child_env``; ``CONTAINER`` records the container-side scrub-list
+for ``entrypoint._sanitize_reviewer_environment``. The two-stage scrub is
+intentional defence in depth: the container can see Harbor-injected names the
+host builder never processed. ``RENDERER`` and ``TASK`` describe the inputs to
+``package.render_job_config`` and ``package.render_task_toml`` respectively;
+``JUDGE`` describes the renderer subset and the host-side judge-asset guard.
+The renderer emits a documented subset of the reviewer control-plane channel.
+
+The host's ``claude_keep_vars`` are the same Anthropic names as the
+``render_job_config`` placeholders: only that trio may survive the host
+scrub in Claude mode.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
+
+REVIEW_CHANNEL_PREFIX = "DAYDREAM_REVIEW_"
+JUDGE_PREFIX = "DAYDREAM_JUDGE_"
+BACKEND_ENV = "DAYDREAM_REVIEW_BACKEND"
+MODEL_ENV = "DAYDREAM_REVIEW_MODEL"
+API_KEY_ENV = "DAYDREAM_REVIEW_API_KEY"
+BASE_URL_ENV = "DAYDREAM_REVIEW_BASE_URL"
+CANDIDATE_ENV = "DAYDREAM_REVIEW_PROFILE_CANDIDATE"
+EFFORT_ENV = "DAYDREAM_REVIEW_EFFORT"
+REPO_DIR_ENV = "DAYDREAM_REVIEW_REPO_DIR"
+ARTIFACT_PATH_ENV = "DAYDREAM_REVIEW_ARTIFACT_PATH"
+TRAJECTORY_PATH_ENV = "DAYDREAM_REVIEW_TRAJECTORY_PATH"
+CASE_ID_ENV = "DAYDREAM_REVIEW_CASE_ID"
+BASE_REF_ENV = "DAYDREAM_REVIEW_BASE_REF"
+HEAD_REF_ENV = "DAYDREAM_REVIEW_HEAD_REF"
+JUDGE_PROVIDER_ENV = "DAYDREAM_JUDGE_PROVIDER"
+JUDGE_MODEL_ENV = "DAYDREAM_JUDGE_MODEL"
+JUDGE_API_KEY_ENV = "DAYDREAM_JUDGE_API_KEY"
+JUDGE_BASE_URL_ENV = "DAYDREAM_JUDGE_BASE_URL"
+CLAUDE_CODE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC_ENV = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+
+REVIEWER_CONTROL_PLANE: Mapping[str, str] = MappingProxyType({
+    BACKEND_ENV: "operator",
+    MODEL_ENV: "operator",
+    API_KEY_ENV: "operator",
+    BASE_URL_ENV: "operator",
+    CANDIDATE_ENV: "operator",
+    EFFORT_ENV: "host",
+    REPO_DIR_ENV: "defaulted",
+    ARTIFACT_PATH_ENV: "defaulted",
+    TRAJECTORY_PATH_ENV: "defaulted",
+    CASE_ID_ENV: "injected",
+    BASE_REF_ENV: "injected",
+    HEAD_REF_ENV: "injected",
+})
+ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
+ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
+ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
+CLAUDE_KEEP_PREFIX = "ANTHROPIC_"
+PI_API_KEY_ENV = "PI_API_KEY"
+SKILLS_DIR_ENV = "DAYDREAM_SKILLS_DIR"
+
+
+@dataclass(frozen=True)
+class HostChannel:
+    """Names allowed, required, or excluded by the host child-env builder."""
+
+    posture: str
+    keep_prefixes: tuple[str, ...]
+    required_process_vars: frozenset[str]
+    banned_vars: frozenset[str]
+    banned_prefixes: frozenset[str]
+    claude_keep_vars: frozenset[str]
+    claude_exempt_vars: frozenset[str]
+    claude_exempt_prefix: str
+
+
+HOST = HostChannel(
+    posture="allowlist",
+    keep_prefixes=(REVIEW_CHANNEL_PREFIX,),
+    required_process_vars=frozenset({"PATH", "HOME", "LANG"}),
+    banned_vars=frozenset({
+        "GH_TOKEN", "GITHUB_TOKEN", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY",
+        "HF_TOKEN", "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENROUTER_API_KEY", "PI_API_KEY",
+    }),
+    banned_prefixes=frozenset({
+        JUDGE_PREFIX, "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "OPENROUTER_", "PI_",
+    }),
+    claude_keep_vars=frozenset({
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    }),
+    claude_exempt_vars=frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
+    claude_exempt_prefix=CLAUDE_KEEP_PREFIX,
+)
+
+
+@dataclass(frozen=True)
+class ContainerChannel:
+    """Names removed during the container scrub and before GitHub subprocesses."""
+
+    posture: str
+    github_credential_vars: frozenset[str]
+    unselected_pi_credentials: frozenset[str]
+    scrub_prefixes: frozenset[str]
+    control_plane_aliases: frozenset[str]
+    github_subprocess_drops: frozenset[str]
+
+
+CONTAINER = ContainerChannel(
+    posture="scrub-list",
+    github_credential_vars=frozenset({
+        "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN",
+        "GH_HOST", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY",
+    }),
+    unselected_pi_credentials=frozenset({"ZAI_API_KEY", "NOUS_API_KEY"}),
+    scrub_prefixes=frozenset({
+        JUDGE_PREFIX, "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "OPENROUTER_", "PI_",
+        "DAYDREAM_APP_",
+    }),
+    control_plane_aliases=frozenset({
+        API_KEY_ENV, BASE_URL_ENV, SKILLS_DIR_ENV,
+    }),
+    github_subprocess_drops=frozenset({
+        "PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    }),
+)
+
+
+@dataclass(frozen=True)
+class RendererChannel:
+    """Ordered placeholders for the agent and verifier environment maps."""
+
+    reviewer_placeholders: Mapping[str, str]
+    judge_placeholders: Mapping[str, str]
+
+
+RENDERER = RendererChannel(
+    reviewer_placeholders=MappingProxyType({
+        # Backend selection passes through verbatim; agent/entrypoint validate pi|claude.
+        BACKEND_ENV: "${DAYDREAM_REVIEW_BACKEND:-pi}",
+        MODEL_ENV: "${DAYDREAM_REVIEW_MODEL}",
+        # Mutually exclusive credentials get empty fallbacks so an unset
+        # alternative never aborts rendering: the selected provider's
+        # credential is present and the unused one resolves to "", which
+        # downstream fail-closed checks treat as missing.
+        API_KEY_ENV: "${DAYDREAM_REVIEW_API_KEY:-}",
+        BASE_URL_ENV: "${DAYDREAM_REVIEW_BASE_URL:-}",
+        CANDIDATE_ENV: "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
+        # ANTHROPIC_* carries claude-backend credentials into the container
+        # (agent.build_child_env keep-set, entrypoint claude branch); the
+        # API key and auth token are alternatives, the base URL optional.
+        ANTHROPIC_API_KEY_ENV: "${ANTHROPIC_API_KEY:-}",
+        ANTHROPIC_AUTH_TOKEN_ENV: "${ANTHROPIC_AUTH_TOKEN:-}",
+        ANTHROPIC_BASE_URL_ENV: "${ANTHROPIC_BASE_URL:-}",
+    }),
+    judge_placeholders=MappingProxyType({
+        JUDGE_PROVIDER_ENV: "${DAYDREAM_JUDGE_PROVIDER}",
+        JUDGE_MODEL_ENV: "${DAYDREAM_JUDGE_MODEL}",
+        JUDGE_API_KEY_ENV: "${DAYDREAM_JUDGE_API_KEY:-}",
+        JUDGE_BASE_URL_ENV: "${DAYDREAM_JUDGE_BASE_URL:-}",
+        # CLAUDE_CODE_* feeds the keyless claude-cli judge client; the
+        # nonessential-traffic gate defaults on (fail-safe direction).
+        # The oauth token is an alternative to DAYDREAM_JUDGE_API_KEY, so
+        # it gets the same empty fallback; downstream fail-closed checks
+        # treat "" as missing.
+        CLAUDE_CODE_OAUTH_TOKEN_ENV: "${CLAUDE_CODE_OAUTH_TOKEN:-}",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}",
+    }),
+)
+
+
+@dataclass(frozen=True)
+class TaskChannel:
+    """Ordered per-case environment names and value templates for task TOML."""
+
+    injected: Mapping[str, str]
+
+
+TASK = TaskChannel(injected=MappingProxyType({
+    CASE_ID_ENV: "{opaque_key}",
+    BASE_REF_ENV: "base",
+    HEAD_REF_ENV: "head",
+}))
+
+
+@dataclass(frozen=True)
+class JudgeChannel:
+    """Judge variables emitted by the renderer or supplied by the host."""
+
+    renderer_emitted: tuple[str, ...]
+    host_supplied: frozenset[str]
+    prefix: str
+
+
+JUDGE = JudgeChannel(
+    renderer_emitted=tuple(RENDERER.judge_placeholders),
+    host_supplied=frozenset({
+        "DAYDREAM_JUDGE_ALLOWED_HOSTS", "DAYDREAM_JUDGE_ARTIFACT_PATH", "DAYDREAM_JUDGE_OUT_PATH",
+    }),
+    prefix=JUDGE_PREFIX,
+)
+
+
+def declared_names() -> frozenset[str]:
+    """Return all concrete environment names declared by any policy channel."""
+    return frozenset(
+        HOST.required_process_vars | HOST.banned_vars | HOST.claude_keep_vars | HOST.claude_exempt_vars
+        | CONTAINER.github_credential_vars | CONTAINER.unselected_pi_credentials
+        | CONTAINER.control_plane_aliases | CONTAINER.github_subprocess_drops
+        | REVIEWER_CONTROL_PLANE.keys() | RENDERER.reviewer_placeholders.keys()
+        | RENDERER.judge_placeholders.keys() | TASK.injected.keys()
+        | JUDGE.host_supplied | {PI_API_KEY_ENV, SKILLS_DIR_ENV}
+    )

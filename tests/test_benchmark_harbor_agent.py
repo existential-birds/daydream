@@ -812,14 +812,10 @@ def test_local_harbor_task_with_fake_backend(
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor import build, entrypoint
+    from daydream.benchmark.harbor import build, entrypoint, env_policy
     from daydream.benchmark.harbor import package as pkg
     from daydream.benchmark.harbor import verifier_core as vc
-    from daydream.benchmark.harbor.agent import (
-        _BANNED_PREFIXES,
-        _BANNED_VARS,
-        DaydreamReviewAgent,
-    )
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
     from tests.harness.stub_backend import install_stub_backend
     from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
@@ -853,7 +849,7 @@ def test_local_harbor_task_with_fake_backend(
         ),
     }
     # Host secrets present in the parent env must never reach the child env.
-    for banned in _BANNED_VARS:
+    for banned in env_policy.HOST.banned_vars:
         monkeypatch.setenv(banned, "super-secret")
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path / "logs", extra_env=task_env)
@@ -876,9 +872,9 @@ def test_local_harbor_task_with_fake_backend(
     assert set(executed.child) <= {"PATH", "HOME", "LANG"} | {
         k for k in executed.child if k.startswith("DAYDREAM_REVIEW_")
     }
-    for banned in _BANNED_VARS:
+    for banned in env_policy.HOST.banned_vars:
         assert banned not in executed.child  # fail-closed: host secrets never reach the child
-    for prefix in _BANNED_PREFIXES:
+    for prefix in env_policy.HOST.banned_prefixes:
         assert not any(k.startswith(prefix) for k in executed.child)
 
     # The entrypoint consumes exactly the captured child mapping; no host
@@ -947,14 +943,9 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor import entrypoint
+    from daydream.benchmark.harbor import entrypoint, env_policy
     from daydream.benchmark.harbor import verifier_core as vc
-    from daydream.benchmark.harbor.agent import (
-        _ANTHROPIC_BAN_VARS,
-        _BANNED_PREFIXES,
-        _BANNED_VARS,
-        DaydreamReviewAgent,
-    )
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
     from tests.harness.stub_backend import install_stub_backend
 
     repo = _seed_defect_repo(tmp_path)
@@ -978,8 +969,8 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     # except the ANTHROPIC_* credential the claude backend is allowed to carry,
     # which is controlled deterministically via extra_env (extra_env wins the
     # ``{**os.environ, **extra_env}`` merge regardless of host state).
-    for banned in _BANNED_VARS:
-        if banned in _ANTHROPIC_BAN_VARS:
+    for banned in env_policy.HOST.banned_vars:
+        if banned in env_policy.HOST.claude_exempt_vars:
             continue  # claude keep-set; pinned by extra_env above
         monkeypatch.setenv(banned, "super-secret")
 
@@ -1006,11 +997,11 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     # strip it and the in-container claude branch would fail below).
     assert executed.child["ANTHROPIC_API_KEY"] == "sk-ant-live"
     assert executed.child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
-    for banned in _BANNED_VARS:
-        if banned not in _ANTHROPIC_BAN_VARS:
+    for banned in env_policy.HOST.banned_vars:
+        if banned not in env_policy.HOST.claude_exempt_vars:
             assert banned not in executed.child  # non-credential bans stay
-    for prefix in _BANNED_PREFIXES:
-        if prefix == "ANTHROPIC_":
+    for prefix in env_policy.HOST.banned_prefixes:
+        if prefix == env_policy.HOST.claude_exempt_prefix:
             continue  # exempted for backend="claude"
         assert not any(k.startswith(prefix) for k in executed.child)
 
