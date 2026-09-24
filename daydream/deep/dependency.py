@@ -13,21 +13,19 @@ import time
 from pathlib import Path, PurePosixPath
 
 from daydream.tree_sitter_index import (
+    LANGUAGES,
     _query_for_language,
     extract_imports,
     get_parser,
 )
 
-# Extension -> tree-sitter language id (subset of the tree_sitter_index
-# registry relevant to sharding's dependency graph). Unknown extensions are
-# fail-open: the file becomes a singleton, never dropped.
+# Extension -> tree-sitter language id for the sharding dependency graph,
+# derived from the canonical registry so the two can never drift. ``.js`` is
+# excluded because ``_resolve_import`` does not resolve JavaScript specifiers;
+# unknown extensions are fail-open (the file becomes a singleton, never
+# dropped).
 _LANG_BY_EXT: dict[str, str] = {
-    ".py": "python",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "typescript",
-    ".go": "go",
-    ".rs": "rust",
+    ext: lang for ext, (lang, _) in LANGUAGES.items() if ext != ".js"
 }
 
 _GRAPH_BUILD_WALL_BUDGET_S = 5.0

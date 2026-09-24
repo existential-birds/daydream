@@ -9,7 +9,6 @@ injected fake HTTP client against ``tmp_path``.
 """
 import asyncio
 import hashlib as _h
-import hashlib as _mh
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -102,8 +101,6 @@ async def test_anthropic_client_posts_messages_and_returns_verdict(sr_module: An
 @pytest.mark.asyncio
 async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_module: Any) -> None:
     sr = sr_module
-    with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_BASE_URL"):
-        sr.resolve_base_url(None)
     with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_BASE_URL"):
         sr.resolve_base_url(None)
     assert sr.resolve_base_url("https://custom.example/v1") == "https://custom.example/v1"
@@ -656,7 +653,7 @@ def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path
         "base_ref": "base",
         "head_ref": "head",
         "template_version": "1",
-        "gold_sha256": _mh.sha256(gold_path.read_bytes()).hexdigest(),
+        "gold_sha256": _h.sha256(gold_path.read_bytes()).hexdigest(),
     }
     gold_path.with_name("verifier-metadata.json").write_text(
         json.dumps(meta, sort_keys=True)

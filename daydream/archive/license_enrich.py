@@ -208,10 +208,10 @@ def _cache_path(stage: Path) -> Path:
     return stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
 
 
-def _load_cache(stage: Path) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-    """Load the enrichment cache: latest entry per session and per (slug, commit)."""
+def _load_cache(stage: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Load the enrichment cache: latest entry per session and first resolved per repo."""
     by_session: dict[str, dict[str, Any]] = {}
-    by_repo: dict[tuple[str, str], dict[str, Any]] = {}
+    by_repo: dict[str, dict[str, Any]] = {}
     path = _cache_path(stage)
     if not path.is_file():
         return by_session, by_repo
@@ -228,7 +228,7 @@ def _load_cache(stage: Path) -> tuple[dict[str, dict[str, Any]], dict[tuple[str,
         slug = entry.get("repo_slug")
         commit = entry.get("repo_commit")
         if entry.get("status") == "resolved" and isinstance(slug, str) and isinstance(commit, str):
-            by_repo[(slug, commit)] = entry
+            by_repo.setdefault(slug, entry)
     return by_session, by_repo
 
 
@@ -326,7 +326,7 @@ def enrich_license_evidence(
         # Dedupe per (repo_slug, resolved repo_commit): any prior resolved entry for
         # this slug is reused — repeated sessions in one repo hit the cache, not the
         # resolver (the commit is produced by the resolver, so the slug keys the hit).
-        cached_hit = next((e for (s, __), e in by_repo.items() if s == slug), None)
+        cached_hit = by_repo.get(slug)
         entry: dict[str, Any]
         if cached_hit is not None:
             entry = {**cached_hit, "session_id": sid}
@@ -348,7 +348,7 @@ def enrich_license_evidence(
                     "spdx_id": evidence.spdx_id, "source": evidence.source,
                     "repo_commit": evidence.repo_commit,
                 }
-                by_repo[(slug, evidence.repo_commit)] = entry
+                by_repo.setdefault(slug, entry)
         fresh.append(entry)
         if entry.get("status") == "resolved":
             resolved[sid] = {

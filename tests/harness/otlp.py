@@ -76,6 +76,20 @@ class TraceCollector:
 
 
 @contextmanager
+def _loopback_http_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[str]:
+    """Bind a loopback HTTP server, yield its base URL, and tear it down."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@contextmanager
 def otlp_collector(
     *,
     status: int = 200,
@@ -99,16 +113,8 @@ def otlp_collector(
         def log_message(self, format: str, *args: Any) -> None:
             """Keep test output free of HTTP request logs."""
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    collector.base_url = f"http://127.0.0.1:{server.server_port}"
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-    thread.start()
-    try:
+    with _loopback_http_server(Handler) as collector.base_url:
         yield collector
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
 
 @contextmanager
@@ -165,16 +171,8 @@ def scripted_otlp_collector(
         def log_message(self, format: str, *args: Any) -> None:
             """Keep test output free of HTTP request logs."""
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    collector.base_url = f"http://127.0.0.1:{server.server_port}"
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-    thread.start()
-    try:
+    with _loopback_http_server(Handler) as collector.base_url:
         yield collector
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
 
 class TrickleServer:
