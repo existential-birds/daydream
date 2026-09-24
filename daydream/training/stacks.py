@@ -73,8 +73,6 @@ class V2Projection:
         by_split: Records grouped by their recorded ``lineage.split``; all
             three keys are always present.
         lineage: The parsed ``lineage.json`` dict.
-        split_digests: sha256 of each split JSONL file's bytes, keyed by
-            filename.
         digest: Deterministic directory-level digest: sha256 over the sorted
             ``(relpath, sha256(file_bytes))`` pairs of every file in the
             projection directory. A pure function of the directory bytes.
@@ -83,7 +81,6 @@ class V2Projection:
     records: list[dict[str, object]]
     by_split: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     lineage: dict[str, object] = field(default_factory=dict)
-    split_digests: dict[str, str] = field(default_factory=dict)
     digest: str = ""
 
 
@@ -395,19 +392,9 @@ def load_v2_projection(
             )
         by_split[cast(str, split)].append(record)
 
-    split_digests: dict[str, str] = {}
-    for filename in _SPLIT_FILENAMES.values():
-        split_path = projection_dir / filename
-        if not split_path.is_file():
-            raise ValueError(
-                f"projection {projection_dir}: missing split file "
-                f"{filename!r} — refusing an incomplete projection"
-            )
-        split_digests[filename] = _sha256_file(split_path)
     return V2Projection(
         records=records,
         by_split=by_split,
         lineage=lineage,
-        split_digests=split_digests,
         digest=_directory_digest(projection_dir),
     )

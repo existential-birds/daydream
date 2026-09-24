@@ -11,7 +11,13 @@ import pytest
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
-from tests.test_corpus_projection import _admit_second_batch, _cfg, _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_projection import (
+    _admit_second_batch,
+    _cfg,
+    _write_ann_sumsums,
+    _write_annotations_snapshot,
+    _write_bundle,
+)
 
 
 def _read_split_memberships(out_dir: Path) -> tuple[list[str], list[str], list[str]]:
@@ -211,13 +217,7 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
     rows[-1]["profile"]["profile_name"] = "quick-review"
     snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     ann_dir = snap.parent
-    rel = sorted(
-        p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
-        if p.is_file() and p.name != "SHA256SUMS"
-    )
-    (ann_dir / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-    ))
+    _write_ann_sumsums(ann_dir)
     for out in (tmp_path / "a", tmp_path / "b"):
         build_frozen_corpus(
             _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,

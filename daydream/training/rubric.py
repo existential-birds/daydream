@@ -22,7 +22,7 @@ classifier dispositions), ``ambiguous`` / ``unanswered`` /
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from daydream.training.labeler_signals import (
@@ -338,18 +338,7 @@ class RubricV2Breakdown:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation with explicit key order."""
-        return {
-            "learned_outcome": self.learned_outcome,
-            "false_positive_penalty": self.false_positive_penalty,
-            "signal_to_noise": self.signal_to_noise,
-            "localization": self.localization,
-            "tool_grounded": self.tool_grounded,
-            "golden_overlap": self.golden_overlap,
-            "intrinsic_composite": self.intrinsic_composite,
-            "terms": dict(self.terms),
-            "composite": self.composite,
-            "reward_version": self.reward_version,
-        }
+        return asdict(self)
 
 
 def score_review(

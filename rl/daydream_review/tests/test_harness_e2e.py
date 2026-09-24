@@ -41,7 +41,13 @@ def _stage(root: Path) -> dict[str, Path]:
     return {"repo": repo, "archive": archive, "home": home, "out": root / "out"}
 
 
-def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> subprocess.CompletedProcess[str]:
+def _run_eval(
+    paths: dict[str, Path],
+    *,
+    model: str,
+    base_url: str | None,
+    backend: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     argv = [
         "uv",
         "run",
@@ -62,7 +68,18 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> su
     ]
     if base_url is not None:
         argv += ["--client.base-url", base_url]
+    if backend is not None:
+        argv += ["--harness.backend", backend]
     return subprocess.run(argv, cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
+
+
+def _assert_reward_bounds(trace: dict[str, Any]) -> None:
+    """Shared intrinsic-composite and suite metric floor for both rollouts."""
+    assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
+    reward = trace["rewards"]["intrinsic_composite"]
+    score = reward["score"] if isinstance(reward, dict) else reward
+    assert 0.0 <= score <= 1.0, trace["rewards"]
+    assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0), trace["metrics"]
 
 
 def _sole_trace(paths: dict[str, Path]) -> dict[str, Any]:
@@ -96,11 +113,7 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     # the run exercise the retry path while claiming to prove the dialect.
     sampled = [node for node in trace["nodes"] if node.get("sampled")]
     assert sampled, "no sampled assistant turns — endpoint injection or the dialect did not work"
-    assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
-    rw = trace["rewards"]["intrinsic_composite"]
-    rw = rw["score"] if isinstance(rw, dict) else rw
-    assert 0.0 <= rw <= 1.0, trace["rewards"]
-    assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0), trace["metrics"]
+    _assert_reward_bounds(trace)
     assert trace["info"]["daydream_backend"] == "claude"
     assert trace["info"]["daydream_exit_code"] == 0
     # Scoring really read daydream's archived run dir out of the sandbox.
@@ -126,28 +139,9 @@ def test_live_rollout(tmp_path: Path) -> None:
     base_url = os.environ.get("DAYDREAM_RL_LIVE_BASE_URL")
     backend = os.environ.get("DAYDREAM_RL_LIVE_BACKEND", "claude")
 
-    argv_extra = ["--harness.backend", backend]
-    result = subprocess.run(
-        [
-            "uv", "run", "eval", "@", "configs/eval-stub.toml",
-            "-m", model, "--no-rich", "-o", str(paths["out"]),
-            "--harness.repo-path", str(paths["repo"]),
-            "--harness.archive-root", str(paths["archive"]),
-            "--harness.home", str(paths["home"]),
-            *(["--client.base-url", base_url] if base_url else []),
-            *argv_extra,
-        ],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run_eval(paths, model=model, base_url=base_url, backend=backend)
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
 
     trace = _sole_trace(paths)
-    assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
-    rw2 = trace["rewards"]["intrinsic_composite"]
-    rw2 = rw2["score"] if isinstance(rw2, dict) else rw2
-    assert 0.0 <= rw2 <= 1.0
-    assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0)
+    _assert_reward_bounds(trace)
     assert trace["info"]["daydream_backend"] == backend

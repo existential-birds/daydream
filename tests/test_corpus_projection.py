@@ -74,6 +74,21 @@ def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -
     (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
+def _write_ann_sumsums(
+    root: Path, *, skip: frozenset[str] = frozenset({"SHA256SUMS"})
+) -> None:
+    """Regenerate an annotation bundle's SHA256SUMS listing in fixture format."""
+    rel = sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file() and p.name not in skip
+    )
+    (root / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256((root / p).read_bytes()).hexdigest()}  {p}\n" for p in rel),
+        encoding="utf-8",
+    )
+
+
 _SEED_REPO_SLUGS = {"sess-a": "owner/repo-a"}
 
 
@@ -200,10 +215,7 @@ def _write_annotations_snapshot(
         "labeler_version": "v1", "rubric_version": "v1",
         "classifier_version": "v1", "as_of": None,
     }, sort_keys=True) + "\n")
-    rel = sorted(p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*") if p.is_file())
-    (ann_dir / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-    ))
+    _write_ann_sumsums(ann_dir)
     (ann_dir / "_SUCCESS").write_text("ok\n")
     return ann_dir / "annotations.jsonl"
 
@@ -299,10 +311,7 @@ def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation
         "labeler_version": "v1", "rubric_version": "v1",
         "classifier_version": "v1", "as_of": None,
     }, sort_keys=True) + "\n", encoding="utf-8")
-    rel = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
-    (root / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256((root / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-    ), encoding="utf-8")
+    _write_ann_sumsums(root)
     if success:
         (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return root
@@ -703,13 +712,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     # exactly as the fixture does (no SHA256SUMS self-line — it does not exist
     # when the fixture computes the listing).
     ann_dir = snap.parent
-    rel = sorted(
-        p.relative_to(ann_dir).as_posix()
-        for p in ann_dir.rglob("*") if p.is_file() and p.name != "SHA256SUMS"
-    )
-    (ann_dir / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-    ))
+    _write_ann_sumsums(ann_dir)
     summary = build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
     assert summary["records_by_tier"] == {"silver": 1}
     records = [json.loads(line) for line in
@@ -959,14 +962,7 @@ def _inject_admitted_repo_slug(
     ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
     ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
     (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
-    rel = sorted(
-        p.relative_to(ann_dir).as_posix()
-        for p in ann_dir.rglob("*")
-        if p.is_file() and p.name not in ("SHA256SUMS", "_SUCCESS")
-    )
-    (ann_dir / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-    ))
+    _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
 
 
 def test_projection_rejects_c5_repo_and_refuses_success(
@@ -1170,14 +1166,7 @@ def _admit_second_batch(bundle_dir: Path, slug: str, *, spdx_id: str = "Apache-2
     ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
     ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
     (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
-    rel = sorted(
-        p.relative_to(ann_dir).as_posix()
-        for p in ann_dir.rglob("*")
-        if p.is_file() and p.name not in ("SHA256SUMS", "_SUCCESS")
-    )
-    (ann_dir / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
-    ))
+    _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
 
 
 def test_end_to_end_mixed_repo_publication_gated(

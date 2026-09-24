@@ -1166,6 +1166,24 @@ def _comment_finding(issue: ParsedIssue) -> CommentFinding:
     )
 
 
+def _render_component(render: Callable[[], object], fallback: Callable[[], str], label: str) -> str:
+    """Run a registered renderer under the fail-open contract.
+
+    Returns its string result, or the registered fallback (with a warning) when
+    it raises or returns a non-``str``/empty value, so a broken fork can never
+    break posting.
+    """
+    try:
+        result = render()
+    except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
+        _logger.warning("%s renderer failed (%s); using default", label, exc)
+        return fallback()
+    if not isinstance(result, str) or not result:
+        _logger.warning("%s renderer failed (returned %r); using default", label, result)
+        return fallback()
+    return result
+
+
 def _render_finding(issue: ParsedIssue, placement: str, renderers: ReviewRenderers) -> str:
     """Render one finding's inner block through the registered ``"finding"`` renderer.
 
@@ -1177,17 +1195,11 @@ def _render_finding(issue: ParsedIssue, placement: str, renderers: ReviewRendere
     ctx = FindingRenderContext(placement=placement)
     _fn = renderers.finding
     _label = "builtin" if _fn is default_render_finding else "custom"
-    try:
-        result = _fn(cf, ctx)
-    except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
-        _logger.warning("%s 'finding' renderer failed (%s); using default", _label, exc)
-        return renderers.fallback_finding(cf, ctx)
-    if not isinstance(result, str) or not result:
-        _logger.warning(
-            "%s 'finding' renderer failed (returned %r); using default", _label, result
-        )
-        return renderers.fallback_finding(cf, ctx)
-    return result
+    return _render_component(
+        lambda: _fn(cf, ctx),
+        lambda: renderers.fallback_finding(cf, ctx),
+        f"{_label} 'finding'",
+    )
 
 
 def _format_comment_body(issue: ParsedIssue, kind: str, renderers: ReviewRenderers) -> str:
@@ -1465,17 +1477,11 @@ def _render_summary(ctx: SummaryContext, renderers: ReviewRenderers) -> str:
     renderer raises or returns a non-``str``/empty result, so a broken fork can
     never break posting.
     """
-    try:
-        result = renderers.summary(ctx)
-    except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
-        _logger.warning("custom 'summary' renderer failed (%s); using default", exc)
-        return renderers.fallback_summary(ctx)
-    if not isinstance(result, str) or not result:
-        _logger.warning(
-            "custom 'summary' renderer failed (returned %r); using default", result
-        )
-        return renderers.fallback_summary(ctx)
-    return result
+    return _render_component(
+        lambda: renderers.summary(ctx),
+        lambda: renderers.fallback_summary(ctx),
+        "custom 'summary'",
+    )
 
 
 def _count_labels(

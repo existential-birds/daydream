@@ -9,7 +9,6 @@ recomputed from its record id.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -101,13 +100,6 @@ def test_load_v2_projection_returns_per_split_records_lineage_and_digests(
     assert len(proj.records) == len(record_ids)
     assert sum(len(v) for v in proj.by_split.values()) == len(record_ids)
     assert proj.lineage["salt"] == SALT
-    assert set(proj.split_digests) == {
-        "train.jsonl",
-        "validation.jsonl",
-        "holdout.jsonl",
-    }
-    for name, digest in proj.split_digests.items():
-        assert digest == hashlib.sha256((out / name).read_bytes()).hexdigest()
 
 
 def test_load_v2_projection_digest_is_deterministic(tmp_path: Path) -> None:

@@ -13,7 +13,6 @@ backend seam stubbed.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,9 +20,9 @@ import pytest
 from daydream import exploration as exploration_mod
 from daydream.artifact_visibility import _atomic_json, _manifest, _manifest_payload
 from daydream.exploration import exploration_cache_key
-from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import git as _git
+from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 _SPECIALIST_MARKER = "specialist"
@@ -65,24 +64,13 @@ def _drift_cached_key_between_runs(
     _atomic_json(state_root / "canonical-manifest.json", _manifest_payload(_manifest(canonical)))
 
 
-def _specialist_profile() -> ResolvedProfile:
-    """The cache's specialist tests explicitly opt into model exploration."""
-    profile = build_default_profile()
-    strategies = dict(profile.strategies)
-    strategies["exploration.dependency_trace"] = replace(
-        strategies["exploration.dependency_trace"],
-        content=strategies["exploration.dependency_trace"].content + "\nCustom dependency mapping policy.",
-    )
-    return ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")
-
-
 async def _run_deep(target: Path, *, custom_exploration: bool = True) -> int:
 
     exclude = target / ".git" / "info" / "exclude"
     exclude.write_text(f"{exclude.read_text()}\n.daydream/\n.review-output.md\n")
     return await run(RunConfig(
         target=str(target), start_at="review", cleanup=False,
-        review_profile=_specialist_profile() if custom_exploration else None,
+        review_profile=independent_exploration_profile() if custom_exploration else None,
     ))
 
 
@@ -218,7 +206,8 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await run(RunConfig(
-        target=str(multi_stack_target), start_at="review", cleanup=False, review_profile=_specialist_profile(),
+        target=str(multi_stack_target), start_at="review", cleanup=False,
+        review_profile=independent_exploration_profile(),
     )) == 0
     assert _count_specialist_calls(stub1) > 0
 
@@ -228,7 +217,8 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
 
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await run(RunConfig(
-        target=str(multi_stack_target), start_at="review", cleanup=False, review_profile=_specialist_profile(),
+        target=str(multi_stack_target), start_at="review", cleanup=False,
+        review_profile=independent_exploration_profile(),
     )) == 0
     assert _count_specialist_calls(stub2) > 0
     exploration = multi_stack_target / ".daydream" / "exploration"

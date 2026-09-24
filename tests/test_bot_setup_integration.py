@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import bot_setup, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
@@ -19,17 +17,8 @@ from daydream.templates import workflow_template_files
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.rsa import generate_rsa_pem
 from tests.harness.scripts import cli_main
-
-
-def _real_pem() -> str:
-    """Generate a real RSA PEM so ``mint_jwt`` can sign a valid App JWT."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    return key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
 
 
 def test_callback_listener_captures_code_then_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,7 +160,7 @@ def test_verify_healthy_install_passes_all_checks(
     check passes.
     """
 
-    pem = _real_pem()
+    pem = generate_rsa_pem()
     monkeypatch.setenv(APP_ID_ENV, "7")
     monkeypatch.setenv(APP_PRIVATE_KEY_ENV, pem)
 
@@ -356,7 +345,7 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     block). Asserts observable outcomes: exit 0, the three canonical secrets
     set, and a PR created (the bot goes live on merge).
     """
-    pem = _real_pem()
+    pem = generate_rsa_pem()
     monkeypatch.setattr(
         "daydream.bot_setup.register_app_via_manifest",
         lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),

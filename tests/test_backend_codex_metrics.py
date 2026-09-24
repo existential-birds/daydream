@@ -35,6 +35,14 @@ from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from tests.harness.codex_replay import make_mock_process_from_fixture as _make_mock_process
 
 
+async def _execute_events(model: str, fixture: str) -> list[object]:
+    """Replay one Codex fixture through a real CodexBackend, collecting all events."""
+    backend = CodexBackend(model=model)
+    mock_proc = _make_mock_process(fixture)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        return [event async for event in backend.execute(Path("/tmp"), "test")]
+
+
 @pytest.mark.asyncio
 async def test_metrics_event_emitted_at_turn_completed() -> None:
     """turn.completed with full usage produces MetricsEvent with EVNT-02 field names (EVNT-07).
@@ -42,12 +50,7 @@ async def test_metrics_event_emitted_at_turn_completed() -> None:
     Model gpt-5.3-codex is in MODEL_PRICES, so #194 synthesizes cost at the
     backend layer; the value must match compute_cost for these tokens.
     """
-    backend = CodexBackend(model="gpt-5.3-codex")
-    mock_proc = _make_mock_process("turn_completed_with_usage.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "test"):
-            events.append(event)
+    events = await _execute_events("gpt-5.3-codex", "turn_completed_with_usage.jsonl")
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 1
     m = metrics[0]
@@ -75,12 +78,7 @@ async def test_cost_event_still_emitted() -> None:
     None here (#156); a known model would synthesize (see test_metrics_event
     above and test_backend_codex.py::test_codex_synthesizes_cost_for_known_model).
     """
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_completed_with_usage.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "test"):
-            events.append(event)
+    events = await _execute_events("fixture-model", "turn_completed_with_usage.jsonl")
     cost = [e for e in events if isinstance(e, CostEvent)]
     assert len(cost) == 1
     assert cost[0].input_tokens == 200     # CostEvent keeps SDK boundary names
@@ -92,12 +90,7 @@ async def test_cost_event_still_emitted() -> None:
 @pytest.mark.asyncio
 async def test_partial_usage_skips_metrics_event() -> None:
     """usage missing output_tokens => no MetricsEvent emitted (EVNT-02 requires both as int)."""
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_completed_partial_usage.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "test"):
-            events.append(event)
+    events = await _execute_events("fixture-model", "turn_completed_partial_usage.jsonl")
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 0
     # CostEvent still emitted with the partial signal.

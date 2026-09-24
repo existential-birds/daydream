@@ -84,15 +84,6 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
     return root
 
 
-def _tree_sha(root: Path) -> str:
-    """Deterministic sha256 over a workspace tree's file bytes (read-only check)."""
-    digest = hashlib.sha256()
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            digest.update(p.read_bytes())
-    return digest.hexdigest()
-
-
 def _tree_bytes(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
@@ -172,14 +163,14 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws = _write_curated_workspace_with_sensitive_evidence(tmp_path)
-    before = _tree_sha(ws)
+    before = _tree_bytes(ws)
     rc = _handle_benchmark_command(["validate", str(ws)])
     captured = capsys.readouterr()
     out = captured.out + captured.err
     assert "SUPER_SECRET_EVIDENCE" not in out       # evidence bodies never printed
     assert "corrupt" in out.lower() or "ready" in out.lower()   # only labels/short strings
     assert rc == 1
-    assert _tree_sha(ws) == before                  # validate is read-only: nothing written
+    assert _tree_bytes(ws) == before                # validate is read-only: nothing written
 
 
 def test_validate_exit_code_contract_preserved(tmp_path: Path) -> None:

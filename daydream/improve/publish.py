@@ -37,35 +37,48 @@ class PublishResult:
     issue_url: str
 
 
+def _validated_marker(value: str, label: str, prefix: str, suffix: str) -> str:
+    """Validate one injection-prone identifier and wrap it in its marker."""
+    if _PACKAGE_ID_RE.fullmatch(value) is None:
+        raise ValueError(
+            f"{label} must contain only letters, numbers, '.', '_', ':', or '-'"
+        )
+    return f"{prefix}{value}{suffix}"
+
+
 def package_marker(package_id: str) -> str:
     """Return the stable, injection-safe issue marker for a work package."""
-    if _PACKAGE_ID_RE.fullmatch(package_id) is None:
-        raise ValueError(
-            "package_id must contain only letters, numbers, '.', '_', ':', or '-'"
-        )
-    return f"<!-- daydream-improve: package={package_id} -->"
+    return _validated_marker(
+        package_id, "package_id", "<!-- daydream-improve: package=", " -->"
+    )
 
 
 def member_marker(member_alias: str) -> str:
     """Return an injection-safe marker for one stable package member alias."""
-    if _PACKAGE_ID_RE.fullmatch(member_alias) is None:
-        raise ValueError(
-            "member_alias must contain only letters, numbers, '.', '_', ':', or '-'"
-        )
-    return f"{_MEMBER_ALIAS_MARKER_PREFIX}{member_alias} -->"
+    return _validated_marker(
+        member_alias, "member_alias", _MEMBER_ALIAS_MARKER_PREFIX, " -->"
+    )
 
 
 def member_fingerprint_marker(fingerprint: str) -> str:
     """Return an injection-safe marker for one audit-time member identity."""
-    if _PACKAGE_ID_RE.fullmatch(fingerprint) is None:
-        raise ValueError(
-            "member fingerprint must contain only letters, numbers, '.', '_', ':', or '-'"
-        )
-    return f"{_MEMBER_FINGERPRINT_MARKER_PREFIX}{fingerprint} -->"
+    return _validated_marker(
+        fingerprint,
+        "member fingerprint",
+        _MEMBER_FINGERPRINT_MARKER_PREFIX,
+        " -->",
+    )
 
 
 def _member_markers(member_aliases: Sequence[str]) -> tuple[str, ...]:
     return tuple(member_marker(alias) for alias in dict.fromkeys(member_aliases))
+
+
+def _member_fingerprint_markers(fingerprints: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        member_fingerprint_marker(fingerprint)
+        for fingerprint in dict.fromkeys(fingerprints)
+    )
 
 
 def issue_body(
@@ -81,10 +94,7 @@ def issue_body(
     markers = (
         package_marker(package_id),
         *_member_markers(member_aliases),
-        *tuple(
-            member_fingerprint_marker(fingerprint)
-            for fingerprint in dict.fromkeys(member_fingerprints)
-        ),
+        *_member_fingerprint_markers(member_fingerprints),
     )
     return f"{'\n'.join(markers)}\n\n{plan_markdown}"
 
@@ -270,10 +280,7 @@ class IssuePublisher:
             raise ImprovePublishError(str(exc)) from exc
         marker = package_marker(package_id)
         alias_markers = _member_markers(member_aliases)
-        fingerprint_markers = tuple(
-            member_fingerprint_marker(fingerprint)
-            for fingerprint in dict.fromkeys(member_fingerprints)
-        )
+        fingerprint_markers = _member_fingerprint_markers(member_fingerprints)
         # A repeated stable alias is deliberately ambiguous: two independent
         # findings share the same semantic anchor. In that case only the raw
         # member fingerprints can prove that every member is covered.
