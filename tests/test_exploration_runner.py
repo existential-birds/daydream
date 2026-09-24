@@ -12,7 +12,6 @@ import anyio
 import pytest
 
 import daydream.exploration_runner as er
-import daydream.exploration_runner as exploration_runner
 from daydream import review_profile as rp
 from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext, FileInfo
@@ -672,7 +671,7 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
             return _never_yield()
         return None
 
-    monkeypatch.setattr(exploration_runner, "_PRE_SCAN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(er, "_PRE_SCAN_TIMEOUT_SECONDS", 0.05)
     diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
     recorder = make_recorder(tmp_path)
 

@@ -52,25 +52,12 @@ _FACTUAL_DISAGREEMENT_RULES: tuple[str, ...] = (
 _NEGATION_TOKENS = re.compile(r"\b(?:not|never)\b|\bn't\b", re.IGNORECASE)
 
 
-def _sentence_containing(text: str, start: int, end: int) -> str:
-    """Return the sentence (split on .!?; and newlines) containing [start, end)."""
-    sentence_starts = [0] + [m.end() for m in re.finditer(r"[.!?;\n]", text) if m.end() <= start]
-    start_idx = sentence_starts[-1]
-    tail = re.search(r"[.!?;\n]", text[end:])
-    end_idx = end + (tail.start() if tail else len(text[end:]))
-    return text[start_idx:end_idx]
-
-
 def _is_negated(text: str, start: int) -> bool:
     """True when a negation token appears before ``start`` in the same sentence."""
-    sentence = _sentence_containing(text, start, start)
-    return bool(_NEGATION_TOKENS.search(sentence[: _sentence_offset(sentence, text, start)]))
-
-
-def _sentence_offset(sentence: str, text: str, start: int) -> int:
-    # Offset of `start` within its sentence.
-    idx = text.find(sentence)
-    return start - idx if idx >= 0 else start
+    prefix = text[:start]
+    boundaries = [m.end() for m in re.finditer(r"[.!?;\n]", prefix)]
+    sentence_start = boundaries[-1] if boundaries else 0
+    return bool(_NEGATION_TOKENS.search(text[sentence_start:start]))
 
 
 def _match_rules(text: str, rules: tuple[str, ...], *, guard_negation: bool) -> bool:

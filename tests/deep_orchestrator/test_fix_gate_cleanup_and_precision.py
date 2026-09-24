@@ -416,9 +416,6 @@ async def test_cleanup_none_unattended_defaults_to_keep(
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
 
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("input() called in unattended mode -- cleanup gate must not read stdin")
-
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
     report = multi_stack_target / REVIEW_OUTPUT_FILE

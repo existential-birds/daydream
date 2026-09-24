@@ -277,10 +277,9 @@ def run_rft(config: RftConfig) -> RftResult:
     raw = inputs_path.read_text(encoding="utf-8")
     records: list[dict[str, Any]] = [json.loads(line) for line in raw.splitlines() if line.strip()]
 
-    tasks = [_reconstruct_task(rec) for rec in sorted(records, key=_record_sort_key)]
-
     winners: list[RftWinner] = []
-    for rec, (rid, _base_sha, _diff) in zip(sorted(records, key=_record_sort_key), tasks):
+    for rec in sorted(records, key=_record_sort_key):
+        rid, _base_sha, _diff = _reconstruct_task(rec)
         for index, candidate in enumerate(_sample_candidates(rec, rid, config)):
             breakdown = _score_candidate(candidate)
             if _passes(config.min_breakdown, breakdown):

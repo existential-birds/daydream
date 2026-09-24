@@ -469,20 +469,8 @@ def _frozen_split_from_projection(
             "its holdout split; the gate would evaluate against nothing and refuses closed"
         )
     holdout_rate = float(cast(float, projection.lineage["holdout_rate"]))
-    held_out_ids = [str(r["comment_id"]) for r in held_out]
-    digest = gate_mod._split_digest(held_out_ids, seed)
-    digest_path = gate_mod.write_split_sidecar(
+    return gate_mod._build_frozen_split(
         labels_path,
-        digest=digest,
-        seed=seed,
-        held_out_fraction=holdout_rate,
-        held_out_ids=held_out_ids,
-        train_ids=[str(r["comment_id"]) for r in train],
-    )
-    return FrozenSplit(
-        digest=digest,
-        fingerprint=digest[:8],
-        digest_path=digest_path,
         train_rows=train,
         held_out_rows=held_out,
         seed=seed,

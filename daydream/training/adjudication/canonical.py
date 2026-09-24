@@ -224,10 +224,9 @@ def run_canonical_harvest(
         )
 
     # Merge human observations under three-tier precedence (M4/M5).
-    known_record_ids = {str(record["record_id"]) for record in materialized}
     observations = load_observations(observations_path) if observations_path is not None else []
     grouped = group_observations_by_record(
-        observations, known_record_ids, "run_canonical_harvest"
+        observations, materialized_ids, "run_canonical_harvest"
     )
 
     human_adjudicated = 0

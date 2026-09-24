@@ -336,12 +336,8 @@ def _pin_replay_clock(pinned_first_end_ns: int) -> Callable[[], None]:
     """
     # The stdlib ``time`` module is the same object ``pi.py`` imports; pin the
     # host receipt clock there so the REAL backends.pi reads land deterministically.
-    import time as _stdlib_time
-
-    import daydream.backends.pi as pi_module
-
     clock_state: dict[str, int] = {"reads": 0, "first_end_real": 0}
-    real_time_ns = _stdlib_time.time_ns
+    real_time_ns = time.time_ns
 
     def pinned_time_ns() -> int:
         now = real_time_ns()
@@ -358,13 +354,12 @@ def _pin_replay_clock(pinned_first_end_ns: int) -> Callable[[], None]:
         raise ReplayValidationError("Manifest pinned first message_end receipt must be a positive int")
 
     def _restore_pinned_clock() -> None:
-        _stdlib_time.time_ns = _stdlib_real_time_ns
+        time.time_ns = _stdlib_real_time_ns
 
     # Deliberate operator pin of the host receipt clock inside the REAL
     # backends.pi module, exactly as the task-7 replay requires it; the
     # caller restores via the returned hook in a finally.
-    setattr(_stdlib_time, "time_ns", pinned_time_ns)
-    _ = pi_module  # backends.pi reads time.time_ns via the shared stdlib module
+    setattr(time, "time_ns", pinned_time_ns)
     return _restore_pinned_clock
 
 

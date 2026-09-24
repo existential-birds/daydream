@@ -16,14 +16,13 @@ The module shells out via :mod:`daydream.git_ops` only.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import secrets
 import shutil
 import stat
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +40,7 @@ from daydream.artifact_visibility import (
 )
 from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.json_utils import _fsync_directory
 
 _logger = logging.getLogger(__name__)
 
@@ -722,21 +722,8 @@ def _remove_emptied_legacy_roots(source: Path) -> None:
             # Residue remains: leave the root for _validate_legacy_public to
             # refuse with its actionable diagnostic.
             continue
-        _fsync_directory(root.parent)
-
-
-def _fsync_directory(path: Path) -> None:
-    """Persist a directory entry change (best-effort fsync of the directory)."""
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
+        with suppress(OSError):
+            _fsync_directory(root.parent)
 
 
 def _resolve_ref(source: Path, branch: str | None) -> str:
