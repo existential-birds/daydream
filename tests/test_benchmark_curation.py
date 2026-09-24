@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pydantic
 import pytest
@@ -90,7 +90,7 @@ def _seed_ready_workspace(
 def _finish_import(ws: Path, origin_url: str) -> str:
     """Run the real import and return the first frozen case id."""
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
-    return load_yaml_strict(ws / "benchmark.yaml")["cases"][0]["case_id"]
+    return cast(str, load_yaml_strict(ws / "benchmark.yaml")["cases"][0]["case_id"])
 
 
 def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candidate: bool = False) -> tuple[Any, ...]:
