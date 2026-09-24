@@ -8,10 +8,40 @@ from types import MappingProxyType
 import pytest
 import yaml
 
-from daydream.benchmark.harbor import env_policy
+from daydream.benchmark.harbor import agent, entrypoint, env_policy, package
 from daydream.benchmark.harbor.agent import build_child_env
 from daydream.benchmark.harbor.entrypoint import _sanitize_reviewer_environment
-from daydream.benchmark.harbor.package import render_job_config
+from daydream.benchmark.harbor.package import render_job_config, render_task_toml
+
+
+def test_task_toml_renderer_derives_its_injected_env_from_the_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The [environment.env] block is built from the declaration's injection channel."""
+    extended = replace(
+        env_policy.TASK,
+        injected=MappingProxyType(
+            {**env_policy.TASK.injected, "DAYDREAM_REVIEW_PROBE": "{opaque_key}"}
+        ),
+    )
+    monkeypatch.setattr(env_policy, "TASK", extended)
+    rendered = render_task_toml(
+        "case-abc123def456", reviewer_hosts=["api.anthropic.com"], judge_hosts=["openrouter.ai"]
+    ).decode()
+    assert rendered.index('DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"') < rendered.index(
+        'DAYDREAM_REVIEW_PROBE = "case-abc123def456"'
+    )
+
+
+def test_harbour_layers_declare_no_policy_name_literal() -> None:
+    """No credential or control-plane name remains a bare literal outside the
+    declaration (spec M4) — a re-export from env_policy is allowed, a local
+    string equal to a policy name is not."""
+    for module in (agent, entrypoint, package):
+        assert module.__file__ is not None
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        offenders = sorted(n for n in env_policy.declared_names() if f'"{n}"' in source)
+        assert offenders == [], f"{module.__name__} restates policy names: {offenders}"
 
 
 def test_job_config_renderer_derives_its_env_from_the_declaration(

@@ -550,13 +550,18 @@ def render_task_toml(
     rendering, and compilation fails closed (``PackageError``) on a missing,
     empty, or invalid list rather than silently defaulting to a host.
 
-    The ``[environment.env]`` block threads the opaque per-case task key and the
-    deterministic ``base``/``head`` ref names into the agent container (Harbor
-    natively injects ``[environment].env`` into the environment). No judge/
-    credential/archive configuration is ever rendered onto the agent surface.
+    The ``[environment.env]`` block comes from ``env_policy.TASK.injected``:
+    it threads the opaque per-case task key and the deterministic ``base``/``head``
+    ref names into the agent container (Harbor natively injects
+    ``[environment].env`` into the environment). No judge/credential/archive
+    configuration is ever rendered onto the agent surface.
     """
     reviewer = _normalized_allowed_hosts(reviewer_hosts, "reviewer")
     judge = _normalized_allowed_hosts(judge_hosts, "judge")
+    injected_env = "\n".join(
+        f'{name} = "{value.format(opaque_key=opaque_key)}"'
+        for name, value in env_policy.TASK.injected.items()
+    )
     # TOML is intentionally rendered directly: fixed ordering and no timestamp
     # make these bytes part of the deterministic compiled-tree contract.
     # json.dumps renders each list as a double-quoted TOML inline array.
@@ -580,9 +585,7 @@ memory_mb = 4096
 storage_mb = 10240
 
 [environment.env]
-DAYDREAM_REVIEW_CASE_ID = "{opaque_key}"
-DAYDREAM_REVIEW_BASE_REF = "base"
-DAYDREAM_REVIEW_HEAD_REF = "head"
+{injected_env}
 
 [verifier]
 timeout_sec = 900.0
