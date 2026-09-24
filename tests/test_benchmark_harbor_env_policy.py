@@ -1,10 +1,27 @@
 """Policy declarations and per-layer consumption for the harbor env policy."""
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
+import pytest
+
 from daydream.benchmark.harbor import env_policy
+from daydream.benchmark.harbor.agent import build_child_env
+
+
+def test_host_builder_derives_its_sets_from_the_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing the host view changes the builder's output, without a private copy."""
+    extended = replace(
+        env_policy.HOST,
+        required_process_vars=env_policy.HOST.required_process_vars | {"PROBE_VAR"},
+    )
+    monkeypatch.setattr(env_policy, "HOST", extended)
+    child = build_child_env({"PATH": "/usr/bin", "PROBE_VAR": "kept"})
+    assert child.get("PROBE_VAR") == "kept"
 
 
 def test_declaration_is_a_leaf_module() -> None:
