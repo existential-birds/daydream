@@ -7,12 +7,13 @@ identity resolution, and gh token-env propagation through
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import jwt as pyjwt
 import pytest
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import git_ops, github_app
 from daydream.github_app import (
@@ -342,7 +343,9 @@ def test_mint_jwt_is_rs256_with_expected_claims() -> None:
     private_key = serialization.load_pem_private_key(pem.encode(), password=None)
 
     token = mint_jwt(12345, pem)
-    decoded = pyjwt.decode(token, private_key.public_key(), algorithms=["RS256"])
+    # generate_rsa_pem always emits an RSA key, so the loaded union narrows safely.
+    public_key = cast(rsa.RSAPublicKey, private_key.public_key())
+    decoded = pyjwt.decode(token, public_key, algorithms=["RS256"])
     assert decoded["iss"] == "12345" or decoded["iss"] == 12345
     assert decoded["exp"] - decoded["iat"] <= 600
 
