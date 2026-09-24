@@ -28,9 +28,11 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -442,6 +444,17 @@ def _schema_instruction(schema: dict[str, Any]) -> str:
     )
 
 
+def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
+    """Create a closed private UTF-8 file owned by the invocation's cleanup scope."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix="daydream-pi-prompt-", suffix=".txt", delete=False,
+    ) as prompt_file:
+        path = Path(prompt_file.name).absolute()
+        attachments.callback(path.unlink, missing_ok=True)
+        prompt_file.write(text)
+    return path
+
+
 class PiBackend:
     """Backend that wraps the Pi CLI subprocess.
 
@@ -702,9 +715,6 @@ class PiBackend:
         if output_schema:
             full_prompt = prompt + _schema_instruction(output_schema)
 
-        if not tools_disabled:
-            args.append(full_prompt)
-
         # P18 Task 1: generation lifecycle correlation state (Pi only —
         # native_generation_interval class). One open generation per
         # assistant message; user/tool-result lifecycle never creates one.
@@ -791,7 +801,16 @@ class PiBackend:
             session_source="host_generated" if resume_id is None else "configured",
         )
 
+        attachments = ExitStack()
         try:
+            if not tools_disabled:
+                args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
+            if review_instructions and not finalization:
+                # Pi resolves existing system-prompt paths directly (without @).
+                # Review instructions are caller-controlled and need the same
+                # size-independent transport as the user prompt.
+                index = args.index("--append-system-prompt") + 1
+                args[index] = str(_write_prompt_attachment(system_prompt, attachments))
             transport = CliTransport(
                 "pi",
                 args,
@@ -1074,8 +1093,11 @@ class PiBackend:
                 )
 
         finally:
-            if transport is not None:
-                await teardown(transport, self._transports)
+            try:
+                if transport is not None:
+                    await teardown(transport, self._transports)
+            finally:
+                attachments.close()
 
     async def cancel(self) -> None:
         """Cancel all running Pi processes.

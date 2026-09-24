@@ -244,8 +244,18 @@ exploration pre-scan (cached across runs)
   is), `source_uids` (which records it was made of). Provenance is *not* identity — two items may cite the
   same record, so `source_uids` is not unique. Keep `id` integer: five strict `*_SCHEMA` constants type the
   echoed `id`/`issue_id` as `integer`, and the report renders it as the finding number.
-- Intent and wonder prompts inline the diff under `INLINE_DIFF_BUDGET_BYTES` (12 KiB, shared with per-stack),
-  else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
+- Pi discovery always references the actual live session `diff.patch`, including small diffs. It uses
+  ordinary read-only tools and separate structural review, never preloaded finite evidence packets.
+  The pointer-only diff has a separate 128 MiB validation ceiling; other sanctioned-input budgets stay
+  unchanged. Recovery finalization uses completed investigation evidence and never recaptures raw diff.
+  Other backends' intent, wonder and per-stack prompts keep their bounded 12 KiB inline policy and
+  transport-specific isolation. Small diffs can still collapse the fan-out.
+- Uncovered sweeps use the durable hunk index for eligibility. Pi reviewers receive the admitted diff
+  reference and source checkout; other backends retain bounded per-file context and their access mode. Structured output is persisted by the host. Only completed source
+  reads and validated findings establish review coverage; assignment or successful output alone does not.
+- Pi sends normal logical prompts plus schema through private temporary `@file` attachments. Dynamic
+  review system instructions use Pi's system-prompt file support. Files survive until child teardown
+  and are removed on success, failure, cancellation or generator close; tools-disabled calls retain stdin.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
   prompt forces a re-read of the per-stack record files, rewritten after arbitration.
 - **Diagrams (`diagram` step, after merge/supervision).** The LLM **never writes mermaid**: it emits a

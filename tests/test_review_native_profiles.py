@@ -102,7 +102,7 @@ def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None
     unc = build_uncovered_sweep_prompt(
         strategy="uncovered-strategy-sentinel {file}",
         file="uncovered.py",
-        hunks="@@ -1 +1 @@\n-old\n+new",
+        diff_path=Path("/diff.patch"),
         intent_path=Path("/intent.md"),
         cwd=Path("/review-repo"),
         output_path=Path("/uncovered-review.md"),
@@ -125,7 +125,7 @@ def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None
     assert "verification-strategy-sentinel" in ver
     assert "changed.py" in ver and "verification-candidate-sentinel" in ver
     assert "uncovered-strategy-sentinel" in unc
-    assert "uncovered.py" in unc and "@@ -1 +1 @@" in unc
+    assert "uncovered.py" in unc and "/diff.patch" in unc
     assert "intent-strategy-sentinel" in intent
     assert "/review.diff" in intent and "+new behavior" in intent
     assert "alternative-strategy-sentinel" in alt

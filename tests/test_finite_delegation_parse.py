@@ -8,7 +8,6 @@ import pytest
 
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
-from daydream.deep.finite_review import FiniteResult
 from daydream.deep.review_steps import _per_stack_body, _step_per_stack_parse
 from daydream.extensions import Registry, get_registry
 from daydream.flows.engine import FlowContext
@@ -93,22 +92,13 @@ async def test_per_stack_rerun_clears_stale_delegation_before_review(
     alternatives.write_text("[]")
     attempted: list[str] = []
 
-    async def finite(*args: Any, **kwargs: Any) -> FiniteResult:
-        assert not any(path.exists() for path in artifacts)
-        attempted.append("primary")
-        return FiniteResult(
-            {"issues": [], "verdicts": [{"path": "api.py", "lines_read": 1,
-                "verdict": "not_reviewed", "n_findings": 0}]},
-            "evidence_incomplete", frozenset(), tuple(source.metadata() for source in args[2].sources),
-        )
-
-    async def fallback(*args: Any, **kwargs: Any) -> Any:
-        assert attempted == ["primary"]
-        attempted.append("fallback")
+    async def review(*args: Any, **kwargs: Any) -> Any:
+        assert not artifacts[0].exists()
+        assert "STALE" not in args[2]
+        attempted.append("structure" if "repository-wide interactions" in args[2] else "primary")
         return {"issues": [], "verdicts": []}, None, None
 
-    monkeypatch.setattr("daydream.deep.finite_review.run_finite_review", finite)
-    monkeypatch.setattr("daydream.phases.run_agent", fallback)
+    monkeypatch.setattr("daydream.phases.run_agent", review)
     backend = PiBackend(model="test", reasoning_effort="high")
     ctx = FlowContext(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
@@ -120,11 +110,11 @@ async def test_per_stack_rerun_clears_stale_delegation_before_review(
               "stacks": [StackAssignment("python", ["api.py"]), StackAssignment("structure", ["api.py"])]},
     )
     await _per_stack_body(ctx, include_alternatives=False)
-    assert attempted == ["primary", "fallback"]
+    assert sorted(attempted) == ["primary", "structure"]
     assert not artifacts[0].exists()
     assert "delegated_to" not in json.loads(artifacts[1].read_text())
     assert artifacts[2].read_text().startswith("# Review")
-    assert set(ctx.data["failed_stacks"]) == {"python"}
+    assert ctx.data["failed_stacks"] == {}
 
 
 def _mark_delegated_artifacts(deep: Path, scopes: dict[str, list[str]]) -> None:

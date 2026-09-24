@@ -60,6 +60,14 @@ def alternatives_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "alternatives.json"
 
 
+def write_review_markdown(path: Path, issues: list[dict[str, Any]]) -> None:
+    """Persist the host-owned review sidecar from authoritative structured issues."""
+    path.write_text("# Review\n\n" + "\n".join(
+        f"- {issue.get('file', '')}:{issue.get('line', '')} {issue.get('description', '')}"
+        for issue in issues
+    ))
+
+
 def per_stack_review_path(deep_dir_path: Path, stack_name: str) -> Path:
     """Per-stack review markdown output (D-18 deterministic, unique per stack)."""
     return deep_dir_path / f"stack-{stack_name}-review.md"

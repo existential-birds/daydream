@@ -16,16 +16,22 @@ from daydream.agent import console, run_agent
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S, STRUCTURE_STACK_NAME
-from daydream.deep.artifacts import MERGE_FAILURE_KEY, _load_failures, per_stack_failures_path, per_stack_records_path
+from daydream.deep.artifacts import (
+    MERGE_FAILURE_KEY,
+    _load_failures,
+    per_stack_failures_path,
+    per_stack_records_path,
+    write_review_markdown,
+)
 from daydream.deep.artifacts import alternatives_path as _alternatives_path
 from daydream.deep.artifacts import intent_path as _intent_path
 from daydream.deep.coverage import (
     _completed_read_paths,
     _finding_files_from_records,
+    bounded_diff_block_for_file,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
-    diff_block_for_file,
     filter_sweepable_files,
     resolve_per_stack_verdicts,
 )
@@ -43,7 +49,7 @@ from daydream.phases import (
     phase_per_stack_reviews,
     phase_understand_intent,
 )
-from daydream.prompt_budget import prepare_sanctioned_inputs
+from daydream.prompt_budget import prepare_sanctioned_inputs, uses_diff_reference
 from daydream.review_budget import ReviewBudgetExceeded, ReviewLimits, record_review_budget_stop, review_budget_path
 from daydream.review_evidence import FinalizationContext
 from daydream.trajectory import (
@@ -778,17 +784,9 @@ async def _run_uncovered_sweep(
         dd.parent, session_id, receipts=_load_coverage_receipts(ctx)
     )
 
-    # Issue #644 — the sweep's block extraction must source the FULL on-disk
-    # diff (``ctx.data["diff_path"]``, always written full at gather) because
-    # the coverage file set above derives from the same full ``diff.patch``:
-    # a bounded in-memory ``ctx.data["diff"]`` would silently route a
-    # truncated-away file into ``skipped_small`` (block lookup -> None) and it
-    # would never be swept. A read error propagates to the step's
-    # fail-open wrapper (the sweep must NEVER fail the run); it is not
-    # swallowed with a silent empty-diff fallback. A ctx built without
-    # ``diff_path`` (defensive legacy fallback only, never the default)
-    # degrades to the in-memory diff rather than crashing the sweep.
-    full_diff = _read_full_diff(ctx)
+    # Eligibility comes from the durable hunk index, including files omitted
+    # from the short display diff. Discovery receives the actual live path.
+    diff_path = deep_state.diff_path
 
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
@@ -866,14 +864,18 @@ async def _run_uncovered_sweep(
     )
     # Loop-invariant for the whole fan-out: every sweep fork sanctions the same
     # intent and pre-scan artifacts, so they are captured once.
+    reference_diff = uses_diff_reference(parse_backend, ctx.work.repo, read_only=True)
     sweep_inputs = {"intent": deep_state.intent_path}
+    if reference_diff:
+        sweep_inputs["diff"] = diff_path
     sweep_exploration = deep_state.exploration_dir_or_none
     if isinstance(sweep_exploration, Path):
         sweep_inputs["exploration-summary"] = sweep_exploration / "summary.md"
         sweep_inputs["exploration-affected-files"] = sweep_exploration / "affected_files.md"
     sanctioned_inputs = prepare_sanctioned_inputs(
         parse_backend, ctx.work.repo,
-        {label: path for label, path in sweep_inputs.items() if path.is_file()}, read_only=False,
+        {label: path for label, path in sweep_inputs.items() if label == "diff" or path.is_file()},
+        read_only=reference_diff,
     )
     async with dispatch_scope(
         recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors
@@ -884,7 +886,8 @@ async def _run_uncovered_sweep(
                 prompt = build_uncovered_sweep_prompt(
                     strategy=ctx.strategy("uncovered_review"),
                     file=file,
-                    hunks=diff_block_for_file(full_diff, file) or "",
+                    diff_path=diff_path,
+                    inline_diff=None if reference_diff else bounded_diff_block_for_file(diff_path, file),
                     intent_path=deep_state.intent_path,
                     cwd=ctx.work.repo,
                     output_path=output_path,
@@ -916,11 +919,14 @@ async def _run_uncovered_sweep(
                                         assigned_files=(file,),
                                         output_semantics="Return only grounded issues for the assigned file. "
                                         "An empty issues array is valid; unfinished work is not clean coverage.",
-                                        supplied_context=(("diff", diff_block_for_file(full_diff, file) or ""),),
+                                        supplied_context=(
+                                            (("diff reference", str(diff_path)),) if reference_diff else ()
+                                        ),
                                     ),
                                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                                     sanctioned_inputs=sanctioned_inputs,
+                                    read_only=reference_diff,
                                     run_context=ctx.run_context,
                                 )
                             if budget_reason:
@@ -948,9 +954,13 @@ async def _run_uncovered_sweep(
                                 )
                                 sweep_records_by_file[file] = issues
                                 # Structured records are the authoritative sweep
-                                # output. Markdown review files are optional backend
-                                # byproducts and cannot gate persistence. Coverage is
+                                # output. Host-written Markdown files are optional
+                                # sidecars and cannot gate persistence. Coverage is
                                 # still computed independently from verified Reads.
+                                try:
+                                    write_review_markdown(dd / f"uncovered-{n}-review.md", issues)
+                                except OSError as exc:
+                                    print_warning(console, f"Could not write optional sweep review for {file}: {exc}")
                                 completed_reviews.add(file)
                         except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
                             sweep_failures[file] = f"{type(exc).__name__}: {exc}"
@@ -1004,11 +1014,11 @@ async def _run_uncovered_sweep(
     stats["completed_files"] = sorted(completed_reviews)
     # Issue #309 finding 6: per-file attempt status. A completed review output
     # is a completed ATTEMPT; only files with a verified post-sweep completed
-    # read are "read". Anything else is "reviewed (hunks only)" and must not
+    # read are "read". Anything else is "completed without verified source read" and must not
     # move files_read_by_reviewers / coverage_ratio.
     covered_set = set(stats.get("covered_files") or [])
     stats["sweep_attempt_status"] = {
-        file: ("read" if file in covered_set else "reviewed (hunks only)")
+        file: ("read" if file in covered_set else "completed without verified source read")
         for file in sorted(completed_reviews)
     }
     if completed_reviews:

@@ -85,7 +85,14 @@ async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) 
     proc = FakeCliProcess([json.dumps(item) for item in native])
     schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
     events: list[Any] = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc) as spawn:
+    delivered_prompts: list[str] = []
+
+    async def spawn_child(*args: str, **kwargs: Any) -> Any:
+        assert args[-1].startswith("@/")
+        delivered_prompts.append(Path(args[-1][1:]).read_text(encoding="utf-8"))
+        return proc
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn_child) as spawn:
         try:
             async for event in PiBackend("requested-model").execute(Path("/tmp"), "actual prompt", schema,
                                                                    persist_session=False):
@@ -108,7 +115,8 @@ async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) 
     assert result.continuation is None
     assert result.finish_reason == ("error" if failed else "stop")
     request = next(e for e in events if isinstance(e, RequestEvent))
-    assert request.prompt == spawn.call_args.args[-1]
+    assert delivered_prompts == [request.prompt]
+    assert not Path(spawn.call_args.args[-1][1:]).exists()
     assert request.prompt.startswith("actual prompt")
     assert request.output_schema == schema
     assert request.system_prompt

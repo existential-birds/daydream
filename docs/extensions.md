@@ -552,6 +552,13 @@ Working contracts for extension steps:
   over-limit inputs fail before backend entry instead of being truncated.
   Exact-path validation streams and hashes the named files without retaining
   their full contents.
+  Pi's exact-path `diff` input is a pointer-only durable artifact: it has a
+  separate 128 MiB streaming-validation limit and does not consume the 1 MiB
+  captured-file or 4 MiB aggregate allowances. It remains in the exact-file
+  allowlist, is UTF-8 validated and stream-hashed again before each attempt,
+  and is never copied into recovery finalization context. Its path must be the
+  active session path supplied by the host. All other required inputs retain
+  their existing limits; INLINE transports retain their isolation contract.
 - Private storage is cwd-rooted discovery isolation, not an OS sandbox; no
   transport grants access to an entire runtime directory.
 - Intentional standalone phase calls pass `allow_standalone=True` to keep

@@ -21,6 +21,9 @@ SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES = INLINE_DIFF_BUDGET_BYTES
 SANCTIONED_EXACT_INPUT_MAX_FILES = 512
 SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES = 1_048_576
 SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 4_194_304
+# Durable references cost streaming I/O, not model context. Bound that resource
+# independently of captured prompt inputs (one required diff per input set).
+SANCTIONED_DIFF_REFERENCE_MAX_BYTES = 128 * 1024 * 1024
 
 _SANCTIONED_INLINE_HEADER = "Sanctioned phase inputs (captured verbatim):"
 _SANCTIONED_INLINE_CLOSE_TAG = "</sanctioned-input>"
@@ -49,6 +52,7 @@ class PreparedSanctionedInput:
     inode: int
     size: int
     mtime_ns: int
+    pointer_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,11 @@ class PreparedSanctionedInputs:
         priorities = {label: index for index, label in enumerate(input_priority)}
         inputs = sorted(self.inputs, key=lambda item: priorities.get(item.label, len(priorities)))
         for item in inputs:
+            if item.pointer_only:
+                blocks.append(
+                    f"Reference {item.label!r}: {item.path} (not captured; use completed investigation evidence)"
+                )
+                continue
             if remaining <= 0:
                 blocks.append("[remaining sanctioned inputs omitted; coverage incomplete]")
                 break
@@ -159,7 +168,7 @@ class PreparedSanctionedInputs:
             raise SanctionedInputUnavailable("sanctioned input transport mode changed before model execution")
         aggregate = 0
         for item in self.inputs:
-            if _unchanged_since_capture(item):
+            if not item.pointer_only and _unchanged_since_capture(item):
                 # The capture already streamed and hashed these exact bytes,
                 # so the re-read/re-hash is redundant — but the aggregate cap
                 # stays enforced exactly as a fresh capture would enforce it.
@@ -170,8 +179,11 @@ class PreparedSanctionedInputs:
                     )
                 aggregate += item.size
                 continue
-            current = _capture_input(item.label, item.path, self.transport, aggregate)
-            aggregate += current.size
+            current = _capture_input(
+                item.label, item.path, self.transport, aggregate, pointer_only=item.pointer_only,
+            )
+            if not item.pointer_only:
+                aggregate += current.size
             if current != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
 
@@ -259,7 +271,8 @@ def _transport_allowance(transport: SanctionedInputTransport, aggregate: int) ->
 
 
 def _capture_input(
-    label: str, path: Path, transport: SanctionedInputTransport, aggregate: int, *, text_budget: int | None = None
+    label: str, path: Path, transport: SanctionedInputTransport, aggregate: int, *,
+    text_budget: int | None = None, pointer_only: bool = False,
 ) -> PreparedSanctionedInput:
     """Capture one no-follow file within the transport's remaining allowance.
 
@@ -267,7 +280,10 @@ def _capture_input(
     than the aggregate ceiling admits. ``fstat`` before and after bounds the
     captured bytes to one immutable revision of one inode.
     """
-    max_bytes, aggregate_limit, limit_name = _transport_allowance(transport, aggregate)
+    max_bytes, aggregate_limit, limit_name = (
+        (SANCTIONED_DIFF_REFERENCE_MAX_BYTES, False, "durable diff resource limit")
+        if pointer_only else _transport_allowance(transport, aggregate)
+    )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
     fd = -1
@@ -283,7 +299,7 @@ def _capture_input(
             raise SanctionedInputUnavailable(f"sanctioned input {label!r} changed while being opened")
         digest = hashlib.sha256()
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
-        keep_text = transport is SanctionedInputTransport.INLINE or text_budget is not None
+        keep_text = not pointer_only and (transport is SanctionedInputTransport.INLINE or text_budget is not None)
         chunks: list[bytes] | None = [] if keep_text else None
         retained = 0
         total = 0
@@ -326,6 +342,7 @@ def _capture_input(
         inode=before.st_ino,
         size=before.st_size,
         mtime_ns=before.st_mtime_ns,
+        pointer_only=pointer_only,
     )
 
 
@@ -363,6 +380,15 @@ def sanctioned_transport_for(
     capture, mirroring how the diff is excluded when it is inlined.
     """
     return _sanctioned_transport(backend, cwd, read_only=read_only)
+
+
+def uses_diff_reference(backend: object, cwd: Path, *, read_only: bool) -> bool:
+    """Pi discovery reads its durable diff through an admitted host path."""
+    from daydream.backends.pi import PiBackend
+
+    return isinstance(backend, PiBackend) and sanctioned_transport_for(
+        backend, cwd, read_only=read_only,
+    ) is SanctionedInputTransport.EXACT_PATHS
 
 
 def select_advisory_inputs(
@@ -444,8 +470,10 @@ def prepare_sanctioned_inputs(
     for label, path in sorted(inputs.items()):
         if not label or len(label) > 128 or any(ord(c) < 32 or ord(c) == 127 or c in '<>"' for c in label):
             raise SanctionedInputUnavailable("sanctioned input label is invalid")
-        item = _capture_input(label, path, transport, aggregate)
-        aggregate += item.size
+        pointer_only = label == "diff" and uses_diff_reference(backend, canonical_cwd, read_only=read_only)
+        item = _capture_input(label, path, transport, aggregate, pointer_only=pointer_only)
+        if not pointer_only:
+            aggregate += item.size
         prepared.append(item)
     return PreparedSanctionedInputs(
         transport=transport,
