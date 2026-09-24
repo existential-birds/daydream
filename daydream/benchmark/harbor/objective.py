@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -330,54 +330,14 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
     objective_dict: dict[str, object] | None = None
     if run.objective is not None:
         obj = run.objective
-        objective_dict = {
-            "tp": obj.tp,
-            "fp": obj.fp,
-            "fn": obj.fn,
-            "precision": obj.precision,
-            "recall": obj.recall,
-            "f1": obj.f1,
-            "clean_task_count": obj.clean_task_count,
-            "clean_pass_count": obj.clean_pass_count,
-            "clean_accuracy": obj.clean_accuracy,
-            "task_count": obj.task_count,
-            "scored_task_count": obj.scored_task_count,
-            "candidate_count": obj.candidate_count,
-            "gold_count": obj.gold_count,
-            "infra_error_task_count": obj.infra_error_task_count,
-            "verifier_error_task_count": obj.verifier_error_task_count,
-            "malformed_task_count": obj.malformed_task_count,
-            "failed_task_count": obj.failed_task_count,
-            "comparison_eligible": obj.comparison_eligible,
-            "mean_task_score": obj.mean_task_score,
-            "location_pairs_scored": obj.location_pairs_scored,
-            "severity_pairs_scored": obj.severity_pairs_scored,
-            "location_exact_rate": obj.location_exact_rate,
-            "location_near_rate": obj.location_near_rate,
-            "location_file_rate": obj.location_file_rate,
-            "location_miss_rate": obj.location_miss_rate,
-            "location_credit": obj.location_credit,
-            "location_exact": obj.location_exact,
-            "location_near": obj.location_near,
-            "location_file": obj.location_file,
-            "location_miss": obj.location_miss,
-            "total_location_exact": obj.total_location_exact,
-            "total_location_near": obj.total_location_near,
-            "total_location_file": obj.total_location_file,
-            "total_location_miss": obj.total_location_miss,
-            "severity_exact": obj.severity_exact,
-            "severity_within_1": obj.severity_within_1,
-            "total_severity_exact": obj.total_severity_exact,
-            "total_severity_within_1": obj.total_severity_within_1,
-            "severity_exact_rate": obj.severity_exact_rate,
-            "severity_within_1_rate": obj.severity_within_1_rate,
-            "severity_mean_distance": obj.severity_mean_distance,
-            "severity_credit": obj.severity_credit,
-        }
-        if obj.tokens is not None:
-            objective_dict["tokens"] = obj.tokens
-        if obj.cost is not None:
-            objective_dict["cost"] = obj.cost
+        # Every Objective field is a flat scalar, so asdict copies the exact
+        # reported shape. The two optional tokens/cost fields stay absent
+        # (rather than null) unless the run actually recorded them.
+        objective_dict = asdict(obj)
+        if obj.tokens is None:
+            del objective_dict["tokens"]
+        if obj.cost is None:
+            del objective_dict["cost"]
 
     return {
         "run_id": run.run_id,
