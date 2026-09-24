@@ -680,7 +680,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch:
     # A score whose captured default weights no longer match the canonical
     # constant is marked custom, so publication must refuse it.
 
-    monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights(is_default=True))
+    monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights())
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = _pr_row(run_dir, "s_custom", pr_number=9)
     with pytest.raises((AssertionError, RuntimeError), match="canonical"):

@@ -60,12 +60,14 @@ from daydream.run_context import active_backends
 from daydream.runner import RunConfig, run
 from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, flush_active_signal_recorders
 from daydream.ui import (
+    NEON_THEME,
     ShutdownPanel,
     create_console,
     get_shutdown_panel,
     print_error,
     print_info,
     print_success,
+    print_warning,
     set_shutdown_panel,
 )
 
@@ -537,7 +539,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     from dataclasses import replace
 
     from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_build_corpus_parser()
     args = parser.parse_args(argv)
@@ -1277,7 +1278,6 @@ def _handle_harvest_command(argv: list[str]) -> int:
     """
     import daydream.archive as _archive
     import daydream.training.harvest as _harvest
-    from daydream.ui import create_console, print_info
 
     parser = _build_harvest_parser()
     args = parser.parse_args(argv)
@@ -1564,7 +1564,6 @@ def _handle_calibrate_reward_command(argv: list[str]) -> int:
         validation or gate failure.
     """
     from daydream.training import calibration as _calibration
-    from daydream.ui import create_console, print_error, print_info
 
     parser = _build_calibrate_reward_parser()
     console = create_console()
@@ -1645,7 +1644,6 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
-    from daydream.ui import create_console, print_warning
 
     parser = _build_hydrate_hub_parser()
     console = create_console()
@@ -1802,7 +1800,6 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     """
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
-    from daydream.ui import print_warning
 
     try:
         client = _hydrate._make_client(config.source_repo)
@@ -1955,7 +1952,6 @@ def _handle_list_reanchored_command(argv: list[str]) -> int:
     from rich.markup import escape
 
     from daydream.improve.plans import reanchored_plan_rows
-    from daydream.ui import create_console, print_info
 
     parser = _build_list_reanchored_parser()
     args = parser.parse_args(argv)
@@ -2043,7 +2039,6 @@ def _handle_label_command(argv: list[str]) -> int:
     """
     import daydream.archive as _archive
     from daydream.archive import index as _index
-    from daydream.ui import create_console, print_info
 
     parser = _build_label_parser()
     args = parser.parse_args(argv)
@@ -2232,9 +2227,7 @@ def _print_namespace_help(usage: str, *, error: bool = False) -> None:
             when ``False`` (default) write to stdout (bare invocation / help
             request path).
     """
-    from rich.console import Console
 
-    from daydream.ui import NEON_THEME
 
     Console(stderr=error, theme=NEON_THEME).print(usage)
 
@@ -2463,7 +2456,6 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         (issue #1176) — so it is not a post-findings failure.
     """
     from daydream import pr_review
-    from daydream.ui import create_console, print_warning
 
     parser = _build_post_findings_parser()
     args = parser.parse_args(argv)

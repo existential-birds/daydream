@@ -97,6 +97,7 @@ from daydream.training.labeler_versions import (
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
 )
+from daydream.ui import create_console, print_error, print_success
 
 __all__ = [
     "handle_adjudicate",
@@ -400,7 +401,6 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
 
 def handle_build(argv: list[str]) -> int:
     """Handle ``corpus adjudicate build --index-root <path> --state-dir <path>``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["build", *argv])
     try:
@@ -434,7 +434,6 @@ def handle_build(argv: list[str]) -> int:
 
 def handle_show(argv: list[str]) -> int:
     """Handle ``corpus adjudicate show --state-dir <path>``."""
-    from daydream.ui import create_console, print_error
 
     args = _build_adjudicate_parser().parse_args(["show", *argv])
     try:
@@ -459,7 +458,6 @@ def handle_show(argv: list[str]) -> int:
 
 def handle_label(argv: list[str]) -> int:
     """Handle ``corpus adjudicate label --state-dir <path> ...``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["label", *argv])
     try:
@@ -527,7 +525,6 @@ def _load_sessions_for_index(index_root: Path) -> list[dict[str, Any]]:
 
 def handle_export(argv: list[str]) -> int:
     """Handle ``corpus adjudicate export --index-root <path> --state-dir <path>``."""
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_adjudicate_parser()
     args = parser.parse_args(["export", *argv])
@@ -599,7 +596,6 @@ def _report_items(
 
 def handle_report(argv: list[str]) -> int:
     """Handle ``corpus adjudicate report --index-root <path> --state-dir <path>``."""
-    from daydream.ui import create_console, print_error
 
     args = _build_adjudicate_parser().parse_args(["report", *argv])
     try:
@@ -663,7 +659,6 @@ def _print_conflicts(enriched: list[dict[str, Any]]) -> None:
 
 def handle_materialize(argv: list[str]) -> int:
     """Handle ``corpus adjudicate materialize --index-root <path> --out-dir <path> ...``."""
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_adjudicate_parser()
     args = parser.parse_args(["materialize", *argv])
@@ -684,7 +679,6 @@ def handle_materialize(argv: list[str]) -> int:
 
 def handle_publish_state(argv: list[str]) -> int:
     """Handle ``corpus adjudicate publish-state --state-dir <path> --manifest <path>``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["publish-state", *argv])
     try:
@@ -704,7 +698,6 @@ def handle_publish_state(argv: list[str]) -> int:
 
 def handle_resume_state(argv: list[str]) -> int:
     """Handle stable-curation checkpoint discovery and verified restoration."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["resume-state", *argv])
     try:
@@ -760,7 +753,6 @@ def handle_publish_final(argv: list[str]) -> int:
     """
     from daydream.training.adjudication.final_bundle import build_final_bundle, final_snapshot_id
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
     bundle_dir = args.materialize_dir / "final-bundle"
@@ -819,7 +811,6 @@ def handle_publish_final(argv: list[str]) -> int:
 def handle_download_final(argv: list[str]) -> int:
     """Handle a pinned clean-room download of a final annotation bundle."""
     from daydream.training.adjudication.publish import download_final_annotation_bundle
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["download-final", *argv])
     try:
@@ -844,7 +835,6 @@ def handle_download_final(argv: list[str]) -> int:
 
 def handle_harvest_snapshot(argv: list[str]) -> int:
     """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["harvest-snapshot", *argv])
     try:
@@ -1483,7 +1473,6 @@ def handle_import_local_observations(argv: list[str]) -> int:
     ``--state-dir/import-report.json`` with the ledger in
     ``--state-dir/import-ledger.json``. Dry-run writes nothing (S2).
     """
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_adjudicate_parser()
     args = parser.parse_args(["import-local-observations", *argv])
