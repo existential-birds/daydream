@@ -221,12 +221,9 @@ def load_toml_or_empty(path: Path) -> dict[str, Any]:
     Raises:
         Never. Malformed TOML is logged as a warning and yields ``{}``.
     """
-    if not path.is_file():
-        return {}
     try:
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except tomllib.TOMLDecodeError as exc:
+        return _load_toml(path)
+    except ValueError as exc:
         logger.warning("daydream: malformed TOML in %s — ignoring (%s)", path, exc)
         return {}
     except OSError as exc:
@@ -315,6 +312,14 @@ def _coerce_non_negative_int(raw: Any) -> int | None:
     if isinstance(raw, bool):
         return None
     return raw if isinstance(raw, int) and raw >= 0 else None
+
+
+def _coerce_optional_bool(raw: Any) -> bool | None:
+    """Return ``raw`` only when it is a real bool, else None (degrade to unset).
+
+    An accidental ``precision_mode = 1`` is treated as unset, never enabled.
+    """
+    return raw if isinstance(raw, bool) else None
 
 
 def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
@@ -460,34 +465,12 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     backend = merged.get("backend")
     reasoning_effort = merged.get("reasoning_effort")
     threshold = _coerce_int(merged.get("shallow_fanout_threshold"))
-    # precision_mode: bool only. Any non-bool value (str, int, list) degrades to
-    # None rather than crashing the loader; truthy ints are *not* coerced to True
-    # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.
-    raw_precision = merged.get("precision_mode")
-    precision: bool | None = raw_precision if isinstance(raw_precision, bool) else None
-    # approve_on_clean: bool only, same degrade-to-None rule as precision_mode so
-    # an accidental ``approve_on_clean = 1`` is treated as unset, not enabled.
-    raw_approve = merged.get("approve_on_clean")
-    approve_on_clean: bool | None = raw_approve if isinstance(raw_approve, bool) else None
-    # scope_issue_filing: bool only, same degrade-to-None rule so an accidental
-    # ``scope_issue_filing = 1`` is treated as unset, not enabled.
-    raw_scope = merged.get("scope_issue_filing")
-    scope_issue_filing: bool | None = raw_scope if isinstance(raw_scope, bool) else None
-    # deep_shard_enabled: bool only, same degrade-to-None rule as precision_mode
-    # so an accidental ``deep_shard_enabled = 1`` is treated as unset, not
-    # enabled. The shard bounds are non-negative ints (reject bool/float via
-    # _coerce_non_negative_int).
-    raw_deep_shard_enabled = merged.get("deep_shard_enabled")
-    deep_shard_enabled: bool | None = (
-        raw_deep_shard_enabled if isinstance(raw_deep_shard_enabled, bool) else None
-    )
-    # quality_gate_enabled: bool only, same degrade-to-None rule. The delta AND
-    # absolute thresholds are finite non-negative floats (reject bool, coerce
-    # ints, reject negative / NaN / inf) via _coerce_non_negative_float.
-    raw_quality_gate_enabled = merged.get("quality_gate_enabled")
-    quality_gate_enabled: bool | None = (
-        raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
-    )
+    # Optional bool flags (precision_mode, approve_on_clean, scope_issue_filing,
+    # deep_shard_enabled, quality_gate_enabled) accept a real bool only; any
+    # other value degrades to None rather than crashing the loader, so an
+    # accidental ``precision_mode = 1`` is treated as unset, not enabled. The
+    # shard bounds beside deep_shard_enabled are non-negative ints; the
+    # quality-gate delta and absolute thresholds are finite non-negative floats.
     # Grounded diagrams (#1113): the sub-table degrades to empty on junk, so
     # every key falls through to its config.py default rather than raising.
     diagram = merged.get("diagram")
@@ -517,19 +500,19 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,
         phases=_coerce_phases(merged.get("phases")),
         shallow_fanout_threshold=threshold,
-        precision_mode=precision,
-        approve_on_clean=approve_on_clean,
-        scope_issue_filing=scope_issue_filing,
+        precision_mode=_coerce_optional_bool(merged.get("precision_mode")),
+        approve_on_clean=_coerce_optional_bool(merged.get("approve_on_clean")),
+        scope_issue_filing=_coerce_optional_bool(merged.get("scope_issue_filing")),
         group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
         retry_recovery_allowance_s=_coerce_retry_recovery_allowance(merged),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
-        deep_shard_enabled=deep_shard_enabled,
+        deep_shard_enabled=_coerce_optional_bool(merged.get("deep_shard_enabled")),
         deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),
         deep_shard_max_bytes=_coerce_non_negative_int(merged.get("deep_shard_max_bytes")),
         deep_shard_fanout_cap=_coerce_non_negative_int(merged.get("deep_shard_fanout_cap")),
         deep_shard_frontier_max=_coerce_non_negative_int(merged.get("deep_shard_frontier_max")),
-        quality_gate_enabled=quality_gate_enabled,
+        quality_gate_enabled=_coerce_optional_bool(merged.get("quality_gate_enabled")),
         quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
         quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),
         quality_gate_erosion_absolute=_coerce_non_negative_float(merged.get("quality_gate_erosion_absolute")),

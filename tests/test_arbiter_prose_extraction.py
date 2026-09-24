@@ -88,17 +88,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 def _pi_like_backend(message: str) -> ScriptedBackend:
     """Mirrors the pi backend: structured_output = extract_json(final text), gated on the schema."""
-
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        return [
-            TextEvent(text=message),
-            ResultEvent(
-                structured_output=extract_json(message) if output_schema else None,
-                continuation=None,
-            ),
-        ]
-
-    return ScriptedBackend(responder=respond, model="glm-5.2")
+    return _split_text_backend(message, extract_json(message))
 
 
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(

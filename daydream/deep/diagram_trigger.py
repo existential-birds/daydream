@@ -140,18 +140,7 @@ class Eligibility:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable form written to ``diagram.json``."""
-        return {
-            "code_files": list(self.code_files),
-            "modules": dict(self.modules),
-            "services": dict(self.services),
-            "cross_module_edges": self.cross_module_edges,
-            "function_branch_counts": [asdict(root) for root in self.function_branch_counts],
-            "candidate_roots": [asdict(root) for root in self.candidate_roots],
-            "sequence": asdict(self.sequence),
-            "flowchart": asdict(self.flowchart),
-            "thresholds": asdict(self.thresholds),
-            "force": self.force,
-        }
+        return asdict(self)
 
 
 def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list[str]:

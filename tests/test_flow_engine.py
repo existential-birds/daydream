@@ -48,35 +48,31 @@ def _break_after(tag: str, times: int) -> Callable[[FlowContext], Awaitable[Stop
     return run
 
 
-def _ctx(reg: Registry) -> FlowContext:
+def _ctx(
+    reg: Registry,
+    *,
+    repo: Path = Path("."),
+    config: RunConfig | None = None,
+    run_id: str = "test-run",
+) -> FlowContext:
     work = WorkContext(
-        repo=Path("."),
-        source=Path("."),
+        repo=repo,
+        source=repo,
         base_branch="main",
         base_sha="0" * 40,
         head_branch="feature",
         head_sha="1" * 40,
         is_ephemeral=False,
-        run_id="test-run",
+        run_id=run_id,
     )
-    return FlowContext(config=RunConfig(), work=work, registry=reg)
+    return FlowContext(config=config if config is not None else RunConfig(), work=work, registry=reg)
 
 
 def test_backend_for_resolves_pi_model_from_workspace(tmp_path: Path) -> None:
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()
     settings.write_text('{"defaultModel": "gpt-5.6-luna"}')
-    work = WorkContext(
-        repo=tmp_path,
-        source=tmp_path,
-        base_branch="main",
-        base_sha="0" * 40,
-        head_branch="feature",
-        head_sha="1" * 40,
-        is_ephemeral=False,
-        run_id="test-run",
-    )
-    ctx = FlowContext(config=RunConfig(backend="pi"), work=work, registry=Registry())
+    ctx = _ctx(Registry(), repo=tmp_path, config=RunConfig(backend="pi"))
 
     assert ctx.backend_for("review").model == "gpt-5.6-luna"
 
@@ -86,12 +82,8 @@ def test_backend_factory_uses_context_workspace_and_cache(tmp_path: Path) -> Non
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()
     settings.write_text('{"defaultModel": "context-model"}')
-    ctx = _ctx(Registry())
+    ctx = _ctx(Registry(), repo=tmp_path, run_id="factory")
     ctx.config.backend = "pi"
-    ctx.work = WorkContext(
-        repo=tmp_path, source=tmp_path, base_branch="main", base_sha="0" * 40,
-        head_branch="feature", head_sha="1" * 40, is_ephemeral=False, run_id="factory",
-    )
 
     resolved_phases: list[str] = []
 

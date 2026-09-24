@@ -40,7 +40,7 @@ the repository root and one ``git grep`` per symbol fallback.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -203,17 +203,7 @@ class ElementCheck:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-safe form written into ``diagram.json``."""
-        return {
-            "element": self.element,
-            "ref": self.ref,
-            "grounded": self.grounded,
-            "reason": self.reason,
-            "strength": self.strength,
-            "snapped_line": self.snapped_line,
-            "in_changed_hunk": self.in_changed_hunk,
-            "defined_at": self.defined_at,
-            "final_index": self.final_index,
-        }
+        return asdict(self)
 
 
 @dataclass
