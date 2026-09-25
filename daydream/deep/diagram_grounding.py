@@ -52,7 +52,13 @@ from daydream.config import (
     DIAGRAM_MAX_PARTICIPANTS,
 )
 from daydream.deep.coverage import _path_component_matches, _strip_dot_slash
-from daydream.deep.diagram_types import CandidateRoot
+from daydream.deep.diagram_types import (
+    CandidateRoot,
+    as_dict,
+    as_int,
+    as_list,
+    as_optional_str,
+)
 from daydream.git_ops import GitError, grep_fixed_matches
 from daydream.repository_paths import path_is_confined, valid_repository_file_path
 from daydream.tree_sitter_index import (
@@ -61,6 +67,13 @@ from daydream.tree_sitter_index import (
     is_executable_statement_line,
     is_terminal_line,
     language_for_path,
+)
+
+_as_dict, _norm_line, _as_list, _norm_optional_str = (
+    as_dict,
+    as_int,
+    as_list,
+    as_optional_str,
 )
 
 # --- Vocabulary --------------------------------------------------------------
@@ -432,29 +445,9 @@ class _SourceCache:
         return rows[line - 1] if 1 <= line <= len(rows) else ""
 
 
-def _as_list(value: Any) -> list[Any]:
-    """Return ``value`` when it is a list, else the empty list."""
-    return value if isinstance(value, list) else []
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    """Return ``value`` when it is a dict, else the empty dict."""
-    return value if isinstance(value, dict) else {}
-
-
 def _norm_str(value: Any) -> str:
     """Return ``value`` when it is a string, else ``""``."""
     return value if isinstance(value, str) else ""
-
-
-def _norm_optional_str(value: Any) -> str | None:
-    """Return ``value`` when it is a non-empty string, else None."""
-    return value if isinstance(value, str) and value else None
-
-
-def _norm_line(value: Any) -> int:
-    """Return ``value`` when it is a real int (not a bool), else 0."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _token_on_line(text: str, symbol: str) -> bool:

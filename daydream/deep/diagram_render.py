@@ -41,6 +41,9 @@ from daydream.config import (
     DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
 )
+from daydream.deep.diagram_types import as_dict, as_int, as_list, as_optional_str
+
+_mapping, _int, _list, _key = as_dict, as_int, as_list, as_optional_str
 
 # Sanitization
 
@@ -141,23 +144,6 @@ def _dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
-
-
-def _mapping(value: Any) -> dict[str, Any]:
-    """Return ``value`` when it is a dict, else an empty dict."""
-    return value if isinstance(value, dict) else {}
-
-
-def _int(value: Any) -> int:
-    """Return ``value`` as an int when it is a non-bool integer, else ``0``."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return value
-
-
-def _key(value: Any) -> str | None:
-    """Return ``value`` when it is a usable dict key (a string), else ``None``."""
-    return value if isinstance(value, str) and value else None
 
 
 def _plural(count: int, word: str) -> str:
@@ -653,8 +639,3 @@ def render_omission_notice(kind: str, result: dict[str, Any]) -> str:
                 f"{capped} {_plural(capped, 'element')} {_was(capped)} trimmed to fit the diagram cap."
             )
     return " ".join(parts)
-
-
-def _list(value: Any) -> list[Any]:
-    """Return ``value`` when it is a list, else ``[]``."""
-    return value if isinstance(value, list) else []

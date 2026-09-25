@@ -20,7 +20,7 @@ import json
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from daydream import severity
@@ -715,11 +715,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
                 f"{sorted(_SEVERITY_LEVELS)}",
                 source,
             )
-        arbitration = Arbitration(
-            enabled=arbitration.enabled,
-            min_severity=severity,
-            contested_location=arbitration.contested_location,
-        )
+        arbitration = replace(arbitration, min_severity=severity)
     suppression = Suppression(
         enabled=_bool("suppression_enabled", defaults.suppression.enabled),
         severity_classes=_severity_classes(

@@ -61,6 +61,7 @@ from daydream.trajectory import (
     siblings_directory,
 )
 from daydream.workspace import WorkContext
+from tests.harness.git_helpers import git as _git
 
 _TRANSITIONS = (
     "DETACH_STAGED",
@@ -92,17 +93,6 @@ class _Entry:
     mode: int
     size: int
     sha256: str | None
-
-
-def _git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(  # noqa: S603 - fixed test-only Git argv
-        ["git", *args],  # noqa: S607 - Git is the tested external boundary
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return proc.stdout.strip()
 
 
 def _init_repo(repo: Path) -> None:

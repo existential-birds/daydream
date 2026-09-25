@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import json
-import json as _json
 import time
 
 import pytest
@@ -665,7 +664,7 @@ def test_redactor_preserves_structural_separator_after_bare_value() -> None:
     out = redact_structured_text('{"token": null, "count": 3}')
     assert out == '{"token": "[REDACTED_CREDENTIAL]", "count": 3}'
 
-    assert _json.loads(out)  # still parseable as JSON
+    assert json.loads(out)  # still parseable as JSON
 
 
 @pytest.mark.parametrize("text", [

@@ -284,19 +284,11 @@ class BenchmarkManifest(BaseModel):
 
     schema_version: Literal[1] = 1
     benchmark_id: UUID
-    created_at: datetime
+    created_at: Timestamp
     source: Source
     privacy: Privacy
     pull_requests: list[PullRequestEntry] = []
     cases: list[CaseIndexEntry] = []
-
-    @field_validator("created_at")
-    @classmethod
-    def _created_at_utc(cls, v: str | datetime) -> datetime:
-        value = v if isinstance(v, datetime) else datetime.fromisoformat(v)
-        if value.tzinfo is None:
-            raise ValueError(f"created_at must carry a UTC offset, got {v!r}")
-        return value.astimezone(timezone.utc)
 
     @model_validator(mode="after")
     def _cases_ordered(self) -> "BenchmarkManifest":

@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from daydream import git_ops
@@ -633,6 +634,22 @@ def _handle_benchmark_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "init": lambda a: _handle_benchmark_init(a.dir, a.repo, a.reviewer_host, a.judge_host),
+    "status": lambda a: _handle_benchmark_status(a.dir),
+    "validate": _handle_benchmark_validate,
+    "build-harbor": _handle_benchmark_build_harbor,
+    "upgrade": _handle_benchmark_upgrade,
+    "import-prs": _handle_benchmark_import_prs,
+    "curate": _handle_benchmark_curate,
+    "calibrate-judge": _handle_benchmark_calibrate,
+    "run": _handle_benchmark_run,
+    "clean": _handle_benchmark_clean,
+    "objective": _handle_benchmark_objective,
+    "aggregate": _handle_benchmark_aggregate,
+}
+
+
 def _handle_benchmark_command(argv: list[str]) -> int:
     """Handle the ``daydream benchmark`` subcommands.
 
@@ -652,29 +669,8 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     if sub is None:
         parser.print_help()
         return 0
-    if sub == "init":
-        return _handle_benchmark_init(args.dir, args.repo, args.reviewer_host, args.judge_host)
-    if sub == "status":
-        return _handle_benchmark_status(args.dir)
-    if sub == "validate":
-        return _handle_benchmark_validate(args)
-    if sub == "build-harbor":
-        return _handle_benchmark_build_harbor(args)
-    if sub == "upgrade":
-        return _handle_benchmark_upgrade(args)
-    if sub == "import-prs":
-        return _handle_benchmark_import_prs(args)
-    if sub == "curate":
-        return _handle_benchmark_curate(args)
-    if sub == "calibrate-judge":
-        return _handle_benchmark_calibrate(args)
-    if sub == "run":
-        return _handle_benchmark_run(args)
-    if sub == "clean":
-        return _handle_benchmark_clean(args)
-    if sub == "objective":
-        return _handle_benchmark_objective(args)
-    if sub == "aggregate":
-        return _handle_benchmark_aggregate(args)
+    handler = _HANDLERS.get(sub)
+    if handler is not None:
+        return handler(args)
     parser.print_help(file=sys.stderr)
     return 2
