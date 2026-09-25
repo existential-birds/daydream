@@ -122,11 +122,11 @@ _LEGACY_SKILL_TO_STACK: dict[str, str] = {
 # Dual keys: both the full skill string and the short stack name map to the
 # lowercase stack label, so _stack_for_skill is one dict lookup regardless of
 # which form the manifest stored.
-_SKILL_TO_STACK: dict[str, str] = {}
-for _skill, _stack in _LEGACY_SKILL_TO_STACK.items():
-    _SKILL_TO_STACK[_skill] = _stack
-    _SKILL_TO_STACK[_stack] = _stack
-del _skill, _stack
+_SKILL_TO_STACK: dict[str, str] = {
+    entry: stack
+    for skill, stack in _LEGACY_SKILL_TO_STACK.items()
+    for entry in (skill, stack)
+}
 
 
 def _stack_for_skill(skill: str | None) -> str | None:
