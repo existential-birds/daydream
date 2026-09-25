@@ -1,9 +1,8 @@
 """Shared projection helpers over the bitemporal training archive.
 
 This module owns the small set of reusable pieces the projection packages
-import from here: the span builder (``_build_spans``), the skill-to-stack
-decoder (:func:`_stack_for_skill`), the temporal-leakage guard
-(:func:`_is_posterior_leak`), the gold-admission gate
+import from here: the skill-to-stack decoder (:func:`_stack_for_skill`), the
+temporal-leakage guard (:func:`_is_posterior_leak`), the gold-admission gate
 (:func:`_is_admitted_outcome_gold`), and the trajectory-set content hash
 (:func:`_trajectory_set_hash`).
 
@@ -24,8 +23,8 @@ string.
 
 All symbols are private (underscore-prefixed) shared infrastructure for the
 corpus projection packages; the canonical emitter is
-:mod:`daydream.training.corpus_projection`, which imports the span builder,
-the leak guard, the trajectory-set hash, and the skill-to-stack decoder;
+:mod:`daydream.training.corpus_projection`, which imports the leak guard, the
+trajectory-set hash, and the skill-to-stack decoder;
 :mod:`daydream.training.reward_model` imports the gold-admission gate from
 here.
 """
@@ -33,78 +32,8 @@ here.
 from __future__ import annotations
 
 import hashlib
-import warnings
 from datetime import datetime
 from typing import Any
-
-
-def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert an ATIF v1.7 trajectory dict into REASON/ACT span refs.
-
-    Implements plan §5. The output is a list of ``{step_id, kind, content_path}``
-    dicts that point at substructures of ``trajectory["steps"]`` rather than
-    embedding the content itself (per the "pass refs, not contents" rule).
-
-    Rules:
-    - Only ``source == "agent"`` steps contribute spans.
-    - Steps marked ``is_copied_context=True`` are skipped (ATIF v1.5 semantics).
-    - REASON prefers ``reasoning_content``; if absent, falls back to ``message``
-      when ``message`` is a non-empty string. List-typed ``message`` values
-      (ContentPart arrays) are not used as REASON sources.
-    - ACT is emitted when ``tool_calls`` is a truthy (non-empty) list.
-    - Within a single step REASON is appended before ACT, preserving the
-      natural reason-then-act ordering required by the schema consumers.
-
-    Returns:
-        Spans in insertion order. Empty list when ``trajectory`` has no
-        agent-authored steps or when no agent step carries reason/action data.
-    """
-    spans: list[dict[str, Any]] = []
-    for i, step in enumerate(trajectory.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        if step.get("is_copied_context") is True:
-            continue
-        raw_step_id = step.get("step_id", i + 1)
-        try:
-            step_id = int(raw_step_id)
-        except (TypeError, ValueError):
-            warnings.warn(
-                f"Invalid step_id {raw_step_id!r} at steps[{i}] — using fallback {i + 1}.",
-                stacklevel=2,
-            )
-            step_id = i + 1
-        # REASON: prefer explicit reasoning_content; fall back to text message.
-        has_reasoning = bool(step.get("reasoning_content"))
-        message = step.get("message")
-        has_text_message = isinstance(message, str) and bool(message.strip())
-        if has_reasoning:
-            spans.append(
-                {
-                    "step_id": step_id,
-                    "kind": "REASON",
-                    "content_path": f"steps[{i}].reasoning_content",
-                }
-            )
-        elif has_text_message:
-            spans.append(
-                {
-                    "step_id": step_id,
-                    "kind": "REASON",
-                    "content_path": f"steps[{i}].message",
-                }
-            )
-        # ACT: any non-empty tool_calls list.
-        if step.get("tool_calls"):
-            spans.append(
-                {
-                    "step_id": step_id,
-                    "kind": "ACT",
-                    "content_path": f"steps[{i}].tool_calls",
-                }
-            )
-    return spans
-
 
 # Legacy skill->stack decode map for historically captured corpus metadata.
 # Built-in reviews no longer emit skills (#886): this maps archived manifest

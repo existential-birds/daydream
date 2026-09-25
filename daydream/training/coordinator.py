@@ -44,7 +44,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from daydream.archive import get_archive_dir
 from daydream.json_utils import atomic_write_json
 from daydream.training import gate as gate_mod
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
@@ -53,7 +52,6 @@ from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
 from daydream.training.stacks import V2Projection, load_v2_projection
-from daydream.trajectory import RUNS_DIRNAME
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
@@ -276,41 +274,6 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def _materialize_diff(rec: dict[str, Any]) -> str | None:
-    """Materialize the RFT diff body from the archive for production records.
-
-    v1 records exports carry only ``fix_diff_ref`` — a
-    pointer to the archived reviewed-INPUT ``diff.patch`` — never a raw
-    ``diff`` body (the training record schema is ``additionalProperties: false``).
-    The pointer is relative to the record's bronze run dir under the archive
-    root; an unavailable, missing, or unreadable patch returns ``None`` so
-    the caller's fail-closed identity check refuses the record rather than
-    recording Stage 2 complete over an unrunnable input.
-    """
-    ref = rec.get("fix_diff_ref")
-    if not isinstance(ref, dict) or not ref.get("available"):
-        return None
-    rel = ref.get("archive_relative_path")
-    if not isinstance(rel, str) or not rel:
-        return None
-    sid = str(rec.get("session_id") or "")
-    if not sid:
-        return None
-    archive_root = get_archive_dir()
-    # M17 derivative bundles legitimately live under ``runs/sanitized/...``,
-    # reached via a ``../sanitized/...`` pointer; anything resolving outside
-    # the archive root is treated as unavailable (fail-closed), never read.
-    target = (archive_root / RUNS_DIRNAME / sid / rel).resolve()
-    if not target.is_relative_to(archive_root.resolve()):
-        return None
-    if not target.is_file():
-        return None
-    try:
-        return target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Materialize Stage-2 RFT replay inputs from corpus records (M16).
 
@@ -342,12 +305,6 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     every candidate at a flat 0.0 composite. ``grounding_rate`` stays absent
     (unknown, never an invented zero).
 
-    ``diff`` falls back to :func:`_materialize_diff` when the record carries
-    no raw ``diff`` body: v1 records exports (schema v1,
-    ``additionalProperties: false``) hold only the ``fix_diff_ref`` pointer
-    to the archived ``diff.patch``, so the documented real-archive journey
-    stays runnable through Stage 2.
-
     Raises:
         RuntimeError: When any record lacks ``repo_slug``/``base_sha``/
             ``head_sha``/``diff`` identity or carries a truncated/non-hex SHA
@@ -361,8 +318,6 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")
         head_sha = identity.get("head_sha") or rec.get("head_sha") or code_ctx.get("head_sha")
         diff = rec.get("diff")
-        if not diff:
-            diff = _materialize_diff(rec)
         missing = [
             name
             for name, value in (

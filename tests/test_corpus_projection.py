@@ -479,19 +479,6 @@ def test_duplicate_sibling_keys_raise() -> None:
         segment(traj)
 
 
-def test_spans_compose_v1_build_spans_per_sibling() -> None:
-    traj = _traj([("s1:fix-0", "a.jsonl")])
-    traj["subagent_trajectory_ref"][0]["steps"] = [
-        {"step_id": 1, "source": "agent", "message": "think"},
-        {"step_id": 2, "source": "agent", "tool_calls": [{"name": "t"}]},
-    ]
-    segs = segment(traj)
-    assert segs[0].spans == [
-        {"step_id": 1, "kind": "REASON", "content_path": "steps[0].message"},
-        {"step_id": 2, "kind": "ACT", "content_path": "steps[1].tool_calls"},
-    ]
-
-
 # Task 6: profile + stack provenance
 
 
