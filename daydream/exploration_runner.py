@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import stat
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
 
 import anyio
@@ -385,16 +386,7 @@ async def pre_scan(
     # Paths are cwd-absolute (rooted at repo_root, the actual worktree). In a
     # linked worktree the agent must not re-root a bare relative path via git
     # topology, which points at the sibling main worktree.
-    static_files_abs = [
-        FileInfo(
-            path=str(repo_root / f.path),
-            role=f.role,
-            summary=f.summary,
-            provenance=f.provenance,
-            source_file=f.source_file,
-        )
-        for f in static_files
-    ]
+    static_files_abs = [replace(f, path=str(repo_root / f.path)) for f in static_files]
 
     async with dispatch_scope(
         recorder,

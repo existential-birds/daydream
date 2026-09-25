@@ -9,10 +9,10 @@ by construction (C4).
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from daydream.json_utils import canonical_json
 from daydream.training._immutable_json import thaw_json
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
@@ -142,7 +142,5 @@ def snapshot_id(pin: Mapping[str, str]) -> str:
         if not isinstance(value, str) or not value:
             raise ValueError(f"snapshot_id: pin is missing required component {field!r}")
         components[field] = value
-    canonical = json.dumps(
-        components, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+    canonical = canonical_json(components)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

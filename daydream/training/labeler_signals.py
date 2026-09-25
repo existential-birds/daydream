@@ -193,21 +193,19 @@ def _disposition_for_replies(
     finding, or harvest's ``_decisive_evidence_valid_at`` would drop its
     timestamp as excluded while the disposition kept its vote (M6).
     """
-    if not any(
-        isinstance(reply, dict)
-        and is_qualifying_author(reply, pr_author_logins, review_author_logins)
-        for reply in replies
-    ):
-        return "unanswered"
+    saw_qualifying = False
     votes: set[PerFindingDisposition] = set()
     for reply in replies:
         if not isinstance(reply, dict):
             continue
         if not is_qualifying_author(reply, pr_author_logins, review_author_logins):
             continue
+        saw_qualifying = True
         label = classify_reply(reply)
         if label in ("accepted", "rejected"):
             votes.add(cast(PerFindingDisposition, label))
+    if not saw_qualifying:
+        return "unanswered"
     if len(votes) == 1:
         return votes.pop()
     return "ambiguous"

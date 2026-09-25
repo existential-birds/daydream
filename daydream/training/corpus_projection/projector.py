@@ -26,7 +26,7 @@ from typing import Any, Literal, Mapping, NoReturn, cast, overload
 
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, canonical_json
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_projection.bundle import (
     CuratedBundle,
@@ -124,7 +124,7 @@ def _dump_jsonl(records: list[Record]) -> str:
     """Canonical JSONL: sorted keys, compact separators, record order fixed
     by the caller — byte-for-byte stable across re-runs."""
     return "".join(
-        json.dumps(r, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        canonical_json(r) + "\n"
         for r in records
     )
 

@@ -29,6 +29,7 @@ from daydream.archive.hydrate import (
     PublicDestinationError,
     RepoInfo,
 )
+from daydream.json_utils import canonical_json
 from daydream.training.adjudication.final_bundle import (
     FINAL_IDENTITY_FILES,
     _bundle_input_names,
@@ -147,7 +148,7 @@ class AnnotationHubClient(Protocol):
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    return (canonical_json(value) + "\n").encode("utf-8")
 
 
 def _validate_identifier(name: str, value: Any) -> str:

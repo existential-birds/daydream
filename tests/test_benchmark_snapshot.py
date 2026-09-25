@@ -8,7 +8,6 @@ against the real object store. Only the import-gating tests (in
 """
 from __future__ import annotations
 
-import contextlib
 import os
 import re
 import shutil
@@ -30,16 +29,6 @@ from tests.harness.git_helpers import seed_pr_origin, seeded_commit, write_and_s
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 # real-git seed helpers (deterministic commit SHAs)
-
-
-@contextlib.contextmanager
-def monkeypatch_relative_cwd(cwd: Path) -> Any:
-    old = os.getcwd()
-    os.chdir(cwd)
-    try:
-        yield
-    finally:
-        os.chdir(old)
 
 
 def _publish_origin(repo: Path, bare: Path, *refspecs: str) -> None:
@@ -352,17 +341,15 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     assert storage.sha256_file(bundle) == first
 
 
-def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path) -> None:
-
-
+def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     rel_bundle = Path(os.path.relpath(bundle, tmp_path))
-    with monkeypatch_relative_cwd(tmp_path):
-        heads_rel = sn.bundle_heads(rel_bundle)
-        heads_abs = sn.bundle_heads(bundle)
+    monkeypatch.chdir(tmp_path)
+    heads_rel = sn.bundle_heads(rel_bundle)
+    heads_abs = sn.bundle_heads(bundle)
     assert heads_rel == {"refs/heads/base", "refs/heads/head"}
     assert heads_abs == {"refs/heads/base", "refs/heads/head"}
 
