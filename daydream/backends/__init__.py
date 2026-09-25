@@ -319,19 +319,6 @@ _BIDI_FORMAT_CATEGORIES = frozenset({"Cf"})
 _LINE_SEPARATOR_CATEGORIES = frozenset({"Zl", "Zp"})
 _CONTROL_CATEGORIES = frozenset({"Cc"})
 
-# Characters that can smuggle a directional override through a name.
-_BIDI_CODEPOINTS = (
-    "\u202a",  # LRE
-    "\u202b",  # RLE
-    "\u202c",  # PDF
-    "\u202d",  # LRO
-    "\u202e",  # RLO
-    "\u2066",  # LRI
-    "\u2067",  # RLI
-    "\u2068",  # FSI
-    "\u2069",  # PDI
-)
-
 # POSIX + Windows absolute-path spellings, and the drive/UNC prefixes that
 # reveal a host filesystem location. Model namespace slashes (``org/model``,
 # ``provider//model``) never match because they are not absolute.
@@ -348,13 +335,10 @@ class EvidenceDiagnostic:
 
 def _has_unicode_controls(value: str) -> bool:
     """Reject C0/C1 controls and bidi/line-separator format characters."""
-    return bool(_BIDI_CODEPOINTS_RE.search(value)) or any(
+    return any(
         unicodedata.category(ch) in _CONTROL_CATEGORIES | _BIDI_FORMAT_CATEGORIES | _LINE_SEPARATOR_CATEGORIES
         for ch in value
     )
-
-
-_BIDI_CODEPOINTS_RE = re.compile("|".join(re.escape(cp) for cp in _BIDI_CODEPOINTS))
 
 
 def _changed_by_redaction(value: str) -> bool:

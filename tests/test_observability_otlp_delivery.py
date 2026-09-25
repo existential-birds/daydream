@@ -82,7 +82,6 @@ def test_http_zero_byte_protobuf_200_is_canonical_full_success(monkeypatch: pyte
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 1
-        assert snapshot["accepted"] == 0  # the ack carries no counts; none are invented
         assert snapshot["unverified"] == 0
         exporter.shutdown()
         assert content_types == ["application/x-protobuf"]
@@ -99,7 +98,6 @@ def test_http_empty_body_200_no_content_type_is_full_success(monkeypatch: pytest
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 1
-        assert snapshot["accepted"] == 0  # no counts are invented from a non-conforming ack
         assert snapshot["unverified"] == 0
         exporter.shutdown()
         assert len(receiver.requests) == 1  # no retry
@@ -242,10 +240,7 @@ def test_http_partial_success_positive_rejection_is_terminal_no_retry(
         exporter.shutdown()
         assert len(receiver.requests) == 1  # never retried
         snapshot = exporter.delivery_snapshot()
-        # The partial-success ack carries only rejected_spans; accepted counts
-        # are never invented when the acknowledgment lacks them.
         assert snapshot["rejected"] == 3
-        assert snapshot["accepted"] == 0
         assert snapshot["delivered"] == 0
 
 
@@ -389,23 +384,23 @@ def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch
 
 def test_classify_http_ack_incomplete_empty_read_is_not_success() -> None:
     """M5: a zero-length *incomplete* read must not be graded full success."""
-    verdict, accepted, rejected = classify_http_ack(status=200, content_type=None, body=b"", complete=False)
-    assert (verdict, accepted, rejected) == ("oversized", 0, 0)
+    verdict, rejected = classify_http_ack(status=200, content_type=None, body=b"", complete=False)
+    assert (verdict, rejected) == ("oversized", 0)
 
 
 def test_classify_http_ack_none_body_is_not_success() -> None:
-    verdict, accepted, rejected = classify_http_ack(
+    verdict, rejected = classify_http_ack(
         status=200, content_type="application/x-protobuf", body=None, complete=True
     )
-    assert (verdict, accepted, rejected) == ("malformed", 0, 0)
+    assert (verdict, rejected) == ("malformed", 0)
 
 
 def test_classify_http_ack_json_without_positive_success_is_malformed() -> None:
     """A JSON ack with no truthy success flag is never graded delivered."""
-    verdict, accepted, rejected = classify_http_ack(
+    verdict, rejected = classify_http_ack(
         status=200, content_type="application/json", body=b'{"ok": false}', complete=True
     )
-    assert (verdict, accepted, rejected) == ("malformed", 0, 0)
+    assert (verdict, rejected) == ("malformed", 0)
 
 
 @pytest.mark.parametrize("env_var", _CREDENTIAL_PROVIDER_VARS)
@@ -481,7 +476,7 @@ def test_grpc_export_full_success_and_snapshot(monkeypatch: pytest.MonkeyPatch) 
         exporter.shutdown()
         assert len(received) == 1
         snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1 and snapshot["accepted"] == 0
+        assert snapshot["delivered"] == 1
     finally:
         _stop_grpc()
 

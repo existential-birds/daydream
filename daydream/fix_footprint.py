@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
@@ -32,10 +32,8 @@ FixFootprintOrigin = Literal[
     "staging",
 ]
 
-_ACTIONS = frozenset(
-    {"authorize", "approve_generated", "rejected_retarget", "restore", "remove", "stage", "reject"}
-)
-_ORIGINS = frozenset({"reviewed", "primary", "related", "generated", "guard", "retarget", "staging"})
+_ACTIONS = frozenset(get_args(FixFootprintAction))
+_ORIGINS = frozenset(get_args(FixFootprintOrigin))
 
 
 @dataclass(frozen=True)

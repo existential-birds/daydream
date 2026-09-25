@@ -58,10 +58,7 @@ class DeepState:
 
     @property
     def diff_or_empty(self) -> str:
-        value: object = self._data.get("diff", _MISSING)
-        if value is _MISSING or value is None:
-            return ""
-        return cast(str, self._check("diff", value, str, "str"))
+        return cast(str, self._optional("diff", str, "str")) or ""
 
     @property
     def diff_path(self) -> Path:

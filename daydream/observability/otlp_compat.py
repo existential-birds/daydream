@@ -90,7 +90,6 @@ class DeliverySnapshot:
     """Per-destination observable delivery outcomes."""
 
     delivered: int = 0
-    accepted: int = 0
     rejected: int = 0
     unverified: int = 0
     warning: bool = False
@@ -99,7 +98,6 @@ class DeliverySnapshot:
     def as_dict(self) -> dict[str, Any]:
         return {
             "delivered": self.delivered,
-            "accepted": self.accepted,
             "rejected": self.rejected,
             "unverified": self.unverified,
             "warning": self.warning,
@@ -108,22 +106,20 @@ class DeliverySnapshot:
 
 
 class DeliveryLedger:
-    """Thread-safe per-destination delivered/accepted/rejected/unverified record."""
+    """Thread-safe per-destination delivered/rejected/unverified record."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._snapshot = DeliverySnapshot()
 
-    def record_delivered(self, *, accepted: int, warning: bool = False) -> None:
+    def record_delivered(self, *, warning: bool = False) -> None:
         with self._lock:
             self._snapshot.delivered += 1
-            self._snapshot.accepted += accepted
             self._snapshot.warning = self._snapshot.warning or warning
 
-    def record_rejected(self, rejected: int, accepted: int) -> None:
+    def record_rejected(self, rejected: int) -> None:
         with self._lock:
             self._snapshot.rejected += rejected
-            self._snapshot.accepted += accepted
 
     def record_unverified(self, diagnostic: str) -> None:
         with self._lock:
@@ -193,8 +189,8 @@ def classify_http_ack(
     content_type: str | None,
     body: bytes | None,
     complete: bool,
-) -> tuple[str, int, int]:
-    """Classify one HTTP acknowledgment. Returns (verdict, accepted, rejected).
+) -> tuple[str, int]:
+    """Classify one HTTP acknowledgment. Returns (verdict, rejected).
 
     A complete zero-length 200 body is canonical full success for any (or no)
     content type — vendors such as LangSmith ack with an empty body and no
@@ -209,20 +205,20 @@ def classify_http_ack(
     warning is accepted with warning. Neither partial form is ever retried.
     """
     if status != 200:
-        return (_ACK_MALFORMED, 0, 0)
+        return (_ACK_MALFORMED, 0)
     if body is None or not complete:
-        return (_ACK_OVERSIZED if body is not None else _ACK_MALFORMED, 0, 0)
+        return (_ACK_OVERSIZED if body is not None else _ACK_MALFORMED, 0)
     if len(body) > _MAX_DECODE_BYTES:
-        return (_ACK_OVERSIZED, 0, 0)
+        return (_ACK_OVERSIZED, 0)
     if not body:
-        return (_ACK_EMPTY_OK, 0, 0)
+        return (_ACK_EMPTY_OK, 0)
     if content_type is None:
-        return (_ACK_MALFORMED, 0, 0)
+        return (_ACK_MALFORMED, 0)
     if content_type.split(";")[0].strip().lower() == "application/json":
         try:
             parsed = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            return (_ACK_MALFORMED, 0, 0)
+            return (_ACK_MALFORMED, 0)
         if (
             isinstance(parsed, dict)
             and isinstance(parsed.get("success"), bool)
@@ -230,33 +226,33 @@ def classify_http_ack(
             and "error" not in parsed
             and "errors" not in parsed
         ):
-            return (_ACK_PARTIAL, 0, 0)  # zero-rejected warning form
-        return (_ACK_MALFORMED, 0, 0)
+            return (_ACK_PARTIAL, 0)  # zero-rejected warning form
+        return (_ACK_MALFORMED, 0)
     if content_type.split(";")[0].strip().lower() != "application/x-protobuf":
-        return (_ACK_MALFORMED, 0, 0)
+        return (_ACK_MALFORMED, 0)
     response = ExportTraceServiceResponse()
     try:
         response.ParseFromString(body)
     except DecodeError:
-        return (_ACK_MALFORMED, 0, 0)
+        return (_ACK_MALFORMED, 0)
     rejected = int(response.partial_success.rejected_spans)
     if rejected > 0:
-        return (_ACK_PARTIAL, 0, rejected)
+        return (_ACK_PARTIAL, rejected)
     if response.HasField("partial_success"):
-        return (_ACK_PARTIAL, 0, 0)  # zero-rejected warning form
-    return (_ACK_OK, 0, 0)
+        return (_ACK_PARTIAL, 0)  # zero-rejected warning form
+    return (_ACK_OK, 0)
 
 
-def classify_grpc_ack(payload: ExportTraceServiceResponse | None) -> tuple[str, int, int]:
+def classify_grpc_ack(payload: ExportTraceServiceResponse | None) -> tuple[str, int]:
     """Classify a decoded gRPC acknowledgment payload."""
     if payload is None:
-        return (_ACK_OK, 0, 0)
+        return (_ACK_OK, 0)
     rejected = int(payload.partial_success.rejected_spans)
     if rejected > 0:
-        return (_ACK_PARTIAL, 0, rejected)
+        return (_ACK_PARTIAL, rejected)
     if payload.HasField("partial_success"):
-        return (_ACK_PARTIAL, 0, 0)
-    return (_ACK_OK, 0, 0)
+        return (_ACK_PARTIAL, 0)
+    return (_ACK_OK, 0)
 
 
 _VERDICT_RESULT = {
@@ -269,12 +265,12 @@ _VERDICT_RESULT = {
 }
 
 
-def _partial_ack_result(ledger: DeliveryLedger, accepted: int, rejected: int) -> SpanExportResult:
+def _partial_ack_result(ledger: DeliveryLedger, rejected: int) -> SpanExportResult:
     """_ACK_PARTIAL policy: terminal FAILURE when spans were rejected, else warning."""
     if rejected > 0:
-        ledger.record_rejected(rejected, accepted)
+        ledger.record_rejected(rejected)
         return SpanExportResult.FAILURE
-    ledger.record_delivered(accepted=accepted, warning=True)
+    ledger.record_delivered(warning=True)
     return SpanExportResult.SUCCESS
 
 
@@ -439,7 +435,7 @@ class HttpxOtlpTransport:
                 return last
             try:
                 with anyio.fail_after(left):
-                    verdict, accepted, rejected, retry_after = await self._attempt(body)
+                    verdict, rejected, retry_after = await self._attempt(body)
             except TimeoutError:
                 self._ledger.record_unverified("OTLP_DEADLINE_EXCEEDED_AFTER_SEND")
                 return SpanExportResult.FAILURE  # ambiguous: no retry
@@ -448,8 +444,8 @@ class HttpxOtlpTransport:
                 return SpanExportResult.FAILURE
             if verdict in (_ACK_OK, _ACK_EMPTY_OK, _ACK_PARTIAL):
                 if verdict == _ACK_PARTIAL:
-                    return _partial_ack_result(self._ledger, accepted, rejected)
-                self._ledger.record_delivered(accepted=accepted)
+                    return _partial_ack_result(self._ledger, rejected)
+                self._ledger.record_delivered()
                 return verdict_result(verdict)
             if verdict != _ACK_RETRYABLE:
                 # Malformed/oversized acknowledgment: terminal, never retried.
@@ -468,7 +464,7 @@ class HttpxOtlpTransport:
             await anyio.sleep(wait)
             attempt += 1
 
-    async def _attempt(self, body: bytes) -> tuple[str, int, int, float | None]:
+    async def _attempt(self, body: bytes) -> tuple[str, int, float | None]:
         assert self._client is not None
         headers = {"Content-Type": "application/x-protobuf"}
         if self._config.compression == "gzip":
@@ -484,21 +480,21 @@ class HttpxOtlpTransport:
                     break  # bounded discard; the context closes the response
                 chunks.append(chunk)
             if not complete:
-                return (_ACK_OVERSIZED, 0, 0, None)
+                return (_ACK_OVERSIZED, 0, None)
             content_type = response.headers.get("Content-Type")
             status = response.status_code
         if status in (301, 302, 303, 307, 308):
             _logger.warning("Trace destination redirected; configure its final endpoint")
-            return (_ACK_MALFORMED, 0, 0, None)
+            return (_ACK_MALFORMED, 0, None)
         if status == 200:
-            verdict, accepted, rejected = classify_http_ack(
+            verdict, rejected = classify_http_ack(
                 status=status, content_type=content_type, body=b"".join(chunks), complete=True
             )
-            return (verdict, accepted, rejected, None)
+            return (verdict, rejected, None)
         if status in (429, 502, 503, 504):
             retry_after = parse_retry_after(response.headers.get("Retry-After"))
-            return (_ACK_RETRYABLE, 0, 0, retry_after)
-        return (_ACK_MALFORMED, 0, 0, None)
+            return (_ACK_RETRYABLE, 0, retry_after)
+        return (_ACK_MALFORMED, 0, None)
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         """Nothing is buffered here; flush success is not delivery acceptance."""
@@ -659,12 +655,12 @@ class GrpcBridge:
                 self._ledger.record_unverified("OTLP_GRPC_RPC_FAILED")
                 del exc
                 return SpanExportResult.FAILURE
-            verdict, accepted, rejected = classify_grpc_ack(payload if payload is not None else None)
+            verdict, rejected = classify_grpc_ack(payload if payload is not None else None)
             if verdict in (_ACK_OK, _ACK_EMPTY_OK):
-                self._ledger.record_delivered(accepted=accepted)
+                self._ledger.record_delivered()
                 return SpanExportResult.SUCCESS
             if verdict == _ACK_PARTIAL:
-                return _partial_ack_result(self._ledger, accepted, rejected)
+                return _partial_ack_result(self._ledger, rejected)
             self._ledger.record_unverified("OTLP_GRPC_MALFORMED_ACK")
             return SpanExportResult.FAILURE
 
