@@ -122,7 +122,6 @@ Sha40 = Annotated[str, AfterValidator(_validate_sha40)]
 Sha64 = Annotated[str, AfterValidator(_hex64)]
 Sha64OrEmpty = Annotated[str, AfterValidator(_hex64_or_empty)]
 NullableSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
-CommitSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
 PositiveLine = Annotated[int | None, AfterValidator(_validate_positive_line)]
 Timestamp = Annotated[datetime, BeforeValidator(_validate_ts)]
 OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_validate_ts)]
@@ -523,7 +522,7 @@ class AuthoringAnchor(BaseModel):
 
     version: Literal[1]
     status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"]
-    commit_id: CommitSha40
+    commit_id: NullableSha40
     path: str | None
     start_line: PositiveLine
     end_line: PositiveLine
@@ -568,8 +567,8 @@ class EvidenceRecord(BaseModel):
     created_at: Timestamp
     updated_at: Timestamp
     submitted_at: OptionalTimestamp = None
-    commit_id: CommitSha40 = None
-    original_commit_id: CommitSha40 = None
+    commit_id: NullableSha40 = None
+    original_commit_id: NullableSha40 = None
     path: str | None = None
     original_path: str | None = None
     line: PositiveLine = None

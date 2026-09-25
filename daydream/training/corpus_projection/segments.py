@@ -34,8 +34,8 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
     is ``seg-0`` only when no siblings exist; otherwise siblings are ``seg-0..n-1``.
 
     Raises:
-        ValueError: when two sibling refs share the same
-            ``(descriptor, trajectory_id)`` key — the message names both.
+        ValueError: when two sibling refs share the same ``trajectory_id`` —
+            the message names the duplicated id.
     """
     refs = trajectory.get("subagent_trajectory_ref") or []
     if not refs:
@@ -48,18 +48,16 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
             )
         ]
 
-    seen: dict[tuple[str, str], str] = {}
+    seen: set[str] = set()
     segments: list[Segment] = []
     for order_index, ref in enumerate(refs):
         trajectory_id = str(ref.get("trajectory_id", ""))
-        descriptor = _descriptor(trajectory_id)
-        key = (descriptor, trajectory_id)
-        if key in seen:
+        if trajectory_id in seen:
             raise ValueError(
-                f"duplicate segmentation key (descriptor={descriptor!r}): "
-                f"{seen[key]!r} and {trajectory_id!r} — segmentation must be a total order"
+                f"duplicate segmentation key (descriptor={_descriptor(trajectory_id)!r}): "
+                f"{trajectory_id!r} — segmentation must be a total order"
             )
-        seen[key] = trajectory_id
+        seen.add(trajectory_id)
         segments.append(
             Segment(
                 segment_id=f"seg-{order_index}",
