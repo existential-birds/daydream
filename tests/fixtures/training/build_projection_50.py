@@ -132,21 +132,15 @@ def _add_batch(
     fps = _fingerprints(
         session_id, prefixed=_SESSION_ORDER.index(session_id) > 0
     )
+    head_sha = hashlib.sha256(f"{session_id}-head".encode()).hexdigest()[:40]
+    base_sha = hashlib.sha256(f"{session_id}-base".encode()).hexdigest()[:40]
     (batch_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "git": {
-                    "head_sha": hashlib.sha256(
-                        f"{session_id}-head".encode()
-                    ).hexdigest()[:40],
-                },
+                "git": {"head_sha": head_sha},
                 "code_context": {
-                    "base_sha": hashlib.sha256(
-                        f"{session_id}-base".encode()
-                    ).hexdigest()[:40],
-                    "head_sha": hashlib.sha256(
-                        f"{session_id}-head".encode()
-                    ).hexdigest()[:40],
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
                 },
             },
             sort_keys=True,

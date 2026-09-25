@@ -19,7 +19,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import AbstractSet, Any, Mapping, Protocol, runtime_checkable
 
 from daydream.archive.hydrate import (
     ANNOTATION_BRANCH,
@@ -52,6 +52,9 @@ _STATE_FILES = ("queue.json", "observations.jsonl", "preview-ledger.json")
 # restore the import itself, not just the adjudication state.
 _ARCHIVE_INDEX_FILE = "index.db"
 _MANIFEST_FILENAME = "preview-manifest.json"
+# Shared by the checkpoint writer and reader so an emitted batch always parses.
+_CHECKPOINT_REQUIRED_NAMES = frozenset((*_STATE_FILES, _MANIFEST_FILENAME))
+_CHECKPOINT_ALLOWED_NAMES = _CHECKPOINT_REQUIRED_NAMES | {_ARCHIVE_INDEX_FILE}
 _CHECKPOINT_RELPATH = "checkpoints/batch-latest.json"
 _CHECKPOINT_SCHEMA = "annotation-checkpoint/v1"
 _ATOMIC_ATTEMPTS = 6
@@ -166,7 +169,7 @@ def _validate_oid(value: Any, *, what: str) -> str:
     return value
 
 
-def _validate_remote_path(path: Any, *, allowed: set[str], what: str) -> str:
+def _validate_remote_path(path: Any, *, allowed: AbstractSet[str], what: str) -> str:
     if not isinstance(path, str) or not path or "\\" in path or path.endswith("/"):
         raise ValueError(f"{what}: invalid remote path")
     pure = PurePosixPath(path)
@@ -287,8 +290,8 @@ def _build_checkpoint(
     snapshot_id: str,
     payloads: Mapping[str, bytes],
 ) -> tuple[str, str, bytes]:
-    required = {*_STATE_FILES, _MANIFEST_FILENAME}
-    allowed = {*required, _ARCHIVE_INDEX_FILE}
+    required = _CHECKPOINT_REQUIRED_NAMES
+    allowed = _CHECKPOINT_ALLOWED_NAMES
     names = set(payloads)
     if not required.issubset(names) or not names.issubset(allowed):
         raise HydrationError("refusing to commit an incomplete or foreign checkpoint batch")
@@ -343,8 +346,8 @@ def _parse_checkpoint(
     entries = pointer.get("files")
     if not isinstance(entries, list):
         raise ValueError(f"{_CHECKPOINT_RELPATH}: files must be a list")
-    allowed_names = {*_STATE_FILES, _MANIFEST_FILENAME, _ARCHIVE_INDEX_FILE}
-    required_names = {*_STATE_FILES, _MANIFEST_FILENAME}
+    allowed_names = _CHECKPOINT_ALLOWED_NAMES
+    required_names = _CHECKPOINT_REQUIRED_NAMES
     seen: set[str] = set()
     payloads: dict[str, bytes] = {}
     for entry in entries:

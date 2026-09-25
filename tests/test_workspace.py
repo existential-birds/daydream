@@ -202,10 +202,7 @@ async def test_external_worktrees_use_supplied_private_workspace_owner(
     assert payload["source"] == str(repo.resolve())
     assert payload["git_common_dir"] == str(git_ops.git_common_dir(repo))
 
-    def unexpected_default_lookup() -> Path:
-        raise AssertionError("a supplied owner must not consult the default provider")
-
-    monkeypatch.setattr(artifact_visibility, "_default_private_base", unexpected_default_lookup)
+    _forbid_default_private_base(monkeypatch)
     captured: list[Path] = []
     async with _open(repo, owner, ephemeral=True) as first:
         captured.append(first.repo)
@@ -262,10 +259,7 @@ async def test_open_workspace_rejects_wrong_supplied_owner_before_git_mutation(
     wrong_owner = _private_owner(first_repo, tmp_path)
     before = _git(second_repo, "worktree", "list", "--porcelain")
 
-    def unexpected_default_lookup() -> Path:
-        raise AssertionError("a supplied owner must not consult the default provider")
-
-    monkeypatch.setattr(artifact_visibility, "_default_private_base", unexpected_default_lookup)
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError, match="owner identity mismatch"):
         async with _open(second_repo, wrong_owner, ephemeral=True):
             pass

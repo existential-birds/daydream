@@ -194,15 +194,13 @@ def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
     config = _compiled_job_config(workspace)
     cases = _compiled_cases(workspace)
 
-    gold_candidate_pairs = sum(
-        1 for c in cases if isinstance(c, dict)
-    )
+    case_count = sum(1 for c in cases if isinstance(c, dict))
 
     attempts = config.get("n_attempts")
     concurrency = config.get("n_concurrent_trials")
     # The oracle judges every compiled case once per attempt, so the oracle
     # spend is the case count times the configured retries.
-    oracle_pairs = len([c for c in cases if isinstance(c, dict)]) * int(attempts or 1)
+    oracle_pairs = case_count * int(attempts or 1)
     first_case = cases[0] if cases else {}
     timeout_sec = None
     if isinstance(first_case, dict):
@@ -226,7 +224,7 @@ def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
             f"  concurrency:      {_or(concurrency)}",
             f"  timeouts:         {_or(timeout_sec)}",
             f"  oracle pair:      {_or(oracle_pairs, '0')}",
-            f"  benchmark judge pair: {_or(gold_candidate_pairs, '0')}",
+            f"  benchmark judge pair: {_or(case_count, '0')}",
             "reviewer spend is time-bounded (a per-turn timeout), not a strict dollar cap",
         ]
     )
