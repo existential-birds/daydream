@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import fnmatch
 import re
 from typing import Any
 
 from daydream.extensions import ToolDecision
+from daydream.generated_files import match_suffix_glob
 from daydream.trajectory import DaydreamPhase
 
 _REVISABLE_FINDING_FIELDS = (
@@ -65,16 +65,6 @@ def apply_findings_verdicts(
     return kept, held, events
 
 
-def _matched_glob(path: str, deny_globs: tuple[str, ...]) -> str | None:
-    normalized = path.replace("\\", "/").lstrip("/")
-    parts = normalized.split("/")
-    for pattern in deny_globs:
-        candidates = ("/".join(parts[index:]) for index in range(len(parts)))
-        if any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates):
-            return pattern
-    return None
-
-
 class RuleBasedSupervisor:
     """Apply deny-glob rules to canonical findings."""
 
@@ -89,7 +79,7 @@ class RuleBasedSupervisor:
             file_path = item.get("file")
             if not isinstance(item_id, int) or not isinstance(file_path, str):
                 continue
-            matched = _matched_glob(file_path, self._deny_globs)
+            matched = match_suffix_glob(file_path, self._deny_globs)
             if matched is not None:
                 verdicts[item_id] = {
                     "id": item_id,
@@ -117,7 +107,7 @@ class RuleBasedToolSupervisor:
         if tool_name in {"Write", "Edit"}:
             path = tool_input.get("file_path") or tool_input.get("path")
             if isinstance(path, str):
-                matched = _matched_glob(path, self._deny_globs)
+                matched = match_suffix_glob(path, self._deny_globs)
                 if matched is not None:
                     return ToolDecision(veto=True, reason=f"denied by glob '{matched}'")
         elif tool_name == "Bash":

@@ -45,13 +45,20 @@ require a synchronized lockfile update.
 """.strip()
 
 
-def is_generated_file(path: str, content: str | bytes | None = None) -> bool:
+def match_suffix_glob(path: str, globs: tuple[str, ...]) -> str | None:
+    """Return the first glob matching *path* or any of its trailing segments."""
     normalized = path.replace("\\", "/").lstrip("/")
     parts = normalized.split("/")
-    for pattern in GENERATED_FILE_GLOBS:
+    for pattern in globs:
         candidates = ("/".join(parts[index:]) for index in range(len(parts)))
         if any(fnmatchcase(candidate, pattern) for candidate in candidates):
-            return True
+            return pattern
+    return None
+
+
+def is_generated_file(path: str, content: str | bytes | None = None) -> bool:
+    if match_suffix_glob(path, GENERATED_FILE_GLOBS) is not None:
+        return True
     if content is None:
         return False
     if isinstance(content, bytes):
