@@ -112,6 +112,12 @@ def _validate_ts(v: str | datetime | None) -> datetime | None:
     return _rfc3339(v)
 
 
+def _canonical_source_id(v: str) -> str:
+    if not _SOURCE_ID_RE.fullmatch(v):
+        raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
+    return v
+
+
 Sha40 = Annotated[str, AfterValidator(_validate_sha40)]
 Sha64 = Annotated[str, AfterValidator(_hex64)]
 Sha64OrEmpty = Annotated[str, AfterValidator(_hex64_or_empty)]
@@ -120,6 +126,7 @@ CommitSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
 PositiveLine = Annotated[int | None, AfterValidator(_validate_positive_line)]
 Timestamp = Annotated[datetime, BeforeValidator(_validate_ts)]
 OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_validate_ts)]
+SourceId = Annotated[str, AfterValidator(_canonical_source_id)]
 
 
 def normalize_hostname(raw: str) -> str:
@@ -551,7 +558,7 @@ class EvidenceRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_id: str
+    source_id: SourceId
     kind: Literal["review", "inline_comment", "thread_comment", "issue_comment"]
     database_id: int
     node_id: str
@@ -583,13 +590,6 @@ class EvidenceRecord(BaseModel):
     is_bot: bool
     url: str
 
-    @field_validator("source_id")
-    @classmethod
-    def _canonical_source_id(cls, v: str) -> str:
-        if not _SOURCE_ID_RE.fullmatch(v):
-            raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
-        return v
-
     @model_validator(mode="after")
     def _body_hash(self) -> "EvidenceRecord":
         if self.body and self.body_sha256 != hashlib.sha256(self.body.encode("utf-8")).hexdigest():
@@ -602,20 +602,13 @@ class Candidate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_id: str
+    source_id: SourceId
     title: str
     body: str
     severity: None = None
     location: Location | None = None
     exact_acceptable: bool
     not_exact_reason: str | None = None
-
-    @field_validator("source_id")
-    @classmethod
-    def _canonical_source_id(cls, v: str) -> str:
-        if not _SOURCE_ID_RE.fullmatch(v):
-            raise ValueError(f"source_id must be github canonical, got {v!r}")
-        return v
 
     @model_validator(mode="after")
     def _reason(self) -> "Candidate":

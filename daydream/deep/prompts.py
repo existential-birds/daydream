@@ -40,6 +40,7 @@ from daydream.prompt_budget import (  # noqa: F401
 )
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.schema_block import schema_block
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -1349,16 +1350,6 @@ DIAGRAM_GROUNDING_INSTRUCTION = (
 )
 
 
-def _schema_block(schema: dict[str, Any]) -> str:
-    """Render the structured-output schema block.
-
-    Mirrors the identical helper in ``improve/prompts.py`` and
-    ``prompts/exploration_subagents.py``; re-stated locally so the deep-diagram
-    builders take no dependency on either module.
-    """
-    return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
-
-
 def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode: bool = False) -> str:
     """Inline the diff when it fits the shared byte budget, else point at it.
 
@@ -1660,7 +1651,7 @@ def build_sequence_diagram_prompt(
         _files_by_module_block(files_by_module),
         _SEQUENCE_SPEC_RULES,
         DIAGRAM_GROUNDING_INSTRUCTION,
-        _schema_block(schema),
+        schema_block(schema),
     ]
     return "\n\n".join(parts)
 
@@ -1714,7 +1705,7 @@ def build_flowchart_prompt(
         _candidate_roots_block(candidate_roots, forced=forced),
         _FLOWCHART_SPEC_RULES,
         DIAGRAM_GROUNDING_INSTRUCTION,
-        _schema_block(schema),
+        schema_block(schema),
     ]
     return "\n\n".join(parts)
 
@@ -1783,5 +1774,5 @@ def build_diagram_repair_prompt(
         "dropped, and the diagram is omitted if too little survives."
     )
     parts.append(DIAGRAM_GROUNDING_INSTRUCTION)
-    parts.append(_schema_block(schema))
+    parts.append(schema_block(schema))
     return "\n\n".join(parts)

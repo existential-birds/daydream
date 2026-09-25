@@ -20,19 +20,7 @@ from daydream.pr_review import (
     parse_finding_markers,
     post_classified_review,
 )
-
-
-def _pr() -> PRInfo:
-    return PRInfo(
-        number=42,
-        head_sha="head123",
-        base_sha="base456",
-        base_ref="main",
-        head_ref="feature",
-        owner="acme",
-        repo="widgets",
-        url="https://github.com/acme/widgets/pull/42",
-    )
+from tests.harness.review_profile import sample_pr
 
 
 def _finding(
@@ -75,7 +63,7 @@ def _plan(
         body_only=[] if body_only is None else body_only,
     )
     return ClassifiedReviewPlan.from_classified(
-        _pr(),
+        sample_pr(),
         classified,
         event=event,
         run_info="Run information from the authorized caller.",

@@ -29,6 +29,7 @@ from daydream.improve.command_contract import (
 )
 from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.schema_block import schema_block
 
 # Single source for the structured repository-command contract wording used by
 # the repo-level recon prompt.
@@ -707,10 +708,6 @@ Concretely:
   always beats a short ambiguous one."""
 
 
-def _schema_block(schema: dict[str, Any]) -> str:
-    return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
-
-
 def _group_block(group: Mapping[str, Any]) -> str:
     """Render one line per member partition — roots and counts, never file lists."""
     lines: list[str] = []
@@ -795,7 +792,7 @@ Audit depth:
 
 {_HARD_RULES_BLOCK}
 
-{_schema_block(AUDIT_FINDINGS_SCHEMA)}
+{schema_block(AUDIT_FINDINGS_SCHEMA)}
 """
 
 
@@ -848,7 +845,7 @@ Candidates (the `vet_id` is the 1-based array index and must be echoed):
 {json.dumps(list(findings), indent=2, default=str)}
 ```
 
-{_schema_block(VET_SCHEMA)}
+{schema_block(VET_SCHEMA)}
 """
 
 
@@ -920,7 +917,7 @@ above by id):
 
 {PLAN_WRITER_CONTRACT_INSTRUCTIONS}
 
-{_schema_block(PLAN_AUTHOR_SCHEMA)}
+{schema_block(PLAN_AUTHOR_SCHEMA)}
 """
 
 
