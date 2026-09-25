@@ -12,14 +12,18 @@ from typing import Any
 import pytest
 
 from daydream import cli
-from daydream.archive import hydrate, license_enrich
+from daydream.archive import hydrate
 from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.index import append_label_observation, label_observation_history, query_runs, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.final_bundle import final_snapshot_id
 from daydream.training.adjudication.publish import publish_final_annotation_bundle
-from tests.fixtures.training.build_hub_snapshot import PublicationHubs, build_publication_hubs
+from tests.fixtures.training.build_hub_snapshot import (
+    PublicationHubs,
+    build_publication_hubs,
+    install_external_license_resolver,
+)
 
 
 def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> str:
@@ -136,14 +140,9 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     def external_client(repo_id: str, **_kwargs: Any) -> FakeHub:
         return {hubs.source.repo_id: hubs.source, hubs.annotations.repo_id: hubs.annotations}[repo_id]
 
-    class ExternalLicenseResolver:
-        def resolve(self, repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
-            commit = repo_commit or "a" * 40
-            return license_enrich.EnrichedEvidence("MIT", f"github:{repo_slug}@{commit}", commit)
-
     monkeypatch.setattr(hydrate, "_make_client", external_client)
     monkeypatch.setattr(adjudication_cli, "_make_client", external_client)
-    monkeypatch.setattr(license_enrich, "_make_license_resolver", ExternalLicenseResolver)
+    install_external_license_resolver(monkeypatch)
     monkeypatch.setenv("HF_TOKEN", "offline-fixture-token")
     monkeypatch.setenv("GITHUB_TOKEN", "offline-fixture-token")
     vm1 = tmp_path / "first disposable VM"

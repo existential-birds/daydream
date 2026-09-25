@@ -687,17 +687,7 @@ async def test_host_commit_push_verifies_remote_before_success(
     and verifies the remote actually contains the pushed HEAD before the phase
     may report success. No agent turn is involved in the commit."""
 
-    remote = tmp_path / "remote"
-    git(tmp_path, "init", "--bare", "remote")
-    work_repo = tmp_path / "clone"
-    work_repo.mkdir()
-    git(work_repo, "init", "-b", "main")
-    git(work_repo, "config", "user.email", "t@example.com")
-    git(work_repo, "config", "user.name", "t")
-    (work_repo / "app.py").write_text("x = 0\n")
-    git(work_repo, "add", "app.py")
-    git_commit(work_repo, "baseline")
-    git(work_repo, "remote", "add", "origin", str(remote))
+    work_repo = _pushable_repo(tmp_path)
     (work_repo / "fix.py").write_text("fixed\n")  # the daydream change
 
     work = make_work(work_repo)
@@ -891,17 +881,7 @@ async def test_push_verification_failure_surfaces_even_when_push_succeeds(
 
     monkeypatch.setattr(git_ops, "remote_contains_commit", lambda *a, **k: False)
 
-    remote = tmp_path / "remote"
-    git(tmp_path, "init", "--bare", "remote")
-    work_repo = tmp_path / "clone"
-    work_repo.mkdir()
-    git(work_repo, "init", "-b", "main")
-    git(work_repo, "config", "user.email", "t@example.com")
-    git(work_repo, "config", "user.name", "t")
-    (work_repo / "app.py").write_text("x = 0\n")
-    git(work_repo, "add", "app.py")
-    git_commit(work_repo, "baseline")
-    git(work_repo, "remote", "add", "origin", str(remote))
+    work_repo = _pushable_repo(tmp_path)
     (work_repo / "fix.py").write_text("fixed\n")
 
     work = make_work(work_repo)
