@@ -62,6 +62,7 @@ from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
+from tests.harness.improve_backend import plan_ref as _ref
 
 
 @pytest.mark.parametrize(
@@ -641,18 +642,6 @@ def test_recon_applicability_directory_scopes_fail_closed(
     assert errors == [
         "RECON_APPLICABILITY_INVALID@/commands/0/applicability/scope/paths/0"
     ]
-
-
-def _ref(
-    recon_command_id: str = "test-suite",
-    appended_args: str | None = None,
-    note: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "recon_command_id": recon_command_id,
-        "appended_args": appended_args,
-        "note": note,
-    }
 
 
 def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:

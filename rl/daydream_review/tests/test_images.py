@@ -827,8 +827,6 @@ def test_repo_image_chowns_checkout_to_agent() -> None:
 
 
 def test_configs_and_pyproject_reflect_the_new_contract() -> None:
-    from conftest import PROJECT_ROOT
-
     docker = (PROJECT_ROOT / "configs" / "eval-docker.toml").read_text(encoding="utf-8")
     stub = (PROJECT_ROOT / "configs" / "eval-stub.toml").read_text(encoding="utf-8")
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")

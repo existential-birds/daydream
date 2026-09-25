@@ -28,13 +28,13 @@ from daydream import pr_comment_renderer
 from daydream.benchmark.harbor import verifier_core
 from daydream.pr_review import (
     ParsedIssue,
-    PRInfo,
     ReviewRenderers,
     _ClassifiedIssues,
     build_payload,
     default_render_finding,
     default_render_summary,
 )
+from tests.harness.review_profile import sample_pr
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -231,16 +231,7 @@ def test_pr_review_severity_breakdown_follows_the_declaration(
         ]
     )
     body = build_payload(
-        PRInfo(
-            number=42,
-            head_sha="head123",
-            base_sha="base456",
-            base_ref="main",
-            head_ref="feature",
-            owner="acme",
-            repo="widgets",
-            url="https://github.com/acme/widgets/pull/42",
-        ),
+        sample_pr(),
         classified,
         renderers=ReviewRenderers(default_render_finding, default_render_summary),
         run_info=pr_comment_renderer._render_fallback(),

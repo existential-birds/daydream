@@ -405,10 +405,7 @@ def _rollup_model(agg: _RunAgg) -> str:
         return "unknown"
     if len(models) > 1:
         return "mixed — see breakdown"  # M7
-    only = next(iter(models))
-    if only in _GENERIC_MODEL_LABELS:
-        return "unknown"
-    return only
+    return next(iter(models))
 
 
 def _rollup_cost(agg: _RunAgg) -> str:
@@ -466,8 +463,7 @@ def _render_phase_row(phase: _PhaseAgg) -> str:
     elif len(phase.models) > 1:
         model_cell = "mixed"
     else:
-        only = next(iter(phase.models))
-        model_cell = "unknown" if only in _GENERIC_MODEL_LABELS else only
+        model_cell = next(iter(phase.models))
     cost_cell = "—" if phase.cost_unknown else _format_cost(phase.cost_usd)
     pct = _format_cache_hit_pct(phase.input_tokens, phase.cached_tokens)
     if pct is not None and phase.cached_tokens > 0:

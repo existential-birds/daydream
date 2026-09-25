@@ -938,7 +938,6 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     if ctx.config.findings_out is not None:
         from daydream.pr_review import resolve_review_renderers
         from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
-        from daydream.trajectory import get_current_recorder
 
         run_info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
         if run_info.diagnostic is not None:

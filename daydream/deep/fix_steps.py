@@ -569,26 +569,28 @@ async def _evaluate_quality_gate(
             return
         rounds = _load_quality_gate_rounds(gate_p, session_id)
         round_no = iteration if iteration is not None else len(rounds) + 1
-        if candidates is None:
+
+        def _unavailable(stage: str, reason: str) -> None:
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
                 rounds=rounds,
                 round_no=round_no,
-                stage="candidates",
-                reason="could not enumerate files changed by the fix pass against the pre-fix snapshot",
+                stage=stage,
+                reason=reason,
                 session_id=session_id,
                 thresholds=thresholds,
             )
+
+        if candidates is None:
+            _unavailable(
+                "candidates",
+                "could not enumerate files changed by the fix pass against the pre-fix snapshot",
+            )
             return
         if before is None:
-            _persist_quality_gate_unavailable(
-                gate_p=gate_p,
-                rounds=rounds,
-                round_no=round_no,
-                stage="before",
-                reason=before_unavailable_reason or "pre-fix quality snapshot unavailable",
-                session_id=session_id,
-                thresholds=thresholds,
+            _unavailable(
+                "before",
+                before_unavailable_reason or "pre-fix quality snapshot unavailable",
             )
             return
         try:
@@ -602,15 +604,7 @@ async def _evaluate_quality_gate(
                 partial(analyze_quality, daydream_dir, candidates, code_workspace=code_workspace)
             )
         except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
-            _persist_quality_gate_unavailable(
-                gate_p=gate_p,
-                rounds=rounds,
-                round_no=round_no,
-                stage="after",
-                reason=f"{type(exc).__name__}: {exc}",
-                session_id=session_id,
-                thresholds=thresholds,
-            )
+            _unavailable("after", f"{type(exc).__name__}: {exc}")
             return
         before_per_file: dict[str, Any] = before.get("per_file") or {}
         after_per_file: dict[str, Any] = after.get("per_file") or {}

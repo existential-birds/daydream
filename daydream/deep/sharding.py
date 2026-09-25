@@ -36,11 +36,6 @@ def _file_change_bytes(diff: str) -> dict[str, int]:
     return sizes
 
 
-def _changed_bytes(sizes: dict[str, int], files: list[str]) -> int:
-    """Total changed-byte size of ``files`` from a pre-parsed sizes map."""
-    return sum(sizes.get(f, 1) for f in files)
-
-
 def _pack_shards(
     stack: StackAssignment,
     sizes: dict[str, int],
@@ -159,7 +154,7 @@ def shard_stacks(
         if stack.stack_name == STRUCTURE_STACK_NAME:
             structural.append(stack)
             continue
-        if len(stack.files) <= max_files and _changed_bytes(sizes, stack.files) <= max_bytes:
+        if len(stack.files) <= max_files and sum(sizes.get(f, 1) for f in stack.files) <= max_bytes:
             unsharded.append(stack)
             continue
         # Co-locate when a non-empty graph is available, else sorted singletons.

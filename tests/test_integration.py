@@ -1,7 +1,6 @@
 """Integration tests for the full review-fix-test flow."""
 import asyncio
 import json
-import json as _json
 import re
 import threading
 import time
@@ -1744,7 +1743,7 @@ async def test_run_populates_exploration_context(
         dd.mkdir(parents=True, exist_ok=True)
         for s in stacks:
             per_stack_records_path(dd, s.stack_name).write_text(
-                _json.dumps({"issues": [], "verdicts": []})
+                json.dumps({"issues": [], "verdicts": []})
             )
         return {s.stack_name: None for s in stacks}, {}
 

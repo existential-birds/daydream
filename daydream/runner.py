@@ -724,34 +724,19 @@ def _resolve_backend(
     )
 
     def _make() -> Backend:
-        if execution_input is not None:
-            return create_backend(
-                backend_name,
-                model=resolved_model,
-                cwd=cwd if backend_name == "pi" else None,
-                reasoning_effort=resolved_effort,
-                audit_root=audit_root,
-                audit_outward_symlinks=audit_outward_symlinks,
-                execution_input=execution_input,
-            )
         # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
         # default model, and widening it churns every patched create_backend.
+        kwargs: dict[str, Any] = {
+            "model": resolved_model,
+            "reasoning_effort": resolved_effort,
+            "audit_root": audit_root,
+            "audit_outward_symlinks": audit_outward_symlinks,
+        }
         if backend_name == "pi":
-            return create_backend(
-                backend_name,
-                model=resolved_model,
-                cwd=cwd,
-                reasoning_effort=resolved_effort,
-                audit_root=audit_root,
-                audit_outward_symlinks=audit_outward_symlinks,
-            )
-        return create_backend(
-            backend_name,
-            model=resolved_model,
-            reasoning_effort=resolved_effort,
-            audit_root=audit_root,
-            audit_outward_symlinks=audit_outward_symlinks,
-        )
+            kwargs["cwd"] = cwd
+        if execution_input is not None:
+            kwargs["execution_input"] = execution_input
+        return create_backend(backend_name, **kwargs)
 
     if cache is None:
         return _make()

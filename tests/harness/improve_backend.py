@@ -54,8 +54,8 @@ _AUDIT_HEADINGS = {
 }
 
 
-def _plan_ref(
-    recon_command_id: str,
+def plan_ref(
+    recon_command_id: str = "test-suite",
     *,
     appended_args: str | None = None,
     note: str | None = None,
@@ -142,16 +142,16 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
         f" for the requested change: {finding['title']}" if finding.get("category") == "requested" else ""
     )
     title = finding["title"] if len(finding["title"]) >= 12 else f"Implement requested change {finding['title']}"
-    step_gate = _plan_ref(
+    step_gate = plan_ref(
         "test-suite",
         appended_args="apps/billing/test_api.py -q",
         note="The focused billing suite proves the changed behavior.",
     )
-    test_gate = _plan_ref(
+    test_gate = plan_ref(
         "test-suite",
         appended_args="apps/billing/test_api.py -q",
     )
-    scope_gate = _plan_ref(
+    scope_gate = plan_ref(
         "git-diff",
         appended_args="-- README.md",
         note="Documentation must stay untouched by the billing change.",
@@ -763,7 +763,7 @@ class ImproveStubBackend:
             if self.plan_gate_on_first_menu_id:
                 # A writer can only gate on what the menu actually offers.
                 offered = _menu_ids(prompt)
-                plan = _set_plan_verification(plan, _plan_ref(offered[0])) if offered else plan
+                plan = _set_plan_verification(plan, plan_ref(offered[0])) if offered else plan
             if self.plan_file_role_override is not None:
                 plan["scope"]["existing_paths"][0]["role"] = (
                     self.plan_file_role_override
@@ -809,7 +809,7 @@ class ImproveStubBackend:
                     self.plan_stop_condition_path
                 )
             if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
-                plan["steps"][0]["verification"] = _plan_ref("make-tests")
+                plan["steps"][0]["verification"] = plan_ref("make-tests")
             if self.plan_writer_calls <= self.plan_unquoted_path_attempts:
                 plan["context_excerpts"] = []
             if self.plan_writer_calls <= self.plan_missing_path_attempts:

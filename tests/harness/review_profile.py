@@ -4,7 +4,22 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from daydream.pr_review import PRInfo
 from daydream.review_profile import ResolvedProfile, build_default_profile
+
+
+def sample_pr() -> PRInfo:
+    """The canonical test PRInfo used across submission/review/severity tests."""
+    return PRInfo(
+        number=42,
+        head_sha="head123",
+        base_sha="base456",
+        base_ref="main",
+        head_ref="feature",
+        owner="acme",
+        repo="widgets",
+        url="https://github.com/acme/widgets/pull/42",
+    )
 
 
 def default_strategy(stage: str) -> str:

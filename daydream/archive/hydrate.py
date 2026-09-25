@@ -1292,8 +1292,6 @@ def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
     whose derivative digest changed, refresh the admitted baseline copy and
     append a new ``admitted`` ledger entry carrying the enriched digest
     (latest-entry-wins, same convention as the dedupe pass itself)."""
-    from daydream.archive import sanitize  # noqa: PLC0415  # local: avoid import cycle
-
     runs_dir = stage / RUNS_DIRNAME
     if not runs_dir.is_dir():
         return

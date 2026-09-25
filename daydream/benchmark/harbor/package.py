@@ -259,8 +259,6 @@ def build_harbor(root: Path, *, wheel: Path) -> dict[str, Any]:
 
 def _validate_compiled_local(root: Path) -> Path:
     """Verify compiled inventory hashes, exact file set, and control-plane leakage."""
-    import json
-
     from daydream.benchmark.harbor import build
 
     compiled = root / "harbor"

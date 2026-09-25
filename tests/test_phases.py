@@ -2,14 +2,12 @@
 """Tests for phase functions with backend abstraction."""
 import errno
 import json
-import json as _json
 import os
 import shlex
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
-from pathlib import Path as _Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
@@ -17,7 +15,6 @@ from unittest.mock import Mock
 import anyio
 import jsonschema
 import pytest
-import pytest as _pytest
 from rich.console import Console
 
 import daydream
@@ -1935,7 +1932,7 @@ async def test_phase_fix_batched_adds_test_map_source_hint(
     silence_console("daydream.phases")
     test_map_path = tmp_path / "test-map.json"
     test_map_path.write_text(
-        _json.dumps({"test_mapping": [{"test_file": "tests/test_app.py", "source_file": "daydream/app.py"}]})
+        json.dumps({"test_mapping": [{"test_file": "tests/test_app.py", "source_file": "daydream/app.py"}]})
     )
     # The map is parsed once at the fan-out root; fix prompts consume the
     # normalized table rather than re-reading test-map.json per group.
@@ -3125,7 +3122,7 @@ async def test_declined_commit_surfaces_failed_validation(
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
     config = make_config(tmp_path, test_command="false")
-    with _pytest.raises(RuntimeError, match="validation"):
+    with pytest.raises(RuntimeError, match="validation"):
         await phase_commit_push(ScriptedBackend(), work, config=config)
 
 
@@ -4072,7 +4069,7 @@ def test_write_handoff_returns_false_on_oserror(tmp_path: Path, monkeypatch: pyt
     def _boom(self: object, *args: Any, **kwargs: Any) -> None:  # noqa: ARG001 - signature must match Path.write_text
         raise OSError("disk full")
 
-    monkeypatch.setattr(_Path, "write_text", _boom)
+    monkeypatch.setattr(Path, "write_text", _boom)
 
     assert _write_handoff(target, "BODY") is False
 
