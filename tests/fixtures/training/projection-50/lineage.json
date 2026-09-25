@@ -264,11 +264,6 @@
   "salt": "issue-1081-fixture-salt",
   "schema_version": "lineage",
   "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
-  "split_assignment": {
-    "holdout": 10,
-    "train": 32,
-    "validation": 8
-  },
   "split_counts": {
     "holdout": 10,
     "train": 32,

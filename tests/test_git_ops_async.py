@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import threading
 import time
@@ -17,6 +16,7 @@ import pytest
 from daydream import git_ops
 from daydream.backends._subprocess import terminate_process
 from tests.harness.fake_gh import FakeGh
+from tests.harness.processes import wait_for_process_group_exit
 
 
 def _budget(
@@ -835,19 +835,6 @@ async def _wait_for_json(path: Path, *, timeout: float = 5.0) -> dict[str, int]:
     raise AssertionError(f"blocking fake gh did not publish {path}")
 
 
-async def _wait_process_group_gone(pgid: int, *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            # EPERM means the pgid was recycled by a foreign-uid process,
-            # i.e. our same-uid group exited.
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"process group {pgid} survived cleanup")
-
-
 async def _wait_for_fd_baseline(baseline: int, *, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -894,7 +881,7 @@ async def _exercise_blocking_request(
         with pytest.raises(git_ops.GitTimeoutError, match="timed out"):
             await request
 
-    await _wait_process_group_gone(pids["direct"])
+    await wait_for_process_group_exit(pids["direct"])
     return pids
 
 
@@ -947,4 +934,4 @@ async def test_process_cleanup_is_idempotent(
         await terminate_process(proc)
 
     assert proc.returncode is not None
-    await _wait_process_group_gone(pids["direct"])
+    await wait_for_process_group_exit(pids["direct"])

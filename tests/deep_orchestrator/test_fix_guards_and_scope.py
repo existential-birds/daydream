@@ -15,6 +15,7 @@ from daydream.deep.scope_issues import _scope_edit_fingerprint, _scope_edit_mark
 from daydream.git_ops import GitError
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _run_loop,
     _scan_phase_events,
     _scan_trajectory_extra,
 )
@@ -553,14 +554,7 @@ async def test_fix_tool_veto_allows_unmatched_write(
         'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
     )
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "App.tsx").read_text() == "backend resumed"
@@ -586,14 +580,7 @@ async def test_fix_tool_veto_stops_subsequent_calls(
     api_before = (multi_stack_target / "api.py").read_bytes()
     app_before = (multi_stack_target / "App.tsx").read_bytes()
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "api.py").read_bytes() == api_before
@@ -615,14 +602,7 @@ async def test_fix_tool_supervisor_off_writes(
     stub.deferred_write_pairs = ["api.py"]
     (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "off"\n')
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "api.py").read_text() == "backend resumed"

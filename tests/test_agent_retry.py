@@ -22,9 +22,10 @@ from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
 from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.retry_policy import classify_failure
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+from tests.harness.trajectory import make_recorder
 
 
 def _fail_then_succeed(
@@ -335,12 +336,9 @@ async def test_run_agent_retry_exhausted_marks_trajectory_partial(
     backend = _always_raises(PiError("429 rate limit", retryable=True))
 
     trajectory_path = tmp_path / ".daydream" / "trajectory.json"
-    recorder = TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="test",
+    recorder = make_recorder(
+        tmp_path, path=trajectory_path,
+        agent_model_name="test-model", session_id="test",
     )
 
     with pytest.raises(PiError):

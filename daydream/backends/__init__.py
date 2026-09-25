@@ -665,7 +665,6 @@ class OspreyRequestConfig(EffectiveRequestConfig):
     immutable_surface: bool | None = None
     compress_context: bool | None = None
     ultracode: bool | None = None
-    max_turns: int | None = None
     turn_timeout: int | None = None
     stream_idle_timeout_secs: int | None = None
     streaming_timeout_secs: int | None = None

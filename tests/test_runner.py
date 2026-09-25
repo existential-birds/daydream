@@ -74,6 +74,7 @@ from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend, silence
+from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,
     _FakeSDKClient,
@@ -179,12 +180,9 @@ _VALID_DOCUMENT_BYTES = json.dumps(
 @pytest.fixture
 def capture_recorder(tmp_path: Path) -> TrajectoryRecorder:
     """A bare recorder identifying the ``session`` run for capture tests."""
-    return TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test",
-        session_id="session",
+    return make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="test", session_id="session",
     )
 
 

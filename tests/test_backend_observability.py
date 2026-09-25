@@ -29,9 +29,10 @@ from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
 from daydream.backends.codex import CodexBackend
 from daydream.backends.osprey import OspreyBackend, OspreyError
 from daydream.backends.pi import PiBackend, PiError, _render_tool_result
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.harness.claude_sdk import scripted_client
 from tests.harness.fake_cli_process import FakeCliProcess
+from tests.harness.trajectory import make_recorder
 
 
 @pytest.mark.asyncio
@@ -232,8 +233,10 @@ def test_pi_preserves_mixed_tool_blocks_and_structured_details() -> None:
 async def test_request_event_does_not_fabricate_a_trajectory_step(tmp_path: Path) -> None:
     request = RequestEvent(prompt="effective prompt", output_schema={"type": "object"})
     assert isinstance(request, AgentEvent)
-    recorder = TrajectoryRecorder(path=tmp_path / "trajectory.json", run_flow=DaydreamRunFlow.NORMAL,
-                                  target_dir=tmp_path, agent_model_name="model", session_id="session")
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="model", session_id="session",
+    )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(request)

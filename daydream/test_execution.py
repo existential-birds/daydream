@@ -212,27 +212,23 @@ async def _run_test_command_inner(
     except TimeoutError:
         timed_out = True
         await terminate_process(proc)
-        # After the group kill the pipes hit EOF; give the pumps a moment to
-        # drain whatever the process produced before it died.
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(pump_stdout, pump_stderr), timeout=5.0
-            )
-        except (TimeoutError, asyncio.CancelledError):  # noqa: BLE001 - salvage
-            pass
         exit_status = proc.returncode if proc.returncode is not None else -1
-    else:
-        # The direct child has exited, but a suite-spawned grandchild that
-        # inherited the pipe write ends can keep them open past exit (a
-        # live-server fixture, a daemonizing helper). Bound the drain with
-        # the same salvage window as the timed-out branch above so the
-        # success path cannot hang the run on a pipe-holding descendant.
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(pump_stdout, pump_stderr), timeout=5.0
-            )
-        except TimeoutError:
-            pass
+
+    # Bound the post-exit drain with a salvage window. After a group kill the
+    # pipes hit EOF; a suite-spawned grandchild that inherited the pipe write
+    # ends can keep them open past a direct child's exit (a live-server
+    # fixture, a daemonizing helper), so the success path needs the same bound.
+    # A CancelledError here is only reachable after a clean exit, so it
+    # propagates; the timed-out path swallows it as before.
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(pump_stdout, pump_stderr), timeout=5.0
+        )
+    except TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        if not timed_out:
+            raise
     if timed_out:
         phase.stop_reason = "timed_out"
     return TestExecutionResult(

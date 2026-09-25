@@ -28,9 +28,10 @@ from daydream.atif.validator import TrajectoryValidator
 from daydream.backends import MetricsEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase, TrajectoryRecorder
 from tests.harness.codex_replay import GapThenBlockingStdout as _GapThenBlockingStdout
 from tests.harness.codex_replay import make_mock_process_from_fixture
+from tests.harness.trajectory import make_recorder
 
 FIXTURE = "multi_turn_with_metrics.jsonl"
 
@@ -49,12 +50,9 @@ async def _drive_codex_through_recorder(
     ``inv.observe``. Returns the raw event list (for stream assertions) and
     the recorder (for step assertions).
     """
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="codex-test-model",
-        session_id="00000000-0000-0000-0000-000000000155",
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="codex-test-model", session_id="00000000-0000-0000-0000-000000000155",
     )
     backend = CodexBackend(model="codex-test-model")
     events: list[Any] = []
@@ -298,12 +296,9 @@ async def test_parser_gap_survives_in_partial_trajectory_before_stream_stall(
     """The first gap reaches the recorder before a later blocked read stalls."""
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
 
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="codex-test-model",
-        session_id="00000000-0000-0000-0000-000000001128",
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="codex-test-model", session_id="00000000-0000-0000-0000-000000001128",
     )
     backend = CodexBackend(model="codex-test-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")

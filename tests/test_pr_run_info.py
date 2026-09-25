@@ -23,13 +23,13 @@ from daydream.pr_run_info import (
 )
 from daydream.pricing import ModelPrice
 from daydream.trajectory import (
-    DaydreamRunFlow,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
 from daydream.workspace import WorkContext
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import git
+from tests.harness.trajectory import make_recorder
 
 
 def _trajectory(
@@ -86,12 +86,9 @@ def _recorder(
     prompt_tokens: int = 100,
     cost_usd: float | None = 0.01,
 ) -> TrajectoryRecorder:
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name=model,
-        session_id=session_id,
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name=model, session_id=session_id,
     )
     recorder.steps.extend(
         _trajectory(

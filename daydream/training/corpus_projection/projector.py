@@ -1196,7 +1196,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "trajectory_set_hash": _trajectory_set_hash(
             sorted({str(r["session_id"]) for r in records})
         ),
-        "split_assignment": split_counts,
         "split_counts": split_counts,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
         "caps": {"configured": dict(sorted(config.caps.items())),

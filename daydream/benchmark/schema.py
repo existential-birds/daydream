@@ -835,7 +835,6 @@ class EvidenceExclusion(_NoteForOther):
 
     source_id: str
     reason: _EVIDENCE_REASON
-    note: str | None = None
 
 
 _CASE_EXCLUSION_REASON = Literal["unreplayable", "not_suitable", "duplicate_case", "other"]
@@ -848,7 +847,6 @@ class CaseExclusion(_NoteForOther):
     _exclusion_noun: ClassVar[str] = "case exclusion"
 
     reason: _CASE_EXCLUSION_REASON
-    note: str | None = None
 
 
 # Single source of truth for the snapshot-comparison fact extraction version.
