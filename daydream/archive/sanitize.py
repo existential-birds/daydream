@@ -116,13 +116,8 @@ def _sanitize_json_document(doc: Any) -> Any:
     if isinstance(doc, list):
         return [_sanitize_json_document(child) for child in doc]
     if isinstance(doc, str):
-        return _sanitize_text(_sanitize_url_string(doc))
+        return redact_text(_sanitize_url_string(doc))
     return doc
-
-
-def _sanitize_text(text: str) -> str:
-    """Use the live redactor's shared credential rules for text and JSON leaves."""
-    return redact_text(text)
 
 
 def _sanitize_derivative(derivative_dir: Path) -> None:
@@ -143,7 +138,7 @@ def _sanitize_derivative(derivative_dir: Path) -> None:
                     encoding="utf-8",
                 )
                 continue
-        file_path.write_text(_sanitize_text(text), encoding="utf-8")
+        file_path.write_text(redact_text(text), encoding="utf-8")
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:

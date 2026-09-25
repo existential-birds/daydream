@@ -39,10 +39,7 @@ def mirror(root: Path) -> Path:
 def rev_parse(repo: Path, ref: str) -> str:
     """Resolve *ref* to a 40-hex SHA in *repo*, raising GitError on absence."""
     proc = git_ops._run_git(repo, ["rev-parse", "--verify", ref], retries=0)
-    if proc.returncode != 0:
-        raise git_ops.GitError(
-            f"git rev-parse --verify {ref} failed in {repo}: {proc.stderr.strip()}"
-        )
+    git_ops._require_ok(proc, f"git rev-parse --verify {ref} failed in {repo}")
     return proc.stdout.strip()
 
 
@@ -63,10 +60,7 @@ def ensure_mirror(root: Path, repo_slug: str, origin_url: str | None = None) -> 
         proc = git_ops._run_git(
             root, ["init", "--bare", str(m)], env_cmd=_fetch_env(), retries=0, timeout=30,
         )
-        if proc.returncode != 0:
-            raise git_ops.GitError(
-                f"git init --bare {m} failed: {proc.stderr.strip()}"
-            )
+        git_ops._require_ok(proc, f"git init --bare {m} failed")
     return m
 
 
@@ -81,10 +75,7 @@ def _git_fetch(mirror_repo: Path, url: str, refspecs: list[str]) -> None:
     url = str(url)
     args = [*git_ops._credential_helper_args(), "fetch", url, *refspecs]
     proc = git_ops._run_git(mirror_repo, args, env_cmd=_fetch_env(), retries=0, timeout=300)
-    if proc.returncode != 0:
-        raise git_ops.GitError(
-            f"git fetch {url} {' '.join(refspecs)} failed: {proc.stderr.strip()}"
-        )
+    git_ops._require_ok(proc, f"git fetch {url} {' '.join(refspecs)} failed")
 
 
 def fetch_base_tip(
@@ -211,13 +202,7 @@ def changed_paths(mirror_repo: Path, base_sha: str, head_sha: str) -> frozenset[
         capture_bytes=True,
         timeout=30,
     )
-    if proc.returncode != 0:
-        stderr = (
-            proc.stderr.decode("utf-8", errors="replace")
-            if isinstance(proc.stderr, bytes)
-            else proc.stderr
-        )
-        raise git_ops.GitError(f"git diff --name-status failed: {stderr.strip()}")
+    git_ops._require_ok(proc, "git diff --name-status failed")
     raw = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
     if not raw:
         return frozenset()
@@ -420,10 +405,9 @@ def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -
         # exit code 1 is git's documented signal for "no common ancestor" --
         # the soft-failure sentinel. Any other non-zero code is a real failure.
         return None
-    if proc.returncode != 0:
-        raise git_ops.GitError(
-            f"git merge-base {base_tip_ref} {head_sha} failed in {mirror_repo}: {proc.stderr.strip()}"
-        )
+    git_ops._require_ok(
+        proc, f"git merge-base {base_tip_ref} {head_sha} failed in {mirror_repo}"
+    )
     out = proc.stdout.strip()
     return out or None
 
@@ -555,9 +539,7 @@ def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> st
         mirror_repo, _canonical_diff_args(base_sha, head_sha),
         retries=0, capture_bytes=True,
     )
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace")
-        raise git_ops.GitError(f"git diff --binary {base_sha} {head_sha} failed: {stderr.strip()}")
+    git_ops._require_ok(proc, f"git diff --binary {base_sha} {head_sha} failed")
     return hashlib.sha256(proc.stdout).hexdigest()
 
 
@@ -606,9 +588,7 @@ def _run_git_checked(
         proc = git_ops._run_git(
             repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=False
         )
-    if proc.returncode != 0:
-        stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode("utf-8", errors="replace")
-        raise git_ops.GitError(f"git {' '.join(args)} failed: {stderr.strip()}")
+    git_ops._require_ok(proc, f"git {' '.join(args)} failed")
     if capture_bytes:
         return proc.stdout
     return proc.stdout.strip()
@@ -652,8 +632,7 @@ def bundle_heads(bundle_path: Path) -> set[str]:
     proc = git_ops._run_git(
         bundle_path.parent, ["bundle", "list-heads", str(bundle_path)], retries=0, timeout=30
     )
-    if proc.returncode != 0:
-        raise git_ops.GitError(f"git bundle list-heads failed: {proc.stderr.strip()}")
+    git_ops._require_ok(proc, "git bundle list-heads failed")
     heads: set[str] = set()
     for line in proc.stdout.splitlines():
         parts = line.split()
@@ -689,8 +668,7 @@ def validate_offline_clone(
             Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
             retries=0, timeout=120,
         )
-        if proc.returncode != 0:
-            raise git_ops.GitError(f"offline clone of {bundle_path} failed: {proc.stderr.strip()}")
+        git_ops._require_ok(proc, f"offline clone of {bundle_path} failed")
         refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
         refs = set(refs_out.splitlines())
         expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}

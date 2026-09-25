@@ -1053,6 +1053,29 @@ def build_merge_prompt(
     return "\n\n".join(parts)
 
 
+def _read_only_contract(*, depth: bool = False) -> str:
+    """The shared read-only/allowlist guard for verification prompts.
+
+    Single-sources the allowed-tool and state-changing-command rules so the
+    recommendation and fix-verify prompts cannot drift. ``depth`` adds the
+    fix-verify bullet scoping inspection to the retained patch.
+    """
+    parts = [
+        "Read-only contract (MANDATORY):\n"
+        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
+        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
+        "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
+        "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
+        "state-changing command."
+    ]
+    if depth:
+        parts.append(
+            "  - Depth: inspect the retained patch's files, but do not roam the whole "
+            "tree; prefer Grep/Glob to narrow."
+        )
+    return "\n".join(parts)
+
+
 def build_verification_prompt(
     *,
     strategy: str,
@@ -1104,14 +1127,7 @@ def build_verification_prompt(
         + render_report(items)
         + "\nDo NOT re-run any reviews."
     )
-    parts.append(
-        "Read-only contract (MANDATORY):\n"
-        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
-        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
-        "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
-        "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
-        "state-changing command."
-    )
+    parts.append(_read_only_contract())
     parts.append(
         "Turn budget: cap your investigation at 25 turns total. Prefer Grep/Glob "
         "to narrow the search before opening files with Read."
@@ -1225,16 +1241,7 @@ def build_fix_verify_prompt(
         "  - Emit one verdict entry for EVERY numbered finding. A finding you "
         "omit is treated as `unresolved`; there is no skip verdict."
     )
-    parts.append(
-        "Read-only contract (MANDATORY):\n"
-        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
-        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
-        "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
-        "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
-        "state-changing command.\n"
-        "  - Depth: inspect the retained patch's files, but do not roam the whole "
-        "tree; prefer Grep/Glob to narrow."
-    )
+    parts.append(_read_only_contract(depth=True))
     return "\n\n".join(parts)
 
 

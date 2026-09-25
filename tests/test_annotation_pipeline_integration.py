@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.archive import hydrate, license_enrich
+from daydream.archive import hydrate
 from daydream.archive.index import label_observation_history
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.canonical import run_canonical_harvest
@@ -24,7 +24,10 @@ from daydream.training.adjudication.publish import (
 )
 from daydream.training.corpus_projection.bundle import _verify_sha256sums
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
-from tests.fixtures.training.build_hub_snapshot import build_publication_hubs
+from tests.fixtures.training.build_hub_snapshot import (
+    build_publication_hubs,
+    install_external_license_resolver,
+)
 
 
 def test_full_annotation_pipeline_survives_vm_loss(
@@ -36,12 +39,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
     annotations = hubs.annotations
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: annotations)
 
-    class ExternalLicenseResolver:
-        def resolve(self, repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
-            commit = repo_commit or "a" * 40
-            return license_enrich.EnrichedEvidence("MIT", f"github:{repo_slug}@{commit}", commit)
-
-    monkeypatch.setattr(license_enrich, "_make_license_resolver", ExternalLicenseResolver)
+    install_external_license_resolver(monkeypatch)
     monkeypatch.setenv("HF_TOKEN", "offline-fixture-token")
     monkeypatch.setenv("GITHUB_TOKEN", "offline-fixture-token")
     policy_path = hubs.policy_path
