@@ -29,7 +29,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
     REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
-from daydream.archive.index import append_label_observation
+from daydream.archive.index import LABEL_OBSERVATION_NAMES, append_label_observation
 from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 from daydream.archive.sanitize import _sanitize_url_string
 from daydream.archive.scan import scan_run_dir
@@ -78,23 +78,13 @@ _EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![:/\w])(/[\w.-]+(?:/[\w.-]+)+)")
 # labeler_policy_version axis is carried verbatim so a policy bump or the
 # legacy sentinel survives the merge); every other key on an import row
 # (payload_digest, remote_url, ...) is importer metadata, not payload.
-# ``legacy`` is derived separately in ``_planned_append``.
-_WRITER_FIELDS = (
-    "labels",
-    "pr_state",
-    "labeler_version",
-    "evidence_sha",
-    "rubric_json",
-    "valid_at",
-    "reward_version",
-    "reward_json",
-    "composite_reward",
-    "reviewer_logins",
-    "has_posterior",
-    "source",
-    "reply_classifier_version",
-    "reply_evidence_digest",
-    "labeler_policy_version",
+# ``legacy`` is derived separately in ``_planned_append``. Derived from the
+# canonical ``label_observations`` declaration so a new column cannot silently
+# drop out of an import. The writer takes keyword arguments, so order is free.
+_WRITER_FIELDS: tuple[str, ...] = tuple(
+    name
+    for name in LABEL_OBSERVATION_NAMES
+    if name not in ("session_id", "observed_at", "legacy")
 )
 
 _REASON_UNMATCHED = "no_hub_entry"

@@ -260,6 +260,20 @@ def _ls_session(project: str) -> dict[str, Any]:
     }
 
 
+def _sessions_ok(project: str) -> Callable[[Mapping[str, Any]], tuple[int, dict[str, str], bytes]]:
+    """A LangSmith sessions responder resolving *project* to a single session."""
+
+    def responder(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
+        return 200, {"Content-Type": "application/json"}, json.dumps([_ls_session(project)]).encode()
+
+    return responder
+
+
+def _empty_runs() -> tuple[int, dict[str, str], bytes]:
+    """A LangSmith empty-runs response: an honest absence, not an error."""
+    return 200, {"Content-Type": "application/json"}, b'{"runs": []}'
+
+
 def _run_verify(
     receipt_path: Path,
     result_path: Path,
@@ -539,17 +553,14 @@ def test_langsmith_ambiguous_root_rejected(
     receipt = _write_receipt(tmp_path, destinations=["langsmith"])
     project = json.loads(receipt.read_text())["langsmith_project"]
 
-    def sessions(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, json.dumps([_ls_session(project)]).encode()
-
     def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         payload = json.loads(record["body"])
         if "id" in payload or payload.get("filter", "").startswith("eq(trace_id"):
-            return 200, {"Content-Type": "application/json"}, b'{"runs": []}'
+            return _empty_runs()
         runs = [_ls_run("root-a", trace_id="trace-a"), _ls_run("root-b", trace_id="trace-b")]
         return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
 
-    fake_vendor.respond("GET", "/api/v1/sessions", sessions)
+    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
     fake_vendor.respond("POST", "/runs/query", query)
     _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
     result_path = tmp_path / "result.json"
@@ -567,9 +578,6 @@ def test_langsmith_unstable_tree_fails_closed(
     root = _ls_run("root-1", metadata={"daydream_run_id": run_id})
     calls = {"tree": 0}
 
-    def sessions(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, json.dumps([_ls_session(project)]).encode()
-
     def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         payload = json.loads(record["body"])
         if "id" in payload:
@@ -582,7 +590,7 @@ def test_langsmith_unstable_tree_fails_closed(
             return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
         return 200, {"Content-Type": "application/json"}, json.dumps({"runs": [root]}).encode()
 
-    fake_vendor.respond("GET", "/api/v1/sessions", sessions)
+    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
     fake_vendor.respond("POST", "/runs/query", query)
     _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
     result_path = tmp_path / "result.json"
@@ -1091,13 +1099,10 @@ def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
     receipt = _write_receipt(tmp_path, destinations=["langsmith"])
     project = json.loads(receipt.read_text())["langsmith_project"]
 
-    def sessions(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, json.dumps([_ls_session(project)]).encode()
-
     def query(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, b'{"runs": []}'
+        return _empty_runs()
 
-    fake_vendor.respond("GET", "/api/v1/sessions", sessions)
+    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
     fake_vendor.respond("POST", "/runs/query", query)
     _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
     result_path = tmp_path / "result.json"

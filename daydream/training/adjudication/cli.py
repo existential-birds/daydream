@@ -70,7 +70,11 @@ from daydream.archive.importer import (
     redact_metadata_value,
     run_pure_import,
 )
-from daydream.archive.index import _get_connection, readonly_connection
+from daydream.archive.index import (
+    LABEL_OBSERVATION_NAMES,
+    _get_connection,
+    readonly_connection,
+)
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
@@ -857,31 +861,6 @@ def handle_harvest_snapshot(argv: list[str]) -> int:
     return 0
 
 
-# Full modern ``label_observations`` column list. Legacy-schema roots are
-# introspected via ``PRAGMA table_info`` and missing version columns are
-# surfaced as the ``"legacy"`` sentinel (never gold-eligible, still imported
-# as evidence).
-_IMPORT_OBSERVATION_COLUMNS = (
-    "session_id",
-    "observed_at",
-    "labels",
-    "pr_state",
-    "labeler_version",
-    "evidence_sha",
-    "rubric_json",
-    "valid_at",
-    "reward_version",
-    "reward_json",
-    "composite_reward",
-    "reviewer_logins",
-    "has_posterior",
-    "source",
-    "labeler_policy_version",
-    "reply_classifier_version",
-    "reply_evidence_digest",
-    "legacy",
-)
-
 _IMPORT_VERSION_COLUMNS = (
     "labeler_policy_version",
     "reply_classifier_version",
@@ -926,7 +905,7 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
                 f"archive root {root} has no label_observations table in index.db"
             )
         columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(label_observations)")]
-        selected = [column for column in _IMPORT_OBSERVATION_COLUMNS if column in columns]
+        selected = [column for column in LABEL_OBSERVATION_NAMES if column in columns]
         rows = [
             dict(row)
             for row in conn.execute(

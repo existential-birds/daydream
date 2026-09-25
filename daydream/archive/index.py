@@ -73,6 +73,7 @@ from daydream.archive._schema import (
     _PRECEDENCE_ORDER,
     _REVIEWER_PENALTY_MAP,
     _UPSERT_SQL,
+    LABEL_OBSERVATION_NAMES,
     RUNS_COLUMNS,
     SCHEMA_VERSION,
     _migrate_label_observations_schema,
@@ -83,10 +84,23 @@ from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.manifest import Manifest
 
+# The 16 non-identity columns, in the canonical declaration order: exactly the
+# values ``row_body`` supplies after the ``(session_id, observed_at)`` prefix.
+_LABEL_OBSERVATION_ROW_BODY_NAMES = LABEL_OBSERVATION_NAMES[2:]
+_INSERT_LABEL_OBSERVATION_SQL = (
+    f"INSERT INTO label_observations ({', '.join(LABEL_OBSERVATION_NAMES)}) "
+    f"VALUES ({', '.join('?' * len(LABEL_OBSERVATION_NAMES))})"
+)
+_SELECT_LABEL_OBSERVATION_ROW_SQL = (
+    f"SELECT {', '.join(_LABEL_OBSERVATION_ROW_BODY_NAMES)} FROM label_observations "
+    "WHERE session_id = ? AND observed_at = ?"
+)
+
 # Re-export for callers (including tests) that import these names from this module.
 __all__ = [
     "SCHEMA_VERSION",
     "RUNS_COLUMNS",
+    "LABEL_OBSERVATION_NAMES",
     "_CREATE_TABLE",
     "upsert_run",
     "update_labels",
@@ -543,11 +557,7 @@ def append_label_observation(
             )
             try:
                 conn.execute(
-                    "INSERT INTO label_observations "
-                    "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source, "
-                    "labeler_policy_version, reply_classifier_version, reply_evidence_digest, legacy) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    _INSERT_LABEL_OBSERVATION_SQL,
                     (session_id, observed_at, *row_body),
                 )
                 break
@@ -559,11 +569,7 @@ def append_label_observation(
                 # surviving source, human or auto). A genuinely distinct
                 # generation at the same stamp keeps the pre-existing bump.
                 existing = conn.execute(
-                    "SELECT labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, "
-                    "has_posterior, source, labeler_policy_version, reply_classifier_version, "
-                    "reply_evidence_digest, legacy "
-                    "FROM label_observations WHERE session_id = ? AND observed_at = ?",
+                    _SELECT_LABEL_OBSERVATION_ROW_SQL,
                     (session_id, observed_at),
                 ).fetchone()
                 if existing is not None and tuple(existing) == row_body:
