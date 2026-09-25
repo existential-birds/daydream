@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import NamedTuple
 
 SCHEMA_VERSION = 8
@@ -31,7 +31,20 @@ _REVIEWER_PENALTY_MAP: dict[str, float] = {
 ``daydream.training.reward._FP_PENALTY_MAP``.  Defined here so the archive
 layer does not depend on the training layer."""
 
-class RunColumn(NamedTuple):
+class Column(NamedTuple):
+    """One table column: its SQL name, DDL body text, and run-migration flags.
+
+    ``additive``/``upserted`` default to ``False`` so non-``runs`` tables (e.g.
+    ``label_observations``) declare only a name and definition.
+    """
+
+    name: str
+    definition: str
+    additive: bool = False
+    upserted: bool = False
+
+
+class RunColumn(Column):
     """One column of the ``runs`` table.
 
     ``RUNS_COLUMNS`` is the *only* declaration of the runs column set — the
@@ -42,16 +55,10 @@ class RunColumn(NamedTuple):
     (see ``_alter_add_missing``), so their resulting column order is not a
     contract, and every runs read is ``SELECT *`` materialised by column name.
 
-    ``definition`` is the DDL body text after the column name (including any
-    constraint clauses). ``additive`` marks a column that appended databases
-    migrate onto; ``upserted`` marks a column the run upsert writes (the
-    label-observation paths own the rest and maintain them separately).
+    ``additive`` marks a column that appended databases migrate onto;
+    ``upserted`` marks a column the run upsert writes (the label-observation
+    paths own the rest and maintain them separately).
     """
-
-    name: str
-    definition: str
-    additive: bool
-    upserted: bool
 
 
 RUNS_COLUMNS: tuple[RunColumn, ...] = (
@@ -116,18 +123,20 @@ RUNS_COLUMNS: tuple[RunColumn, ...] = (
 )
 
 
-def _create_table_sql(columns: Iterable[RunColumn]) -> str:
-    """Render the ``runs`` CREATE TABLE text from *columns*.
+def _create_table_sql(
+    columns: Iterable[Column],
+    table: str = "runs",
+    table_constraints: Sequence[str] = (),
+) -> str:
+    """Render a CREATE TABLE statement from *columns* and *table_constraints*.
 
     Every line carries a trailing comma except the last, matching the canonical
-    fresh-database DDL byte-for-byte. The definition text is emitted verbatim.
+    fresh-database ``runs`` DDL byte-for-byte. The definition text is emitted
+    verbatim. ``table_constraints`` are appended after the columns.
     """
-    columns = tuple(columns)
-    lines = [
-        f"    {col.name} {col.definition}" + ("," if i < len(columns) - 1 else "")
-        for i, col in enumerate(columns)
-    ]
-    return "\nCREATE TABLE IF NOT EXISTS runs (\n" + "\n".join(lines) + "\n)\n"
+    lines = [f"    {col.name} {col.definition}" for col in columns]
+    lines += [f"    {constraint}" for constraint in table_constraints]
+    return f"\nCREATE TABLE IF NOT EXISTS {table} (\n" + ",\n".join(lines) + "\n)\n"
 
 
 _UPSERT_LINE_WIDTH = 92
@@ -203,29 +212,33 @@ _CREATE_TABLE = _create_table_sql(RUNS_COLUMNS)
 # (current-generation); the additive migration stamps every pre-existing row
 # (``labeler_policy_version IS NULL``) ``'legacy'`` exactly once, never touching
 # its labels/observed_at/rubric_json.
-_CREATE_LABEL_OBSERVATIONS_TABLE = """
-CREATE TABLE IF NOT EXISTS label_observations (
-    session_id       TEXT NOT NULL,
-    observed_at      TEXT NOT NULL,
-    labels           TEXT NOT NULL,
-    pr_state         TEXT,
-    labeler_version  TEXT NOT NULL,
-    evidence_sha     TEXT,
-    rubric_json      TEXT,
-    valid_at         TEXT,
-    reward_version   TEXT,
-    reward_json      TEXT,
-    composite_reward REAL,
-    reviewer_logins  TEXT,
-    has_posterior    INTEGER NOT NULL DEFAULT 0,
-    source           TEXT NOT NULL DEFAULT 'auto',
-    labeler_policy_version TEXT,
-    reply_classifier_version TEXT,
-    reply_evidence_digest  TEXT,
-    legacy           TEXT NOT NULL DEFAULT 'auto',
-    PRIMARY KEY (session_id, observed_at)
+LABEL_OBSERVATION_COLUMNS: tuple[Column, ...] = (
+    Column("session_id", "TEXT NOT NULL"),
+    Column("observed_at", "TEXT NOT NULL"),
+    Column("labels", "TEXT NOT NULL"),
+    Column("pr_state", "TEXT"),
+    Column("labeler_version", "TEXT NOT NULL"),
+    Column("evidence_sha", "TEXT"),
+    Column("rubric_json", "TEXT"),
+    Column("valid_at", "TEXT"),
+    Column("reward_version", "TEXT"),
+    Column("reward_json", "TEXT"),
+    Column("composite_reward", "REAL"),
+    Column("reviewer_logins", "TEXT"),
+    Column("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
+    Column("source", "TEXT NOT NULL DEFAULT 'auto'"),
+    Column("labeler_policy_version", "TEXT"),
+    Column("reply_classifier_version", "TEXT"),
+    Column("reply_evidence_digest", "TEXT"),
+    Column("legacy", "TEXT NOT NULL DEFAULT 'auto'"),
 )
-"""
+LABEL_OBSERVATION_NAMES: tuple[str, ...] = tuple(col.name for col in LABEL_OBSERVATION_COLUMNS)
+
+_CREATE_LABEL_OBSERVATIONS_TABLE = _create_table_sql(
+    LABEL_OBSERVATION_COLUMNS,
+    table="label_observations",
+    table_constraints=("PRIMARY KEY (session_id, observed_at)",),
+)
 
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_runs_repo_slug ON runs(repo_slug)",
