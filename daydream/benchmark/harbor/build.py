@@ -97,12 +97,6 @@ ASSIGNMENT_TEXT = (
 MAX_PR_CONTEXT_BYTES = 32 * 1024
 
 
-_ESCAPED_HISTORICAL_TAGS = {
-    "<historical_pr_context>": "&lt;historical_pr_context&gt;",
-    "</historical_pr_context>": "&lt;/historical_pr_context&gt;",
-}
-
-
 def _escape_historical_delimiters(text: str) -> str:
     """Neutralize the ``<historical_pr_context>`` block delimiters in untrusted text.
 
@@ -114,9 +108,9 @@ def _escape_historical_delimiters(text: str) -> str:
     delimiter.
     """
     return text.replace(
-        "<historical_pr_context>", _ESCAPED_HISTORICAL_TAGS["<historical_pr_context>"]
+        "<historical_pr_context>", "&lt;historical_pr_context&gt;"
     ).replace(
-        "</historical_pr_context>", _ESCAPED_HISTORICAL_TAGS["</historical_pr_context>"]
+        "</historical_pr_context>", "&lt;/historical_pr_context&gt;"
     )
 
 
