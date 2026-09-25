@@ -38,11 +38,12 @@ import hashlib
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from daydream.json_utils import atomic_write_json
+from daydream.timeutil import now_iso_utc
 from daydream.training import labeler_versions
 from daydream.ui import create_console, print_warning
 
@@ -58,11 +59,6 @@ older than this window does not resume the session), letting a re-run observe
 a reply edit and append a fresh generation (M14) instead of being masked by a
 stale memoized response.
 """
-
-
-def _now_iso_utc() -> str:
-    """Return the current UTC time as an ISO-8601 string with a ``Z`` suffix."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _slug_endpoint(repo: str, endpoint: str) -> str:
@@ -158,7 +154,7 @@ class BackfillCache:
             {
                 "session_id": session_id,
                 "labeler_policy_version": labeler_versions.LABELER_POLICY_VERSION,
-                "completed_at": _now_iso_utc(),
+                "completed_at": now_iso_utc(),
             },
             sort_keys=True,
         )

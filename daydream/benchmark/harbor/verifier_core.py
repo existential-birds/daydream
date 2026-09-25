@@ -473,25 +473,20 @@ LOCATION_TOLERANCE: Final = 3
 # below 3 lines the "near" tier would measure the posting snapper's behavior,
 # not the reviewer's actual localization accuracy.
 
-_RANGE_DISTANCE_DOC = """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
-
-``0`` when ``line`` lies inside the range, else the distance to the nearer
-boundary (``start`` when ``line`` is below it, ``end`` when above).
-
-Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
-(the source of truth).
-"""
-
-
 def _range_distance(line: int, start: int, end: int) -> int:
+    """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
+
+    ``0`` when ``line`` lies inside the range, else the distance to the nearer
+    boundary (``start`` when ``line`` is below it, ``end`` when above).
+
+    Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
+    (the source of truth).
+    """
     if start <= line <= end:
         return 0
     if line < start:
         return start - line
     return line - end
-
-
-_range_distance.__doc__ = _RANGE_DISTANCE_DOC
 
 
 _SEVERITY_RANK: Final = {"high": 3, "medium": 2, "low": 1}
