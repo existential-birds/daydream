@@ -110,24 +110,7 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
         ResultEvent(structured_output=None, continuation=None),
     ]
 
-
-    output = StringIO()
-    monkeypatch.setattr(
-        "daydream.agent.console",
-        Console(file=output, force_terminal=True, width=120, theme=NEON_THEME),
-    )
-
-    async def run_() -> None:
-        await run_agent(
-            ScriptedBackend(events=events, model="mock-model"),
-            Path("/tmp"),
-            "Test prompt",
-            phase=DaydreamPhase.REVIEW,
-            run_context=RunContext(InteractionPolicy(quiet=False)),
-        )
-
-    await run_()
-    plain_text = strip_ansi(output.getvalue())
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
 
     assert plain_text.count("Thinking") == 5, "each thought must render its Thinking title once"
 

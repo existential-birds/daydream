@@ -13,8 +13,9 @@ import pytest
 from daydream.atif import Step
 from daydream.atif import validate as atif_validate
 from daydream.backends import AgentEvent, ToolResultEvent
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.contract._loaders import claude_loader, codex_loader, pi_loader
+from tests.harness.trajectory import make_recorder
 
 CANONICAL = Path(__file__).parent / "fixtures" / "canonical_script.json"
 
@@ -28,12 +29,9 @@ async def _run_backend_against_canonical(
     read_only: bool = False,
 ) -> list[Step]:
     script = json.loads(CANONICAL.read_text())
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="00000000-0000-0000-0000-0000000000ff",
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="test-model", session_id="00000000-0000-0000-0000-0000000000ff",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:

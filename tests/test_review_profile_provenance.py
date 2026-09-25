@@ -11,16 +11,14 @@ from pathlib import Path
 from daydream.archive import _schema
 from daydream.archive import manifest as m
 from daydream.backends import ResultEvent, TextEvent
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
+from tests.harness.trajectory import make_recorder
 
 
 async def test_trajectory_build_extra_carries_profile_provenance(tmp_path: Path) -> None:
-    rec = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id="s1",
+    rec = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="opus", session_id="s1",
     )
     rec.record_profile(schema_version=1, name="p", source_kind="default", digest="abc")
     async with rec:

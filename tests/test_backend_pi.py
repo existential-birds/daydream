@@ -62,12 +62,13 @@ from daydream.backends.pi import (
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.stub_backend import silence as _silence
+from tests.harness.trajectory import make_recorder
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
@@ -813,12 +814,9 @@ async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
     traj_path = tmp_path / "trajectory.json"
 
-    recorder = TrajectoryRecorder(
-        path=traj_path,
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="glm-5.2",
-        session_id="00000000-0000-0000-0000-0000000000aa",
+    recorder = make_recorder(
+        tmp_path, path=traj_path,
+        agent_model_name="glm-5.2", session_id="00000000-0000-0000-0000-0000000000aa",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:

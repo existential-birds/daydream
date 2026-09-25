@@ -12,20 +12,18 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends.codex import CodexBackend
 from daydream.phases import FEEDBACK_SCHEMA
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.scripts import build_codex_jsonl_for_phase
+from tests.harness.trajectory import make_recorder
 
 
 @pytest.fixture
 def recorder(tmp_path: Path) -> Any:
     """A real recorder shared by the review and parse invocations."""
-    return TrajectoryRecorder(
-        path=tmp_path / "t.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="m",
-        session_id="00000000-0000-0000-0000-0000000000ff",
+    return make_recorder(
+        tmp_path, path=tmp_path / "t.json",
+        agent_model_name="m", session_id="00000000-0000-0000-0000-0000000000ff",
     )
 
 

@@ -51,6 +51,7 @@ from tests.harness.claude_sdk import (
     patch_claude_sdk,
     scripted_client,
 )
+from tests.harness.trajectory import make_recorder
 
 
 @pytest.fixture
@@ -65,14 +66,10 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
     """Mirror runner.py: ``agent_model_name`` is stamped per-step, not at recorder init."""
-    return TrajectoryRecorder(
+    return make_recorder(
+        tmp_path, run_flow=DaydreamRunFlow.TTT,
         path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.TTT,
-        target_dir=tmp_path,
-        # Backend alias is only a legacy fallback; daydream stamps the resolved
-        # model on each Step explicitly (config.model was replaced by per-phase fields).
-        agent_model_name="claude",
-        session_id="test",
+        agent_model_name="claude", session_id="test",
     )
 
 

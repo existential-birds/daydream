@@ -70,7 +70,6 @@ _CREDENTIAL_PROVIDER_VARS = (
 _GRPC_BRIDGE_SURFACE = ("_client", "_channel", "_headers", "_timeout", "_shutdown", "_initialize_channel_and_stub")
 
 _ACK_OK = "ok"
-_ACK_EMPTY_OK = "empty_ok"
 _ACK_PARTIAL = "partial"
 _ACK_MALFORMED = "malformed"
 _ACK_OVERSIZED = "oversized"
@@ -211,7 +210,7 @@ def classify_http_ack(
     if len(body) > _MAX_DECODE_BYTES:
         return (_ACK_OVERSIZED, 0)
     if not body:
-        return (_ACK_EMPTY_OK, 0)
+        return (_ACK_OK, 0)
     if content_type is None:
         return (_ACK_MALFORMED, 0)
     if content_type.split(";")[0].strip().lower() == "application/json":
@@ -257,7 +256,6 @@ def classify_grpc_ack(payload: ExportTraceServiceResponse | None) -> tuple[str, 
 
 _VERDICT_RESULT = {
     _ACK_OK: SpanExportResult.SUCCESS,
-    _ACK_EMPTY_OK: SpanExportResult.SUCCESS,
     _ACK_PARTIAL: SpanExportResult.FAILURE,
     _ACK_MALFORMED: SpanExportResult.FAILURE,
     _ACK_OVERSIZED: SpanExportResult.FAILURE,
@@ -442,7 +440,7 @@ class HttpxOtlpTransport:
             except Exception:  # noqa: BLE001 - sanitized transport failure seam
                 self._ledger.record_unverified("OTLP_CONNECTION_FAILED")
                 return SpanExportResult.FAILURE
-            if verdict in (_ACK_OK, _ACK_EMPTY_OK, _ACK_PARTIAL):
+            if verdict in (_ACK_OK, _ACK_PARTIAL):
                 if verdict == _ACK_PARTIAL:
                     return _partial_ack_result(self._ledger, rejected)
                 self._ledger.record_delivered()
@@ -655,8 +653,8 @@ class GrpcBridge:
                 self._ledger.record_unverified("OTLP_GRPC_RPC_FAILED")
                 del exc
                 return SpanExportResult.FAILURE
-            verdict, rejected = classify_grpc_ack(payload if payload is not None else None)
-            if verdict in (_ACK_OK, _ACK_EMPTY_OK):
+            verdict, rejected = classify_grpc_ack(payload)
+            if verdict == _ACK_OK:
                 self._ledger.record_delivered()
                 return SpanExportResult.SUCCESS
             if verdict == _ACK_PARTIAL:

@@ -46,13 +46,12 @@ from daydream.eval.analyzer import (
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
-    DaydreamRunFlow,
-    TrajectoryRecorder,
     redact_text,
     run_directory,
     run_document_path,
     sibling_document_path,
 )
+from tests.harness.trajectory import make_recorder
 
 
 def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
@@ -435,12 +434,9 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(
 ) -> None:
     session = "nested-forks"
     daydream_dir = tmp_path / ".daydream"
-    recorder = TrajectoryRecorder(
-        path=daydream_dir / "runs" / session / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="opus",
-        session_id=session,
+    recorder = make_recorder(
+        tmp_path, path=daydream_dir / "runs" / session / "trajectory.json",
+        agent_model_name="opus", session_id=session,
     )
 
     async with recorder:
