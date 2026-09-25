@@ -95,9 +95,7 @@ def _plan_dispositions() -> dict[str, list[str]]:
     # First two holdout findings pin the two classes on the evaluated side;
     # everything else alternates, so the training side carries both too.
     for position, pair in enumerate(holdout):
-        label_of[(pair[0], pair[1])] = "accepted" if position == 0 else (
-            "rejected" if position == 1 else ("accepted" if position % 2 == 0 else "rejected")
-        )
+        label_of[(pair[0], pair[1])] = "accepted" if position % 2 == 0 else "rejected"
     for position, pair in enumerate(p for p in gold_pairs if p[2] != "holdout"):
         label_of[(pair[0], pair[1])] = "accepted" if position % 2 == 0 else "rejected"
 

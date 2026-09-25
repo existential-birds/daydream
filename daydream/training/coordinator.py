@@ -236,6 +236,19 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     return gold, {"gold": len(gold), "silver": silver}
 
 
+def _record_views(
+    rec: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Read a record's v2-first ``code_context``/``task_identity``/``lineage`` views."""
+    raw_ctx = rec.get("code_context")
+    code_ctx = raw_ctx if isinstance(raw_ctx, dict) else {}
+    task_identity = rec.get("task_identity")
+    identity = task_identity if isinstance(task_identity, dict) else {}
+    raw_lineage = rec.get("lineage")
+    lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
+    return code_ctx, identity, lineage_obj
+
+
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Deterministic SFT prompt built from a record's frozen review context.
 
@@ -245,14 +258,7 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
     same order :func:`_rft_rows` uses), so a v2 prompt carries the record's
     real repo slug and frozen task shas instead of degrading to 'unknown'.
     """
-    code_ctx: dict[str, Any] = {}
-    raw_ctx = rec.get("code_context")
-    if isinstance(raw_ctx, dict):
-        code_ctx = raw_ctx
-    task_identity = rec.get("task_identity")
-    identity = task_identity if isinstance(task_identity, dict) else {}
-    raw_lineage = rec.get("lineage")
-    lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
+    code_ctx, identity, lineage_obj = _record_views(rec)
     repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get(
         "repo_slug", "unknown"
     )
@@ -349,14 +355,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
-        code_ctx: dict[str, Any] = {}
-        raw_ctx = rec.get("code_context")
-        if isinstance(raw_ctx, dict):
-            code_ctx = raw_ctx
-        task_identity = rec.get("task_identity")
-        identity = task_identity if isinstance(task_identity, dict) else {}
-        raw_lineage = rec.get("lineage")
-        lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
+        code_ctx, identity, lineage_obj = _record_views(rec)
         rid = str(rec.get("comment_id") or rec.get("session_id") or "")
         repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get("repo_slug")
         base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")

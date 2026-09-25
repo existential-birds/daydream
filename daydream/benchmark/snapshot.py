@@ -565,15 +565,52 @@ def _synthetic_env() -> dict[str, str]:
     return {**os.environ, **_SYNTH_AUTHOR, "GIT_TERMINAL_PROMPT": "0"}
 
 
+@overload
 def _run_git_checked(
-    repo: Path | str, args: list[str], *, env_cmd: dict[str, str] | None = None, timeout: int = 30
-) -> str:
-    """Run git and raise GitError on a non-zero exit (build-bundle helper)."""
+    repo: Path | str,
+    args: list[str],
+    *,
+    env_cmd: dict[str, str] | None = None,
+    timeout: int = 30,
+    capture_bytes: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+def _run_git_checked(
+    repo: Path | str,
+    args: list[str],
+    *,
+    env_cmd: dict[str, str] | None = None,
+    timeout: int = 30,
+    capture_bytes: Literal[True],
+) -> bytes: ...
+
+
+def _run_git_checked(
+    repo: Path | str,
+    args: list[str],
+    *,
+    env_cmd: dict[str, str] | None = None,
+    timeout: int = 30,
+    capture_bytes: bool = False,
+) -> str | bytes:
+    """Run git and raise GitError on a non-zero exit."""
     repo = Path(repo)
-    proc = git_ops._run_git(repo, args, env_cmd=env_cmd, retries=0, timeout=timeout)
+    proc: subprocess.CompletedProcess[bytes] | subprocess.CompletedProcess[str]
+    if capture_bytes:
+        proc = git_ops._run_git(
+            repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=True
+        )
+    else:
+        proc = git_ops._run_git(
+            repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=False
+        )
     if proc.returncode != 0:
         stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode("utf-8", errors="replace")
         raise git_ops.GitError(f"git {' '.join(args)} failed: {stderr.strip()}")
+    if capture_bytes:
+        return proc.stdout
     return proc.stdout.strip()
 
 
@@ -654,7 +691,7 @@ def validate_offline_clone(
         )
         if proc.returncode != 0:
             raise git_ops.GitError(f"offline clone of {bundle_path} failed: {proc.stderr.strip()}")
-        refs_out = _run_git_cwd(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
+        refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
         refs = set(refs_out.splitlines())
         expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
         if refs != expected_refs:
@@ -662,13 +699,13 @@ def validate_offline_clone(
                 f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
                 f"got {sorted(refs)})"
             )
-        count = _run_git_cwd(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
+        count = _run_git_checked(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
         if count != "2":
             raise git_ops.GitError(
                 f"offline clone head ancestry must contain exactly two reachable commits "
                 f"(got {count})"
             )
-        parents_out = _run_git_cwd(
+        parents_out = _run_git_checked(
             clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
         )
         if len(parents_out.splitlines()) != 1:
@@ -676,10 +713,10 @@ def validate_offline_clone(
                 f"offline clone base must be a root commit with no parent "
                 f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
             )
-        head_parent = _run_git_cwd(
+        head_parent = _run_git_checked(
             clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
         )
-        base_commit = _run_git_cwd(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
+        base_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
         if head_parent != base_commit:
             raise git_ops.GitError(
                 f"offline clone head's parent must be the base commit "
@@ -689,10 +726,10 @@ def validate_offline_clone(
             ("refs/remotes/origin/base", base_tree),
             ("refs/remotes/origin/head", head_tree),
         ):
-            got = _run_git_cwd(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
+            got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
             if got != expected:
                 raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
-        diff = _run_git_cwd(
+        diff = _run_git_checked(
             clone_dir,
             _canonical_diff_args("refs/remotes/origin/base", "refs/remotes/origin/head"),
             capture_bytes=True,
@@ -702,32 +739,6 @@ def validate_offline_clone(
     finally:
         shutil.rmtree(clone_dir, ignore_errors=True)
     return None
-
-
-@overload
-def _run_git_cwd(repo: Path | str, args: list[str]) -> str: ...
-
-
-@overload
-def _run_git_cwd(repo: Path | str, args: list[str], *, capture_bytes: Literal[True]) -> bytes: ...
-
-
-def _run_git_cwd(
-    repo: Path | str, args: list[str], *, capture_bytes: bool = False
-) -> str | bytes:
-    """Run git and raise GitError on non-zero exit (offline-clone helper)."""
-    repo = Path(repo)
-    proc: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
-    if capture_bytes:
-        proc = git_ops._run_git(repo, args, retries=0, capture_bytes=True, timeout=30)
-    else:
-        proc = git_ops._run_git(repo, args, retries=0, capture_bytes=False, timeout=30)
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
-        raise git_ops.GitError(f"git {' '.join(args)} failed: {stderr.strip()}")
-    if isinstance(proc.stdout, bytes):
-        return proc.stdout
-    return proc.stdout.strip()
 
 
 def freeze_one(
