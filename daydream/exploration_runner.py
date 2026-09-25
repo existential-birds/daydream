@@ -14,8 +14,11 @@ import re
 import stat
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
 
+import anyio
+
 from daydream import git_ops
 from daydream import review_profile as _rp
+from daydream.agent import run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
@@ -290,10 +293,6 @@ async def pre_scan(
             "exploration.test_mapping": defaults["exploration.test_mapping"].content,
             "exploration.repository_survey": defaults["exploration.repository_survey"].content,
         }
-    import anyio
-
-    from daydream.agent import run_agent
-
     static_files: list[FileInfo] = []
     try:
         static_files = detect_affected_files(diff_text, repo_root)
@@ -511,10 +510,6 @@ async def repo_scan(
                 "exploration.repository_survey"
             ].content,
         }
-    import anyio
-
-    from daydream.agent import run_agent
-
     paths: list[str] = []
     try:
         paths = git_ops.ls_files(repo_root)

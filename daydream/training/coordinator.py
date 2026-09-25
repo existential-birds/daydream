@@ -642,8 +642,9 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         RuntimeError: When Stage 3 is requested without a passed Stage-0 gate,
             or the corpus carries no gold outcome rows for Stage 0.
     """
-    if config.projection is None:  # unreachable: PipelineConfig.__post_init__ enforces the input
-        raise ValueError("no projection input: PipelineConfig requires projection=<frozen projection dir>")
+    # PipelineConfig.__post_init__ enforces a projection input; the assert keeps
+    # the invariant documented and narrows the type for mypy.
+    assert config.projection is not None
     # Frozen projection directory: the v2 loader re-applies the C5/C8 and
     # split-drift gates, and the directory-level digest replaces the
     # single-file corpus digest in the run identity.
