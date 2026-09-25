@@ -329,18 +329,12 @@ class LiveToolPanel:
         body_extras = _build_tool_body_extras(self._name, self._args)
 
         if self._result is None:
+            header_with_spinner = Text()
+            header_with_spinner.append_text(header)
             if self._name == "Edit":
-                surgery_indicator = self._build_surgery_phase_indicator()
-                header_with_surgery = Text()
-                header_with_surgery.append_text(header)
-                header_with_surgery.append_text(surgery_indicator)
-                header_with_surgery.append_text(self._spinner.render())
-                content = Group(header_with_surgery)
-            else:
-                header_with_spinner = Text()
-                header_with_spinner.append_text(header)
-                header_with_spinner.append_text(self._spinner.render())
-                content = Group(header_with_spinner, *body_extras)
+                header_with_spinner.append_text(self._build_surgery_phase_indicator())
+            header_with_spinner.append_text(self._spinner.render())
+            content = Group(header_with_spinner, *body_extras)
         elif self._name == "Skill":
             # Skill calls skip the output section; the header already shows the skill name.
             content = Group(header)
@@ -574,10 +568,7 @@ class LiveToolPanelRegistry:
             panel = self._panels.get(tid)
             if panel:
                 self._console.print(panel._render_panel())
-        self._active_order.clear()
-        self._panels.clear()
-        self._call_args.clear()
-        self._task_labels.clear()
+        self.discard_all()
 
     def discard_all(self) -> None:
         """Stop rendering and clear tracked panels without printing them."""
