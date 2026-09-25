@@ -50,6 +50,7 @@ from daydream.archive.index import upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
+from daydream.timeutil import now_iso_utc
 from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -501,7 +502,7 @@ def download_snapshot(
                 "source_relpath": source_relpath,
                 "sha256": sha,
                 "size": len(data),
-                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "fetched_at": now_iso_utc(),
             }
         )
 
@@ -571,10 +572,6 @@ class IngestResult:
     session_id: str
     status: str  # "admitted" | "quarantined"
     reason_code: str | None = None
-
-
-def _utc_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
@@ -880,7 +877,7 @@ def apply_license_gate(
             _append_dedupe_entry(
                 ledger_path,
                 {"session_id": sid, "status": "excluded", "reason_code": reason_code,
-                 "content_digest": None, "revision": str(revision), "at": _utc_now()},
+                 "content_digest": None, "revision": str(revision), "at": now_iso_utc()},
             )
             rejected.append((sid, reason_code))
     if rejected:
@@ -1311,7 +1308,7 @@ def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
         _append_dedupe_entry(
             ledger_path,
             {"session_id": sid, "status": "admitted", "reason_code": None,
-             "content_digest": digest, "revision": str(revision), "at": _utc_now()},
+             "content_digest": digest, "revision": str(revision), "at": now_iso_utc()},
         )
 
 
@@ -1426,7 +1423,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                 _append_dedupe_entry(
                     ledger_path,
                     {"session_id": sid, "status": "excluded", "reason_code": code,
-                     "content_digest": None, "revision": revision, "at": _utc_now()},
+                     "content_digest": None, "revision": revision, "at": now_iso_utc()},
                 )
                 result.excluded.append((sid, code))
                 continue
@@ -1457,7 +1454,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                         ledger_path,
                         {"session_id": sid, "status": "admitted", "reason_code": None,
                          "content_digest": sanitize._derivative_digest(baseline),
-                         "revision": revision, "at": _utc_now()},
+                         "revision": revision, "at": now_iso_utc()},
                     )
                     result.admitted += 1
                     continue
@@ -1476,7 +1473,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                     ledger_path,
                     {"session_id": sid, "status": "collision",
                      "reason_code": REASON_CODE_IDENTITY_COLLISION,
-                     "content_digest": digest, "revision": revision, "at": _utc_now()},
+                     "content_digest": digest, "revision": revision, "at": now_iso_utc()},
                 )
                 result.collisions += 1
                 result.collision_ids.append(sid)
@@ -1489,7 +1486,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
             _append_dedupe_entry(
                 ledger_path,
                 {"session_id": sid, "status": "admitted", "reason_code": None,
-                 "content_digest": digest, "revision": revision, "at": _utc_now()},
+                 "content_digest": digest, "revision": revision, "at": now_iso_utc()},
             )
             result.admitted += 1
     rebuild_index(stage)
@@ -1685,7 +1682,7 @@ def build_import_ledger(
         "pinned_revision": revision,
         "source_commit": source_commit,
         "curation_id": curated.name,
-        "generated_at": _utc_now(),
+        "generated_at": now_iso_utc(),
         "imported": imported,
         "quarantined": sorted(quarantined, key=lambda x: x["session_id"]),
         "excluded": sorted(excluded, key=lambda x: x["session_id"]),
@@ -1978,7 +1975,7 @@ def _write_resume_ledger(curated: Path, curation_id: str) -> None:
                 "batch_digest": sanitize._derivative_digest(batch),
                 "source_commit": source_commit,
                 "curation_id": curation_id,
-                "at": _utc_now(),
+                "at": now_iso_utc(),
             }
     resume_path = curated / "resume" / "ledger.jsonl"
     existing: dict[str, dict[str, Any]] = {}

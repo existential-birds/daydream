@@ -96,18 +96,26 @@ class PreparedSanctionedInputs:
         """
         rendered = self.render()
         if self.transport is SanctionedInputTransport.INLINE and self.inputs:
-            for item in self.inputs:
-                prompt = prompt.replace(str(item.path), f"sanctioned input '{item.label}'")
-                rendered = rendered.replace(str(item.path), f"sanctioned input '{item.label}'")
-            common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
-            if common_parent and common_parent != os.path.sep:
-                prompt = prompt.replace(common_parent, "sanctioned artifact storage")
-                rendered = rendered.replace(common_parent, "sanctioned artifact storage")
+            prompt = self._scrub_private_paths(prompt)
+            rendered = self._scrub_private_paths(rendered)
         if not rendered:
             return prompt
         if prompt.endswith(rendered):
             return prompt
         return f"{prompt}\n\n{rendered}"
+
+    def _scrub_private_paths(self, text: str) -> str:
+        """Hide sanctioned-input pathnames from an inline-transport string.
+
+        Replaces each input's path with its label first, then the inputs' shared
+        parent (a sibling the builders did not sanction) with a storage marker.
+        """
+        for item in self.inputs:
+            text = text.replace(str(item.path), f"sanctioned input '{item.label}'")
+        common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
+        if common_parent and common_parent != os.path.sep:
+            text = text.replace(common_parent, "sanctioned artifact storage")
+        return text
 
     def finalization_text(
         self, backend: object, cwd: Path, read_only: bool, *, input_priority: tuple[str, ...] = (),
@@ -141,11 +149,7 @@ class PreparedSanctionedInputs:
                 blocks.append("[input truncated; missing bytes do not establish coverage]")
         rendered = truncate_utf8_to_budget("\n\n".join(blocks), 24000, "[sanctioned context truncated]")
         if self.transport is SanctionedInputTransport.INLINE and self.inputs:
-            for item in self.inputs:
-                rendered = rendered.replace(str(item.path), f"sanctioned input '{item.label}'")
-            common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
-            if common_parent and common_parent != os.path.sep:
-                rendered = rendered.replace(common_parent, "sanctioned artifact storage")
+            rendered = self._scrub_private_paths(rendered)
         return rendered
 
     def revalidate(self, backend: object, cwd: Path, read_only: bool) -> None:
