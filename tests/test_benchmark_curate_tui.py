@@ -11,8 +11,7 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream.benchmark import curate_tui as tui
-from daydream.benchmark import curation as cu
+from daydream.benchmark import curate_tui as tui, curation as cu
 from daydream.benchmark.curate_tui import (
     parse_indices,
     render_case,

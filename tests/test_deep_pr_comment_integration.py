@@ -42,9 +42,7 @@ from tests.harness.claude_sdk import (
     patch_claude_sdk,
 )
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 
 FIXTURE_MODEL_ID = "fixture-model-id"
 _PARTIAL_MODEL = "partial-only-model-must-not-be-posted"

@@ -19,9 +19,7 @@ from tests.deep_orchestrator.support import (
     _scan_phase_events,
     _scan_trajectory_extra,
 )
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import bare_remote as _bare_remote, commit as _commit, git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.test_deep_orchestrator import (
     INTENT_SENTINEL,

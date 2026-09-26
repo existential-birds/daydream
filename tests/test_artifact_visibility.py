@@ -36,20 +36,16 @@ from daydream.artifact_visibility import (
     PrivateRootLocations,
     PrivateWorkspaceOwner,
     TrajectoryOutputRoute,
+    _manifest as _pv_manifest,
     artifact_dir_for,
     artifact_session_active,
     derive_workspace_identity,
+    open_artifact_session as _open_artifact_session,
     operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
     review_output_path_for,
     validate_private_workspace_owner,
-)
-from daydream.artifact_visibility import (
-    _manifest as _pv_manifest,
-)
-from daydream.artifact_visibility import (
-    open_artifact_session as _open_artifact_session,
 )
 from daydream.deep.artifacts import check_deep_artifacts
 from daydream.trajectory import (

@@ -25,8 +25,7 @@ from typing import Any, Literal
 
 import yaml
 
-from daydream.json_utils import _fsync_directory as _fsync_dir
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import _fsync_directory as _fsync_dir, atomic_write_bytes
 
 
 class WorkspaceError(Exception):

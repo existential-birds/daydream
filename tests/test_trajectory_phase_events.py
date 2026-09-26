@@ -13,8 +13,7 @@ import pytest
 
 import daydream.trajectory as trajectory_module
 from daydream import remote_ci
-from daydream.atif import Step
-from daydream.atif import validate as atif_validate
+from daydream.atif import Step, validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     ResultEvent,

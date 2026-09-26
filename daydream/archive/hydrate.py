@@ -25,8 +25,7 @@ import shutil
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
-from dataclasses import fields as dataclass_fields
+from dataclasses import dataclass, field, fields as dataclass_fields
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 

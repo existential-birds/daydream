@@ -21,6 +21,7 @@ and treat the empty string as "no pre-merge identity".
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
 #: Record dict key holding the host-assigned referential identity.
@@ -128,16 +129,12 @@ def stamp_record_uids(records: list[dict[str, Any]], stack_name: str) -> None:
             normalized via :func:`stack_name_from_records_source`.
     """
     normalized = stack_name_from_records_source(stack_name)
-    taken = {uid for uid in (record_uid(record) for record in records) if uid}
-    ordinal = 0
-    for record in records:
-        if record_uid(record):
-            continue
-        ordinal += 1
-        while (candidate := mint_record_uid(normalized, ordinal)) in taken:
-            ordinal += 1
-        record[RECORD_UID_KEY] = candidate
-        taken.add(candidate)
+    _stamp_unique(
+        records,
+        key=RECORD_UID_KEY,
+        getter=record_uid,
+        mint=lambda ordinal: mint_record_uid(normalized, ordinal),
+    )
 
 
 def stamp_item_uids(items: list[dict[str, Any]]) -> None:
@@ -153,15 +150,32 @@ def stamp_item_uids(items: list[dict[str, Any]]) -> None:
     Args:
         items: Merged item dicts to stamp, mutated in place.
     """
-    taken = {uid for uid in (item_uid(item) for item in items) if uid}
+    _stamp_unique(items, key=ITEM_UID_KEY, getter=item_uid, mint=mint_item_uid)
+
+
+def _stamp_unique(
+    entries: list[dict[str, Any]],
+    *,
+    key: str,
+    getter: Callable[[dict[str, Any]], str],
+    mint: Callable[[int], str],
+) -> None:
+    """Assign *key* to every entry lacking a value from *getter*, in place.
+
+    Existing values are preserved and a minted ordinal skips any value already
+    taken by an entry, so stamping is idempotent and never collides. Shared by
+    :func:`stamp_record_uids` and :func:`stamp_item_uids`, which differ only in
+    the key, accessor, and mint function.
+    """
+    taken = {uid for uid in (getter(entry) for entry in entries) if uid}
     ordinal = 0
-    for item in items:
-        if item_uid(item):
+    for entry in entries:
+        if getter(entry):
             continue
         ordinal += 1
-        while (candidate := mint_item_uid(ordinal)) in taken:
+        while (candidate := mint(ordinal)) in taken:
             ordinal += 1
-        item[ITEM_UID_KEY] = candidate
+        entry[key] = candidate
         taken.add(candidate)
 
 

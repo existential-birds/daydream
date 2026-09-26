@@ -9,8 +9,8 @@ never writes, and the mock sets ``stdin=None`` accordingly.
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.harness.process_replay import make_mock_process as _make_mock_process
 from tests.harness.process_replay import (
+    make_mock_process as _make_mock_process,
     make_mock_process_from_fixture as _make_mock_process_from_fixture,
 )
 

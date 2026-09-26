@@ -21,8 +21,7 @@ from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.archive.index import readonly_connection
-from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.json_utils import canonical_json as _canonical
+from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS

@@ -451,8 +451,7 @@ def _handle_benchmark_clean(args: argparse.Namespace) -> int:
     ``calibrate-judge``); expected ``RunError``/``WorkspaceCorrupt`` print to
     stderr and return exit ``1`` — never a bare traceback.
     """
-    from daydream.benchmark.harbor import clean as clean_mod
-    from daydream.benchmark.harbor import run as run_mod
+    from daydream.benchmark.harbor import clean as clean_mod, run as run_mod
     from daydream.benchmark.storage import WorkspaceCorrupt
 
     if args.all and not args.yes and not _is_interactive_tty():

@@ -10,8 +10,6 @@ from typing import Literal, Mapping
 
 from daydream.training.dispositions import (
     DECISIVE_DISPOSITIONS as _DECISIVE_DISPOSITIONS,
-)
-from daydream.training.dispositions import (
     NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
 )
 

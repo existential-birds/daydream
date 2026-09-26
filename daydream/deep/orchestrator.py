@@ -22,9 +22,14 @@ from daydream.config import (
 )
 from daydream.config_file import _coerce_non_negative_int
 from daydream.deep import review_steps
-from daydream.deep.artifacts import alternatives_path as _alternatives_path
-from daydream.deep.artifacts import check_deep_artifacts, deep_dir, diff_key, diff_key_path
-from daydream.deep.artifacts import intent_path as _intent_path
+from daydream.deep.artifacts import (
+    alternatives_path as _alternatives_path,
+    check_deep_artifacts,
+    deep_dir,
+    diff_key,
+    diff_key_path,
+    intent_path as _intent_path,
+)
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.deep.diagram_steps import _diagram_mode_for, _resolved_diagram_mode, _step_diagram, _step_post_diagram

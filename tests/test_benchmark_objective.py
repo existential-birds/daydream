@@ -11,8 +11,7 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import objective, verifier_core
-from daydream.benchmark.harbor import run as run_mod
+from daydream.benchmark.harbor import objective, run as run_mod, verifier_core
 from tests.test_benchmark_run import _seed_compiled_lock
 
 harbor = pytest.importorskip("harbor", reason="harbor is an optional benchmark extra")

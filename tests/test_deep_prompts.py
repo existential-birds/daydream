@@ -6,8 +6,7 @@ from typing import Any, TypedDict
 
 import pytest
 
-from daydream import review_profile as rp
-from daydream import severity
+from daydream import review_profile as rp, severity
 from daydream.deep.coverage import build_uncovered_sweep_prompt, diff_block_for_file
 from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,

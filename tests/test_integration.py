@@ -38,10 +38,7 @@ from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.processes import wait_for_process_group_exit
 from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha, write_pre_push_sha_hook

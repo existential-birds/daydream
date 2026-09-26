@@ -16,9 +16,14 @@ from daydream.agent import console, run_agent
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S, STRUCTURE_STACK_NAME
-from daydream.deep.artifacts import MERGE_FAILURE_KEY, _load_failures, per_stack_failures_path, per_stack_records_path
-from daydream.deep.artifacts import alternatives_path as _alternatives_path
-from daydream.deep.artifacts import intent_path as _intent_path
+from daydream.deep.artifacts import (
+    MERGE_FAILURE_KEY,
+    _load_failures,
+    alternatives_path as _alternatives_path,
+    intent_path as _intent_path,
+    per_stack_failures_path,
+    per_stack_records_path,
+)
 from daydream.deep.coverage import (
     _completed_read_paths,
     _finding_files_from_records,
@@ -73,11 +78,7 @@ try:
     from daydream.exploration import ExplorationContext, safe_explore
     from daydream.exploration_runner import (
         count_changed_files as count_changed_files,
-    )
-    from daydream.exploration_runner import (
         pre_scan,
-    )
-    from daydream.exploration_runner import (
         select_tier as select_tier,
     )
 

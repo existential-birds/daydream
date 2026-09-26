@@ -55,8 +55,6 @@ from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
     GapThenBlockingStdout as _GapThenBlockingStdout,
-)
-from tests.harness.codex_replay import (
     make_mock_process,
     make_mock_process_from_fixture,
 )

@@ -8,8 +8,7 @@ manifest (optional fields, omitted on legacy), and the SQLite run projection
 import sqlite3
 from pathlib import Path
 
-from daydream.archive import _schema
-from daydream.archive import manifest as m
+from daydream.archive import _schema, manifest as m
 from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
 from tests.harness.trajectory import make_recorder

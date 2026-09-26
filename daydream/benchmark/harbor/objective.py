@@ -20,8 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeGuard
 
-from daydream.benchmark.harbor import calibrate, verifier_core
-from daydream.benchmark.harbor import run as run_mod
+from daydream.benchmark.harbor import calibrate, run as run_mod, verifier_core
 
 
 class ObjectiveError(Exception):

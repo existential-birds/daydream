@@ -29,9 +29,7 @@ from daydream.repository_paths import (
 )
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo
 
 
 def _work(repo: Path) -> WorkContext:

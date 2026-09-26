@@ -12,8 +12,7 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream.benchmark.harbor import build
-from daydream.benchmark.harbor import package as pkg
+from daydream.benchmark.harbor import build, package as pkg
 from daydream.benchmark.harbor.build import TEMPLATE_VERSION
 from tests.harness.fake_gh import FakeGh
 from tests.test_benchmark_harbor_build import _harbor_tree_bytes, _seed_clean_workspace, _seed_ready_workspace

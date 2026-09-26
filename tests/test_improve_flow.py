@@ -11,8 +11,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from daydream import git_ops
-from daydream import review_profile as rp
+from daydream import git_ops, review_profile as rp
 from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,

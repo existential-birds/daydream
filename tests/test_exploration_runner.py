@@ -36,15 +36,10 @@ from daydream.prompts.grounding import (
 )
 from tests.harness.backend import Responder, ScriptedBackend
 from tests.harness.fake_clock import FakeClock
-from tests.harness.review_profile import default_strategy as _default_strategy
-from tests.harness.review_profile import exploration_strategies
+from tests.harness.review_profile import default_strategy as _default_strategy, exploration_strategies
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
-)
-from tests.harness.trajectory import (
     dispatch_encloses_children as _dispatch_encloses_children,
-)
-from tests.harness.trajectory import (
     make_recorder,
     read_trajectory,
 )

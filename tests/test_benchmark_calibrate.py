@@ -10,8 +10,7 @@ import pytest
 import daydream.benchmark.harbor.calibrate as cal
 from daydream.benchmark import cli
 from daydream.benchmark.cli import _build_benchmark_parser
-from daydream.benchmark.harbor import calibrate
-from daydream.benchmark.harbor import verifier_core as canonical_vc
+from daydream.benchmark.harbor import calibrate, verifier_core as canonical_vc
 from daydream.benchmark.harbor.calibrate import (
     _build_calibration_client,
     _build_receipt,

@@ -22,8 +22,7 @@ import yaml
 from pydantic import BaseModel
 
 from daydream import git_ops
-from daydream.benchmark import schema
-from daydream.benchmark import snapshot as snapshot_mod
+from daydream.benchmark import schema, snapshot as snapshot_mod
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.schema import (
     BenchmarkManifest,
@@ -40,15 +39,13 @@ from daydream.benchmark.schema import (
 )
 from daydream.benchmark.storage import (
     Transaction,
+    WorkspaceCorrupt as WorkspaceCorrupt,
     WorkspaceLock,
     load_json_strict,
     load_yaml_strict,
     recover_startup,
     resolve_authoring_path,
     sha256_file,
-)
-from daydream.benchmark.storage import (
-    WorkspaceCorrupt as WorkspaceCorrupt,
 )
 
 _SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache")

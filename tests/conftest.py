@@ -17,11 +17,13 @@ from daydream.workspace import WorkContext
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
 from tests.harness.fake_gh import FakeGh, install_fake_gh
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import configure_identity as _configure_identity  # noqa: F401 - test_git_ops re-import
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import (
+    bare_remote as _bare_remote,
+    commit as _commit,
+    configure_identity as _configure_identity,  # noqa: F401 - test_git_ops re-import
+    git as _git,
+    init_repo as _init_repo,
+)
 from tests.harness.remote_ci import NoCIRemote
 
 # Isolate the test process from any inherited git environment. When the suite

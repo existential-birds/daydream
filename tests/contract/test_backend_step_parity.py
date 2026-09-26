@@ -10,8 +10,7 @@ from typing import Any, Callable
 
 import pytest
 
-from daydream.atif import Step
-from daydream.atif import validate as atif_validate
+from daydream.atif import Step, validate as atif_validate
 from daydream.backends import AgentEvent, ToolResultEvent
 from daydream.trajectory import DaydreamPhase
 from tests.contract._loaders import claude_loader, codex_loader, pi_loader

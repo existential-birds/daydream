@@ -66,8 +66,7 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.protocol_cli import install_protocol_cli
-from tests.harness.stub_backend import force_interactive as _force_interactive
-from tests.harness.stub_backend import silence as _silence
+from tests.harness.stub_backend import force_interactive as _force_interactive, silence as _silence
 from tests.harness.trajectory import make_recorder
 
 if TYPE_CHECKING:

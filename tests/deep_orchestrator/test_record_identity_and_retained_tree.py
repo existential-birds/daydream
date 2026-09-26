@@ -29,9 +29,7 @@ from tests.deep_orchestrator.support import (
     _uid_records,
     _uncovered_sweep_target,
 )
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     MakeConfig,

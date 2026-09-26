@@ -32,8 +32,7 @@ from daydream.observability.config import ObservabilityConfig
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.otlp import TraceCollector, attributes, otlp_collector
-from tests.harness.otlp import kind_of as _kind
+from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
 
 _RESULT_FILE = ".daydream/trace-failure-result.json"
 _FLOW_IMPORTS = """

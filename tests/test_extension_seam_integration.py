@@ -31,8 +31,7 @@ from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import bare_remote
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import bare_remote, git as _git
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.test_deep_orchestrator import _fix_prompts, _install_stub_backend, _silence, _StubBackend
 

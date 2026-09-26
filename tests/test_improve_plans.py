@@ -60,8 +60,7 @@ from daydream.improve.prompts import (
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
+from tests.harness.git_helpers import bare_remote as _bare_remote, commit, git, init_repo, write_and_stage
 from tests.harness.improve_backend import plan_ref as _ref
 
 

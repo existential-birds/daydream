@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
 
 import anyio
 
-from daydream import git_ops
-from daydream import review_profile as _rp
+from daydream import git_ops, review_profile as _rp
 from daydream.agent import run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S

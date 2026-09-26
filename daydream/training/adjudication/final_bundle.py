@@ -30,15 +30,12 @@ from typing import Any
 from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
-from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.json_utils import canonical_json as _canonical
+from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.adjudication.canonical import (
     _evidence_after_as_of,
+    _load_materialized_records as _load_sessions_records,
     _read_manifest,
     read_jsonl,
-)
-from daydream.training.adjudication.canonical import (
-    _load_materialized_records as _load_sessions_records,
 )
 from daydream.training.adjudication.materialize import (
     _ANNOTATIONS_FILENAME,

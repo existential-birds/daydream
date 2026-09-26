@@ -19,13 +19,11 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
-from daydream.benchmark import snapshot, storage
-from daydream.benchmark import snapshot as sn
+from daydream.benchmark import snapshot, snapshot as sn, storage
 from daydream.benchmark.schema import case_id_for
 from daydream.benchmark.storage import recover_startup
 from daydream.git_ops import GitError
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import seed_pr_origin, seeded_commit, write_and_stage
+from tests.harness.git_helpers import git as _git, seed_pr_origin, seeded_commit, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 # real-git seed helpers (deterministic commit SHAs)

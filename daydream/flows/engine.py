@@ -19,11 +19,9 @@ from typing import TYPE_CHECKING, Any
 from daydream.extensions.api import (
     BreakLoop,
     FlowStep,
+    LoopGroup as LoopGroup,
     Stop,
     UnresolvedExtensionError,
-)
-from daydream.extensions.api import (
-    LoopGroup as LoopGroup,
 )
 from daydream.github_app import GitHubExecutionInput
 from daydream.observability.spans import step_scope

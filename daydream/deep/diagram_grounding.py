@@ -40,6 +40,7 @@ the repository root and one ``git grep`` per symbol fallback.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -547,22 +548,28 @@ def _snap_symbol(
     return None
 
 
-def _branch_line(sources: _SourceCache, file: str, line: int) -> bool:
-    """Whether ``file:line`` opens a control-flow branch (fail-open on a bad install)."""
+def _language_line(
+    sources: _SourceCache,
+    file: str,
+    line: int,
+    predicate: Callable[[str | None, bytes, int], bool],
+) -> bool:
+    """Run a tree-sitter line *predicate*, falling back to its ``None``-language path."""
     source = sources.read(file) or b""
     try:
-        return is_branch_line(language_for_path(file), source, line)
+        return predicate(language_for_path(file), source, line)
     except Exception:
-        return is_branch_line(None, source, line)
+        return predicate(None, source, line)
+
+
+def _branch_line(sources: _SourceCache, file: str, line: int) -> bool:
+    """Whether ``file:line`` opens a control-flow branch (fail-open on a bad install)."""
+    return _language_line(sources, file, line, is_branch_line)
 
 
 def _terminal_line(sources: _SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` ends a control-flow path (fail-open on a bad install)."""
-    source = sources.read(file) or b""
-    try:
-        return is_terminal_line(language_for_path(file), source, line)
-    except Exception:
-        return is_terminal_line(None, source, line)
+    return _language_line(sources, file, line, is_terminal_line)
 
 
 def _reply_line(sources: _SourceCache, file: str, line: int) -> bool:

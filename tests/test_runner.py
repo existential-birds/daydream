@@ -67,10 +67,7 @@ from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.claude_sdk import patch_claude_sdk
-from tests.harness.git_helpers import bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend, silence

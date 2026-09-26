@@ -13,9 +13,7 @@ from daydream import cli as top_cli
 from daydream.benchmark import migrate, schema, storage
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.schema import _schema_ready
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import write_and_stage
+from tests.harness.git_helpers import commit as _commit, git as _git, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
