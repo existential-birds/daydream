@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream import review_profile as rp
+from daydream import review_profile as rp, severity
 from tests.test_review_profile_completeness import STAGE_KEYS
 
 
@@ -188,6 +188,4 @@ def test_suppression_severity_classes_default_narrowed() -> None:
 
 
 def test_review_profile_severity_levels_derive_from_severity_module() -> None:
-    from daydream import severity
-
     assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)

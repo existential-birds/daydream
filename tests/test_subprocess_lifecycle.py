@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from daydream.backends._subprocess import terminate_process
+from daydream.backends._subprocess import cancel_processes, terminate_process
 from tests.harness.processes import wait_for_process_group_gone
 
 if TYPE_CHECKING:
@@ -81,8 +81,6 @@ async def test_terminate_process_is_idempotent() -> None:
 
 async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
     """cancel_processes reaps every tracked process group, not just direct children."""
-    from daydream.backends._subprocess import cancel_processes
-
     base = _fd_count()
     procs = [await _spawn_holder() for _ in range(2)]
     pgids = [os.getpgid(p.pid) for p in procs]

@@ -7,6 +7,7 @@ import jsonschema
 import pytest
 from jsonschema import Draft202012Validator
 
+import daydream.archive.hydrate_rules as hydrate_rules
 from daydream.archive.hydrate_rules import (
     REASON_CODE_LICENSE_EVIDENCE_MISSING,
     REASON_CODE_REPO_IDENTITY_MISSING,
@@ -20,10 +21,16 @@ from daydream.training.corpus_projection.bundle import (
     load_curated_bundle,
 )
 from daydream.training.corpus_projection.identity import record_id
+from daydream.training.corpus_projection.projector import (
+    BuildFrozenCorpusConfig,
+    build_frozen_corpus,
+    project_findings,
+)
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
+from daydream.training.stacks import load_dataset_v2
 from tests.harness.scripts import cli_main
 
 
@@ -126,13 +133,6 @@ def _write_bundle(
     if corrupt_digest:
         (bundle_dir / "batches" / "sess-a" / "trajectory.json").write_bytes(b"tampered\n")
     return bundle_dir
-
-
-def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
-    if kw.get("license_policy_path") is None:
-        kw["license_policy_path"] = _policy_file(bundle_dir.parent)
-    return BuildFrozenCorpusConfig(out_dir=out_dir, bundle_dir=bundle_dir,
-                               annotation_bundle_dir=snapshot.parent, **kw)
 
 
 def _write_annotations_snapshot(
@@ -280,7 +280,7 @@ def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_
     assert {r["fingerprint"] for r in rows} == {"a1" * 32, "b2" * 32}
     assert len({r["record_id"] for r in rows}) == 2
     out = tmp_path / "proj"
-    build_frozen_corpus(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     records = _read_jsonl(out / "corpus.jsonl")
     assert len(records) == 2
 
@@ -526,9 +526,6 @@ def test_stack_falls_back_to_none_when_unresolvable() -> None:
 
 # Task 7: per-finding projection + adjudication routing
 
-from daydream.training.corpus_projection.projector import project_findings  # noqa: E402
-
-
 def _res(fp: str, disposition: str) -> dict[str, object]:
     return {"fingerprint": fp, "disposition": disposition,
             "evidence": [{"comment_id": 1, "created_at": "2026-02-01T00:00:00+00:00",
@@ -575,13 +572,10 @@ def test_run_level_contested_aggregate_never_erases_split() -> None:
 
 # Task 9: summary + full lineage + adjudication report
 
-from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus  # noqa: E402
-
-
 def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected", "ambiguous"])
-    summary = build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected", "ambiguous"])
+    summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     assert set(summary) >= {"records_by_type", "records_by_tier", "records_by_split",
                             "caps", "exclusions_by_reason"}
     assert summary["records_by_type"]["outcome-finding"] >= 2
@@ -614,18 +608,20 @@ def _config_for(
     bundle_dir: Path,
     tmp_path: Path,
     license_policy: Any = _UNSET,
+    *,
+    out_dir: Path | None = None,
     **kw: Any,
 ) -> Any:
     """BuildFrozenCorpusConfig over the fixture's bundle + annotation bundle.
 
-    The policy defaults to ``_policy_file(tmp_path)``; passing ``None``
-    explicitly produces the misconfigured (no-policy) config.
+    The policy defaults to ``_policy_file(bundle_dir.parent)``; passing
+    ``None`` explicitly produces the misconfigured (no-policy) config.
     """
     if license_policy is _UNSET:
-        license_policy = _policy_file(tmp_path)
+        license_policy = _policy_file(bundle_dir.parent)
     snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
     return BuildFrozenCorpusConfig(
-        out_dir=tmp_path / "out",
+        out_dir=out_dir if out_dir is not None else tmp_path / "out",
         bundle_dir=bundle_dir,
         annotation_bundle_dir=snap.parent,
         license_policy_path=license_policy,
@@ -672,8 +668,8 @@ def test_schema_validation_accepts_evolved_v2_records(
 
 def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")
     assert records
     for rec in records:
@@ -698,7 +694,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     # when the fixture computes the listing).
     ann_dir = snap.parent
     _write_ann_sumsums(ann_dir)
-    summary = build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
+    summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     assert summary["records_by_tier"] == {"silver": 1}
     records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")
     assert records and records[0]["tier"] == "silver"
@@ -707,13 +703,10 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
 
 # Frozen-corpus loader surface (stacks.py)
 
-from daydream.training.stacks import load_dataset_v2  # noqa: E402
-
-
 def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    summary = build_frozen_corpus(_cfg(tmp_path / "proj", bundle_dir, snap))
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "proj"))
     assert summary["emitted"] >= 1
     records = load_dataset_v2(tmp_path / "proj")
     assert records
@@ -758,9 +751,9 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
     schema_path = Path(__file__).resolve().parents[1] / "daydream/training/schema/record-schema.json"
 
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir)
+    _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "proj"
-    summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
+    summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     assert summary["emitted"] >= 1
     validator = Draft202012Validator(json.loads(schema_path.read_text()))
     records = _read_jsonl(out / "corpus.jsonl")
@@ -780,11 +773,11 @@ def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
     # The snapshot resolutions are session-scoped, so one finding must never
     # fan out into per-segment copies that could land in different splits.
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(
+    _write_annotations_snapshot(
         bundle_dir, dispositions=["accepted", "rejected"], n_siblings=2
     )
     out = tmp_path / "proj"
-    build_frozen_corpus(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     records = _read_jsonl(out / "corpus.jsonl")
     assert len(records) == 2  # one per (session, fingerprint), not per segment
     assert len({r["record_id"] for r in records}) == len(records)
@@ -799,9 +792,9 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
     # corpus.jsonl and the split manifests, and counted as excluded in
     # lineage/summary — the membership and the accounting must agree.
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
     out = tmp_path / "proj"
-    summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
+    summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     assert summary["records_by_tier"] == {"gold": 1}
     assert summary["exclusions_by_reason"] == {"non-decisive-adjudication": 1}
     records = _read_jsonl(out / "corpus.jsonl")
@@ -906,9 +899,6 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
 
 
 # Task 6: projection re-enforces C5/C8, accounts rejections, gates _SUCCESS
-
-import daydream.archive.hydrate_rules as hydrate_rules  # noqa: E402
-
 
 def _inject_admitted_repo_slug(
     bundle_dir: Path, slug: str, *, spdx_id: str = "MIT"
@@ -1023,8 +1013,8 @@ def test_multi_session_repo_license_decisions_all_recorded(
         batch["repo_slug"] = "owner/repo-a"
         batch["license_evidence"] = {"spdx_id": "MIT", "source": "manifest"}
     (bundle_dir / "curation-manifest.json").write_text(json.dumps(manifest))
-    ann_snapshot = _write_annotations_snapshot(bundle_dir, session_id="sess-a")
-    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, ann_snapshot))
+    _write_annotations_snapshot(bundle_dir, session_id="sess-a")
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
     assert set(lineage["license_decisions"]) == {"sess-a", "sess-b"}
     assert all(
@@ -1217,9 +1207,9 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     }))
     diff_text = "diff --git a/x.py b/x.py\n+print(1)\n"
     (batch_dir / "diff.patch").write_text(diff_text)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     out = tmp_path / "proj"
-    build_frozen_corpus(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     records = _read_jsonl(out / "corpus.jsonl")
     accepted = next(r for r in records if r["outcome_label"] == "accepted")
     assert accepted["finding_fingerprint"] == "a1" * 32

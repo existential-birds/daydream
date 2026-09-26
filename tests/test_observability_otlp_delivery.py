@@ -36,7 +36,7 @@ from daydream.observability.exporters import (
     otlp_exporter,
 )
 from daydream.observability.otlp_compat import classify_http_ack
-from tests.harness.otlp import ScriptedResponse, otlp_collector, scripted_otlp_collector
+from tests.harness.otlp import ScriptedResponse, TrickleServer, otlp_collector, scripted_otlp_collector
 
 # The private requests-session credential provider settings the whole-operation
 # deadline architecture must reject (Task 0 spike gate 4, binding).
@@ -309,8 +309,6 @@ def test_http_trickle_overruns_inactivity_timeout_but_respects_whole_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The spike proof: per-read inactivity stays silent; the outer deadline fires."""
-    from tests.harness.otlp import TrickleServer
-
     server = TrickleServer(gap_s=0.04)
     try:
         _generic_http(monkeypatch, server.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.15")

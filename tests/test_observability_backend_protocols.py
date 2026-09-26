@@ -36,7 +36,7 @@ from typing import Any
 import pytest
 
 from daydream import runner
-from daydream.backends import RequestEvent
+from daydream.backends import GenerationEndEvent, GenerationStartEvent, RequestEvent
 from daydream.backends.claude import ClaudeBackend
 from daydream.backends.osprey import OspreyBackend
 from daydream.backends.pi import PiBackend
@@ -325,8 +325,6 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
     events exist for the opaque SDK protocol.
     """
     from claude_agent_sdk.types import AgentDefinition
-
-    from daydream.backends import GenerationEndEvent, GenerationStartEvent
 
     canary = _CANARIES["claude"]
     captured: dict[str, Any] = {}

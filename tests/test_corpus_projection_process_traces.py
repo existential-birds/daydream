@@ -8,7 +8,7 @@ from typing import Any
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from tests.test_corpus_projection import (
-    _cfg,
+    _config_for,
     _write_annotations_snapshot,
     _write_bundle,
 )
@@ -22,18 +22,18 @@ def _records(out_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any], Path]:
+def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any]]:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(
+    _write_annotations_snapshot(
         bundle_dir, dispositions=["accepted", "ambiguous"]
     )
     out_dir = tmp_path / "out"
-    out = build_frozen_corpus(_cfg(out_dir, bundle_dir, snap, **kw))
-    return out_dir, out, snap
+    out = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_dir, **kw))
+    return out_dir, out
 
 
 def test_flag_off_emits_only_outcome_finding_records(tmp_path: Path) -> None:
-    out_dir, _out, _snap = _build(tmp_path)
+    out_dir, _out = _build(tmp_path)
     records = _records(out_dir)
     assert records
     assert all(r["record_type"] == "outcome-finding" for r in records)
@@ -42,15 +42,15 @@ def test_flag_off_emits_only_outcome_finding_records(tmp_path: Path) -> None:
 
 
 def test_flag_off_is_the_default(tmp_path: Path) -> None:
-    out_dir, _out, _snap = _build(tmp_path)
-    off_dir, _out_off, _snap2 = _build(tmp_path / "b", emit_process_traces=False)
+    out_dir, _out = _build(tmp_path)
+    off_dir, _out_off = _build(tmp_path / "b", emit_process_traces=False)
     assert (off_dir / "corpus.jsonl").read_bytes() == (
         out_dir / "corpus.jsonl"
     ).read_bytes()
 
 
 def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> None:
-    out_dir, out, _snap = _build(tmp_path, emit_process_traces=True)
+    out_dir, out = _build(tmp_path, emit_process_traces=True)
     records = _records(out_dir)
     types = {r["record_type"] for r in records}
     assert "process-trace" in types
@@ -76,7 +76,7 @@ def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> No
 def test_flag_on_records_carry_identity_lineage_and_distinct_ids(
     tmp_path: Path,
 ) -> None:
-    out_dir, _out, _snap = _build(tmp_path, emit_process_traces=True)
+    out_dir, _out = _build(tmp_path, emit_process_traces=True)
     records = _records(out_dir)
     derived = [
         r for r in records if r["record_type"] in ("process-trace", "task-only")
@@ -103,7 +103,7 @@ def test_flag_on_records_carry_identity_lineage_and_distinct_ids(
 
 
 def test_flag_on_split_files_contain_derived_records(tmp_path: Path) -> None:
-    out_dir, _out, _snap = _build(tmp_path, emit_process_traces=True)
+    out_dir, _out = _build(tmp_path, emit_process_traces=True)
     all_records = _records(out_dir)
     derived_types = {"process-trace", "task-only"}
     split_records: list[dict[str, Any]] = []

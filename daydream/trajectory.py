@@ -2896,6 +2896,7 @@ class PhaseScopeHandle:
     scope_id: str
     status: LifecycleStatus = LifecycleStatus.SUCCEEDED
     reason_code: LifecycleReasonCode | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
     _decision_made: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
@@ -3013,7 +3014,9 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[Ph
         raise
     finally:
         handle._close()
-        _emit_phase_end(recorder, phase, handle.scope_id, safe_metadata, handle.status, handle.reason_code)
+        _emit_phase_end(
+            recorder, phase, handle.scope_id, safe_metadata, handle.status, handle.reason_code, **handle.extra
+        )
 
 
 @dataclass
@@ -3037,34 +3040,23 @@ async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterat
     (from the yielded :class:`HostPhaseHandle`, "failed" when the body
     raised). A no-op when no recorder is active.
     """
-    recorder = get_current_recorder()
     handle = HostPhaseHandle()
-    lifecycle = PhaseScopeHandle(scope_id=recorder._next_phase_scope_id() if recorder is not None else "")
-    safe_metadata = _phase_scope_metadata(metadata)
     started = time.monotonic()
-    _emit_phase_start(recorder, phase, lifecycle.scope_id, safe_metadata)
-    try:
-        yield handle
-    except BaseException as exc:
-        handle.stop_reason = "failed"
-        _override_terminal_state(lifecycle, *_lifecycle_exception_terminal(exc))
-        raise
-    finally:
-        if lifecycle.status is LifecycleStatus.SUCCEEDED:
-            status, reason_code = _host_lifecycle_terminal(handle.stop_reason)
-            lifecycle.status = status
-            lifecycle.reason_code = reason_code
-        lifecycle._close()
-        _emit_phase_end(
-            recorder,
-            phase,
-            lifecycle.scope_id,
-            safe_metadata,
-            lifecycle.status,
-            lifecycle.reason_code,
-            duration_ms=max(0, round((time.monotonic() - started) * 1000)),
-            stop_reason=handle.stop_reason,
-        )
+    async with phase_scope(phase, **metadata) as lifecycle:
+        try:
+            yield handle
+        except BaseException:
+            handle.stop_reason = "failed"
+            raise
+        finally:
+            # phase_scope's own exception handler runs after this and wins the
+            # terminal projection for an escaping body (FAILED/CANCELLED).
+            if lifecycle.status is LifecycleStatus.SUCCEEDED:
+                lifecycle.status, lifecycle.reason_code = _host_lifecycle_terminal(handle.stop_reason)
+            lifecycle.extra = {
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "stop_reason": handle.stop_reason,
+            }
 
 
 @dataclass(frozen=True)

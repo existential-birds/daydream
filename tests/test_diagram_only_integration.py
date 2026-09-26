@@ -46,23 +46,6 @@ FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
 # --- Harness -----------------------------------------------------------------
 
 
-def _serve_pr(fake_gh: FakeGh, target: Path) -> None:
-    """Configure an open PR whose SHAs match the real fixture repository."""
-    fake_gh.serve_pr_view(
-        {
-            "number": 7,
-            "state": "OPEN",
-            "headRefName": "feature",
-            "baseRefName": "main",
-            "headRefOid": git_ops.head_sha(target),
-            "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-            "headRepositoryOwner": {"login": "acme"},
-            "url": "https://github.com/acme/widgets/pull/7",
-            "body": "",
-        }
-    )
-
-
 @pytest.fixture
 def diagram_run(
     monkeypatch: pytest.MonkeyPatch,
@@ -186,7 +169,7 @@ async def test_diagram_only_posts_a_marked_issue_comment(
 ) -> None:
     """Only exploration + diagram run, and the deliverable is an issue comment."""
     target = repo_builder(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, stub = await diagram_run(
         target, diagram=kind, specs={kind: [spec_builder()]}
@@ -220,7 +203,7 @@ async def test_second_diagram_run_minimizes_only_its_own_kind(
 ) -> None:
     """A repeat run folds its own prior comment and leaves the other kind alone."""
     target = dr.build_both_signals_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     monkeypatch.setenv("DAYDREAM_BOT_HANDLE", "daydream")
 
     head = git_ops.head_sha(target)
@@ -277,7 +260,7 @@ async def test_omitted_kind_posts_an_omission_notice(
 ) -> None:
     """An explicit request that grounds to nothing says so, with counts and codes."""
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     thin = dr.sequence_spec()
     thin["messages"] = thin["messages"][:2]
 
@@ -304,7 +287,7 @@ async def test_nothing_eligible_posts_an_explanatory_comment(
 ) -> None:
     """``--diagram-only auto`` on a flat diff explains that nothing was eligible."""
     target = dr.build_flat_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, stub = await diagram_run(target, diagram="auto")
 
@@ -329,7 +312,7 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
 ) -> None:
     """Phase A writes ``kind == "diagram"``; Phase B re-renders identical mermaid."""
     target = dr.build_branch_heavy_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     artifact_path = tmp_path / "findings.json"
 
     exit_code, _ = await diagram_run(
@@ -374,7 +357,7 @@ async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     evidence for every citation comes from the contents API at the same SHA.
     """
     target = dr.build_branch_heavy_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     artifact_path = tmp_path / "findings.json"
 
     exit_code, _ = await diagram_run(
@@ -423,7 +406,7 @@ async def test_phase_b_rejects_diagram_evidence_missing_from_the_immutable_head(
 ) -> None:
     """Phase B must not trust a structurally valid, artifact-supplied citation."""
     target = dr.build_branch_heavy_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     artifact_path = tmp_path / "findings.json"
 
     exit_code, _ = await diagram_run(
@@ -579,7 +562,7 @@ async def test_agent_error_in_diagram_only_mode_exits_one(
 ) -> None:
     """The diagram IS the deliverable here, so a failed kind fails the run."""
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, _ = await diagram_run(
         target,
@@ -611,7 +594,7 @@ async def test_advisory_overflow_in_diagram_only_mode_exits_zero(
     """
 
     target = build_large_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, _ = await diagram_run(
         target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]},
@@ -631,7 +614,7 @@ async def test_advisory_overflow_with_a_real_failure_still_exits_one(
     """The advisory diagnostic must not mask a genuine authoring failure."""
 
     target = build_large_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, _ = await diagram_run(
         target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]},
@@ -652,7 +635,7 @@ async def test_findings_artifact_carries_the_advisory_omission_diagnostic(
     """The operator-readable artifact says which advisory inputs were dropped."""
 
     target = build_large_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     out = tmp_path / "diagram-findings.json"
 
     exit_code, _ = await diagram_run(
@@ -675,7 +658,7 @@ def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
 ) -> None:
     """The public CLI records the successful diagram it actually delivers."""
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
@@ -698,7 +681,7 @@ def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
 ) -> None:
     """The public CLI preserves failure telemetry before returning one."""
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_fail = frozenset({"sequence"})
@@ -733,7 +716,7 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
 
     monkeypatch.setattr(diagram_steps, "_run_diagram_kind", _return_failure)
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, _ = await diagram_run(
         target,
@@ -806,7 +789,7 @@ async def test_diagram_only_run_preserves_prior_deep_artifacts(
     deep review's resumable artifacts.
     """
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True)
     (deep / "merged-items.json").write_text('{"items": []}', encoding="utf-8")
@@ -843,7 +826,7 @@ async def test_diagram_run_flow_label_and_manifest_backends(
     and regression (a) guarantees that file is still on disk.
     """
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
 
     exit_code, _ = await diagram_run(
         target,
@@ -906,7 +889,7 @@ async def test_diagram_only_on_the_base_branch_is_not_a_wrong_branch_error(
 ) -> None:
     """Diagram mode neither fixes nor commits, so the base branch is allowed."""
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     git(target, "checkout", "main")
 
     exit_code, _ = await diagram_run(target, diagram="sequence")
@@ -945,7 +928,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     silence(monkeypatch)
 
     target = dr.build_cross_module_repo(tmp_path)
-    _serve_pr(fake_gh, target)
+    fake_gh.serve_open_pr(target)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
     stub.diagram_emit_reads = True

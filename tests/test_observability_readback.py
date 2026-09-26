@@ -175,6 +175,35 @@ def fake_vendor() -> Iterator[FakeVendorServer]:
         server.close()
 
 
+_OTLP_ACK: tuple[int, dict[str, str], bytes] = (200, {"Content-Type": "application/x-protobuf"}, b"")
+
+
+@pytest.fixture
+def fake_vendors(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeVendorServer, FakeVendorServer]]:
+    """Paired fake HoneyHive + LangSmith servers with the replay env bound.
+
+    Registers the canonical protobuf-ack trace routes on both and points the
+    replay/vendor environment at them; tears both down afterwards.
+    """
+    fake_hh = FakeVendorServer()
+    fake_ls = FakeVendorServer()
+    try:
+        for fake in (fake_hh, fake_ls):
+            for path in ("/opentelemetry/v1/traces", "/otel/v1/traces", "/v1/traces"):
+                fake.respond("POST", path, lambda _r: _OTLP_ACK)
+        monkeypatch.setenv("HH_API_URL", fake_hh.base_url)
+        monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
+        monkeypatch.setenv("LANGSMITH_ENDPOINT", fake_ls.base_url)
+        monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
+        monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-test")
+        monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp,honeyhive,langsmith")
+        monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
+        yield fake_hh, fake_ls
+    finally:
+        fake_hh.close()
+        fake_ls.close()
+
+
 # Receipt helpers
 
 
@@ -802,6 +831,16 @@ def _run_replay(
     ))
 
 
+def _replay_receipt(tmp_path: Path, *, message: str) -> tuple[Path, dict[str, Any]]:
+    """Run the hermetic replay; return ``(receipt_path, parsed_receipt)``."""
+    repo = _public_fixture_repo(tmp_path)
+    fk = _fake_pi_script(tmp_path)
+    receipt_path = tmp_path / "receipt.json"
+    exit_code = _run_replay(repo, fk, receipt_path)
+    assert exit_code == 0, message
+    return receipt_path, json.loads(receipt_path.read_text())
+
+
 def test_replay_gate_fixture_hash_mismatch_fails_before_send(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -914,7 +953,9 @@ def test_replay_fake_pi_marker_requirement(
 # Gate integration (reviewer card t_d50a1bbe): replay→verify chain + HH stability
 
 
-def test_replay_receipt_is_accepted_by_verifier_validator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_replay_receipt_is_accepted_by_verifier_validator(
+    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
+) -> None:
     """The replay tool's receipt must validate under the verifier's schema.
 
     The two operator scripts are one pipeline: the replay tool writes the
@@ -922,35 +963,11 @@ def test_replay_receipt_is_accepted_by_verifier_validator(tmp_path: Path, monkey
     (missing the canonical ``destinations`` list) breaks that pipeline before
     any network work.
     """
-    fake_hh = FakeVendorServer()
-    fake_ls = FakeVendorServer()
-    try:
-        for fake in (fake_hh, fake_ls):
-            fake.respond(
-                "POST",
-                "/opentelemetry/v1/traces",
-                lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""),
-            )
-            fake.respond("POST", "/v1/traces", lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""))
-        monkeypatch.setenv("HH_API_URL", fake_hh.base_url)
-        monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", fake_ls.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-test")
-        monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp,honeyhive,langsmith")
-        monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
-        repo = _public_fixture_repo(tmp_path)
-        fk = _fake_pi_script(tmp_path)
-        receipt_path = tmp_path / "receipt.json"
-        exit_code = _run_replay(repo, fk, receipt_path)
-        assert exit_code == 0, "replay must produce its receipt before validation"
-        receipt = json.loads(receipt_path.read_text())
-        # Must not raise: the replay receipt is the verifier's canonical input.
-        _verifier.validate_receipt(receipt)
-    finally:
-        fake_hh.close()
-        fake_ls.close()
-
+    _receipt_path, receipt = _replay_receipt(
+        tmp_path, message="replay must produce its receipt before validation"
+    )
+    # Must not raise: the replay receipt is the verifier's canonical input.
+    _verifier.validate_receipt(receipt)
 
 def test_honeyhive_requires_two_stable_complete_snapshots(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
@@ -1111,7 +1128,9 @@ def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
     assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
 
 
-def test_replay_then_verify_end_to_end_on_fake_vendors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_replay_then_verify_end_to_end_on_fake_vendors(
+    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
+) -> None:
     """Full operator chain: replay tool writes the receipt the verifier accepts.
 
     The replay runs hermetically (fake vendors, loopback OTLP oracle, fake pi
@@ -1119,92 +1138,70 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(tmp_path: Path, monkeypat
     same fake vendor endpoints and must pass the stored contract for both
     destinations without any manual receipt editing.
     """
-    fake_hh = FakeVendorServer()
-    fake_ls = FakeVendorServer()
-    try:
-        for fake in (fake_hh, fake_ls):
-            fake.respond(
-                "POST",
-                "/opentelemetry/v1/traces",
-                lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""),
-            )
-            fake.respond("POST", "/otel/v1/traces", lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""))
-            fake.respond("POST", "/v1/traces", lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""))
-        monkeypatch.setenv("HH_API_URL", fake_hh.base_url)
-        monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", fake_ls.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-test")
-        monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp,honeyhive,langsmith")
-        monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
-        repo = _public_fixture_repo(tmp_path)
-        fk = _fake_pi_script(tmp_path)
-        receipt_path = tmp_path / "receipt.json"
-        exit_code = _run_replay(repo, fk, receipt_path)
-        assert exit_code == 0, "replay must pass all gates before the verifier runs"
-        receipt = json.loads(receipt_path.read_text())
-        run_id = receipt["run_id"]
-        session_id = receipt["session_id"]
+    fake_hh, fake_ls = fake_vendors
+    receipt_path, receipt = _replay_receipt(
+        tmp_path, message="replay must pass all gates before the verifier runs"
+    )
+    run_id = receipt["run_id"]
+    session_id = receipt["session_id"]
 
-        # Vendor readback stores derived from the actual receipt identity:
-        # one HoneyHive session (stable across reads) and one LangSmith tree.
-        hh_events = [_hh_event(f"ev-{i}", session_id) for i in range(2)]
-        hh_payload = json.dumps({"events": hh_events, "count": len(hh_events)}).encode()
-        fake_hh.respond(
-            "POST",
-            "/v1/events/search",
-            lambda _r: (200, {"Content-Type": "application/json"}, hh_payload),
-        )
-        trace_id = "11111111-2222-4333-8444-555566667777"
-        ls_root = _ls_run(
-            "aaaaaaaa-1111-4222-8333-444455556666",
-            run_type="chain",
-            trace_id=trace_id,
-            parent_run_id=None,
-            metadata={"daydream_run_id": run_id},
-        )
-        ls_child = _ls_run(
-            "bbbbbbbb-1111-4222-8333-444455556666",
-            run_type="llm",
-            trace_id=trace_id,
-            parent_run_id=ls_root["id"],
-            metadata={"daydream_run_id": run_id},
-        )
-        fake_ls.respond(
-            "GET",
-            "/api/v1/sessions",
-            lambda _r: (
-                200,
-                {"Content-Type": "application/json"},
-                json.dumps([_ls_session(str(receipt["langsmith_project"]))]).encode(),
-            ),
-        )
-        fake_ls.respond(
-            "POST",
-            "/runs/query",
-            lambda _r: (
-                200,
-                {"Content-Type": "application/json"},
-                json.dumps({"runs": [json.loads(json.dumps(ls_root)), json.loads(json.dumps(ls_child))]}).encode(),
-            ),
-        )
+    # Vendor readback stores derived from the actual receipt identity:
+    # one HoneyHive session (stable across reads) and one LangSmith tree.
+    hh_events = [_hh_event(f"ev-{i}", session_id) for i in range(2)]
+    hh_payload = json.dumps({"events": hh_events, "count": len(hh_events)}).encode()
+    fake_hh.respond(
+        "POST",
+        "/v1/events/search",
+        lambda _r: (200, {"Content-Type": "application/json"}, hh_payload),
+    )
+    trace_id = "11111111-2222-4333-8444-555566667777"
+    ls_root = _ls_run(
+        "aaaaaaaa-1111-4222-8333-444455556666",
+        run_type="chain",
+        trace_id=trace_id,
+        parent_run_id=None,
+        metadata={"daydream_run_id": run_id},
+    )
+    ls_child = _ls_run(
+        "bbbbbbbb-1111-4222-8333-444455556666",
+        run_type="llm",
+        trace_id=trace_id,
+        parent_run_id=ls_root["id"],
+        metadata={"daydream_run_id": run_id},
+    )
+    fake_ls.respond(
+        "GET",
+        "/api/v1/sessions",
+        lambda _r: (
+            200,
+            {"Content-Type": "application/json"},
+            json.dumps([_ls_session(str(receipt["langsmith_project"]))]).encode(),
+        ),
+    )
+    fake_ls.respond(
+        "POST",
+        "/runs/query",
+        lambda _r: (
+            200,
+            {"Content-Type": "application/json"},
+            json.dumps({"runs": [json.loads(json.dumps(ls_root)), json.loads(json.dumps(ls_child))]}).encode(),
+        ),
+    )
 
-        # The verifier must accept the replay receipt verbatim.
-        result_path = tmp_path / "readback-result.json"
-        assert _run_verify(receipt_path, result_path) == 0
-        result = json.loads(result_path.read_text())
-        assert result["stored_contract_passed"] is True
-        assert set(result["destinations"]) == {"honeyhive", "langsmith"}
-        assert result["destinations"]["honeyhive"]["disposition"] == _verifier.DISPOSITION_PASS
-        assert result["destinations"]["langsmith"]["disposition"] == _verifier.DISPOSITION_PASS
-        # The HoneyHive session was read twice completely (two stable snapshots).
-        assert len([r for r in fake_hh.requests if r["path"] == "/v1/events/search"]) >= 2
-    finally:
-        fake_hh.close()
-        fake_ls.close()
+    # The verifier must accept the replay receipt verbatim.
+    result_path = tmp_path / "readback-result.json"
+    assert _run_verify(receipt_path, result_path) == 0
+    result = json.loads(result_path.read_text())
+    assert result["stored_contract_passed"] is True
+    assert set(result["destinations"]) == {"honeyhive", "langsmith"}
+    assert result["destinations"]["honeyhive"]["disposition"] == _verifier.DISPOSITION_PASS
+    assert result["destinations"]["langsmith"]["disposition"] == _verifier.DISPOSITION_PASS
+    # The HoneyHive session was read twice completely (two stable snapshots).
+    assert len([r for r in fake_hh.requests if r["path"] == "/v1/events/search"]) >= 2
 
-
-def test_replay_full_hermetic_run_writes_labeled_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_replay_full_hermetic_run_writes_labeled_receipt(
+    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The complete sanitized replay through real PiBackend/run_agent/trace_run.
 
     Vendor destinations are fake loopback OTLP/HTTP endpoints; the local
@@ -1212,56 +1209,27 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(tmp_path: Path, monkeyp
     subprocess boundary is the fake executable. Receipt must be labeled
     ``sanitized_protocol_replay`` with model calls 0 and operational cost 0.
     """
+    monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-replay-test")
+    fake_hh, fake_ls = fake_vendors
+    _receipt_path, receipt = _replay_receipt(
+        tmp_path, message="hermetic replay should pass all gates and the local wire check"
+    )
+    assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
+    assert receipt["model_call_count"] == 0
+    assert receipt["operational_cost_usd"] == 0
+    assert receipt["fixture_sha256"] == hashlib.sha256(REPLAY_FIXTURE.read_bytes()).hexdigest()
+    manifest_hash = hashlib.sha256((FIXTURES / "replay-manifest.json").read_bytes()).hexdigest()
+    assert receipt["manifest_sha256"] == manifest_hash
+    assert receipt["run_id"] and receipt["session_id"]
+    assert receipt["local_otlp_root_span_id"]
+    assert len(receipt["local_otlp_wire_sha256"]) >= 1
+    assert receipt["reported_cost_usd"] == 0.00402781
+    assert receipt["labels"]["reported_cost"].startswith("synthetic")
+    # Both vendor destinations must have been reached by the real exporters.
+    assert fake_hh.requests and fake_ls.requests
+    # The pinned replay clock must be restored to the host clock when the
+    # replay returns (guarded global environment: never skew the host or
+    # the pytest worker's later tests).
+    import time as _stdlib_time
 
-    fake_hh = FakeVendorServer()
-    fake_ls = FakeVendorServer()
-    try:
-        # The owned vendors expect HTTP 200 + protobuf content type + empty
-        # body as the canonical full-success ack (binding decision 8).
-        for fake in (fake_hh, fake_ls):
-            fake.respond(
-                "POST",
-                "/opentelemetry/v1/traces",
-                lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""),
-            )
-            fake.respond(
-                "POST",
-                "/otel/v1/traces",
-                lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""),
-            )
-            fake.respond("POST", "/v1/traces", lambda _r: (200, {"Content-Type": "application/x-protobuf"}, b""))
-        monkeypatch.setenv("HH_API_URL", fake_hh.base_url)
-        monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", fake_ls.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-replay-test")
-        monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp,honeyhive,langsmith")
-        monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
-        repo = _public_fixture_repo(tmp_path)
-        fk = _fake_pi_script(tmp_path)
-        receipt_path = tmp_path / "receipt.json"
-        exit_code = _run_replay(repo, fk, receipt_path)
-        assert exit_code == 0, "hermetic replay should pass all gates and the local wire check"
-        receipt = json.loads(receipt_path.read_text())
-        assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
-        assert receipt["model_call_count"] == 0
-        assert receipt["operational_cost_usd"] == 0
-        assert receipt["fixture_sha256"] == hashlib.sha256(REPLAY_FIXTURE.read_bytes()).hexdigest()
-        manifest_hash = hashlib.sha256((FIXTURES / "replay-manifest.json").read_bytes()).hexdigest()
-        assert receipt["manifest_sha256"] == manifest_hash
-        assert receipt["run_id"] and receipt["session_id"]
-        assert receipt["local_otlp_root_span_id"]
-        assert len(receipt["local_otlp_wire_sha256"]) >= 1
-        assert receipt["reported_cost_usd"] == 0.00402781
-        assert receipt["labels"]["reported_cost"].startswith("synthetic")
-        # Both vendor destinations must have been reached by the real exporters.
-        assert fake_hh.requests and fake_ls.requests
-        # The pinned replay clock must be restored to the host clock when the
-        # replay returns (guarded global environment: never skew the host or
-        # the pytest worker's later tests).
-        import time as _stdlib_time
-
-        assert _stdlib_time.time_ns is _replay._stdlib_real_time_ns
-    finally:
-        fake_hh.close()
-        fake_ls.close()
+    assert _stdlib_time.time_ns is _replay._stdlib_real_time_ns

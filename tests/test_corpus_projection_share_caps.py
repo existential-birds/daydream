@@ -11,7 +11,7 @@ from daydream.training.corpus_projection import BuildFrozenCorpusConfig
 from daydream.training.corpus_projection.projector import _apply_share_caps, build_frozen_corpus
 from tests.test_corpus_projection import (
     _admit_second_batch,
-    _cfg,
+    _config_for,
     _policy_file,
     _write_ann_sumsums,
     _write_annotations_snapshot,
@@ -233,9 +233,9 @@ class TestApplyShareCaps:
 
 
 class TestBuildWiring:
-    def _share_cfg(self, out: Path, bundle: Path, snap: Path, **share: Any) -> Any:
+    def _share_cfg(self, out: Path, bundle: Path, **share: Any) -> Any:
 
-        return _cfg(out, bundle, snap, **share)
+        return _config_for(bundle, out.parent, out_dir=out, **share)
 
     def _build(self, tmp_path: Path, **share: Any) -> tuple[Path, dict[str, Any]]:
 
@@ -244,7 +244,7 @@ class TestBuildWiring:
         # small share cap once a second dimension value exists; the 2-record
         # fixture is exercised for *reporting* here, M4's strict share math
         # is covered by TestApplyShareCaps.
-        snap = _write_annotations_snapshot(
+        _write_annotations_snapshot(
             bundle, session_id="sess-a",
             dispositions=["accepted", "accepted", "rejected"],
         )
@@ -257,7 +257,7 @@ class TestBuildWiring:
         )
         out = tmp_path / "out"
         summary = build_frozen_corpus(
-            self._share_cfg(out, bundle, snap, **share)
+            self._share_cfg(out, bundle, **share)
         )
         return out, summary
 
@@ -316,7 +316,7 @@ class TestBuildWiring:
 
         out = tmp_path / "out"
         summary = build_frozen_corpus(self._share_cfg(
-            out, bundle, snap,
+            out, bundle,
             max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
         ))
         emitted = [
@@ -368,11 +368,11 @@ class TestBuildWiring:
     def test_zero_population_cap_fails_closed(self, tmp_path: Path) -> None:
 
         bundle = _write_bundle(tmp_path)
-        snap = _write_annotations_snapshot(bundle, session_id="sess-a",
-                                           dispositions=["accepted", "accepted", "accepted"])
+        _write_annotations_snapshot(bundle, session_id="sess-a",
+                                   dispositions=["accepted", "accepted", "accepted"])
         with pytest.raises(ValueError, match="max_profile_share"):
             build_frozen_corpus(
-                self._share_cfg(tmp_path / "out2", bundle, snap, max_profile_share=0.1)
+                self._share_cfg(tmp_path / "out2", bundle, max_profile_share=0.1)
             )
         # fail-closed: nothing written
         assert not (tmp_path / "out2" / "_SUCCESS").exists()

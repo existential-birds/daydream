@@ -86,6 +86,17 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
+_ARTIFACT_PR = PRInfo(
+    number=7,
+    head_sha="a" * 40,
+    base_sha="b" * 40,
+    base_ref="main",
+    head_ref="feature",
+    owner="owner",
+    repo="repo",
+    url="https://example.invalid/owner/repo/pull/7",
+)
+
 
 @pytest.mark.parametrize("flow_name", [None, "deep", "shallow"])
 async def test_unborn_non_improve_runner_fails_before_backend(
@@ -307,16 +318,7 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     private_path = tmp_path / "private" / "runtime" / "secret" / "findings.json"
     monkeypatch.setattr(
         "daydream.pr_review.find_pr_by_number",
-        lambda *_args, **_kwargs: PRInfo(
-            number=7,
-            head_sha="a" * 40,
-            base_sha="b" * 40,
-            base_ref="main",
-            head_ref="feature",
-            owner="owner",
-            repo="repo",
-            url="https://example.invalid/owner/repo/pull/7",
-        ),
+        lambda *_args, **_kwargs: _ARTIFACT_PR,
     )
 
     result = runner._write_findings_for_parsed(
@@ -346,16 +348,7 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(
     seen: list[git_ops.GitHubAuth] = []
     monkeypatch.setattr(
         "daydream.pr_review.find_pr_by_number",
-        lambda *_args, **_kwargs: PRInfo(
-            number=7,
-            head_sha="a" * 40,
-            base_sha="b" * 40,
-            base_ref="main",
-            head_ref="feature",
-            owner="owner",
-            repo="repo",
-            url="https://example.invalid/owner/repo/pull/7",
-        ),
+        lambda *_args, **_kwargs: _ARTIFACT_PR,
     )
 
     def read_diff(

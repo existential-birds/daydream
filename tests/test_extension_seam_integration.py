@@ -30,7 +30,6 @@ from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git as _git
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.test_deep_orchestrator import _fix_prompts, _install_stub_backend, _silence, _StubBackend
@@ -227,23 +226,6 @@ def _install_filtered_surface(
     return backend
 
 
-def _serve_pr_view(fake_gh: FakeGh, target: Path) -> None:
-    """Configure a PR whose SHAs match the real fixture repository."""
-    fake_gh.serve_pr_view(
-        {
-            "number": 7,
-            "state": "OPEN",
-            "headRefName": "feature",
-            "baseRefName": "main",
-            "headRefOid": git_ops.head_sha(target),
-            "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-            "headRepositoryOwner": {"login": "acme"},
-            "url": "https://github.com/acme/widgets/pull/7",
-            "body": "",
-        }
-    )
-
-
 async def test_post_review_uses_published_items_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -308,7 +290,7 @@ async def test_fork_filter_controls_findings_artifact(
 ) -> None:
     """A load-items fork controls the canonical findings export surface."""
     _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
     findings_out = tmp_path / "findings.json"
     merged_items = multi_stack_target / ".daydream" / "deep" / "merged-items.json"
 
@@ -333,7 +315,7 @@ async def test_fork_filter_controls_pr_post_payload(
 ) -> None:
     """A load-items fork controls the canonical PR review payload."""
     _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
 
     _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
@@ -367,7 +349,7 @@ async def test_fork_filter_controls_fix_prompts(
     """A load-items fork controls the findings that reach the fix phase."""
 
     backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
 
     _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
@@ -395,7 +377,7 @@ async def test_api_v6_stable_keys_share_state_and_reparse_filtered_items(
         monkeypatch,
         extension_source=STABLE_KEYS_FILTER_EXT,
     )
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
     _git(
         multi_stack_target,
         "remote",

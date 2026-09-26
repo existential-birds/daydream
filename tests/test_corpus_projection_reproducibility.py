@@ -13,7 +13,7 @@ from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
 from tests.test_corpus_projection import (
     _admit_second_batch,
-    _cfg,
+    _config_for,
     _write_ann_sumsums,
     _write_annotations_snapshot,
     _write_bundle,
@@ -48,9 +48,9 @@ def test_assign_split_is_deterministic_and_salted() -> None:
 
 def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir)
-    build_frozen_corpus(_cfg(tmp_path / "a", bundle_dir, snap))
-    build_frozen_corpus(_cfg(tmp_path / "b", bundle_dir, snap))
+    _write_annotations_snapshot(bundle_dir)
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "a"))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
     assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
     assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
@@ -80,8 +80,8 @@ def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) ->
     regenerate this dict, never relax it to a subset check."""
     bundle_dir = _write_bundle(tmp_path)
     _enrich_bundle(bundle_dir)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     records = [json.loads(line) for line in
                (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
     accepted = next(r for r in records if r["outcome_label"] == "accepted")
@@ -155,9 +155,9 @@ def test_enriched_reprojection_is_byte_identical(tmp_path: Path) -> None:
     cover finding_text / task_identity / lineage diff pointers."""
     bundle_dir = _write_bundle(tmp_path)
     _enrich_bundle(bundle_dir)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    build_frozen_corpus(_cfg(tmp_path / "a", bundle_dir, snap))
-    build_frozen_corpus(_cfg(tmp_path / "b", bundle_dir, snap))
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "a"))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
     assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
     assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
@@ -166,29 +166,29 @@ def test_enriched_reprojection_is_byte_identical(tmp_path: Path) -> None:
 
 def test_splits_are_disjoint_and_frozen(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir)
+    _write_annotations_snapshot(bundle_dir)
     out_a = tmp_path / "o"
-    build_frozen_corpus(_cfg(out_a, bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_a))
     train, val, holdout = _read_split_memberships(out_a)
     assert not (set(train) & set(val))
     assert not (set(train) & set(holdout))
     assert not (set(val) & set(holdout))
     assert train + val + holdout  # the fixture projected records
     # frozen: same membership again on re-run into a fresh directory
-    build_frozen_corpus(_cfg(tmp_path / "b", bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
     train2, _, _ = _read_split_memberships(tmp_path / "b")
     assert train2 == train
     # frozen: same membership under re-run in place (overwrite is stable)
-    build_frozen_corpus(_cfg(out_a, bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_a))
     train3, _, _ = _read_split_memberships(out_a)
     assert train3 == train
 
 
 def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir)
+    _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "o"
-    build_frozen_corpus(_cfg(out, bundle_dir, snap))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     for line in (out / "corpus.jsonl").read_text().splitlines():
         record = json.loads(line)
         assert record["lineage"]["split"] in {"train", "validation", "holdout"}
@@ -220,8 +220,8 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
     _write_ann_sumsums(ann_dir)
     for out in (tmp_path / "a", tmp_path / "b"):
         build_frozen_corpus(
-            _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,
-                 max_profile_share=0.7)
+            _config_for(bundle_dir, tmp_path, out_dir=out, max_stack_share=0.5,
+                        max_repo_share=0.6, max_profile_share=0.7)
         )
     for name in ("corpus.jsonl", "corpus.jsonl", "lineage.json",
                  "train.jsonl", "validation.jsonl", "holdout.jsonl"):
@@ -237,8 +237,8 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
 
 def test_late_outcome_evidence_is_refused(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir, valid_at="2030-01-01T00:00:00+00:00")
-    cfg = _cfg(tmp_path / "late", bundle_dir, snap, as_of="2026-06-01T00:00:00+00:00")
+    _write_annotations_snapshot(bundle_dir, valid_at="2030-01-01T00:00:00+00:00")
+    cfg = _config_for(bundle_dir, tmp_path, out_dir=tmp_path / "late", as_of="2026-06-01T00:00:00+00:00")
     with pytest.raises(ValueError, match="valid_at"):
         build_frozen_corpus(cfg)
     # refusal, not drop: the full fail-closed file set was never written
