@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, REVIEW_STOPPING_GUIDANCE
 
 
 def test_grounding_instruction_contains_cwd_warning() -> None:
@@ -22,8 +22,6 @@ def test_grounding_instruction_formats_cwd() -> None:
 
 
 def test_review_stopping_guidance_bounds_candidate_work_and_environment_setup() -> None:
-    from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
-
     assert "one pass" in REVIEW_STOPPING_GUIDANCE
     assert "Do not install" in REVIEW_STOPPING_GUIDANCE
     assert "missing dependencies" in REVIEW_STOPPING_GUIDANCE

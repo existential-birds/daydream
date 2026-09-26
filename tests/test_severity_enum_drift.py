@@ -70,33 +70,20 @@ severity.CANONICAL_LEVELS = ("high", "medium", "low", "critical")
 
 import __MODULE__ as target  # built AFTER the declaration moves
 
-
-def walk(node, path, out):
-    if isinstance(node, dict):
-        if isinstance(node.get("severity"), dict):
-            out.append([path, node["severity"]])
-        for key, value in node.items():
-            if isinstance(value, (dict, list)):
-                walk(value, f"{path}.{key}", out)
-    elif isinstance(node, list):
-        for index, value in enumerate(node):
-            walk(value, f"{path}[{index}]", out)
-
-
-found = []
+schemas = {}
 for name in sorted(dir(target)):
     if name.startswith("_") or not name.endswith("_SCHEMA"):
         continue
     schema = getattr(target, name)
     if isinstance(schema, dict):
-        walk(schema, f"__ROOT__.{name}", found)
-print(json.dumps(found))
+        schemas[name] = schema
+print(json.dumps(schemas))
 '''
 
 
-def _rebuild_script(module: str, root: str) -> str:
-    """The one subprocess rebuild walker, parameterized by module and emitted prefix."""
-    return _REBUILD_TEMPLATE.replace("__MODULE__", module).replace("__ROOT__", root)
+def _rebuild_script(module: str) -> str:
+    """The subprocess rebuild command, parameterized by module name."""
+    return _REBUILD_TEMPLATE.replace("__MODULE__", module)
 
 
 def _walk(node: Any, path: str, out: list[tuple[str, dict[str, Any]]]) -> None:
@@ -180,12 +167,15 @@ def rebuilt_under_patched_declaration(
     rebuilt: dict[str, dict[str, dict[str, Any]]] = {}
     for key, module in _MODULES.items():
         script = tmp_path_factory.mktemp(f"rebuild-{key}") / "rebuild.py"
-        script.write_text(_rebuild_script(module.__name__, module.__name__))
+        script.write_text(_rebuild_script(module.__name__))
         proc = subprocess.run(
             [sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300
         )
         assert proc.returncode == 0, proc.stderr
-        rebuilt[key] = {site: fragment for site, fragment in json.loads(proc.stdout)}
+        sites: list[tuple[str, dict[str, Any]]] = []
+        for name, schema in json.loads(proc.stdout).items():
+            _walk(schema, f"{module.__name__}.{name}", sites)
+        rebuilt[key] = dict(sites)
     return rebuilt
 
 

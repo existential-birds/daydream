@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.config_file import DaydreamFileConfig, _coerce_non_negative_float, load_file_config
 from tests.harness.config import write_target_hub_key
 
 
@@ -239,8 +239,6 @@ def test_quality_gate_threshold_coercion(raw: object, expected: float | None) ->
     meaningful floors. Each invalid input degrades to ``None`` so the
     ``config.py`` default applies.
     """
-    from daydream.config_file import _coerce_non_negative_float
-
     value = _coerce_non_negative_float(raw)
     if expected is None:
         assert value is None

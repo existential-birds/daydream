@@ -650,6 +650,24 @@ def _changed_files(repo: Path) -> list[Path]:
     return paths
 
 
+def _require_handoff_session(
+    work: WorkContext,
+    artifact_session: ArtifactSession | None,
+    *,
+    allow_standalone: bool,
+) -> None:
+    """Fail closed when a strict handoff accessor has no bound session."""
+    if artifact_session is None:
+        if not allow_standalone:
+            # Strict callers must supply the session even if a standalone
+            # archive would otherwise make a durable reference available.
+            artifact_dir_for(work.repo, session=None, allow_standalone=False)
+        if artifact_session_active():
+            raise ArtifactVisibilityError(
+                "an explicit artifact session is required for handoff routing"
+            )
+
+
 def _resolve_handoff_paths(
     recorder: TrajectoryRecorder | None,
     work: WorkContext,
@@ -658,19 +676,7 @@ def _resolve_handoff_paths(
     allow_standalone: bool = False,
 ) -> tuple[Path, Path | None, Path | None, Path | None, Path | None, Path | None]:
     """Resolve durable public handoff artifacts from the active run."""
-    if artifact_session is None:
-        if not allow_standalone:
-            # Strict callers must supply the session even if a standalone
-            # archive would otherwise make a durable reference available.
-            artifact_dir_for(
-                work.repo,
-                session=None,
-                allow_standalone=False,
-            )
-        if artifact_session_active():
-            raise ArtifactVisibilityError(
-                "an explicit artifact session is required for handoff routing"
-            )
+    _require_handoff_session(work, artifact_session, allow_standalone=allow_standalone)
 
     if recorder is None:
         ts = datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - filename only
@@ -740,18 +746,8 @@ def _handoff_write_path(
     allow_standalone: bool = False,
 ) -> Path:
     """Return the private active-session destination for a public handoff ref."""
+    _require_handoff_session(work, artifact_session, allow_standalone=allow_standalone)
     if artifact_session is None:
-        if not allow_standalone:
-            # Keep strict routing failure consistent with the public accessors.
-            artifact_dir_for(
-                work.repo,
-                session=artifact_session,
-                allow_standalone=False,
-            )
-        if artifact_session_active():
-            raise ArtifactVisibilityError(
-                "an explicit artifact session is required for handoff routing"
-            )
         return handoff_reference
     return artifact_session.live_path_for(handoff_reference, repo=work.repo)
 

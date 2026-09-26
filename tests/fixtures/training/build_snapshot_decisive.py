@@ -16,6 +16,7 @@ from tests.fixtures.training.build_hub_snapshot import (
     REPO_ID,
     SNAPSHOT_REVISION,
     _snapshot_files,
+    _snapshot_trajectory,
 )
 
 __all__ = ["REPO_ID", "SNAPSHOT_REVISION", "build_snapshot_decisive"]
@@ -27,8 +28,6 @@ _DECISIVE_DISPOSITIONS = {"sess-a": "accepted", "sess-b": "rejected", "sess-c": 
 
 def _snapshot_trajectory_decisive(session_id: str) -> dict[str, object]:
     """The base snapshot trajectory with the session's disposition applied."""
-    from tests.fixtures.training.build_hub_snapshot import _snapshot_trajectory
-
     trajectory = _snapshot_trajectory(session_id)
     resolutions = trajectory["resolutions"]
     assert isinstance(resolutions, list) and len(resolutions) == 1

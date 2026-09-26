@@ -603,6 +603,28 @@ class FakeGh:
         """Make ``gh pr view`` emit *response* and feed ``gh pr list``."""
         self.set_response("pr-view", value=response)
 
+    def serve_open_pr(self, target: Path) -> None:
+        """Serve the canonical open ``acme/widgets`` PR for *target*.
+
+        The head SHA is read from the real fixture repository so callers need
+        only the checkout path, matching ``find_open_pr``'s shape.
+        """
+        from daydream import git_ops
+
+        self.serve_pr_view(
+            {
+                "number": 7,
+                "state": "OPEN",
+                "headRefName": "feature",
+                "baseRefName": "main",
+                "headRefOid": git_ops.head_sha(target),
+                "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+                "headRepositoryOwner": {"login": "acme"},
+                "url": "https://github.com/acme/widgets/pull/7",
+                "body": "",
+            }
+        )
+
     def serve_secret_list(self, names: list[str]) -> None:
         """Make ``gh secret list --json name`` return *names*."""
         self.set_response("secret-list", value=names)

@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 import scripts.redrive_post as redrive
-from tests.test_extension_seam_integration import _serve_pr_view
 
 CANONICAL_KEEP_INLINE = "CANONICAL_KEEP_INLINE_SENTINEL"
 CANONICAL_KEEP_STRUCTURAL = "CANONICAL_KEEP_STRUCTURAL_SENTINEL"
@@ -62,7 +61,7 @@ def test_redrive_posts_only_canonical_merged_items(
     fake_gh: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
     _write_canonical(multi_stack_target)
 
     _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
@@ -110,7 +109,7 @@ def test_redrive_corrupt_merged_items_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
     deep = multi_stack_target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "merged-items.json").write_text("{not valid json}")
@@ -131,7 +130,7 @@ def test_redrive_decline_posts_no_file_comments_or_review(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _serve_pr_view(fake_gh, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
     _write_canonical(multi_stack_target)
     monkeypatch.setattr("daydream.ui.messages._read_user_input", lambda *_args: "n")
 

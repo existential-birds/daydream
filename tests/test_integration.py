@@ -49,6 +49,17 @@ from tests.test_runner import _fix_item, _seed_fix_resume
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
+_COMMENT_PR = PRInfo(
+    number=7,
+    head_sha="0" * 40,
+    base_sha="1" * 40,
+    base_ref="main",
+    head_ref="feature",
+    owner="acme",
+    repo="widgets",
+    url="https://example/pr/7",
+)
+
 
 def strip_ansi(text: str) -> str:
     """Strip ANSI escape codes from text for assertion comparisons."""
@@ -1580,16 +1591,7 @@ async def test_run_comment_submission_failure_exits_nonzero(
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tmp_path)
 
-    fake_pr = PRInfo(
-        number=7,
-        head_sha="0" * 40,
-        base_sha="1" * 40,
-        base_ref="main",
-        head_ref="feature",
-        owner="acme",
-        repo="widgets",
-        url="https://example/pr/7",
-    )
+    fake_pr = _COMMENT_PR
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
     fake_gh.set_response(
         "POST", "repos/acme/widgets/pulls/7/reviews", {"__error__": "HTTP 500"},
@@ -1622,16 +1624,7 @@ async def test_run_loop_submission_failure_warns_and_continues(
     install_stub_backend(monkeypatch, tmp_path)
     force_interactive(monkeypatch)
 
-    fake_pr = PRInfo(
-        number=7,
-        head_sha="0" * 40,
-        base_sha="1" * 40,
-        base_ref="main",
-        head_ref="feature",
-        owner="acme",
-        repo="widgets",
-        url="https://example/pr/7",
-    )
+    fake_pr = _COMMENT_PR
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
     fake_gh.set_response(
         "POST", "repos/acme/widgets/pulls/7/reviews", {"__error__": "HTTP 500"},

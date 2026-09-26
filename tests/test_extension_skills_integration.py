@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream import runner
+from daydream import review_profile as rp, runner
 from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
@@ -38,8 +38,6 @@ async def test_shallow_stack_uses_native_profile_strategy_no_skill(
     review prompt must carry the profile-owned ``discovery.per_stack`` strategy
     and never a Beagle/skill invocation.
     """
-    from daydream import review_profile as rp
-
     backend = ScriptedBackend(events=_CLEAN_TURN)
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")
