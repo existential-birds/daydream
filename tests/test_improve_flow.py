@@ -1565,9 +1565,7 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     failed = report.split("### Failed audit assignments")[1].split("## ")[0]
     # The failed assignment resolves to its group's roots, not just a key.
     assert "**docs / group-01**" in failed and "apps/svc00/" in failed
-    coverage = json.loads(
-        improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text()
-    )
+    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     assert {entry["reason"] for entry in coverage["not_audited"]} == {
         "group-ceiling",
         "group-failed",
@@ -1625,9 +1623,7 @@ async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
         "web",
         "residue",
     }
-    vetted = json.loads(
-        improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text()
-    )
+    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
     # The same pattern in three disjoint partitions aggregates into one finding
     # that names every location it was found in.
     assert len(vetted["findings"]) == 1
@@ -1861,9 +1857,7 @@ async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
     code = await _run_improve(make_config, improve_monorepo_target)
 
     assert code == 0
-    recon = json.loads(
-        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
-    )
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
     by_command = {command["command"]: command for command in recon["commands"]}
     assert "make check" in by_command and "pnpm test" in by_command
     assert by_command["make check"]["id"] == "make-check"
@@ -1911,9 +1905,7 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     code = await _run_improve(make_config, improve_monorepo_target)
 
     assert code == 0
-    recon = json.loads(
-        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
-    )
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
     assert [command["id"] for command in recon["commands"]] == [
         "test-suite",
         "git-diff",
@@ -2170,9 +2162,7 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     coverage = _load_improve_json(improve_branch_target, "coverage.json")
     assert [entry["name"] for entry in coverage["partitions"]] == ["branch"]
     assert coverage["not_audited"] == []
-    vetted = json.loads(
-        improve_artifact(improve_branch_target, "vetted-findings.json").read_text()
-    )
+    vetted = _load_improve_json(improve_branch_target, "vetted-findings.json")
     assert {finding["provenance"] for finding in vetted["findings"]} <= {
         "introduced",
         "inherited",
@@ -2361,9 +2351,7 @@ async def test_vet_rejects_unconfirmed_finding_with_reason_and_persists(
     stub.vet_reject_titles = {"Phantom N+1"}
     await _run_improve(make_config, improve_monorepo_target)
 
-    vetted = json.loads(
-        improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text()
-    )
+    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
     assert all(
         finding["title"] != "Phantom N+1" for finding in vetted["findings"]
     )
@@ -2409,9 +2397,7 @@ async def test_non_interactive_run_selects_top_findings_and_writes_plans(
         n_findings=8,
     )
     code = await _run_improve(make_config, improve_monorepo_target)
-    selected = json.loads(
-        improve_artifact(improve_monorepo_target, "selected.json").read_text()
-    )
+    selected = _load_improve_json(improve_monorepo_target, "selected.json")
     assert len(selected["selected"]) == 5
     assert selected["mode"] == "non-interactive-default"
     plans_dir = improve_monorepo_target / "daydream_plans"
@@ -2493,9 +2479,7 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
     code = await _run_improve(make_config, improve_monorepo_target)
 
     plans_dir = improve_monorepo_target / "daydream_plans"
-    selected = json.loads(
-        improve_artifact(improve_monorepo_target, "selected.json").read_text()
-    )["selected"]
+    selected = _load_improve_json(improve_monorepo_target, "selected.json")["selected"]
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     assert code == 0
     assert len(selected) == 3
@@ -2664,9 +2648,7 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         encoding="utf-8"
     )
     assert "high-leverage-title" in report
-    recon = json.loads(
-        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
-    )
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
     sentinel = next(
         command
         for command in recon["commands"]
@@ -3210,17 +3192,9 @@ async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
     assert code == 0
     # The fan-out really did span multiple groups -- otherwise the dedup path is
     # never taken and the assertions below prove nothing.
-    coverage = json.loads(
-        improve_artifact(improve_monorepo_target, "coverage.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
     assert len(coverage["groups"]) > 1
-    audit_findings = json.loads(
-        improve_artifact(
-            improve_monorepo_target, "audit-findings.json"
-        ).read_text(encoding="utf-8")
-    )["findings"]
+    audit_findings = _load_improve_json(improve_monorepo_target, "audit-findings.json")["findings"]
     fingerprints = [finding["fingerprint"] for finding in audit_findings]
     assert len(fingerprints) == len(set(fingerprints))
 
@@ -3253,11 +3227,7 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
     assert code == 0
     # Built-in detection drives the audit groups independently of plugin presence.
-    coverage = json.loads(
-        improve_artifact(improve_monorepo_target, "coverage.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
     assert sorted(group["stack"] for group in coverage["groups"]) == [
         "generic", "python", "react",
     ]
@@ -4228,9 +4198,7 @@ async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
         (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
     )
     assert len(plans) == 1
-    diagnostics = json.loads(
-        improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json").read_text()
-    )
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     assert not any(
         error["code"] in ("TOOL_CALL_BUDGET_EXCEEDED", "WALL_BUDGET_EXCEEDED")
         for attempt in diagnostics["attempts"]

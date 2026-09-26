@@ -46,9 +46,17 @@ def test_assign_split_is_deterministic_and_salted() -> None:
     )
 
 
-def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
+@pytest.mark.parametrize("enriched", [False, True])
+def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path, enriched: bool) -> None:
+    """The same bundle projects byte-identically twice, with and without the
+    additive enrichment, so the emitted digests deterministically cover
+    finding_text / task_identity / lineage diff pointers."""
     bundle_dir = _write_bundle(tmp_path)
-    _write_annotations_snapshot(bundle_dir)
+    if enriched:
+        _enrich_bundle(bundle_dir)
+        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    else:
+        _write_annotations_snapshot(bundle_dir)
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "a"))
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
     assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
@@ -149,21 +157,6 @@ def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) ->
     }
 
 
-def test_enriched_reprojection_is_byte_identical(tmp_path: Path) -> None:
-    """Reproducibility covers the additive enrichment: the same enriched
-    bundle projects byte-identically twice, so the emitted digests deterministically
-    cover finding_text / task_identity / lineage diff pointers."""
-    bundle_dir = _write_bundle(tmp_path)
-    _enrich_bundle(bundle_dir)
-    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "a"))
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
-    assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
-    assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
-    for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
-        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
-
-
 def test_splits_are_disjoint_and_frozen(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     _write_annotations_snapshot(bundle_dir)
@@ -223,7 +216,7 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
             _config_for(bundle_dir, tmp_path, out_dir=out, max_stack_share=0.5,
                         max_repo_share=0.6, max_profile_share=0.7)
         )
-    for name in ("corpus.jsonl", "corpus.jsonl", "lineage.json",
+    for name in ("corpus.jsonl", "lineage.json",
                  "train.jsonl", "validation.jsonl", "holdout.jsonl"):
         assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
     train, val, hold = _read_split_memberships(tmp_path / "a")
@@ -245,7 +238,7 @@ def test_late_outcome_evidence_is_refused(tmp_path: Path) -> None:
     # (every artifact the projector emits, plus the _SUCCESS completeness
     # marker — a regression that wrote any of them before raising fails)
     late_dir = tmp_path / "late"
-    for name in ("corpus.jsonl", "corpus.jsonl", "train.jsonl", "validation.jsonl",
+    for name in ("corpus.jsonl", "train.jsonl", "validation.jsonl",
                  "holdout.jsonl", "adjudication-report.json", "schema.json",
                  "lineage.json", "_SUCCESS"):
         assert not (late_dir / name).exists(), name
