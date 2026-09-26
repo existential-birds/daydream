@@ -51,6 +51,7 @@ htmlcov/
 .claude/*
 .claude/skills/
 .agents/
+.hermes/
 
 # Logs
 logs/

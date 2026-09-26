@@ -385,8 +385,8 @@ name is stable.
 ### Prompts
 
 Overriding `structural`, including wrapping the built-in builder, opts out of host
-alternatives folding and finite structural delegation. The host runs the
-alternatives pass independently and invokes the custom structural reviewer.
+alternatives folding. The host runs the alternatives pass independently and
+invokes the custom structural reviewer.
 Custom structural strategy text still supports alternatives folding when the
 prompt builder itself remains the built-in function.
 
