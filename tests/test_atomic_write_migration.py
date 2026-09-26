@@ -31,7 +31,7 @@ from daydream.training.corpus_projection import projector
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from tests.test_calibration import _build_fixture, _config
 from tests.test_cli_adjudicate import _seed_adjudicated, _write_sessions
-from tests.test_corpus_projection import _cfg, _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_projection import _config_for, _write_annotations_snapshot, _write_bundle
 from tests.test_training_adjudication_canonical import _PIN, _index
 from tests.test_training_adjudication_final_bundle import seed_final_bundle_state
 
@@ -140,9 +140,9 @@ class TestWriterCharacterization:
 
     def test_projection_bytes_and_private_mode(self, tmp_path: Path) -> None:
         bundle_dir = _write_bundle(tmp_path)
-        snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
         out = tmp_path / "proj"
-        build_frozen_corpus(_cfg(out, bundle_dir, snap))
+        build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
         records = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines()]
         assert (out / "corpus.jsonl").read_bytes() == "".join(_canonical_line(r) for r in records).encode("utf-8")
         assert (out / "_SUCCESS").read_bytes() == b"ok\n"
@@ -191,11 +191,11 @@ class TestWriterCharacterization:
     def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
         bundle_dir = _write_bundle(tmp_path)
-        snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
         out = tmp_path / "proj"
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
-            build_frozen_corpus(_cfg(out, bundle_dir, snap))
+            build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
         assert list(out.iterdir()) == []       # projector's unlink-on-failure must not be weakened
 
     def test_calibration_failure_leaves_no_stray_temp(self, tmp_path: Path,
@@ -342,10 +342,10 @@ class TestProjectorKnobs:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bundle_dir = _write_bundle(tmp_path)
-        snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
         out = tmp_path / "proj"
         calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
-        build_frozen_corpus(_cfg(out, bundle_dir, snap))
+        build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
         assert {target.name for target, _c, _k in calls} >= {
             "corpus.jsonl", "adjudication-report.json", "schema.json",
             "lineage.json", "license-report.json", "_SUCCESS",
