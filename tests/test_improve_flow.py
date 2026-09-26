@@ -1123,6 +1123,11 @@ def _raise_enumeration_failure(*_args: Any, **_kwargs: Any) -> list[dict[str, An
     raise RuntimeError("unparseable repository manifest")
 
 
+def _no_open_issues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub GitHub issue enumeration with an empty result."""
+    monkeypatch.setattr("daydream.git_ops.gh_issue_list_strict", lambda *args, **kwargs: [])
+
+
 @pytest.mark.anyio
 async def test_repo_scan_seeds_specialists_from_tracked_files(tmp_git_repo: Path) -> None:
     stub = ImproveStubBackend(tmp_git_repo)
@@ -4497,10 +4502,7 @@ async def test_configured_headless_publish_selects_all_and_embeds_local_plans(
         improve_monorepo_target,
         n_findings=len(AUDIT_CATEGORIES),
     )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     created: list[dict[str, Any]] = []
 
     def _create_issue(*args: Any, **kwargs: Any) -> str:
@@ -4651,10 +4653,7 @@ async def test_reused_plan_publishes_its_stored_package_and_member_identities(
         json.dumps(sidecar, indent=2) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     created: list[dict[str, Any]] = []
 
     def _create_issue(*args: Any, **kwargs: Any) -> str:
@@ -4704,10 +4703,7 @@ async def test_configured_publish_records_partial_plan_write_failure(
         failed_title="Production finding 03",
     )
     install_capable_improve_backend(monkeypatch, backend)
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     created: list[str] = []
 
     def _create_issue(*args: Any, **kwargs: Any) -> str:
@@ -4744,10 +4740,7 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
         improve_monorepo_target,
         n_findings=1,
     )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     monkeypatch.setattr(
         "daydream.git_ops.gh_issue_create",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("offline")),

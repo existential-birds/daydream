@@ -227,32 +227,27 @@ def test_action_new_via_real_editor_persists_authored(
     assert not Path(buf).exists()               # buffer removed after the edit
 
 
-def test_editor_nonzero_exit_leaves_state_unchanged(
+@pytest.mark.parametrize(
+    "editor_script",
+    [
+        pytest.param("#!/bin/sh\nexit 3\n", id="nonzero-exit"),
+        pytest.param(
+            "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n",
+            id="malformed-buffer",
+        ),
+    ],
+)
+def test_editor_failure_leaves_state_unchanged(
     tmp_path: Path,
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"
-    before = path.read_bytes()
-    _install_editor(tmp_path, monkeypatch, "#!/bin/sh\nexit 3\n")
-
-    run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
-    assert path.read_bytes() == before
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_editor_malformed_buffer_is_discarded(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    editor_script: str,
 ) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
-    _install_editor(tmp_path, monkeypatch, "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n")
+    _install_editor(tmp_path, monkeypatch, editor_script)
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
     assert path.read_bytes() == before

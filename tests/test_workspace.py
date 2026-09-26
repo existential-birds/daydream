@@ -115,7 +115,7 @@ def _make_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
 
 def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "main") -> str:
     """Add a commit to *branch* on *bare* via a fresh sidecar clone; return its SHA."""
-    token = _secrets_token()
+    token = secrets.token_hex(3)
     sidecar = tmp_path / f"sidecar-{branch}-{token}"
     _git(tmp_path, "clone", str(bare), str(sidecar))
     _configure_identity(sidecar)
@@ -138,12 +138,6 @@ def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "m
     sha = _commit(sidecar, f"sidecar commit on {branch}")
     _git(sidecar, "push", "origin", branch)
     return sha
-
-
-def _secrets_token() -> str:
-
-    return secrets.token_hex(3)
-
 
 
 async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:

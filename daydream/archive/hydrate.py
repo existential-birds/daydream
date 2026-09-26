@@ -45,7 +45,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_SECRETS_SCAN_DIRTY,
     REASON_CODE_UNTRUSTED_REMOTE_HOST,
 )
-from daydream.archive.index import upsert_run
+from daydream.archive.index import query_runs, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
@@ -975,8 +975,6 @@ def build_resolution_map(
     hydration never clones or fetches (M5). Raw URLs are consumed as data only
     and never appear in the map. Unexpected IO errors propagate.
     """
-    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle at module load
-
     cmap: dict[str, Any] = {}
     unavailable: list[str] = []
     indexed: set[str] = set()
@@ -2507,8 +2505,6 @@ def verify_publication(
         else:
             kwargs["repo_slug"], kwargs["remote_url"] = None, None
         upsert_run(verify_dir, Manifest(**kwargs))
-
-    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle
 
     verify_admitted = len(query_runs(verify_dir))
     if verify_admitted != dry_run_admitted:

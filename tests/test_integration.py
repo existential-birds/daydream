@@ -126,25 +126,17 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
 def target_project(tmp_path: Path) -> Path:
     """Create a minimal project structure for testing.
 
-    Stage 4.2: ``open_workspace`` requires a real worktree. Initialise a
-    fresh repo with one initial commit on ``main`` and a ``feature`` branch
-    so the WrongBranchError guard does not fire for default-branch runs.
+    Stage 4.2: ``open_workspace`` requires a real worktree. Build the shared
+    two-commit repo so ``main`` has a commit and the ``feature`` branch exists,
+    keeping the WrongBranchError guard from firing for default-branch runs.
     """
-    project = tmp_path / "test_project"
-    project.mkdir()
-
-    (project / "main.py").write_text("def hello():\n    return 'world'\n")
-
-    _init_repo(project)
-    _git(project, "add", "main.py")
-    _commit(project, "init")
-    # Move off main so the WrongBranchError guard doesn't fire on default runs.
-    _git(project, "checkout", "-b", "feature")
-    (project / "main.py").write_text("def hello():\n    return 'universe'\n")
-    _git(project, "add", "main.py")
-    _commit(project, "change")
-
-    return project
+    return _two_commit_repo(
+        tmp_path / "test_project",
+        "main.py",
+        "def hello():\n    return 'world'\n",
+        "def hello():\n    return 'universe'\n",
+        "feature",
+    )
 
 
 @pytest.mark.asyncio
