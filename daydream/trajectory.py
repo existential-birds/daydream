@@ -2907,14 +2907,6 @@ class PhaseScopeHandle:
         """Select one explicit terminal state before this scope closes."""
         _finish_terminal(self, "phase", status, reason_code)
 
-    def _override(
-        self,
-        status: LifecycleStatus,
-        reason_code: LifecycleReasonCode,
-    ) -> None:
-        self.status = status
-        self.reason_code = reason_code
-
     def _close(self) -> None:
         self._closed = True
 
@@ -2926,6 +2918,16 @@ def _lifecycle_exception_terminal(
     if isinstance(exc, anyio.get_cancelled_exc_class()):
         return LifecycleStatus.CANCELLED, LifecycleReasonCode.CANCELLED
     return LifecycleStatus.FAILED, LifecycleReasonCode.UNCAUGHT_EXCEPTION
+
+
+def _override_terminal_state(
+    handle: PhaseScopeHandle | DispatchHandle,
+    status: LifecycleStatus,
+    reason_code: LifecycleReasonCode,
+) -> None:
+    """Set one explicit terminal state on a phase or dispatch scope handle."""
+    handle.status = status
+    handle.reason_code = reason_code
 
 
 def _host_lifecycle_terminal(
@@ -3007,7 +3009,7 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[Ph
     try:
         yield handle
     except BaseException as exc:
-        handle._override(*_lifecycle_exception_terminal(exc))
+        _override_terminal_state(handle, *_lifecycle_exception_terminal(exc))
         raise
     finally:
         handle._close()
@@ -3045,7 +3047,7 @@ async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterat
         yield handle
     except BaseException as exc:
         handle.stop_reason = "failed"
-        lifecycle._override(*_lifecycle_exception_terminal(exc))
+        _override_terminal_state(lifecycle, *_lifecycle_exception_terminal(exc))
         raise
     finally:
         if lifecycle.status is LifecycleStatus.SUCCEEDED:
@@ -3163,36 +3165,22 @@ class DispatchHandle:
     def _record_write_failure(self) -> None:
         self._write_failures += 1
 
-    def _override(
-        self,
-        status: LifecycleStatus,
-        reason_code: LifecycleReasonCode,
-    ) -> None:
-        self.status = status
-        self.reason_code = reason_code
-
     def _override_terminal(
         self,
         status: LifecycleStatus,
         reason_code: LifecycleReasonCode,
     ) -> None:
         """Make an escaping scope terminal authoritative over defaults."""
-        self._override(status, reason_code)
+        _override_terminal_state(self, status, reason_code)
         self._decision_made = True
 
     def _finalize_default(self) -> None:
         if self._decision_made or self._write_failures == 0:
             return
         if self.completed_count:
-            self._override(
-                LifecycleStatus.PARTIAL,
-                LifecycleReasonCode.SOME_CHILDREN_FAILED,
-            )
+            _override_terminal_state(self, LifecycleStatus.PARTIAL, LifecycleReasonCode.SOME_CHILDREN_FAILED)
         else:
-            self._override(
-                LifecycleStatus.FAILED,
-                LifecycleReasonCode.ALL_CHILDREN_FAILED,
-            )
+            _override_terminal_state(self, LifecycleStatus.FAILED, LifecycleReasonCode.ALL_CHILDREN_FAILED)
 
     def _ordered_completed(self) -> list[_CompletedFork]:
         def order(item: _CompletedFork) -> tuple[Any, ...]:

@@ -60,23 +60,12 @@ def _is_negated(text: str, start: int) -> bool:
     return bool(_NEGATION_TOKENS.search(text[sentence_start:start]))
 
 
-def _match_rules(text: str, rules: tuple[str, ...], *, guard_negation: bool) -> bool:
+def _match_rules(text: str, rules: tuple[str, ...]) -> bool:
     for pattern in rules:
         for m in re.finditer(pattern, text, re.IGNORECASE):
-            if guard_negation and _is_negated(text, m.start()):
+            if _is_negated(text, m.start()):
                 continue
             return True
-    return False
-
-
-def _dispute_present(text: str) -> bool:
-    """Any dispute marker, un-negated, co-occurring in the body."""
-    for pattern in _DISPUTE_RULES[1:]:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
-            if not _is_negated(text, m.start()):
-                return True
-    # "won't fix" itself is a dispute trigger phrase but does not self-satisfy;
-    # a *second*, distinct dispute marker is required.
     return False
 
 
@@ -86,11 +75,13 @@ def _direction(body: str) -> str:
     for line in lines:
         if not line.strip():
             continue
-        has_accept = _match_rules(line, _ACCEPT_RULES, guard_negation=True)
+        has_accept = _match_rules(line, _ACCEPT_RULES)
         has_wontfix = bool(re.search(_DISPUTE_RULES[0], line, re.IGNORECASE))
-        has_dispute = _dispute_present(line)
-        has_reject = _match_rules(line, _REJECT_RULES, guard_negation=True) or (has_wontfix and has_dispute)
-        has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES, guard_negation=True)
+        # "won't fix" itself is a dispute trigger phrase but does not self-satisfy;
+        # a *second*, distinct dispute marker is required.
+        has_dispute = _match_rules(line, _DISPUTE_RULES[1:])
+        has_reject = _match_rules(line, _REJECT_RULES) or (has_wontfix and has_dispute)
+        has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES)
         if has_accept:
             directions.add("accepted")
         if has_reject or has_factual:

@@ -55,10 +55,10 @@ from daydream.config import (
 from daydream.deep.coverage import _path_component_matches, _strip_dot_slash
 from daydream.deep.diagram_types import (
     CandidateRoot,
-    as_dict,
-    as_int,
-    as_list,
-    as_optional_str,
+    as_dict as _as_dict,
+    as_int as _norm_line,
+    as_list as _as_list,
+    as_optional_str as _norm_optional_str,
 )
 from daydream.git_ops import GitError, grep_fixed_matches
 from daydream.repository_paths import path_is_confined, valid_repository_file_path
@@ -68,13 +68,6 @@ from daydream.tree_sitter_index import (
     is_executable_statement_line,
     is_terminal_line,
     language_for_path,
-)
-
-_as_dict, _norm_line, _as_list, _norm_optional_str = (
-    as_dict,
-    as_int,
-    as_list,
-    as_optional_str,
 )
 
 # --- Vocabulary --------------------------------------------------------------
