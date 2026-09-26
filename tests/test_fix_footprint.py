@@ -868,12 +868,8 @@ def test_tree_key_is_binary_safe_mode_type_delete_new_and_order_deterministic(gi
 
 
 def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     original_head = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     baseline = git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
 
     _seed(nested, {"source.py": b"value = 2\n"})
@@ -890,11 +886,7 @@ def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path
 def test_dirty_gitlink_cannot_claim_commit_only_test_evidence(
     git_repo: Path, dirty_path: str,
 ) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
+    nested = _add_gitlink(git_repo)
     (nested / dirty_path).write_bytes(b"value = 2\n")
 
     with pytest.raises(GitError, match="dirty gitlink"):
@@ -912,6 +904,16 @@ def test_uninitialized_gitlink_cannot_capture_parent_repository_head(git_repo: P
         git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
 
 
+def _add_gitlink(git_repo: Path) -> Path:
+    """Seed a committed ``dependency`` gitlink and return the nested repo."""
+    nested = git_repo / "dependency"
+    init_repo(nested)
+    _seed(nested, {"source.py": b"value = 1\n"})
+    _git(git_repo, "add", "dependency")
+    _commit(git_repo, "record dependency")
+    return nested
+
+
 def _gitlink_rollback_snapshot(
     repo: Path, path: str = "dependency"
 ) -> WorktreeRollbackSnapshot:
@@ -924,12 +926,8 @@ def _gitlink_rollback_snapshot(
 
 
 def test_gitlink_group_rollback_restores_captured_nested_oid(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     captured = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     snapshot = _gitlink_rollback_snapshot(git_repo)
     _seed(nested, {"source.py": b"value = 2\n"})
     assert _git(nested, "rev-parse", "HEAD") != captured
@@ -941,12 +939,8 @@ def test_gitlink_group_rollback_restores_captured_nested_oid(git_repo: Path) -> 
 
 
 def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     indexed = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     _seed(nested, {"source.py": b"value = 2\n"})
     captured = _git(nested, "rev-parse", "HEAD")
     assert captured != indexed
@@ -962,11 +956,7 @@ def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: P
 def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(
     git_repo: Path,
 ) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
+    nested = _add_gitlink(git_repo)
     snapshot = _gitlink_rollback_snapshot(git_repo)
     original_head = _git(nested, "rev-parse", "HEAD")
     (nested / "source.py").write_bytes(b"owner dirty bytes\n")
@@ -983,12 +973,8 @@ def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(
 
 
 def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     indexed = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     _seed(nested, {"source.py": b"value = 2\n"})
     protected = _git(nested, "rev-parse", "HEAD")
     assert protected != indexed

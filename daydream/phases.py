@@ -5292,6 +5292,21 @@ def _append_structural_and_write_merged(
     canonical_path.write_text(report_path.read_text())
 
 
+def _reset_merged_outputs(canonical_path: Path, report_path: Path, items_path: Path) -> None:
+    """Delete prior merged artifacts and their audit sidecars before writing new ones.
+
+    Clears the evidence-gate ``dropped-speculative.json`` sidecar so a prior
+    run's drops cannot leave phantom entries when a resume drops none (#227),
+    and the structural-fold ``folded-structural.json`` sidecar for the same
+    reason (#1103).
+    """
+    canonical_path.unlink(missing_ok=True)
+    report_path.unlink(missing_ok=True)
+    items_path.unlink(missing_ok=True)
+    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
+    (items_path.parent / "folded-structural.json").unlink(missing_ok=True)
+
+
 def _write_single_stack_merged_items(
     repo: Path,
     deep_dir_path: Path,
@@ -5322,16 +5337,7 @@ def _write_single_stack_merged_items(
         )
 
     # Clear stale outputs (mirrors phase_cross_stack_merge).
-    canonical_path.unlink(missing_ok=True)
-    report_path.unlink(missing_ok=True)
-    items_path.unlink(missing_ok=True)
-    # Clear the evidence-gate audit sidecar too, so a prior run that dropped
-    # findings can't leave phantom drops on a resume that drops none (#227).
-    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
-    # Clear the structural-fold audit sidecar too, so a prior run's folds
-    # can't leave phantom entries on a resume that folds none (#1103).
-    (items_path.parent / "folded-structural.json").unlink(missing_ok=True)
-
+    _reset_merged_outputs(canonical_path, report_path, items_path)
     # Tag per-stack records (the merge agent normally sets lens; here the host
     # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
     # The ``{**rec, ...}`` spread carries each record's ``uid`` through
@@ -5527,15 +5533,7 @@ async def phase_cross_stack_merge(
 
     # Clear stale outputs so a failed merge agent can't leave behind
     # outdated content that downstream stages would silently consume.
-    canonical_path.unlink(missing_ok=True)
-    report_path.unlink(missing_ok=True)
-    items_path.unlink(missing_ok=True)
-    # Clear the evidence-gate audit sidecar too, so a prior run that dropped
-    # findings can't leave phantom drops on a resume that drops none (#227).
-    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
-    # Clear the structural-fold audit sidecar too, so a prior run's folds
-    # can't leave phantom entries on a resume that folds none (#1103).
-    (items_path.parent / "folded-structural.json").unlink(missing_ok=True)
+    _reset_merged_outputs(canonical_path, report_path, items_path)
 
     prompt = get_registry().prompt("merge")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["merge"].content,
