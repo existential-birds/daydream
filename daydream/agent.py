@@ -40,6 +40,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.codex import supervisor_shell_command
 from daydream.config import BUDGET_CLEANUP_GRACE_S, DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.diagnostics import sanitize_verbose_message
 from daydream.extensions import get_registry
@@ -1217,22 +1218,13 @@ async def _run_agent(
 
                                     if tool_supervisor is not None:
                                         try:
-                                            # Extension tool supervisors matched
-                                            # start-anchored deny patterns against the
-                                            # pre-#1124 wrapper-decoded, cd-stripped
-                                            # command value. The stored
-                                            # ToolStartEvent keeps the replayable
-                                            # cd-prefixed payload; hand the supervisor
-                                            # the display variant so e.g. '^make'
-                                            # keeps matching Codex shell commands.
+                                            # Use the strip-only entry point for start-anchored deny patterns.
                                             supervisor_input = event.input
                                             if event.name == "shell" and isinstance(event.input, dict):
                                                 command = event.input.get("command")
                                                 if isinstance(command, str):
-                                                    from daydream.backends.codex import display_shell_command
-
                                                     supervisor_input = dict(event.input)
-                                                    supervisor_input["command"] = display_shell_command(command)
+                                                    supervisor_input["command"] = supervisor_shell_command(command)
                                             decision = tool_supervisor(event.name, supervisor_input, phase=phase)
                                         except Exception as exc:  # noqa: BLE001 - policy failures must propagate
                                             raise _ToolSupervisorFailure(exc) from exc

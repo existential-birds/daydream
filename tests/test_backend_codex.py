@@ -1533,6 +1533,49 @@ class TestUnwrapShellCommand:
         assert seen["command"] == "make test"
         assert budget_reason == "tool_vetoed:shell"
 
+    @pytest.mark.asyncio
+    async def test_tool_supervisor_sees_stripped_and_unredacted_command(self) -> None:
+        """The supervisor value is strip-only: no redaction, no cap (issue #1227)."""
+        token = "ghp_" + "K" * 30
+        raw = '/bin/zsh -lc "cd /srv/app && deploy --token ' + token + '"'
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "th_sup1227"}),
+            json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": raw}}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": raw,
+                        "status": "completed",
+                        "exit_code": 0,
+                        "aggregated_output": "ok",
+                    },
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+        ]
+
+        seen: dict[str, str] = {}
+
+        def supervisor(tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
+            del phase
+            seen["name"] = tool_name
+            seen["command"] = str(tool_input.get("command", ""))
+            return ToolDecision(veto=False)
+
+        registry = Registry()
+        registry.register_tool_supervisor(supervisor)
+        set_registry(registry)
+        mock_proc = make_mock_process(lines)
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+            await run_agent(CodexBackend(model="fixture-model"), Path("/tmp"), "run", phase=DaydreamPhase.REVIEW)
+
+        assert seen["name"] == "shell"
+        assert seen["command"] == "deploy --token " + token  # prefix stripped, secret intact
+        assert "cd /srv/app" not in seen["command"]
+        assert "[REDACTED" not in seen["command"]
+
     def test_wrapper_without_cd(self) -> None:
         cmd = '/bin/zsh -lc "ls -la"'
         assert _unwrap_shell_command(cmd) == "ls -la"

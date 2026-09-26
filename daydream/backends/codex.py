@@ -332,6 +332,17 @@ def display_shell_command(command: str) -> str:
     return _CD_PREFIX_RE.sub("", decoded, count=1)
 
 
+def supervisor_shell_command(command: str) -> str:
+    """Decode the Codex wrapper and strip a leading ``cd <dir> &&`` for extension tool supervisors.
+
+    This is strip-only: never redact or cap the value. Supervisors match start-anchored
+    deny patterns (such as ``^make``) against the stripped command, and redaction
+    could change the command prefix those patterns inspect. Outside the display
+    pipeline, this is the only consumer of the strip step.
+    """
+    return display_shell_command(command)
+
+
 def _bounded_diagnostic_label(value: Any) -> str:
     """Return one redacted, bounded scalar label for diagnostic aggregation."""
     if not isinstance(value, (str, int, float, bool)) and value is not None:
