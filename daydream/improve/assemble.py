@@ -1282,6 +1282,18 @@ def _expand_optional_ref(
     return _expand_command_ref(ref, recon_by_id=recon_by_id)
 
 
+def _expanded_entry(
+    entry: dict[str, Any],
+    *,
+    recon_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Copy *entry* with its optional ``verification`` command ref expanded."""
+    return {
+        **{key: entry[key] for key in entry if key != "verification"},
+        "verification": _expand_optional_ref(entry["verification"], recon_by_id=recon_by_id),
+    }
+
+
 def _derived_commands_table(
     normalized: dict[str, Any],
     *,
@@ -1557,20 +1569,12 @@ def assemble_plan(
             "mode": normalized["test_plan"]["mode"],
             "rationale": normalized["test_plan"]["rationale"],
             "existing_coverage": [
-                {
-                    **{key: coverage[key] for key in coverage if key != "verification"},
-                    "verification": _expand_optional_ref(coverage["verification"], recon_by_id=recon_by_id),
-                }
+                _expanded_entry(coverage, recon_by_id=recon_by_id)
                 for coverage in normalized["test_plan"]["existing_coverage"]
             ],
             "exemplars": deepcopy(normalized["test_plan"]["exemplars"]),
             "cases": [
-                {
-                    **{key: case[key] for key in case if key != "verification"},
-                    "verification": _expand_optional_ref(
-                        case["verification"], recon_by_id=recon_by_id
-                    ),
-                }
+                _expanded_entry(case, recon_by_id=recon_by_id)
                 for case in normalized["test_plan"]["cases"]
             ],
         },

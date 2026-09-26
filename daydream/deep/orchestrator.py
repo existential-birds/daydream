@@ -73,7 +73,7 @@ from daydream.flows.engine import BackendFactory, FlowContext, run_flow
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import PushReceipt
 from daydream.review_budget import review_deadline_scope, review_scale_for_diff
-from daydream.review_profile import Pipeline
+from daydream.review_profile import Pipeline, build_default_profile, resolve_pipeline
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import DaydreamRunFlow
 from daydream.ui import print_error, print_info, print_preflight_notice, print_warning
@@ -127,16 +127,11 @@ def _single_stack_agent_count(stack_count: int) -> int:
 def _config_pipeline(config: RunConfig) -> Pipeline:
     """Return the resolved profile pipeline for a ``RunConfig`` (pre-context).
 
-    ``FlowContext.pipeline()`` is the in-flow accessor; this mirrors it for the
-    pre-flight preamble (printed before the FlowContext is constructed) and for
-    any config-only call site. Falls back to the packaged default pipeline when
-    no profile was resolved (``review_profile is None``).
+    Thin wrapper over :func:`daydream.review_profile.resolve_pipeline` for the
+    pre-flight preamble (printed before the FlowContext is constructed) and any
+    config-only call site; ``FlowContext.pipeline()`` is the in-flow accessor.
     """
-    if config.review_profile is not None:
-        return config.review_profile.profile.pipeline
-    from daydream.review_profile import build_default_profile
-
-    return build_default_profile().pipeline
+    return resolve_pipeline(config.review_profile)
 
 
 def _shallow_fanout_threshold(config: RunConfig) -> int:
@@ -846,8 +841,6 @@ async def _run_review_spine(
             if single_stack_mode
             else total_agent_count(len(stacks))
         )
-        from daydream.review_profile import build_default_profile
-
         default_profile = build_default_profile()
         profile = config.review_profile.profile if config.review_profile is not None else default_profile
         alternatives_strategy = profile.strategies.get("alternatives", default_profile.strategies["alternatives"])

@@ -139,11 +139,9 @@ class FlowContext:
         ``None`` (unresolved) falls back to the packaged default's pipeline so
         pipeline-driven flow steps never branch on resolution state.
         """
-        from daydream.review_profile import build_default_profile
+        from daydream.review_profile import resolve_pipeline
 
-        if self.review_profile is not None:
-            return self.review_profile.profile.pipeline
-        return build_default_profile().pipeline
+        return resolve_pipeline(self.review_profile)
 
 
 def _resolve_steps(registry: Registry, flow_name: str, entries: list[FlowEntry]) -> dict[str, FlowStep]:

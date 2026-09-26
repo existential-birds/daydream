@@ -776,6 +776,17 @@ class ResolvedProfile:
         return self.profile.name
 
 
+def resolve_pipeline(profile: ResolvedProfile | None) -> Pipeline:
+    """Return the resolved profile's bounded pipeline, else the packaged default's.
+
+    ``None`` (profile unresolved) falls back to the packaged default so
+    pipeline-driven call sites never branch on resolution state.
+    """
+    if profile is not None:
+        return profile.profile.pipeline
+    return build_default_profile().pipeline
+
+
 def _read_and_parse(path: Path, source: str) -> ReviewProfile:
     try:
         text = path.read_text(encoding="utf-8")
