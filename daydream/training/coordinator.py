@@ -238,13 +238,12 @@ def _record_views(
     rec: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Read a record's v2-first ``code_context``/``task_identity``/``lineage`` views."""
-    raw_ctx = rec.get("code_context")
-    code_ctx = raw_ctx if isinstance(raw_ctx, dict) else {}
-    task_identity = rec.get("task_identity")
-    identity = task_identity if isinstance(task_identity, dict) else {}
-    raw_lineage = rec.get("lineage")
-    lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
-    return code_ctx, identity, lineage_obj
+
+    def view(key: str) -> dict[str, Any]:
+        value = rec.get(key)
+        return value if isinstance(value, dict) else {}
+
+    return view("code_context"), view("task_identity"), view("lineage")
 
 
 def _sft_prompt(rec: dict[str, Any]) -> str:

@@ -434,23 +434,10 @@ def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Pa
     assert case_path.read_bytes() == before
 
 
-def _seed_frozen_case(ws: Any) -> Any:
-    """Seed one ``ready`` snapshot case + its bundle + the indexed ledger.
-
-    Builds on ``_write_curated_workspace``'s fully-valid ready case shape,
-    writing the frozen ``snapshot.ready`` block (bundle_file + bundle_sha256)
-    and a real ``snapshots/<case>.bundle`` whose sha256 matches, plus the
-    fetched ledger entry + import file. Resolves the source identity so
-    ``validate_workspace`` reaches exit 0.
-    """
-    _write_case_docs(ws, "ready")
-    return ws
-
-
 def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_frozen_case(ws)   # one ready case: bundle YAML + snapshots/<case>.bundle
+    _write_case_docs(ws, "ready")   # one ready case: bundle YAML + snapshots/<case>.bundle
     code, _ = validate_workspace(ws)
     assert code == 0
     # Corrupt the bundle bytes (keeps the case document and ledger intact).
@@ -467,7 +454,7 @@ def test_status_reports_snapshot_state_per_case(tmp_path: Path, capsys: pytest.C
     """``status`` surfaces each case's snapshot state + frozen head prefix."""
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_frozen_case(ws)   # one ready case (from Task 11's helper)
+    _write_case_docs(ws, "ready")   # one ready case (from Task 11's helper)
     st = workspace_status(ws)
     assert st.workspace_state in ("ready", "curating")
     rc = _handle_benchmark_command(["status", str(ws)])

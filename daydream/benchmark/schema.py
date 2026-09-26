@@ -1096,18 +1096,19 @@ _CASE_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+def _validate_transition(table: dict[str, set[str]], frm: str, to: str) -> None:
+    if to not in table.get(frm, set()):
+        raise TransitionError(frm, to)
+
+
 def validate_pr_transition(frm: str, to: str) -> None:
     """Raise :class:`TransitionError` unless ``frm -> to`` is a valid PR ledger move."""
-    allowed = _PR_TRANSITIONS.get(frm, set())
-    if to not in allowed:
-        raise TransitionError(frm, to)
+    _validate_transition(_PR_TRANSITIONS, frm, to)
 
 
 def validate_case_transition(frm: str, to: str) -> None:
     """Raise :class:`TransitionError` unless ``frm -> to`` is a valid curation move."""
-    allowed = _CASE_TRANSITIONS.get(frm, set())
-    if to not in allowed:
-        raise TransitionError(frm, to)
+    _validate_transition(_CASE_TRANSITIONS, frm, to)
 
 
 def derive_workspace_state(

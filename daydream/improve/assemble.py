@@ -908,6 +908,20 @@ def _collect_issues(
             return False
         return True
 
+    def check_symbol_entries(entries: Any, base: str, code: str) -> None:
+        """Flag each entry whose named test symbol is absent from its file."""
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            pointer = f"{base}/{index}"
+            path = entry.get("path")
+            symbol = entry.get("symbol")
+            if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
+                continue
+            source = _read_repo_file(repo, path)
+            if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
+                add(code, pointer)
+
     _schema_issues(normalized, add)
 
     covered = normalized.get("covered_fingerprints")
@@ -1175,29 +1189,8 @@ def _collect_issues(
                     ),
                 )
 
-    for index, coverage in enumerate(existing_coverage):
-        if not isinstance(coverage, dict):
-            continue
-        pointer = f"/test_plan/existing_coverage/{index}"
-        path = coverage.get("path")
-        symbol = coverage.get("symbol")
-        if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
-            continue
-        source = _read_repo_file(repo, path)
-        if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
-            add("EXISTING_COVERAGE_INVALID", pointer)
-
-    for index, exemplar in enumerate(exemplars):
-        if not isinstance(exemplar, dict):
-            continue
-        pointer = f"/test_plan/exemplars/{index}"
-        path = exemplar.get("path")
-        symbol = exemplar.get("symbol")
-        if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
-            continue
-        source = _read_repo_file(repo, path)
-        if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
-            add("TEST_EXEMPLAR_INVALID", pointer)
+    check_symbol_entries(existing_coverage, "/test_plan/existing_coverage", "EXISTING_COVERAGE_INVALID")
+    check_symbol_entries(exemplars, "/test_plan/exemplars", "TEST_EXEMPLAR_INVALID")
     seen_test_symbols: set[tuple[str, str]] = set()
     for index, case in enumerate(cases):
         if not isinstance(case, dict):

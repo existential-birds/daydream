@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.console import Console
@@ -53,6 +53,23 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 def strip_ansi(text: str) -> str:
     """Strip ANSI escape codes from text for assertion comparisons."""
     return _ANSI_ESCAPE.sub("", text)
+
+
+def _load_trajectory(project: Path, session_id: str) -> dict[str, Any]:
+    """Load the recorded trajectory for ``session_id`` from ``project``'s run dir."""
+    path = project / ".daydream" / "runs" / session_id / "trajectory.json"
+    return cast(dict[str, Any], json.loads(path.read_text()))
+
+
+def _remote_ci_phase_end(trajectory: dict[str, Any]) -> dict[str, Any]:
+    """Return the single ``remote-ci`` ``phase_end`` event, asserting uniqueness."""
+    remote_ends: list[dict[str, Any]] = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
+    ]
+    assert len(remote_ends) == 1
+    return remote_ends[0]
 
 
 # Mock Backends
@@ -785,15 +802,10 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     assert manifest["phase_states"]["remote_ci"]["status"] == "succeeded"
     assert manifest["pipeline_status"] == "succeeded"
     trajectory = json.loads((manifests[0].parent / "trajectory.json").read_text())
-    remote_ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
-    ]
-    assert len(remote_ends) == 1
-    assert remote_ends[0]["status"] == "succeeded"
-    assert "reason_code" not in remote_ends[0]
-    assert remote_ends[0]["metadata"]["stop_reason"] == "passed"
+    end = _remote_ci_phase_end(trajectory)
+    assert end["status"] == "succeeded"
+    assert "reason_code" not in end
+    assert end["metadata"]["stop_reason"] == "passed"
 
 
 @pytest.mark.asyncio
@@ -847,24 +859,11 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
     verdict_bytes = (deep / "remote-ci-verdict.json").read_bytes()
     await asyncio.sleep(0.05)
     assert (deep / "remote-ci-verdict.json").read_bytes() == verdict_bytes
-    trajectory = json.loads(
-        (
-            project
-            / ".daydream"
-            / "runs"
-            / verdict["session_id"]
-            / "trajectory.json"
-        ).read_text()
-    )
-    remote_ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
-    ]
-    assert len(remote_ends) == 1
-    assert remote_ends[0]["status"] == "cancelled"
-    assert remote_ends[0]["reason_code"] == "cancelled"
-    assert remote_ends[0]["metadata"]["stop_reason"] == "interrupted"
+    trajectory = _load_trajectory(project, verdict["session_id"])
+    end = _remote_ci_phase_end(trajectory)
+    assert end["status"] == "cancelled"
+    assert end["reason_code"] == "cancelled"
+    assert end["metadata"]["stop_reason"] == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -961,25 +960,12 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     await asyncio.sleep(0.05)
     assert verdict_path.read_bytes() == verdict_bytes
     assert len(fake_gh.process_calls()) == calls
-    trajectory = json.loads(
-        (
-            project
-            / ".daydream"
-            / "runs"
-            / verdict["session_id"]
-            / "trajectory.json"
-        ).read_text()
-    )
+    trajectory = _load_trajectory(project, verdict["session_id"])
     assert trajectory["session_id"] == verdict["session_id"]
-    remote_ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
-    ]
-    assert len(remote_ends) == 1
-    assert remote_ends[0]["status"] == "cancelled"
-    assert remote_ends[0]["reason_code"] == "cancelled"
-    assert remote_ends[0]["metadata"]["stop_reason"] == "cancelled"
+    end = _remote_ci_phase_end(trajectory)
+    assert end["status"] == "cancelled"
+    assert end["reason_code"] == "cancelled"
+    assert end["metadata"]["stop_reason"] == "cancelled"
 
 
 @pytest.mark.asyncio

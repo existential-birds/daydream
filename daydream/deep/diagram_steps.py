@@ -180,6 +180,15 @@ def _diagram_result(
     }
 
 
+def _failed_kind_result(exc: BaseException, advisory: dict[str, Any] | None = None) -> DiagramResult:
+    """Project an unexpected kind failure into the shared no-spec failure result."""
+    return _diagram_result(
+        "failed",
+        f"{type(exc).__name__}: {exc}",
+        advisory=advisory if advisory and advisory["omitted"] else None,
+    )
+
+
 def _diagram_read_paths(fork_path: Path | None) -> set[str]:
     """Completed diagram-phase read paths recorded in one fork's trajectory.
 
@@ -491,11 +500,7 @@ async def _diagram_turn(
     except SanctionedInputUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
-        return _diagram_result(
-            "failed",
-            f"{type(exc).__name__}: {exc}",
-            advisory=advisory if advisory and advisory["omitted"] else None,
-        )
+        return _failed_kind_result(exc, advisory)
     return output, token, budget_reason, getattr(fork, "path", None)
 
 
@@ -628,11 +633,7 @@ async def _run_diagram_kind(
         # Only a real omission is worth carrying on a failure: a kind whose
         # advisory inputs all fit has nothing to report beyond its reason, and
         # ``None`` is the documented "no omission diagnostic" value.
-        return _diagram_result(
-            "failed",
-            f"{type(exc).__name__}: {exc}",
-            advisory=advisory if advisory and advisory["omitted"] else None,
-        )
+        return _failed_kind_result(exc, advisory)
     read_paths |= _diagram_read_paths(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
@@ -854,7 +855,7 @@ async def _run_diagram_step(
                             except Exception as exc:  # noqa: BLE001 -- parallel isolation
                                 detail = f"{type(exc).__name__}: {exc}"
                                 failures[kind_name] = detail
-                                results[kind_name] = _diagram_result("failed", detail)
+                                results[kind_name] = _failed_kind_result(exc)
 
                     tg.start_soon(_task)
             returned_failures = sum(
