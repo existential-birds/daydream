@@ -29,6 +29,7 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+from tests.harness.adjudication import seed_index_dispositions
 from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
 _SOURCE = "b" * 40
@@ -72,28 +73,7 @@ def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str,
     seed shape as the canonical-harvest decisive fixture)."""
 
     root = tmp_path / "index"
-    root.mkdir(exist_ok=True)
-    resolutions = [
-        {
-            "fingerprint": f"fp-{n}", "disposition": disposition,
-            "evidence": [{"reply_id": n, "body_sha256": "abc",
-                          "created_at": "2026-01-01T00:00:00+00:00"}],
-            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
-            "comment_id": 7,
-        }
-        for n, disposition in enumerate(("accepted", "rejected", "unanswered"), start=1)
-    ]
-    sessions = [
-        {
-            "session_id": f"s{n}", "trajectory_id": f"s{n}-t", "segment_id": f"s{n}-seg",
-            "resolutions": [resolution],
-        }
-        for n, resolution in enumerate(resolutions, start=1)
-    ]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
-    (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
+    seed_index_dispositions(root)
     (root / "policy-binding.json").write_text(
         json.dumps(_POLICY_BINDING, sort_keys=True) + "\n", encoding="utf-8"
     )

@@ -43,3 +43,29 @@ def make_hydrated_sqlite_index(
     conn.close()
     (root / "downloads" / ("a" * 40)).mkdir(parents=True)
     return root
+
+
+def seed_index_dispositions(root: Path) -> None:
+    """Write the accepted/rejected/unanswered finding index both decisive fixtures re-derive."""
+    root.mkdir(exist_ok=True)
+    resolutions = [
+        {
+            "fingerprint": f"fp-{n}", "disposition": disposition,
+            "evidence": [{"reply_id": n, "body_sha256": "abc",
+                          "created_at": "2026-01-01T00:00:00+00:00"}],
+            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
+            "comment_id": 7,
+        }
+        for n, disposition in enumerate(("accepted", "rejected", "unanswered"), start=1)
+    ]
+    sessions = [
+        {
+            "session_id": f"s{n}", "trajectory_id": f"s{n}-t", "segment_id": f"s{n}-seg",
+            "resolutions": [resolution],
+        }
+        for n, resolution in enumerate(resolutions, start=1)
+    ]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")

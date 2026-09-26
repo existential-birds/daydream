@@ -27,6 +27,12 @@ from pathlib import Path
 from daydream import git_ops
 
 
+def _fail(message: str) -> int:
+    """Print ``message`` to stderr and return exit code ``1`` (never a bare traceback)."""
+    print(message, file=sys.stderr)
+    return 1
+
+
 def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
@@ -203,8 +209,7 @@ def _handle_benchmark_import_prs(args: argparse.Namespace) -> int:
     try:
         targets = gi.parse_import_targets(args.pr, args.pr_file, args.head)
     except gi.ImportTargetError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     try:
         return gi.run_import_prs(
             args.dir,
@@ -213,11 +218,9 @@ def _handle_benchmark_import_prs(args: argparse.Namespace) -> int:
             refresh=args.refresh,
         )
     except gi.PreflightError as exc:
-        print(f"{exc.code}: {exc.message}", file=sys.stderr)
-        return 1
+        return _fail(f"{exc.code}: {exc.message}")
     except WorkspaceCorrupt as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
 
 
 def _handle_benchmark_init(dir_path: Path, repo: str, reviewer_hosts: list[str], judge_hosts: list[str]) -> int:
@@ -227,8 +230,7 @@ def _handle_benchmark_init(dir_path: Path, repo: str, reviewer_hosts: list[str],
     try:
         manifest = init_workspace(dir_path, repo, reviewer_hosts, judge_hosts)
     except InitError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     classification = manifest.privacy.classification
     egress = " ".join(manifest.privacy.reviewer_allowed_hosts + manifest.privacy.judge_allowed_hosts)
     print(f"classification: {classification}")
@@ -243,8 +245,7 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     try:
         status = workspace_status(dir_path)
     except WorkspaceCorrupt as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     unresolved = "unresolved" if not status.repository_identity_resolved else "resolved"
     print(f"workspace state: {status.workspace_state}")
     print(f"repository identity: {unresolved}")
@@ -277,8 +278,7 @@ def _handle_benchmark_validate(args: argparse.Namespace) -> int:
         try:
             code = validate_compiled(args.dir)
         except (CompileError, WorkspaceCorrupt) as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
+            return _fail(str(exc))
         print("validation: compiled-ready")
         return code
     from daydream.benchmark.workspace import validate_workspace
@@ -297,8 +297,7 @@ def _handle_benchmark_build_harbor(args: argparse.Namespace) -> int:
     try:
         lock = build_harbor(args.dir, wheel=args.daydream_wheel)
     except (CompileError, WorkspaceCorrupt) as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     print(f"built Harbor dataset with {len(lock.get('cases', {}))} case(s)")
     return 0
 
@@ -340,11 +339,9 @@ def _handle_benchmark_calibrate(args: argparse.Namespace) -> int:
     stderr and return exit ``1`` — never a bare traceback.
     """
     if not args.yes and not _is_interactive_tty():
-        print(
-            "calibrate-judge: requires TTY confirmation or --yes before any paid judge call",
-            file=sys.stderr,
+        return _fail(
+            "calibrate-judge: requires TTY confirmation or --yes before any paid judge call"
         )
-        return 1
     from daydream.benchmark.harbor import calibrate
 
     env = {
@@ -455,12 +452,9 @@ def _handle_benchmark_clean(args: argparse.Namespace) -> int:
     from daydream.benchmark.storage import WorkspaceCorrupt
 
     if args.all and not args.yes and not _is_interactive_tty():
-        print(
-            "clean --all: requires TTY confirmation or --yes before deleting "
-            "curated source/gold",
-            file=sys.stderr,
+        return _fail(
+            "clean --all: requires TTY confirmation or --yes before deleting curated source/gold"
         )
-        return 1
     cache = args.cache or args.derived
     jobs = args.jobs or args.derived
     trajectories = args.trajectories or args.derived
@@ -474,8 +468,7 @@ def _handle_benchmark_clean(args: argparse.Namespace) -> int:
             yes=args.yes,
         )
     except (run_mod.RunError, WorkspaceCorrupt) as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     for line in report.summary_lines():
         print(line)
     return report.exit_code
@@ -499,18 +492,15 @@ def _handle_benchmark_curate(args: argparse.Namespace) -> int:
         if _is_interactive_tty():
             from daydream.benchmark.curate_tui import run_curate_tui
             return run_curate_tui(args.dir, args.case)
-        print(
+        return _fail(
             "curate: interactive curation requires a TTY; pass --apply-gold <file> to apply "
-            "a reviewed gold draft",
-            file=sys.stderr,
+            "a reviewed gold draft"
         )
-        return 1
     try:
         fragment = load_yaml_strict(args.apply_gold)
         cu.apply_gold_fragment(args.dir, args.case, fragment)
     except (cu.CurationError, WorkspaceCorrupt, git_ops.GitError, ValidationError, KeyError, TypeError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     return 0
 
 
@@ -531,8 +521,7 @@ def _handle_benchmark_objective(args: argparse.Namespace) -> int:
     try:
         run = objective.read_completed_run(args.dir, args.run_id, env=dict(os.environ))
     except objective.ObjectiveError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
 
     if args.json is not None:
         blob = objective.objective_to_json(run)
@@ -600,11 +589,9 @@ def _handle_benchmark_aggregate(args: argparse.Namespace) -> int:
         manifest = load_json_strict(args.manifest)
         suite = objective.aggregate_suite(manifest, env=dict(os.environ))
     except objective.ObjectiveError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
     except WorkspaceCorrupt as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return _fail(str(exc))
 
     blob = _suite_objective_to_json(suite)
     if args.json is not None:

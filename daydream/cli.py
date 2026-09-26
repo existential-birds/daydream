@@ -505,12 +505,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Maximum projected share of any single native profile, in (0, 1]",
     )
 
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Print the projection summary, write nothing",
-    )
+    _add_dry_run_argument(parser, "Print the projection summary, write nothing")
 
     parser.add_argument(
         "--as-of",
@@ -1203,6 +1198,16 @@ def _add_archive_dir_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> None:
+    """Add the shared ``--dry-run`` option to a corpus/train subcommand parser."""
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help=help_text,
+    )
+
+
 def _build_harvest_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream corpus harvest [...]``.
 
@@ -1219,12 +1224,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
             "(RL/fine-tuning corpus prep)."
         ),
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Build annotations but do not write observations or the resume log.",
-    )
+    _add_dry_run_argument(parser, "Build annotations but do not write observations or the resume log.")
     parser.add_argument(
         "--session",
         type=str,
@@ -1387,14 +1387,10 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
         "owner/repo slug (case-insensitive); only meaningful with --license-policy",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help=(
-            "Plan only: discover and normalize sessions, download, ingest, and tally "
-            "discovered/admitted/rejected candidates — no Hub publication."
-        ),
+    _add_dry_run_argument(
+        parser,
+        "Plan only: discover and normalize sessions, download, ingest, and tally "
+        "discovered/admitted/rejected candidates — no Hub publication.",
     )
     return parser
 
@@ -2127,12 +2123,10 @@ def _build_train_parser() -> argparse.ArgumentParser:
         default=0,
         help="Master seed (split freeze + training determinism; default: 0)",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Execute everything that needs no GPU (corpus load, stage0 gate, "
-             "manifest) and mark the GPU stages skipped_dry — the CI path",
+    _add_dry_run_argument(
+        parser,
+        "Execute everything that needs no GPU (corpus load, stage0 gate, "
+        "manifest) and mark the GPU stages skipped_dry — the CI path",
     )
     return parser
 

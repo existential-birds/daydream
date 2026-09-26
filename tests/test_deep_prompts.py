@@ -1,8 +1,9 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
 import json
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 import pytest
 
@@ -40,32 +41,9 @@ from daydream.phases import build_alternative_review_prompt
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_profile import default_strategy as _default_strategy, prompt_paths
 
-
-class _PromptPaths(TypedDict):
-    """The four on-disk path kwargs shared by the per-stack and fallback builders.
-
-    Declaring each key's type explicitly lets mypy reconcile ``**p`` unpacking
-    with the builders' per-parameter signatures; a plain ``dict[str, Path]`` would
-    spill ``Path`` onto unrelated kwargs like ``prior_commits``/``is_docs_only``.
-    """
-
-    diff_path: Path
-    intent_path: Path
-    alternatives_path: Path
-    output_path: Path
-    cwd: Path
-
-
-def _paths(tmp_path: Path) -> _PromptPaths:
-    return {
-        "diff_path": tmp_path / ".daydream" / "diff.patch",
-        "intent_path": tmp_path / ".daydream" / "deep" / "intent.md",
-        "alternatives_path": tmp_path / ".daydream" / "deep" / "alternatives.json",
-        "output_path": tmp_path / ".daydream" / "deep" / "stack-python-review.md",
-        "cwd": tmp_path,
-    }
+_paths = partial(prompt_paths, output_name="stack-python-review.md")
 
 
 def _arbiter_prompt(tmp_path: Path, **overrides: Any) -> str:
