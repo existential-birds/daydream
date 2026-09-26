@@ -269,8 +269,10 @@ def format_callback_progress(
     if value:
         if name in ("Bash", "shell") and key == "command":
             value = _redacted_bash_command(name, value, max_chars=max_len)
+        else:
+            value = value[:max_len]
         line.append(" ")
-        line.append(value[:max_len], style=_primary_value_style(key))
+        line.append(value, style=_primary_value_style(key))
     return line
 
 

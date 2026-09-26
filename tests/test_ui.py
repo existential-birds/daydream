@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 import daydream.agent as agent_mod
+import daydream.ui.tools as ui_tools
 from daydream.agent import _summarize_input, run_agent
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
@@ -432,6 +433,25 @@ def test_format_callback_progress_bash_shows_command() -> None:
     secret_text = c3.export_text()
     assert "hunter2" not in secret_text
     assert "DB_PASSWORD=[REDACTED_ENV_VAR]" in secret_text
+
+
+def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The owner is the only capper of a command value (issue #1227).
+
+    A stub owner returning more than max_len proves the callback passes the
+    command through whole; a second `value[:max_len]` at the call site would
+    truncate it. Non-command values keep the generic single-line cap.
+    """
+    long_value = "z" * (_BASH_COMMAND_MAX_CHARS + 50)
+    monkeypatch.setattr(ui_tools, "_redacted_bash_command", lambda *a, **k: long_value)
+
+    command_line = format_callback_progress("Bash", {"command": "anything"}, None)
+    assert long_value in command_line.plain
+
+    pattern = "p" * (_BASH_COMMAND_MAX_CHARS + 50)
+    generic_line = format_callback_progress("Grep", {"pattern": pattern}, None)
+    assert pattern[: _BASH_COMMAND_MAX_CHARS] in generic_line.plain
+    assert pattern not in generic_line.plain
 
 
 def test_format_callback_progress_redacts_only_bash_commands() -> None:
