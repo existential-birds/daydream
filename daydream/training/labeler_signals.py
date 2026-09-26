@@ -35,11 +35,10 @@ from daydream.pr_review import parse_finding_markers
 from daydream.training._immutable_json import thaw_json
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (
-    _QUALIFYING_ASSOCIATIONS,
-    _identity_gates_pass,
     _user_str,
     classify_reply,
     is_qualifying_author,
+    qualification_reason,
 )
 
 # Version-stable footer prefix: matching only this prefix (not the full
@@ -127,27 +126,6 @@ class CommentResolutionSignal:
 PerFindingDisposition = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing"]
 
 
-def _reply_reason(
-    reply: dict[str, Any],
-    pr_author_logins: frozenset[str],
-    review_author_logins: frozenset[str],
-) -> str:
-    """Why this reply's author qualified or was excluded (evidence ``reason``)."""
-    if reply.get("is_self_reply"):
-        return "excluded:self-reply"
-    if not _identity_gates_pass(reply):
-        return "excluded:bot"
-    assoc = reply.get("author_association")
-    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
-        return f"assoc:{assoc}"
-    login = _user_str(reply, "login")
-    if login in pr_author_logins:
-        return "pr_author"
-    if login in review_author_logins:
-        return "review_author"
-    return "excluded:non-qualifying"
-
-
 def _reply_evidence(
     replies: list[dict[str, Any]],
     pr_author_logins: frozenset[str],
@@ -165,7 +143,7 @@ def _reply_evidence(
                 "author_association": reply.get("author_association", ""),
                 "created_at": reply.get("created_at", ""),
                 "body_sha256": hashlib.sha256((reply.get("body") or "").encode("utf-8")).hexdigest(),
-                "reason": _reply_reason(reply, pr_author_logins, review_author_logins),
+                "reason": qualification_reason(reply, pr_author_logins, review_author_logins),
                 # Per-reply classifier axis (``classify_reply`` output): the field
                 # harvest's ``_decisive_evidence_valid_at`` filters on, so an earlier
                 # qualifying-but-ambiguous reply never moves ``valid_at`` ahead of
@@ -188,7 +166,7 @@ def _disposition_for_replies(
 
     Only replies whose author qualifies under the M6 gate
     (:func:`is_qualifying_author`) may cast a decisive vote — the same gate
-    the persisted evidence ``reason`` records (``_reply_reason``). A reply
+    whose persisted evidence ``reason`` is :func:`qualification_reason`. A reply
     whose own evidence says ``excluded:non-qualifying`` must not decide the
     finding, or harvest's ``_decisive_evidence_valid_at`` would drop its
     timestamp as excluded while the disposition kept its vote (M6).

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from daydream.backends.osprey import (
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
+from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.trajectory import make_recorder
 
 
@@ -45,10 +47,6 @@ from tests.harness.trajectory import make_recorder
 async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_terminal_envelope(
     tmp_path: Path, sandbox: bool,
 ) -> None:
-    import hashlib
-
-    from tests.harness.protocol_cli import install_protocol_cli
-
     target = (tmp_path / "model cwd with spaces").resolve()
     target.mkdir()
     (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")

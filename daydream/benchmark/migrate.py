@@ -33,7 +33,6 @@ class CaseUpgrade:
 
     case_id: str
     finding_ids_recomputed: int
-    changed: bool
 
 
 @dataclass
@@ -216,8 +215,7 @@ def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
                 continue
             # Every staged case is written: the v1 schema_version bump is
             # unconditional, and a v2 repair is a real backfill.
-            upgrades.append(CaseUpgrade(case_id=case_id, finding_ids_recomputed=recomputed,
-                                        changed=True))
+            upgrades.append(CaseUpgrade(case_id=case_id, finding_ids_recomputed=recomputed))
             writes[case_file] = yaml.safe_dump(new_raw, sort_keys=False).encode("utf-8")
         except Exception as exc:  # never silently rewrite a case
             report.errors.append(f"{case_id}: {exc}")

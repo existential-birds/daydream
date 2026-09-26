@@ -1455,7 +1455,7 @@ class PlanWriteSession:
             # The plan text is worktree-independent: land the durable copy in the
             # main index too, so it survives the next run's worktree pruning.
             (self._plans_dir / filename).write_text(text, encoding="utf-8")
-            self._reanchored[number] = _index_entry(
+            entry = _index_entry(
                 number=number,
                 slug=slug,
                 title=selection.get("title") or title,
@@ -1464,6 +1464,7 @@ class PlanWriteSession:
                 planned_at=new_head,
                 status="TODO",
             )
+            self._reanchored[number] = entry
             entries = dict(self._entries)
             entries.update(self._reanchored)
             self._write_index_files(
@@ -1477,13 +1478,8 @@ class PlanWriteSession:
             landed_rel = (
                 (self._plans_dir / filename).relative_to(self._repo).as_posix()
             )
-            self._entries[number] = _index_entry(
-                number=number,
-                slug=slug,
-                title=selection.get("title") or title,
-                fingerprint=reservation.fingerprint,
-                finding=finding,
-                planned_at=new_head,
+            self._entries[number] = replace(
+                entry,
                 status=f"{REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
             )
             # Index the durable main copy immediately so an interrupted run can

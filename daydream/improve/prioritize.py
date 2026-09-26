@@ -233,6 +233,12 @@ def _concern_for(target: str, signals: list[str], title: str) -> dict[str, Any]:
     return {"kind": "title", "value": normalize_title(title)}
 
 
+def _digest(payload: dict[str, Any]) -> str:
+    """sha256 of a canonical (sorted, compact) JSON document."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def member_alias(finding: dict[str, Any]) -> str:
     """Return a wording-resistant semantic alias for one finding.
 
@@ -248,18 +254,15 @@ def member_alias(finding: dict[str, Any]) -> str:
         str(finding.get("title") or ""),
     )
     line = finding.get("line")
-    canonical = json.dumps(
+    return "member:" + _digest(
         {
             "kind": "daydream-improve-member",
             "path": _finding_path(finding),
             "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
             "category": str(finding.get("category") or ""),
             "concern": concern,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+        }
     )
-    return f"member:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _reuse_target_key(finding: dict[str, Any]) -> str:
@@ -362,7 +365,7 @@ def _work_package_fingerprint(members: list[dict[str, Any]]) -> str:
         else []
     )
     concern = _concern_for(reuse_target or "", signals, str(members[0].get("title") or ""))
-    canonical = json.dumps(
+    return _digest(
         {
             "kind": "daydream-improve-work-package-v2",
             "concern": concern,
@@ -375,11 +378,8 @@ def _work_package_fingerprint(members: list[dict[str, Any]]) -> str:
                 if paths
                 else {"fallback_members": sorted({alias for member in members for alias in _finding_aliases(member)})}
             ),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+        }
     )
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _with_unique_package_fingerprints(
@@ -393,16 +393,13 @@ def _with_unique_package_fingerprints(
         if len(collisions) < 2:
             continue
         for package in collisions:
-            canonical = json.dumps(
+            fingerprint = _digest(
                 {
                     "kind": "daydream-improve-work-package-split-v1",
                     "base": base,
                     "members": sorted(str(value) for value in package.get("member_fingerprints", [])),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
+                }
             )
-            fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
             package["fingerprint"] = fingerprint
             package["package_fingerprint"] = fingerprint
     return packages

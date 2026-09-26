@@ -66,6 +66,19 @@ def _load_workspace_privacy(workspace: Path) -> dict[str, Any]:
     return privacy
 
 
+def _compiled_lock_path(workspace: Path) -> Path:
+    return workspace / "harbor" / "benchmark.lock.json"
+
+
+def _read_compiled_lock(workspace: Path) -> Any:
+    """Parse the compiled ``harbor/benchmark.lock.json``; unreadable is RunError."""
+    path = _compiled_lock_path(workspace)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunError(f"cannot read compiled lock at {path}: {exc}") from exc
+
+
 def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | None:
     """The reviewer/judge egress allowlists Harbor will actually enforce.
 
@@ -84,11 +97,7 @@ def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | No
     skipped when a policy exists.
     """
     compiled = workspace / "harbor"
-    lock_path = compiled / "benchmark.lock.json"
-    try:
-        lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunBlocked(f"cannot read compiled lock at {lock_path}: {exc}") from exc
+    lock = _read_compiled_lock(workspace)
     cases = lock.get("cases") if isinstance(lock, dict) else None
     keys = list(cases.keys()) if isinstance(cases, dict) else []
     if not keys:
@@ -171,11 +180,7 @@ def _compiled_job_config(workspace: Path) -> dict[str, Any]:
 
 def _compiled_cases(workspace: Path) -> list[dict[str, Any]]:
     """Return the compiled lock's case entries (defensive over dict/list)."""
-    path = workspace / "harbor" / "benchmark.lock.json"
-    try:
-        lock = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunError(f"cannot read compiled lock at {path}: {exc}") from exc
+    lock = _read_compiled_lock(workspace)
     cases = lock.get("cases") if isinstance(lock, dict) else None
     if isinstance(cases, dict):
         return list(cases.values())
@@ -232,7 +237,7 @@ def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
 
 def _compiled_lock_sha256(workspace: Path) -> str:
     """sha256 of the compiled ``harbor/benchmark.lock.json`` bytes."""
-    return hashlib.sha256((workspace / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    return hashlib.sha256(_compiled_lock_path(workspace).read_bytes()).hexdigest()
 
 
 def _compiled_daydream_wheel(workspace: Path) -> tuple[str, str]:
@@ -244,11 +249,8 @@ def _compiled_daydream_wheel(workspace: Path) -> tuple[str, str]:
     block (or unreadable lock) raises ``RunError`` naming the lock path — a
     plausible placeholder is never defaulted.
     """
-    path = workspace / "harbor" / "benchmark.lock.json"
-    try:
-        lock = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunError(f"cannot read compiled lock at {path}: {exc}") from exc
+    path = _compiled_lock_path(workspace)
+    lock = _read_compiled_lock(workspace)
     if not isinstance(lock, dict):
         raise RunError(f"compiled lock at {path} must be a mapping")
     day = lock.get("daydream")
