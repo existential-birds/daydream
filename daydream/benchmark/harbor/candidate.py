@@ -88,7 +88,7 @@ def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> li
     salt, so the hidden verifier re-derives identical ids.
     """
     findings: list[dict[str, Any]] = []
-    groups: dict[tuple[str, ...], int] = {}
+    groups: dict[tuple[object, ...], int] = {}
     for raw in items:
         fields = extract_item_fields(raw)
         if fields is None:
@@ -113,17 +113,7 @@ def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> li
             raise CandidateError(
                 f"cannot build candidate finding: {exc}", kind="invalid_finding"
             ) from exc
-        canonical = (
-            title or "",
-            body or "",
-            fields.severity or "",
-            fields.path or "",
-            str(fields.line_int),
-            str(fields.line_int),
-        )
-        ordinal = groups.get(canonical, 0)
-        groups[canonical] = ordinal + 1
-        entry["candidate_id"] = vc.derive_candidate_id(case_id, entry, ordinal)
+        entry["candidate_id"] = vc.assign_candidate_id(case_id, entry, groups)
         findings.append(entry)
     return findings
 

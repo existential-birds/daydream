@@ -57,6 +57,18 @@ def read_trajectory(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
+def trajectory_payload(
+    trajectory_id: str,
+    *,
+    session_id: str = "11111111-2222-3333-4444-555555555555",
+) -> bytes:
+    """Encode an empty trajectory document as a run snapshot stores it."""
+    return json.dumps(
+        {"session_id": session_id, "trajectory_id": trajectory_id, "steps": []},
+        sort_keys=True,
+    ).encode()
+
+
 def root_trajectory(repo: Path) -> dict[str, Any]:
     """Load the single run trajectory written under ``repo/.daydream/runs``."""
     paths = list((repo / ".daydream" / "runs").glob("*/trajectory.json"))

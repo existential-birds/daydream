@@ -51,7 +51,7 @@ from daydream.trajectory import (
     run_document_path,
     sibling_document_path,
 )
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, trajectory_payload
 
 
 def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
@@ -160,22 +160,15 @@ def test_exact_match_takes_precedence(tmp_path: Path) -> None:
 SESSION = "11111111-2222-3333-4444-555555555555"
 
 
-def payload(trajectory_id: str) -> bytes:
-    return json.dumps(
-        {"session_id": SESSION, "trajectory_id": trajectory_id, "steps": []},
-        sort_keys=True,
-    ).encode()
-
-
 def test_analyzer_resolution_keys_off_the_owned_names(tmp_path: Path) -> None:
     """Resolution, the main/forked split and the glob all come from the surface."""
     daydream_dir = tmp_path / ".daydream"
     run_dir = run_directory(daydream_dir, SESSION)
     run_document_path(run_dir).parent.mkdir(parents=True)
-    run_document_path(run_dir).write_bytes(payload(SESSION))
+    run_document_path(run_dir).write_bytes(trajectory_payload(SESSION))
     sibling = sibling_document_path(run_dir, "deep-python.json")
     sibling.parent.mkdir(parents=True)
-    sibling.write_bytes(payload("fork-1"))
+    sibling.write_bytes(trajectory_payload("fork-1"))
 
     assert [p.name for p in collect_trajectory_paths(run_dir)] == [
         RUN_DOCUMENT_NAME,

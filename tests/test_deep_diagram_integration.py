@@ -234,6 +234,9 @@ def _assert_diagram_dispatch_children(
     descriptors: list[str],
 ) -> list[dict[str, Any]]:
     """Prove one exact child document and invocation per dispatch result."""
+    assert dispatch["extra"]["planned_count"] == len(descriptors)
+    assert dispatch["extra"]["attempted_count"] == len(descriptors)
+    assert dispatch["extra"]["completed_count"] == len(descriptors)
     root = _root_trajectory(target)
     results = dispatch["observation"]["results"]
     assert [result["content"] for result in results] == [
@@ -562,9 +565,6 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
         "Dispatched to diagram-sequence",
         "Dispatched to diagram-sequence-repair",
     ]
-    assert dispatch["extra"]["planned_count"] == 2
-    assert dispatch["extra"]["attempted_count"] == 2
-    assert dispatch["extra"]["completed_count"] == 2
     _assert_diagram_dispatch_children(
         target,
         dispatch,
@@ -1127,9 +1127,6 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     assert end["reason_code"] == "some_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "partial"
     assert dispatch["extra"]["reason_code"] == "some_children_failed"
-    assert dispatch["extra"]["planned_count"] == 2
-    assert dispatch["extra"]["attempted_count"] == 2
-    assert dispatch["extra"]["completed_count"] == 2
     _assert_diagram_dispatch_children(
         target,
         dispatch,
@@ -1173,9 +1170,6 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
     assert end["reason_code"] == "all_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "failed"
     assert dispatch["extra"]["reason_code"] == "all_children_failed"
-    assert dispatch["extra"]["planned_count"] == 2
-    assert dispatch["extra"]["attempted_count"] == 2
-    assert dispatch["extra"]["completed_count"] == 2
     _assert_diagram_dispatch_children(
         target,
         dispatch,

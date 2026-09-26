@@ -82,7 +82,8 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         # Recorded-and-flagged as_of edge policy: the record keeps its evidence
         # but is never gold-eligible, so it is excluded from the outcome-bearing
         # numerator regardless of disposition.
-        if bool(item.get("evidence_after_as_of", False)):
+        after_as_of = bool(item.get("evidence_after_as_of", False))
+        if after_as_of:
             evidence_after_as_of.append(record_id)
 
         tier = str(item.get("tier", ""))
@@ -99,7 +100,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
             and tier == "gold"
             and posterior_eligible
             and profile == "pr_review"
-            and not bool(item.get("evidence_after_as_of", False))
+            and not after_as_of
         )
         if decisive:
             if outcome_bearing:
@@ -124,7 +125,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
             ):
                 inter_rater_agreeing += 1
 
-    gate_passes = adjudicated > 0 and adjudicated * 5 >= adjudicated * 4
+    gate_passes = adjudicated > 0
     return {
         "outcome_coverage": {"adjudicated": adjudicated, "total": adjudicated},
         "silver_task_only_count": silver_task_only,
