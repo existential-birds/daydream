@@ -1369,8 +1369,6 @@ def create_backend(
     from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
     if name == "claude":
-        from daydream.backends.claude import ClaudeBackend
-
         return ClaudeBackend(
             model=model or DEFAULT_CLAUDE_MODEL,
             reasoning_effort=reasoning_effort,
@@ -1389,8 +1387,6 @@ def create_backend(
             execution_input=execution_input,
         )
     if name == "pi":
-        from daydream.backends.pi import PiBackend
-
         return PiBackend(
             model=model,
             cwd=cwd,
@@ -1400,8 +1396,6 @@ def create_backend(
     if name == "osprey":
         if execution_input is not None:
             raise ValueError("explicit BackendExecutionInput is not supported for osprey")
-        from daydream.backends.osprey import OspreyBackend
-
         return OspreyBackend(
             model=model,
             cwd=cwd,

@@ -1857,77 +1857,52 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(
     assert result == cached_repo
 
 
-async def test_harvest_propagates_transient_giterror_for_retry(
+@pytest.mark.parametrize(
+    ("session_id", "status_message"),
+    [
+        ("s-transient-500", "gh: Internal Server Error (HTTP 500)"),
+        ("s-merge-comments-404", "gh: Not Found (HTTP 404)"),
+    ],
+)
+async def test_harvest_propagates_confirmed_merge_comment_fetch_error(
     tmp_path: Path,
     archive_dir: Any,
+    session_id: str,
+    status_message: str,
 ) -> None:
-    """Real-path: a transient GitError (HTTP 500) on /comments propagates, not degrades.
+    """Real-path: a GitError on /comments after a confirmed merge propagates, not degrades.
 
     ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a
-    transient HTTP 500. Unlike a benign 404/422 (PR genuinely absent), a server
-    error is *recoverable*: degrading it to the local posterior and caching the
-    row "done" would permanently lose the merge evidence. Per #166 the row must
-    instead surface as a hard error and stay un-cached so a later resume retries
-    it. Drives ``run_harvest`` end-to-end and asserts the row is counted in
-    ``errors``, is NOT annotated, and is NOT marked done in the resume cache.
+    recoverable GitError — an HTTP 500 server error, or a benign HTTP 404. Once
+    the merge status is confirmed the PR provably exists, so a 404 on its
+    comments sub-resource cannot mean "PR absent" either. Degrading such a row
+    to the local posterior and caching it "done" would permanently lose the
+    merge evidence (and its ``valid_at``); per #166 the row must instead surface
+    as a hard error and stay un-cached so a later resume retries it. Drives
+    ``run_harvest`` end-to-end and asserts the row is counted in ``errors``, is
+    NOT annotated, and is NOT marked done in the resume cache.
     """
-    _seed_archived_deep_run(archive_dir, "s-transient-500")
+    _seed_archived_deep_run(archive_dir, session_id)
     cache_dir = tmp_path / "c"
 
-    def _gh_merge_ok_comments_500(repo: str, endpoint: str, **kwargs: Any) -> Any:
+    def _gh_merge_ok_comments_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if re.search(r"/pulls/\d+$", endpoint):
             return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
         if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
-            raise GitError("gh: Internal Server Error (HTTP 500)")
+            raise GitError(status_message)
         return {}
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
     summary = await run_harvest(
         config,
-        services=_services(config, github=_gh_merge_ok_comments_500),
+        services=_services(config, github=_gh_merge_ok_comments_fail),
     )
 
-    assert summary["errors"] == 1  # transient 500 propagated, not degraded
-    assert latest_label_observation(archive_dir, "s-transient-500") is None  # not annotated
+    assert summary["errors"] == 1  # comment-fetch error propagated, merge evidence not discarded
+    assert latest_label_observation(archive_dir, session_id) is None  # not annotated
     # Resume contract: the failed row is NOT cached "done", so a later run retries it.
-    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_500).completed_sessions()
-    assert "s-transient-500" not in done
-
-
-async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
-    tmp_path: Path,
-    archive_dir: Any,
-) -> None:
-    """Real-path: a 404 on /comments after a confirmed merge propagates, not degrades.
-
-    ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a benign
-    HTTP 404. Once the merge status is confirmed the PR provably exists, so a
-    404 on its comments sub-resource cannot mean "PR absent" — it is transient.
-    The old behavior degraded such a row to a local-branch posterior, discarding
-    the confirmed ``PRMergeSignal`` (and its ``valid_at``) and caching an
-    ``unknown`` label. The row must instead surface as a hard error and stay
-    un-cached so a later resume retries it and recovers the merge evidence.
-    """
-    _seed_archived_deep_run(archive_dir, "s-merge-comments-404")
-    cache_dir = tmp_path / "c"
-
-    def _gh_merge_ok_comments_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        if re.search(r"/pulls/\d+$", endpoint):
-            return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
-        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
-            raise GitError("gh: Not Found (HTTP 404)")
-        return {}
-
-    config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
-    summary = await run_harvest(
-        config,
-        services=_services(config, github=_gh_merge_ok_comments_404),
-    )
-
-    assert summary["errors"] == 1  # benign comment 404 propagated, merge evidence not discarded
-    assert latest_label_observation(archive_dir, "s-merge-comments-404") is None  # not annotated
-    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_404).completed_sessions()
-    assert "s-merge-comments-404" not in done
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_fail).completed_sessions()
+    assert session_id not in done
 
 
 async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(

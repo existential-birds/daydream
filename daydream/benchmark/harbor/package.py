@@ -20,6 +20,7 @@ import yaml
 from daydream.benchmark import schema
 from daydream.benchmark.harbor import env_policy
 from daydream.benchmark.harbor.build import CompileError
+from daydream.benchmark.workspace import validate_workspace
 
 GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format requirements-txt"
 _BASE_DIGEST = "sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4"
@@ -243,7 +244,6 @@ def template_text(rel: str) -> str:
 def build_harbor(root: Path, *, wheel: Path) -> dict[str, Any]:
     """Validate all preconditions, then atomically compile a runnable dataset."""
     from daydream.benchmark.harbor import build
-    from daydream.benchmark.workspace import validate_workspace
 
     code, label = validate_workspace(Path(root))
     if code != 0:
@@ -320,7 +320,6 @@ def validate_compiled(root: Path | None) -> int:
     if root is None:
         resolve_harbor()
         raise PackageError("compiled workspace path is required")
-    from daydream.benchmark.workspace import validate_workspace
 
     root = Path(root)
     code, label = validate_workspace(root)

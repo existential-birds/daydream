@@ -58,7 +58,7 @@ from daydream.observability.config import ObservabilityConfig, ObservabilityErro
 from daydream.phases import UnconfinedFindingError
 from daydream.run_context import active_backends
 from daydream.runner import RunConfig, run
-from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, flush_active_signal_recorders
+from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, flush_active_signal_recorders, redact_text
 from daydream.ui import (
     NEON_THEME,
     ShutdownPanel,
@@ -1643,7 +1643,6 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     import os
 
     from daydream.archive import hydrate as _hydrate
-    from daydream.trajectory import redact_text
 
     parser = _build_hydrate_hub_parser()
     console = create_console()
@@ -1794,8 +1793,6 @@ def _print_license_admission(console: Any, buckets: Any) -> None:
 
 def _print_incomplete_manifests(console: Any, manifests: Any, *, prefix: str) -> None:
     """Print the reduced-yield warning shared by hydrate paths."""
-    from daydream.trajectory import redact_text
-
     print_warning(
         console,
         f"{prefix} yield reduced: incomplete manifest(s) discovered and "
@@ -1812,7 +1809,6 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     rejections) lands in exactly one per-repository license bucket.
     """
     from daydream.archive import hydrate as _hydrate
-    from daydream.trajectory import redact_text
 
     try:
         client = _hydrate._make_client(config.source_repo)

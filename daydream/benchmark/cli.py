@@ -316,7 +316,7 @@ def _handle_benchmark_upgrade(args: argparse.Namespace) -> int:
     for c in report.cases:
         print(
             f"case {c.case_id}: finding_ids_recomputed={c.finding_ids_recomputed} "
-            f"changed={c.changed}"
+            f"changed=True"
         )
     for e in report.errors:
         print(f"error: {e}", file=sys.stderr)

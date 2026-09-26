@@ -122,6 +122,32 @@ def _identity_gates_pass(reply: dict[str, Any]) -> bool:
     return True
 
 
+def qualification_reason(
+    reply: dict[str, Any],
+    pr_author_logins: set[str] | frozenset[str],
+    review_author_logins: set[str] | frozenset[str] = frozenset(),
+) -> str:
+    """Name why the reply's author counts (M6) — the persisted evidence reason.
+
+    Returns ``excluded:self-reply``/``excluded:bot``/``excluded:non-qualifying``
+    when the author is not a human whose judgment counts, else ``pr_author``,
+    ``review_author``, or ``assoc:<ASSOCIATION>`` naming the qualifying gate.
+    """
+    if reply.get("is_self_reply"):
+        return "excluded:self-reply"
+    if not _identity_gates_pass(reply):
+        return "excluded:bot"
+    assoc = reply.get("author_association")
+    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
+        return f"assoc:{assoc}"
+    login = _user_str(reply, "login")
+    if login in pr_author_logins:
+        return "pr_author"
+    if login in review_author_logins:
+        return "review_author"
+    return "excluded:non-qualifying"
+
+
 def is_qualifying_author(
     reply: dict[str, Any],
     pr_author_logins: set[str] | frozenset[str],
@@ -133,17 +159,7 @@ def is_qualifying_author(
     a daydream agent, is not a marked self-reply, and is either a PR author,
     a formal-review author, or holds OWNER/MEMBER/COLLABORATOR association.
     """
-    if reply.get("is_self_reply"):
-        return False
-    if not _identity_gates_pass(reply):
-        return False
-    login = _user_str(reply, "login")
-    assoc = reply.get("author_association")
-    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
-        return True
-    if login in pr_author_logins or login in review_author_logins:
-        return True
-    return False
+    return not qualification_reason(reply, pr_author_logins, review_author_logins).startswith("excluded:")
 
 
 def classify_reply(reply: dict[str, Any]) -> str:
