@@ -35,6 +35,7 @@ from daydream.training.adjudication.final_bundle import (
     _bundle_input_names,
     _validate_policy_binding,
 )
+from daydream.training.adjudication.materialize import _MANIFEST_FILENAME
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from daydream.trajectory import redact_text
 
@@ -51,7 +52,6 @@ _STATE_FILES = ("queue.json", "observations.jsonl", "preview-ledger.json")
 # the state files whenever it exists in the state dir: a fresh-VM resume must
 # restore the import itself, not just the adjudication state.
 _ARCHIVE_INDEX_FILE = "index.db"
-_MANIFEST_FILENAME = "preview-manifest.json"
 # Shared by the checkpoint writer and reader so an emitted batch always parses.
 _CHECKPOINT_REQUIRED_NAMES = frozenset((*_STATE_FILES, _MANIFEST_FILENAME))
 _CHECKPOINT_ALLOWED_NAMES = _CHECKPOINT_REQUIRED_NAMES | {_ARCHIVE_INDEX_FILE}

@@ -41,6 +41,8 @@ from daydream.training.adjudication.canonical import (
     _load_materialized_records as _load_sessions_records,
 )
 from daydream.training.adjudication.materialize import (
+    _ANNOTATIONS_FILENAME,
+    _MANIFEST_FILENAME,
     _SESSIONS_OUT_FILENAME,
     index_sessions,
 )
@@ -61,11 +63,9 @@ from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSIO
 
 __all__ = ["FINAL_IDENTITY_FILES", "build_final_bundle", "final_snapshot_id"]
 
-_ANNOTATIONS_FILENAME = "annotations.jsonl"
 _OBSERVATIONS_FILENAME = "label-observations.jsonl"
 _REPORT_FILENAME = "coverage-report.json"
 _LINEAGE_FILENAME = "lineage.json"
-_MANIFEST_FILENAME = "preview-manifest.json"
 _POLICY_BINDING_FILENAME = "policy-binding.json"
 
 _BUNDLE_FILES = (
