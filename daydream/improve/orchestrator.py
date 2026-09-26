@@ -101,6 +101,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
     LifecycleStatus,
+    current_session_id,
     dispatch_scope,
     get_current_recorder,
     maybe_fork,
@@ -185,13 +186,8 @@ def _artifact_provenance(*, phase: DaydreamPhase) -> dict[str, str]:
     }
 
 
-def _run_session_id() -> str | None:
-    recorder = get_current_recorder()
-    return recorder.session_id if recorder is not None else None
-
-
 def _report_with_provenance(content: str) -> str:
-    session_id = _run_session_id()
+    session_id = current_session_id()
     if session_id is None:
         return content
     heading, separator, remainder = content.partition("\n")
@@ -1778,7 +1774,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         plans_dir,
         planned_at=planned_at,
         non_interactive_default=(ctx.data["selection_mode"] in {"non-interactive-default", "automatic-publishing"}),
-        run_session_id=_run_session_id(),
+        run_session_id=current_session_id(),
         private_workspace_owner=ctx.private_workspace_owner,
     )
     # Numbers are claimed here, in selection order, before any writer runs, so

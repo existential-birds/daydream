@@ -19,6 +19,10 @@ from typing import Any, cast
 
 import pytest
 
+from daydream.agent import run_agent
+from daydream.backends.claude import _is_read_only_command, _read_only_guard
+from daydream.backends.codex import CodexBackend
+from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git as _harness_git
 
 _COMMITTING_CODEX = textwrap.dedent(
@@ -69,8 +73,6 @@ def _install_committing_codex(
 
 def test_claude_read_only_profile_refuses_mutation() -> None:
     """Claude's observable refusal is the Bash-guard decision."""
-    from daydream.backends.claude import _is_read_only_command
-
     # Mutating commands denied; read-only inspection allowed.
     assert _is_read_only_command("git commit -m x") is False
     assert _is_read_only_command("git reset --hard HEAD") is False
@@ -86,8 +88,6 @@ def test_claude_read_only_profile_refuses_mutation() -> None:
 @pytest.mark.asyncio
 async def test_claude_read_only_guard_blocks_write_tool() -> None:
     """Under read_only, the guard denies the Write tool outright (not just Bash)."""
-    from daydream.backends.claude import _read_only_guard
-
     decision = cast(dict[str, Any], await _read_only_guard(
         {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
     ))
@@ -102,10 +102,6 @@ async def test_codex_read_only_commit_cannot_change_source_head_or_index(
 ) -> None:
     """A real fake Codex commits in its isolated cwd; the caller's linked-worktree
     HEAD and cached index stay byte-for-byte identical."""
-    from daydream.agent import run_agent
-    from daydream.backends.codex import CodexBackend
-    from daydream.trajectory import DaydreamPhase
-
     _main, source = linked_worktree
     parser = source / "services" / "taste" / "parser.go"
     parser.write_text("package taste\n\n// caller staged sentinel\nfunc S() {}\n")
