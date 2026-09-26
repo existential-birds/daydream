@@ -200,17 +200,12 @@ def _finding_kwargs(
     raw: dict[str, object], *, side: str, id_key: str
 ) -> dict[str, object]:
     """Validate a raw finding dict and return its model constructor kwargs."""
-    if not isinstance(raw, dict):
-        raise VerifierError(f"{side} finding must be a dict")
     validate_exact_keys(
         raw,
         CANDIDATE_FINDING_KEYS if side == "candidate" else GOLD_FINDING_KEYS,
         f"{side} finding",
     )
-    try:
-        ident = _validate_hex64(raw[id_key], id_key)
-    except KeyError as exc:
-        raise VerifierError(f"missing required field {exc.args[0]}") from exc
+    ident = _validate_hex64(raw[id_key], id_key)
     fields = parse_finding_content(
         {field: raw[field] for field in _FINDING_CONTENT_KEYS}
     )
@@ -286,14 +281,11 @@ def _canonical_tuple(finding: object) -> tuple[object, ...]:
 def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding]:
     """Validate a §9 candidate artifact and return its parsed findings."""
     validate_exact_keys(raw, CANDIDATE_ARTIFACT_KEYS, "candidate artifact")
-    try:
-        schema_version = raw["schema_version"]
-        case_id = raw["case_id"]
-        base_ref = raw["base_ref"]
-        head_ref = raw["head_ref"]
-        findings = raw["findings"]
-    except KeyError as exc:
-        raise VerifierError(f"missing artifact field {exc.args[0]}") from exc
+    schema_version = raw["schema_version"]
+    case_id = raw["case_id"]
+    base_ref = raw["base_ref"]
+    head_ref = raw["head_ref"]
+    findings = raw["findings"]
     if schema_version != 1:
         raise VerifierError(f"unsupported schema_version {schema_version!r}")
     if not isinstance(case_id, str) or not isinstance(base_ref, str) or not isinstance(head_ref, str):

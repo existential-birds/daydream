@@ -33,11 +33,9 @@ from daydream.training.harvest import (
     HarvestServices,
     acquire_harvest_evidence,
     assemble_scoring_inputs,
+    build_annotation as _build_annotation,
     make_harvest_services,
     run_harvest,
-)
-from daydream.training.harvest import (
-    build_annotation as _build_annotation,
 )
 from daydream.training.harvest_types import HarvestEvidence, HarvestRow
 from daydream.training.labeler_signals import (
@@ -53,8 +51,7 @@ from daydream.training.reward import RewardWeights, ScoringInputs, score_traject
 from daydream.training.rubric import Rubric
 from daydream.ui import create_console
 from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import commit as _commit, git as _git
 from tests.harness.harvest_services import HarvestTestServices
 from tests.harness.trajectory import diff_adding
 

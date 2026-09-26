@@ -29,8 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.index import append_label_observation
-from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.json_utils import canonical_json as _canonical
+from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.adjudication.materialize import (
     _ANNOTATIONS_FILENAME,
     _CONFLICTED_DISPOSITION,

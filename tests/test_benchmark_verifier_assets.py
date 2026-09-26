@@ -20,8 +20,7 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import build, candidate, verifier_core
-from daydream.benchmark.harbor import verifier_core as vc
+from daydream.benchmark.harbor import build, candidate, verifier_core, verifier_core as vc
 from daydream.benchmark.harbor.build import _copy_assets
 from daydream.benchmark.harbor.package import template_text
 from daydream.hunk_index import range_distance as hunk_range_distance

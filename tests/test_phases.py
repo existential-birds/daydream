@@ -18,9 +18,7 @@ import pytest
 from rich.console import Console
 
 import daydream
-from daydream import artifact_visibility as av
-from daydream import git_ops, phases
-from daydream import review_profile as _rp
+from daydream import artifact_visibility as av, git_ops, phases, review_profile as _rp
 from daydream.artifact_visibility import ArtifactVisibilityError, OutputLabel, artifact_dir_for
 from daydream.backends import (
     AgentEvent,
@@ -104,8 +102,7 @@ from daydream.ui.summary import print_fix_complete
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
-from tests.harness.git_helpers import commit as git_commit
-from tests.harness.git_helpers import git, init_repo
+from tests.harness.git_helpers import commit as git_commit, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.trajectory import make_recorder, read_trajectory
 

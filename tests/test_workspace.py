@@ -41,11 +41,13 @@ from daydream.workspace import (
     open_audit_workspace,
     open_workspace,
 )
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import configure_identity as _configure_identity
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import (
+    bare_remote as _bare_remote,
+    commit as _commit,
+    configure_identity as _configure_identity,
+    git as _git,
+    init_repo as _init_repo,
+)
 
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -42,6 +42,10 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+[tool.ruff.lint.isort]
+# Merge same-module imports, including aliased re-exports, into one statement.
+combine-as-imports = true
+
 [tool.mypy]
 python_version = "3.12"
 explicit_package_bases = true

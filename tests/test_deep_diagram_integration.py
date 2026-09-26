@@ -46,11 +46,9 @@ from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnav
 from daydream.runner import RunConfig, run
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
-from tests.harness.diagram_repos import build_large_cross_module_repo
-from tests.harness.diagram_repos import load_diagram_artifact as _artifact
+from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit, git, init_repo
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import commit, git, git as _git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.harness.trajectory import root_trajectory as _root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline

@@ -28,8 +28,7 @@ from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import REWARD_VERSION, score_trajectory
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
-from daydream_review import rundir as rundir_mod
-from daydream_review import taskset
+from daydream_review import rundir as rundir_mod, taskset
 from daydream_review.fixture import build_fixture_repo
 from daydream_review.rundir import DAYDREAM_EXCLUDE, RUN_DIR_FILES, candidate_diff_cmd
 from daydream_review.taskset import (

@@ -18,8 +18,7 @@ import anyio
 from rich.text import Text
 
 import daydream
-from daydream import git_ops
-from daydream import review_profile as _rp
+from daydream import git_ops, review_profile as _rp
 from daydream.agent import (
     _validates_schema,
     console,
@@ -116,8 +115,6 @@ from daydream.prompts.authorial_intent import (
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
-)
-from daydream.repository_paths import (
     path_is_confined,
 )
 from daydream.review_budget import (

@@ -15,8 +15,6 @@ from daydream.training.corpus_projection.projector import project_findings
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.dispositions import (
     NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
-)
-from daydream.training.dispositions import (
     is_decisive,
 )
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION

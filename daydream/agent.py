@@ -62,9 +62,9 @@ from daydream.run_context import (
     RunContext,
     bind_run_context,
     current_run_context,
+    resolve_gate as resolve_gate,
     resolve_run_context,
 )
-from daydream.run_context import resolve_gate as resolve_gate
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
 from daydream.ui import (
     NEON_THEME,

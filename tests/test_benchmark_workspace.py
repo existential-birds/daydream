@@ -11,8 +11,7 @@ import pytest
 import yaml
 
 from daydream import cli as top_cli
-from daydream.benchmark import github_import as gi
-from daydream.benchmark import snapshot as sn
+from daydream.benchmark import github_import as gi, snapshot as sn
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import build
 from daydream.benchmark.harbor.build import task_spec_digest

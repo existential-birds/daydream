@@ -13,8 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream.benchmark import cli
-from daydream.benchmark import curation as cu
+from daydream.benchmark import cli, curation as cu
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.storage import load_yaml_strict
 from tests.harness.fake_gh import FakeGh

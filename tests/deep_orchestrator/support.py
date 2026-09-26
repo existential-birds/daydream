@@ -18,12 +18,9 @@ from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
 from daydream.extensions import Registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
-from daydream.runner import RunConfig
-from daydream.runner import run as _run
+from daydream.runner import RunConfig, run as _run
 from daydream.workspace import WorkContext
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     Mute,
     _force_interactive,

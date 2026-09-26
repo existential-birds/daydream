@@ -13,8 +13,7 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
-from daydream.benchmark.harbor import package as _pkg
-from daydream.benchmark.harbor import run as run_mod
+from daydream.benchmark.harbor import package as _pkg, run as run_mod
 
 
 def _docker_ok() -> _pkg.DockerNetworkPolicyCapability:

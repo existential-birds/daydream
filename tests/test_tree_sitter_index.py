@@ -5,8 +5,7 @@ from typing import Any
 
 import pytest
 
-from daydream import _tree_sitter_safety as safety
-from daydream import git_ops, tree_sitter_index
+from daydream import _tree_sitter_safety as safety, git_ops, tree_sitter_index
 from daydream.tree_sitter_index import (
     _MAX_IMPORTERS,
     _PARSER_CACHE,
@@ -27,9 +26,7 @@ from daydream.tree_sitter_index import (
     language_for_path,
 )
 from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import configure_identity as _configure_identity
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import commit as _commit, configure_identity as _configure_identity, git as _git
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 

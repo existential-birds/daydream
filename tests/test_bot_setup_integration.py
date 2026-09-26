@@ -15,8 +15,7 @@ from daydream import bot_setup, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
 from daydream.templates import workflow_template_files
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import commit as _commit, git as _git
 from tests.harness.rsa import generate_rsa_pem
 from tests.harness.scripts import cli_main
 

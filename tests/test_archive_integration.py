@@ -27,8 +27,7 @@ from daydream.artifact_visibility import (
     RoutedDestination,
     _manifest,
 )
-from daydream.atif import Step
-from daydream.atif import validate as atif_validate
+from daydream.atif import Step, validate as atif_validate
 from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.cli import _parse_args
 from daydream.config_file import load_file_config

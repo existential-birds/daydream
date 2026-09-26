@@ -522,7 +522,6 @@ def _file_change_events(
             start_input["file"] = "unknown"
             start_input["action"] = "modified"
         is_error = status != "completed"
-        status = status or None
     elif "file_path" in item:
         # Legacy scalar shape (older CLI): keep as-is.
         item_id = item.get("id", str(uuid.uuid4()))

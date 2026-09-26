@@ -29,8 +29,7 @@ from daydream.backends import MetricsEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase, TrajectoryRecorder
-from tests.harness.codex_replay import GapThenBlockingStdout as _GapThenBlockingStdout
-from tests.harness.codex_replay import make_mock_process_from_fixture
+from tests.harness.codex_replay import GapThenBlockingStdout as _GapThenBlockingStdout, make_mock_process_from_fixture
 from tests.harness.trajectory import make_recorder
 
 FIXTURE = "multi_turn_with_metrics.jsonl"

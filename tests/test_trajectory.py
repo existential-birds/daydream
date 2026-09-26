@@ -19,8 +19,7 @@ import anyio
 import pytest
 
 import daydream.trajectory as trajectory_module
-from daydream.atif import Step as AtifStep
-from daydream.atif import validate as atif_validate
+from daydream.atif import Step as AtifStep, validate as atif_validate
 from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,

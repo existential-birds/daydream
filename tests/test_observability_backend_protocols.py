@@ -53,8 +53,7 @@ from tests.harness.claude_sdk import (
     scripted_client,
 )
 from tests.harness.fake_cli_process import install_fake_cli_process
-from tests.harness.otlp import TraceCollector, attributes, otlp_collector, otlp_grpc_collector
-from tests.harness.otlp import kind_of as _kind
+from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector, otlp_grpc_collector
 
 #: Each backend's private sentinel: must appear in exactly that backend's wire
 #: payload and in no sibling's. Distinct canaries make accidental cross-task,
