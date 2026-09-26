@@ -37,19 +37,9 @@ _DEFAULT_REPO_DIR = "/workspace/repo"
 _DEFAULT_ARTIFACT_PATH = "/logs/artifacts/review.json"
 _DEFAULT_TRAJECTORY_PATH = Path("/logs/agent/trajectory.json")
 
-_CASE_ID_ENV = env_policy.CASE_ID_ENV
-_BASE_REF_ENV = env_policy.BASE_REF_ENV
-_HEAD_REF_ENV = env_policy.HEAD_REF_ENV
-_BACKEND_ENV = env_policy.BACKEND_ENV
 # Shared allowlist backing both the host-side agent gate and the in-container
 # gate; any new reviewer backend must be added here.
 _SUPPORTED_BACKENDS: tuple[str, ...] = ("pi", "claude")
-_API_KEY_ENV = env_policy.API_KEY_ENV
-_BASE_URL_ENV = env_policy.BASE_URL_ENV
-_REPO_DIR_ENV = env_policy.REPO_DIR_ENV
-_ARTIFACT_PATH_ENV = env_policy.ARTIFACT_PATH_ENV
-_TRAJECTORY_PATH_ENV = env_policy.TRAJECTORY_PATH_ENV
-_CANDIDATE_ENV = env_policy.CANDIDATE_ENV
 
 
 class EntrypointError(Exception):
@@ -79,7 +69,7 @@ class ParsedReviewerInput:
 
 def require_supported_backend(environment: Mapping[str, str]) -> str:
     """Validate the selected Harbor reviewer backend from its container map."""
-    backend = environment.get(_BACKEND_ENV, "pi").strip().lower()
+    backend = environment.get(env_policy.BACKEND_ENV, "pi").strip().lower()
     if backend not in _SUPPORTED_BACKENDS:
         supported = ", ".join(repr(item) for item in _SUPPORTED_BACKENDS)
         raise EntrypointError(
@@ -136,8 +126,8 @@ def _sanitize_reviewer_environment(
             sanitized[env_policy.ANTHROPIC_AUTH_TOKEN_ENV] = auth_token
         return sanitized
 
-    api_key = (source.get(_API_KEY_ENV) or "").strip()
-    base_url = (source.get(_BASE_URL_ENV) or "").strip()
+    api_key = (source.get(env_policy.API_KEY_ENV) or "").strip()
+    base_url = (source.get(env_policy.BASE_URL_ENV) or "").strip()
     if not base_url:
         raise EntrypointError(
             "missing required environment variable 'DAYDREAM_REVIEW_BASE_URL'"
@@ -181,13 +171,13 @@ def parse_reviewer_environment(environment: Mapping[str, str]) -> ParsedReviewer
     return ParsedReviewerInput(
         backend=backend,
         model=source.get(env_policy.MODEL_ENV),
-        repo_dir=Path(source.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)),
-        artifact_path=Path(source.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)),
-        trajectory_path=Path(source.get(_TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))),
-        case_id=_required_env(source, _CASE_ID_ENV),
-        base_ref=source.get(_BASE_REF_ENV, "base").strip() or "base",
-        head_ref=source.get(_HEAD_REF_ENV, "head").strip() or "head",
-        profile_candidate=source.get(_CANDIDATE_ENV) or None,
+        repo_dir=Path(source.get(env_policy.REPO_DIR_ENV, _DEFAULT_REPO_DIR)),
+        artifact_path=Path(source.get(env_policy.ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)),
+        trajectory_path=Path(source.get(env_policy.TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))),
+        case_id=_required_env(source, env_policy.CASE_ID_ENV),
+        base_ref=source.get(env_policy.BASE_REF_ENV, "base").strip() or "base",
+        head_ref=source.get(env_policy.HEAD_REF_ENV, "head").strip() or "head",
+        profile_candidate=source.get(env_policy.CANDIDATE_ENV) or None,
         execution=execution,
     )
 
@@ -206,10 +196,10 @@ def build_run_config(
 
     try:
         profile_environment = (
-            {} if profile_candidate is None else {_CANDIDATE_ENV: profile_candidate}
+            {} if profile_candidate is None else {env_policy.CANDIDATE_ENV: profile_candidate}
         )
         resolved = resolve_harbor_profile(
-            candidate_env=_CANDIDATE_ENV, env=profile_environment
+            candidate_env=env_policy.CANDIDATE_ENV, env=profile_environment
         )
     except ProfileError as exc:
         raise EntrypointError(f"invalid review-profile candidate: {exc}") from exc
