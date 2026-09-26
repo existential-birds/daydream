@@ -32,6 +32,18 @@ def _rec(monkeypatch: Any) -> Console:
     return rec
 
 
+def _seed_deep(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Seed ``.daydream/deep`` with the intent/alternatives files every render
+    phase requires; returns ``(deep_dir, intent_path, alternatives_path)``."""
+    dd = tmp_path / ".daydream" / "deep"
+    dd.mkdir(parents=True, exist_ok=True)
+    intent = dd / "intent.md"
+    intent.write_text("intent")
+    alts = dd / "alternatives.json"
+    alts.write_text("[]")
+    return dd, intent, alts
+
+
 async def test_merge_prints_item_count(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -57,12 +69,7 @@ async def test_merge_prints_item_count(
         model="mock-model",
     )
 
-    dd = tmp_path / ".daydream" / "deep"
-    dd.mkdir(parents=True, exist_ok=True)
-    intent = dd / "intent.md"
-    intent.write_text("intent")
-    alts = dd / "alternatives.json"
-    alts.write_text("[]")
+    dd, intent, alts = _seed_deep(tmp_path)
     dedup = dd / "dedup-candidates.json"
     dedup.write_text("[]")
 
@@ -108,14 +115,9 @@ async def test_arbiter_prints_kept_dropped(
         model="mock-model",
     )
 
-    dd = tmp_path / ".daydream" / "deep"
-    dd.mkdir(parents=True, exist_ok=True)
+    dd, intent, alts = _seed_deep(tmp_path)
     diff = dd / "diff.patch"
     diff.write_text("diff")
-    intent = dd / "intent.md"
-    intent.write_text("intent")
-    alts = dd / "alternatives.json"
-    alts.write_text("[]")
 
     verdicts, _ = await phase_arbiter_review(
         backend,
@@ -157,13 +159,9 @@ async def test_per_stack_failures_summarized_once(
 ) -> None:
     rec = _rec(monkeypatch)
     work = make_work(tmp_path)
-    (tmp_path / ".daydream" / "deep").mkdir(parents=True, exist_ok=True)
-    diff = tmp_path / ".daydream" / "deep" / "diff.patch"
+    dd, intent, alts = _seed_deep(tmp_path)
+    diff = dd / "diff.patch"
     diff.write_text("diff")
-    intent = tmp_path / ".daydream" / "deep" / "intent.md"
-    intent.write_text("intent")
-    alts = tmp_path / ".daydream" / "deep" / "alternatives.json"
-    alts.write_text("[]")
 
     stacks = [
         StackAssignment(stack_name="stack-a", files=["a.py"]),

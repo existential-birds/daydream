@@ -728,10 +728,10 @@ def _compile_case(
     bundle_dst = case_stage / "environment" / "repository.bundle"
     bundle_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(bundle_src, bundle_dst)
-    actual = hashlib.sha256(bundle_dst.read_bytes()).hexdigest()
-    if actual != expected:
+    bundle_sha256 = hashlib.sha256(bundle_dst.read_bytes()).hexdigest()
+    if bundle_sha256 != expected:
         raise CompileError(
-            f"case {case_id} bundle sha mismatch (wanted {expected}, got {actual})"
+            f"case {case_id} bundle sha mismatch (wanted {expected}, got {bundle_sha256})"
         )
     validate_bundle_inventory(bundle_dst)
 
@@ -740,6 +740,7 @@ def _compile_case(
     gold_path = case_stage / "tests" / "golden-review.json"
     gold_path.parent.mkdir(parents=True, exist_ok=True)
     gold_path.write_bytes(gold_bytes)
+    gold_sha256 = hashlib.sha256(gold_bytes).hexdigest()
 
     # Immutable, deterministic per-case verifier metadata beside the gold file
     # (no timestamps): opaque task key + base/head refs + the hidden-gold sentinel.
@@ -754,7 +755,7 @@ def _compile_case(
         "base_ref": "base",
         "head_ref": "head",
         "template_version": TEMPLATE_VERSION,
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+        "gold_sha256": gold_sha256,
     }
     meta_path = case_stage / "tests" / "verifier-metadata.json"
     meta_path.write_text(json.dumps(metadata, sort_keys=True))
@@ -764,15 +765,21 @@ def _compile_case(
     oracle_path = case_stage / "solution" / "golden-review.json"
     oracle_path.parent.mkdir(parents=True, exist_ok=True)
     oracle_path.write_bytes(oracle_bytes)
+    oracle_sha256 = hashlib.sha256(oracle_bytes).hexdigest()
 
     assets = _copy_assets(case_stage)
 
-    files: dict[str, str] = {}
+    # The bundle/gold/oracle digests were computed above; reuse them instead of
+    # re-reading and re-hashing the same bytes.
+    files: dict[str, str] = {
+        "environment/repository.bundle": bundle_sha256,
+        "tests/golden-review.json": gold_sha256,
+        "solution/golden-review.json": oracle_sha256,
+    }
     for rel in (
-        "README.md", "instruction.md", "Task.md", "task.toml", "environment/repository.bundle",
+        "README.md", "instruction.md", "Task.md", "task.toml",
         "environment/Dockerfile", "environment/runtime-requirements.lock",
-        "tests/golden-review.json", "tests/verifier-metadata.json",
-        "solution/golden-review.json",
+        "tests/verifier-metadata.json",
     ):
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
     for rel, sha in assets:
@@ -792,9 +799,9 @@ def _compile_case(
         "original_base_sha": snapshot.get("original_base_sha"),
         "requested_base_sha": snapshot.get("requested_base_sha"),
         "original_head_sha": snapshot.get("original_head_sha"),
-        "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
-        "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "bundle_sha256": bundle_sha256,
+        "gold_sha256": gold_sha256,
+        "oracle_sha256": oracle_sha256,
         "task_spec_sha256": task_spec_sha256,
         "verifier_script_sha256": hashlib.sha256(
             (case_stage / "tests" / "score_review.py").read_bytes()

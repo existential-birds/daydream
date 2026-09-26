@@ -68,7 +68,7 @@ from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
-    get_current_recorder,
+    current_session_id,
     host_phase_scope,
     now_iso,
     phase_scope,
@@ -237,7 +237,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_error(console, "Fix preflight failed", str(exc))
         return Stop(1)
 
-    session_id = _current_session_id() or ctx.work.run_id
+    session_id = current_session_id() or ctx.work.run_id
     state = FixCycleState(
         session_id=session_id,
         stable_ref=stable_ref,
@@ -439,12 +439,6 @@ def _quality_gate_threshold(config: RunConfig, attr: str, default: float) -> flo
     return coerced if coerced is not None else default
 
 
-def _current_session_id() -> str | None:
-    """Session id binding the quality-gate artifact to the current run."""
-    recorder = get_current_recorder()
-    return recorder.session_id if recorder is not None else None
-
-
 def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:
     """Load prior rounds for the CURRENT session, or start fresh when rebound.
 
@@ -559,7 +553,7 @@ async def _evaluate_quality_gate(
     tree-walk runs off the event loop so parallel fix fan-out is never blocked
     by the analyzer (#329 / CodeRabbit Finding D).
     """
-    session_id = _current_session_id()
+    session_id = current_session_id()
     try:
         gate_p = fix_quality_gate_path(dd)
         if not enabled:

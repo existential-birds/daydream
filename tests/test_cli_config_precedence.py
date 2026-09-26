@@ -10,12 +10,14 @@ environment-variable tier — ``DAYDREAM_MODEL``/``DAYDREAM_BACKEND`` are not re
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend
-from daydream.config_file import DaydreamFileConfig
+from daydream.cli import _parse_args, _parse_improve_args
+from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.runner import (
     RunConfig,
     _default_backend_name,
@@ -25,6 +27,7 @@ from daydream.runner import (
     _resolved_reasoning_effort,
     _resolved_review_backend_name,
 )
+from daydream.test_execution import MissingTestCommandError, canonical_test_command
 
 
 def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
@@ -249,8 +252,6 @@ def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
     Traces construction paths for both flows that read shared args: deep
     (``_parse_args``) and improve (``_parse_improve_args``).
     """
-    from daydream.cli import _parse_args, _parse_improve_args
-
     target = str(tmp_path)
 
     deep = _parse_args([target, "--trajectory-hub-repo", "acme/dd-trajectories"])
@@ -269,12 +270,6 @@ def test_test_command_precedence_cli_over_file_config(tmp_path: Path) -> None:
     (merged from ``.daydream.toml`` over ``[tool.daydream]``); when both are
     unset, resolution fails closed with an actionable error.
     """
-    from types import SimpleNamespace
-
-    from daydream.cli import _parse_args
-    from daydream.config_file import load_file_config
-    from daydream.test_execution import MissingTestCommandError, canonical_test_command
-
     target = str(tmp_path)
 
     # File config loads the key from both sources, dotfile winning.

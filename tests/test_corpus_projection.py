@@ -26,6 +26,12 @@ from daydream.training.corpus_projection.tiers import GoldGateError, classify_ti
 from daydream.training.exclusion import EXCLUSION_PATH
 from tests.harness.scripts import cli_main
 
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Parse a JSONL file, ignoring blank lines (compiler/projector output)."""
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 _MANIFEST = {
     "schema_version": "1",
     "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
@@ -164,10 +170,8 @@ def _write_annotations_snapshot(
     # multiple times over one bundle): the snapshot is one annotations.jsonl
     # for all sessions, and a stale SHA256SUMS listing must not be hashed
     # into itself.
-    prior = [
-        json.loads(line) for line in
-        (ann_dir / "annotations.jsonl").read_text().splitlines() if line
-    ] if (ann_dir / "annotations.jsonl").exists() else []
+    ann_path = ann_dir / "annotations.jsonl"
+    prior = _read_jsonl(ann_path) if ann_path.exists() else []
     (ann_dir / "SHA256SUMS").unlink(missing_ok=True)
     rows = list(prior)
     # Session-scoped fingerprints when merging (a second, distinct session's
@@ -270,17 +274,14 @@ def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_
                                 dispositions=["accepted", "rejected"])
     snap = _write_annotations_snapshot(bundle_dir, session_id="sess-a",
                                        dispositions=["accepted", "rejected"])
-    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    rows = _read_jsonl(snap)
     assert len(rows) == 2  # one per finding, not a prefixed duplicate pair
     assert [r["session_id"] for r in rows] == ["sess-a", "sess-a"]
     assert {r["fingerprint"] for r in rows} == {"a1" * 32, "b2" * 32}
     assert len({r["record_id"] for r in rows}) == 2
     out = tmp_path / "proj"
     build_frozen_corpus(_cfg(out, bundle_dir, snap))
-    records = [
-        json.loads(line)
-        for line in (out / "corpus.jsonl").read_text().splitlines() if line.strip()
-    ]
+    records = _read_jsonl(out / "corpus.jsonl")
     assert len(records) == 2
 
 
@@ -291,7 +292,7 @@ def existing_bundle_fixture(tmp_path: Path) -> tuple[Path, list[dict[str, Any]],
     the linkage kwargs (curation id / hub commit)."""
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    rows = _read_jsonl(snap)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
     kwargs = {"curation_id": manifest["curation_id"],
               "hub_commit": manifest["source_hub_commit"]}
@@ -637,8 +638,7 @@ def test_projected_records_carry_per_repo_license_decision(
 ) -> None:
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
-    records = [json.loads(line) for line in
-               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")
     assert records
     for rec in records:
         lineage = rec["lineage"]
@@ -666,8 +666,7 @@ def test_schema_validation_accepts_evolved_v2_records(
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     schema = json.loads((tmp_path / "out" / "schema.json").read_text())
-    for rec in (json.loads(line) for line in
-                (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line):
+    for rec in _read_jsonl(tmp_path / "out" / "corpus.jsonl"):
         jsonschema.validate(rec, schema)  # no raise
 
 
@@ -675,8 +674,7 @@ def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) ->
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
-    records = [json.loads(line) for line in
-               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")
     assert records
     for rec in records:
         assert rec["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
@@ -691,7 +689,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     policy is enforced, not just recorded."""
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
-    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    rows = _read_jsonl(snap)
     for row in rows:
         row["evidence_after_as_of"] = True
     snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
@@ -702,8 +700,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     _write_ann_sumsums(ann_dir)
     summary = build_frozen_corpus(_cfg(tmp_path / "out", bundle_dir, snap))
     assert summary["records_by_tier"] == {"silver": 1}
-    records = [json.loads(line) for line in
-               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")
     assert records and records[0]["tier"] == "silver"
     assert records[0]["outcome_label"] is None
 
@@ -766,11 +763,7 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
     summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
     assert summary["emitted"] >= 1
     validator = Draft202012Validator(json.loads(schema_path.read_text()))
-    records = [
-        json.loads(line)
-        for line in (out / "corpus.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
+    records = _read_jsonl(out / "corpus.jsonl")
     assert records
     errors = sorted(
         (err.json_path, err.message) for rec in records for err in validator.iter_errors(rec)
@@ -778,10 +771,9 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
     assert not errors, errors
     # every split-manifest record must validate too
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
-        for line in (out / name).read_text().splitlines():
-            if line.strip():
-                errors = list(validator.iter_errors(json.loads(line)))
-                assert not errors, (name, errors)
+        for rec in _read_jsonl(out / name):
+            errors = list(validator.iter_errors(rec))
+            assert not errors, (name, errors)
 
 
 def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
@@ -793,11 +785,7 @@ def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
     )
     out = tmp_path / "proj"
     build_frozen_corpus(_cfg(out, bundle_dir, snap))
-    records = [
-        json.loads(line)
-        for line in (out / "corpus.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
+    records = _read_jsonl(out / "corpus.jsonl")
     assert len(records) == 2  # one per (session, fingerprint), not per segment
     assert len({r["record_id"] for r in records}) == len(records)
     by_fp: dict[str, list[dict[str, Any]]] = {}
@@ -816,16 +804,11 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
     summary = build_frozen_corpus(_cfg(out, bundle_dir, snap))
     assert summary["records_by_tier"] == {"gold": 1}
     assert summary["exclusions_by_reason"] == {"non-decisive-adjudication": 1}
-    records = [
-        json.loads(line)
-        for line in (out / "corpus.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
+    records = _read_jsonl(out / "corpus.jsonl")
     assert all(r["tier"] != "task-only" for r in records)
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
-        for line in (out / name).read_text().splitlines():
-            if line.strip():
-                assert json.loads(line)["tier"] != "task-only"
+        for rec in _read_jsonl(out / name):
+            assert rec["tier"] != "task-only"
     adjudication = json.loads((out / "adjudication-report.json").read_text())
     assert [a["fingerprint"] for a in adjudication] == ["b2" * 32]
     assert (out / "_SUCCESS").is_file()
@@ -1199,8 +1182,7 @@ def test_end_to_end_clean_mixed_repo_publishes(
     rc, out = _run_build_v2_cli(bundle_dir, tmp_path, policy, capsys)
     assert rc == 0, out
     assert (tmp_path / "pub" / "_SUCCESS").is_file()
-    records = [json.loads(line) for line in
-               (tmp_path / "pub" / "corpus.jsonl").read_text().splitlines() if line]
+    records = _read_jsonl(tmp_path / "pub" / "corpus.jsonl")
     assert records
     for rec in records:
         lineage = rec["lineage"]
@@ -1238,10 +1220,7 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     out = tmp_path / "proj"
     build_frozen_corpus(_cfg(out, bundle_dir, snap))
-    records = [
-        json.loads(line)
-        for line in (out / "corpus.jsonl").read_text().splitlines() if line.strip()
-    ]
+    records = _read_jsonl(out / "corpus.jsonl")
     accepted = next(r for r in records if r["outcome_label"] == "accepted")
     assert accepted["finding_fingerprint"] == "a1" * 32
     assert accepted["finding_text"] == "exact localized finding body"

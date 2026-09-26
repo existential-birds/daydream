@@ -89,7 +89,7 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
     """Parse a unified diff into per-file hunk information.
 
     Returns ``{path: {"hunks": [{"old_start", "old_end", "new_start",
-    "new_end", "added", "removed", "added_lines"}], "added_total": N,
+    "new_end", "added", "removed"}], "added_total": N,
     "removed_total": N, "added_lines": set[int]}}``.
 
     ``added_lines`` (the new-side line numbers of ``+`` content lines) is the
@@ -151,7 +151,6 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
                 "new_end": new_start + new_count - 1,
                 "added": 0,
                 "removed": 0,
-                "added_lines": set(),
             }
             current_meta["hunks"].append(current_hunk)
         elif raw.startswith("+"):
@@ -159,7 +158,6 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
             current_meta["added_lines"].add(new_line)
             if current_hunk is not None:
                 current_hunk["added"] += 1
-                current_hunk["added_lines"].add(new_line)
             new_line += 1
         elif raw.startswith("-"):
             current_meta["removed_total"] += 1
@@ -167,10 +165,6 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
                 current_hunk["removed"] += 1
         elif raw.startswith(" "):
             new_line += 1
-    for info in result.values():
-        for hunk in info["hunks"]:
-            hunk["added_lines"] = sorted(hunk["added_lines"])
-        info["added_lines"] = set(info["added_lines"])
     return result
 
 
@@ -251,17 +245,7 @@ def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
     persist: dict[str, Any] = {}
     for file_path, info in parsed.items():
         persist[file_path] = {
-            "hunks": [
-                {
-                    "old_start": h["old_start"],
-                    "old_end": h["old_end"],
-                    "new_start": h["new_start"],
-                    "new_end": h["new_end"],
-                    "added": h["added"],
-                    "removed": h["removed"],
-                }
-                for h in info["hunks"]
-            ],
+            "hunks": info["hunks"],
             "added_total": info["added_total"],
             "removed_total": info["removed_total"],
         }

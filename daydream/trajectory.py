@@ -1799,6 +1799,12 @@ def get_current_recorder() -> "TrajectoryRecorder | None":
     return _RECORDER_VAR.get()
 
 
+def current_session_id() -> str | None:
+    """Session id of the active recorder, or ``None`` when no recorder is active."""
+    recorder = get_current_recorder()
+    return recorder.session_id if recorder is not None else None
+
+
 def flush_active_signal_recorders() -> None:
     """Synchronously flush every active recorder in the selected run."""
     if _ACTIVE_SIGNAL_RUNS:
