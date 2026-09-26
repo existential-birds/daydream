@@ -423,21 +423,11 @@ def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> di
     # Candidate ids are derived from canonical content + an occurrence ordinal
     # (mirrors the verifier's own per-content dedup ordinal), so the compiled
     # artifact re-derives identical ids under ``validate_candidate_artifact``.
-    groups: dict[tuple[str, ...], int] = {}
+    groups: dict[tuple[object, ...], int] = {}
     entries = []
     for flattened, _ in flat:
-        canon = (
-            str(flattened.get("title") or ""),
-            str(flattened.get("body") or ""),
-            str(flattened.get("severity") or ""),
-            str(flattened.get("path") or ""),
-            str(flattened.get("start_line") or ""),
-            str(flattened.get("end_line") or ""),
-        )
-        ordinal = groups.get(canon, 0)
-        groups[canon] = ordinal + 1
         entry = dict(flattened)
-        entry["candidate_id"] = vc.derive_candidate_id(opaque_key, entry, ordinal)
+        entry["candidate_id"] = vc.assign_candidate_id(opaque_key, entry, groups)
         entries.append(entry)
     result = {
         "schema_version": 1,

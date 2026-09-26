@@ -48,6 +48,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -484,14 +485,18 @@ class FakeGh:
 
     # --- inspection ---------------------------------------------------------
 
+    def _records(self) -> Iterator[dict[str, Any]]:
+        """Yield each parsed record from the JSONL call log, in order."""
+        if not self._calls_path.exists():
+            return
+        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
+            yield json.loads(line)
+
     def calls(self, method: str, endpoint: str | None = None) -> list[GhCall]:
         """Return recorded calls matching ``method`` (and ``endpoint`` if given)."""
         out: list[GhCall] = []
-        if not self._calls_path.exists():
-            return out
         wanted_endpoint = endpoint.lstrip("/") if endpoint is not None else None
-        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
-            record = json.loads(line)
+        for record in self._records():
             if "method" not in record:  # non-api record (secret/variable/pr)
                 continue
             if record["method"] != method.upper():
@@ -510,10 +515,7 @@ class FakeGh:
     def command_calls(self, kind: str) -> list[GhCommandCall]:
         """Return recorded non-API calls matching *kind* (for example ``pr view``)."""
         out: list[GhCommandCall] = []
-        if not self._calls_path.exists():
-            return out
-        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
-            record = json.loads(line)
+        for record in self._records():
             if record.get("kind") == kind:
                 out.append(GhCommandCall(kind=kind, argv=record["argv"], env=record.get("env")))
         return out
@@ -521,10 +523,7 @@ class FakeGh:
     def process_calls(self) -> list[GhProcessCall]:
         """Return every intercepted ``gh`` process in invocation order."""
         out: list[GhProcessCall] = []
-        if not self._calls_path.exists():
-            return out
-        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
-            record = json.loads(line)
+        for record in self._records():
             if record.get("kind") == "gh process":
                 out.append(
                     GhProcessCall(
@@ -540,10 +539,7 @@ class FakeGh:
 
     def _set_calls(self, kind: str) -> list[GhSetCall]:
         out: list[GhSetCall] = []
-        if not self._calls_path.exists():
-            return out
-        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
-            record = json.loads(line)
+        for record in self._records():
             if record.get("kind") != kind:
                 continue
             argv = record["argv"]

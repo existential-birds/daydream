@@ -243,15 +243,6 @@ def load_dataset_v2(
 _ALLOWED_V2_LICENSE_STATUSES = frozenset({"admitted", "rejected"})
 
 
-def _v2_lineages(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Validated ``lineage`` dicts (structural gate already passed)."""
-    return [
-        cast(dict[str, object], rec["lineage"])
-        for rec in records
-        if isinstance(rec.get("lineage"), dict)
-    ]
-
-
 def _enforce_v2_identity_and_gates(
     records: list[dict[str, object]],
     path: Path,
@@ -284,11 +275,13 @@ def _enforce_v2_identity_and_gates(
                 "refusing a record without an immutable license decision"
             )
 
+    lineages = [cast(dict[str, object], rec["lineage"]) for rec in records]
+
     excluded = {slug.casefold() for slug in load_exclusion_list()}
     excluded_offenders = sorted(
         {
             slug
-            for lineage in _v2_lineages(records)
+            for lineage in lineages
             if (slug := str(lineage["repo_slug"]).casefold()) in excluded
         }
     )
@@ -305,14 +298,13 @@ def _enforce_v2_identity_and_gates(
     copyleft_offenders = sorted(
         {
             slug
-            for lineage in _v2_lineages(records)
+            for lineage in lineages
             if (slug := str(lineage["repo_slug"]).casefold())
             and slug not in allowed
             and (
                 is_copyleft(slug, allowed, copyleft_list=copyleft_known)
                 or (
-                    isinstance(lineage.get("license_decision"), dict)
-                    and cast(dict[str, object], lineage["license_decision"]).get("reason_code")
+                    cast(dict[str, object], lineage["license_decision"]).get("reason_code")
                     == REASON_CODE_C8_COPYLEFT_UNOPTED
                 )
             )

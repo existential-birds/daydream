@@ -252,6 +252,23 @@ def derive_candidate_id(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def assign_candidate_id(
+    case_key: str,
+    finding: CandidateFinding | dict[str, object],
+    seen: dict[tuple[object, ...], int],
+) -> str:
+    """Derive a finding's id, advancing the ordinal for identical content.
+
+    ``seen`` groups findings by their canonical six-field tuple so duplicate
+    content gets consecutive ordinals, matching the verifier's own per-content
+    ordinal. Mutates ``seen``.
+    """
+    canonical = _canonical_tuple(finding)
+    ordinal = seen.get(canonical, 0)
+    seen[canonical] = ordinal + 1
+    return derive_candidate_id(case_key, finding, ordinal)
+
+
 # candidate artifact + gold set validation
 
 
@@ -293,10 +310,7 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
     seen: dict[tuple[object, ...], int] = {}
     ids: set[str] = set()
     for finding in parsed:
-        canon = _canonical_tuple(finding)
-        ordinal = seen.get(canon, 0)
-        seen[canon] = ordinal + 1
-        expected = derive_candidate_id(case_id, finding, ordinal)
+        expected = assign_candidate_id(case_id, finding, seen)
         if finding.candidate_id != expected:
             raise VerifierError("candidate_id does not match the derived id")
         if finding.candidate_id in ids:

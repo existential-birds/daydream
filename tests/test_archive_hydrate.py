@@ -62,6 +62,24 @@ def make_fake_hub(tmp_path: Path) -> FakeHub:
     return hub
 
 
+def _ingested_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
+    """A staged snapshot downloaded and ingested at ``revision``."""
+    hub = make_fake_hub(tmp_path)
+    hub.commit_revision(revision)
+    stage = tmp_path / "stage"
+    hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
+    hydrate.ingest_bundles(stage, revision=revision)
+    return stage
+
+
+def _admitted_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
+    """An ingested stage that has also passed dedupe and ledger building."""
+    stage = _ingested_stage(tmp_path, revision)
+    hydrate.dedupe_admitted(stage, revision=revision)
+    hydrate.build_import_ledger(stage, revision=revision, source_commit=revision)
+    return stage
+
+
 def test_fake_hub_roundtrip_and_revision(tmp_path: Path) -> None:
     hub = make_fake_hub(tmp_path)
     hub.commit_revision("abc123def4567890")  # fake pins a "commit sha"
@@ -640,20 +658,10 @@ class TestDownloadSnapshot:
 
 
 class TestPublish:
-    def _staged(self, tmp_path: Path) -> Path:
-        hub = make_fake_hub(tmp_path)
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision="a" * 40)
-        hydrate.dedupe_admitted(stage, revision="a" * 40)
-        hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
-        return stage
-
     def test_public_destination_hard_fails(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
         hub.private = False
-        stage = self._staged(tmp_path)
+        stage = _admitted_stage(tmp_path)
         cid = hydrate_rules.derive_pre_identity_curation_id(
             source_commit="a" * 40, sanitizer_version="1", index_schema_version="1",
             admission_policy_version="1")
@@ -663,7 +671,7 @@ class TestPublish:
 
     def test_batches_and_ledger_under_additive_prefix(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
-        stage = self._staged(tmp_path)
+        stage = _admitted_stage(tmp_path)
         cid = hydrate_rules.derive_pre_identity_curation_id(
             source_commit="a" * 40, sanitizer_version="1", index_schema_version="1",
             admission_policy_version="1")
@@ -686,7 +694,7 @@ class TestPublish:
 
     def test_remote_ledger_checkpoint_enables_resume(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
-        stage = self._staged(tmp_path)
+        stage = _admitted_stage(tmp_path)
         cid = "cur-" + "0" * 16
         hydrate.publish_batches(hub, stage, curation_id=cid)
         # a fresh VM with empty disk discovers the remote ledger and skips completed batches
@@ -878,15 +886,8 @@ def test_resolution_map_wired_from_enrichment_cache_in_pipeline(
 
 
 class TestIngestAndIndex:
-    def _staged(self, tmp_path: Path, revision: str = "a" * 40) -> Path:
-        hub = make_fake_hub(tmp_path)
-        hub.commit_revision(revision)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
-        return stage
-
     def test_clean_bundle_ingested_and_indexed_staging_local(self, tmp_path: Path) -> None:
-        stage = self._staged(tmp_path)
+        stage = _ingested_stage(tmp_path)
         results = hydrate.ingest_bundles(stage, revision="a" * 40)
         assert [r.status for r in results] == ["admitted"]
         row_dir = stage / "runs" / "sess-a"
@@ -977,7 +978,7 @@ class TestIngestAndIndex:
 
     def test_bundles_exclude_git_dirs(self, tmp_path: Path) -> None:
         """Task 0B constraint: no .git ships inside hydrated bundles (harvest priority-1 safety)."""
-        stage = self._staged(tmp_path)
+        stage = _ingested_stage(tmp_path)
         hydrate.ingest_bundles(stage, revision="a" * 40)
         assert not list((stage / "runs").rglob(".git"))
 
@@ -995,15 +996,6 @@ class TestFinalizeAndVerify:
             source_repo="org/private-ds", source_revision="a" * 40,
             destination_repo="org/private-ds", stage_dir=tmp_path / "stage",
             license_policy_path=self._policy_path)
-
-    def _staged(self, tmp_path: Path) -> Path:
-        hub = make_fake_hub(tmp_path)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision="a" * 40)
-        hydrate.dedupe_admitted(stage, revision="a" * 40)
-        hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
-        return stage
 
     def test_verify_failure_never_publishes_success_marker(self, tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1037,7 +1029,7 @@ class TestFinalizeAndVerify:
 
     def test_success_marker_last_and_output_sha_captured(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
-        stage = self._staged(tmp_path)
+        stage = _admitted_stage(tmp_path)
         summary = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
             source_repo="org/private-ds", source_revision="a" * 40,
             destination_repo="org/private-ds", stage_dir=stage,
@@ -1048,7 +1040,7 @@ class TestFinalizeAndVerify:
 
     def test_verify_cycle_reproduces_dry_run_counts(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
-        self._staged(tmp_path)
+        _admitted_stage(tmp_path)
         summary = hydrate.run_hydrate_hub(self._config(tmp_path), client=hub)
         assert summary.verified is True
         assert summary.dry_run_admitted == summary.verify_admitted  # M19 count equality
@@ -1056,7 +1048,7 @@ class TestFinalizeAndVerify:
     def test_no_success_on_skipped_upload(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
         hub.fail_uploads = True
-        self._staged(tmp_path)
+        _admitted_stage(tmp_path)
         with pytest.raises(hydrate.HydrationError):
             hydrate.run_hydrate_hub(self._config(tmp_path), client=hub)
         assert "cur-" not in "".join(hub.uploaded_paths) or \
@@ -1242,14 +1234,6 @@ class TestPrefixBindingGate:
 
 
 class TestDedupeAndLedger:
-    def _staged(self, tmp_path: Path, revision: str = "a" * 40) -> Path:
-        hub = make_fake_hub(tmp_path)
-        hub.commit_revision(revision)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision=revision)
-        return stage
-
     def test_collision_durable_across_reruns(self, tmp_path: Path) -> None:
         """A collision re-quarantines on every later run; the mutated derivative
         is never re-admitted over the published baseline (M7 durability)."""
@@ -1276,7 +1260,7 @@ class TestDedupeAndLedger:
         assert len(query_runs(stage)) == 1  # one session row, never overwritten
 
     def test_idempotent_rerun_no_duplicates(self, tmp_path: Path) -> None:
-        stage = self._staged(tmp_path)
+        stage = _ingested_stage(tmp_path)
         first = hydrate.dedupe_admitted(stage, revision="a" * 40)
         assert first.admitted == 1 and first.collisions == 0
         second = hydrate.dedupe_admitted(stage, revision="a" * 40)  # same content re-run

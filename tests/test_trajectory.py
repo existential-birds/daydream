@@ -65,6 +65,7 @@ from tests.harness.trajectory import (
     observe_metrics_and_result,
     observe_text_and_result,
     read_trajectory,
+    trajectory_payload,
 )
 
 
@@ -978,12 +979,6 @@ async def test_lifecycle_reason_redaction_omits_exception_details(
 SESSION = "11111111-2222-3333-4444-555555555555"
 
 
-def _payload(trajectory_id: str) -> bytes:
-    return json.dumps(
-        {"session_id": SESSION, "trajectory_id": trajectory_id, "steps": []}, sort_keys=True
-    ).encode()
-
-
 def _replace_snapshot_root(snapshot: RunWriteSnapshot, root_path: Path) -> RunWriteSnapshot:
     documents = tuple(
         TrajectoryDocumentSnapshot(document.trajectory_id, root_path, document.json_bytes)
@@ -1008,8 +1003,8 @@ def test_producer_labels_and_partial_paths_come_from_the_layout_surface(tmp_path
         cutoff_at="2026-01-01T00:00:00Z",
         root_trajectory_id=SESSION,
         documents=(
-            TrajectoryDocumentSnapshot(SESSION, run_document_path(run_dir), _payload(SESSION)),
-            TrajectoryDocumentSnapshot("fork-1", sibling, _payload("fork-1")),
+            TrajectoryDocumentSnapshot(SESSION, run_document_path(run_dir), trajectory_payload(SESSION)),
+            TrajectoryDocumentSnapshot("fork-1", sibling, trajectory_payload("fork-1")),
         ),
     )
     frozen = snapshot_trajectories(snapshot)

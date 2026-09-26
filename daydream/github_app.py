@@ -484,8 +484,9 @@ def resolve_run_identity(
         raise GitHubAppError("Cannot determine owner/repo for installation token minting")
 
     owner, repo = owner_repo
-    try:
-        minted = _mint_installation_token(
+
+    def mint() -> Any:
+        return _mint_installation_token(
             target_dir,
             credentials.app_id,
             credentials.private_key,
@@ -494,15 +495,11 @@ def resolve_run_identity(
             base_environment=source_environment,
         )
 
+    try:
+        minted = mint()
+
         def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
-            fresh = _mint_installation_token(
-                target_dir,
-                credentials.app_id,
-                credentials.private_key,
-                owner,
-                repo,
-                base_environment=source_environment,
-            )
+            fresh = mint()
             return (
                 git_ops.StaticGitHubAuth(
                     build_gh_env(

@@ -32,6 +32,24 @@ def _http_response(status: int, body: Any = None, *, text: str = "ok", **attrs: 
     return SimpleNamespace(status_code=status, text=text, json=lambda: body, **attrs)
 
 
+def _assert_scored_zero(out: Path, reward: Any) -> dict[str, Any]:
+    """Assert an agent-attributable scored zero carries its bounded diagnostic."""
+    assert reward.verifier_error == 0 and reward.reward == 0.0  # scored, not infra
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 0 and rj["reward"] == 0  # reward.json IS present, verifier_error 0
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1  # bounded diagnostic still written
+    return details
+
+
+def _assert_infra_zero(out: Path) -> dict[str, Any]:
+    """Assert an infra failure wrote bounded diagnostics and no numeric reward."""
+    assert not (out / "reward.json").exists()  # NO numeric reward on any infra path
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1  # bounded diagnostic written
+    return details
+
+
 def test_spike_template_loads_with_bare_import(sr_module: Any) -> None:
     """The template loads via importlib and its bare import resolves to the sibling copy."""
     assert sr_module.__name__ == "score_review"
@@ -512,9 +530,7 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_pa
         env=judge_env(),
     )
     assert reward.verifier_error == 1 and reward.reward == 0.0
-    assert not (out_dir / "reward.json").exists()                 # NO numeric reward on any infra path
-    details = json.loads((out_dir / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic written
+    _assert_infra_zero(out_dir)
 
 
 def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any) -> None:
@@ -913,12 +929,8 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module: Any, tmp_
     client = _CountingClient()
     env = judge_env()
     reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
-    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
-    rj = json.loads((out / "reward.json").read_text())
-    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
+    details = _assert_scored_zero(out, reward)
     assert client.requests == 0  # no judge call
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
     assert details["request_counts"]["requests"] == 0
     blob = json.dumps(details)
     assert oversized_body not in blob and ("t" * 500) not in blob and ("p" * 200) not in blob
@@ -969,11 +981,7 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module: Any, tmp
     client = _CountingClient()
     env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
-    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
-    rj = json.loads((out / "reward.json").read_text())
-    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
+    _assert_scored_zero(out, reward)
 
 
 
@@ -1005,11 +1013,7 @@ def test_run_verifier_rejects_cross_case_replay(sr_module: Any, tmp_path: Path) 
     client = _CountingClient()
     env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
-    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
-    rj = json.loads((out / "reward.json").read_text())
-    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
+    _assert_scored_zero(out, reward)
 
 
 def test_run_verifier_rejects_ref_mismatch(sr_module: Any, tmp_path: Path) -> None:
@@ -1025,11 +1029,7 @@ def test_run_verifier_rejects_ref_mismatch(sr_module: Any, tmp_path: Path) -> No
     client = _CountingClient()
     env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
-    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
-    rj = json.loads((out / "reward.json").read_text())
-    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
+    _assert_scored_zero(out, reward)
 
 
 def test_run_verifier_rejects_single_byte_gold_corruption(sr_module: Any, tmp_path: Path) -> None:
@@ -1049,9 +1049,7 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module: Any, tmp_pa
     env = judge_env()
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
-    assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic written
+    _assert_infra_zero(out)
 
 
 
@@ -1263,9 +1261,7 @@ def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module: Any, tm
     reward = sr.run_verifier(gold_path, art_path, out, client=Exploding(), env=env)
     # unexpected runtime exception no longer escapes to a bare exit
     assert reward.verifier_error == 1 and reward.reward == 0.0
-    assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic written
+    details = _assert_infra_zero(out)
     blob = json.dumps(details)
     assert "sk-ant-leakme123" not in blob and "<redacted>" in blob   # no credential, redacted
     assert len(details["errors"]) >= 1 and any("unexpected" in e for e in details["errors"])
@@ -1287,9 +1283,7 @@ def test_main_fail_closed_on_bad_provider_and_reads_path_overrides(
         _candidate_artifact(sr, case_id="c", n=0)))
     rc = sr.main()
     assert rc == 1  # verifier_error
-    assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1                            # bounded diagnostic written
+    details = _assert_infra_zero(out)
     assert any("unsupported" in e or "expected anthropic or openai-compatible" in e
                for e in details["errors"])  # typed diagnostic surfaced, not a barren client=None exit
 
