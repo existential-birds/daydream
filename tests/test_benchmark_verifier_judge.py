@@ -37,7 +37,7 @@ def _assert_scored_zero(out: Path, reward: Any) -> dict[str, Any]:
     assert reward.verifier_error == 0 and reward.reward == 0.0  # scored, not infra
     rj = json.loads((out / "reward.json").read_text())
     assert rj["verifier_error"] == 0 and rj["reward"] == 0  # reward.json IS present, verifier_error 0
-    details = json.loads((out / "reward-details.json").read_text())
+    details: dict[str, Any] = json.loads((out / "reward-details.json").read_text())
     assert len(details["errors"]) >= 1  # bounded diagnostic still written
     return details
 
@@ -45,7 +45,7 @@ def _assert_scored_zero(out: Path, reward: Any) -> dict[str, Any]:
 def _assert_infra_zero(out: Path) -> dict[str, Any]:
     """Assert an infra failure wrote bounded diagnostics and no numeric reward."""
     assert not (out / "reward.json").exists()  # NO numeric reward on any infra path
-    details = json.loads((out / "reward-details.json").read_text())
+    details: dict[str, Any] = json.loads((out / "reward-details.json").read_text())
     assert len(details["errors"]) >= 1  # bounded diagnostic written
     return details
 
