@@ -1614,6 +1614,16 @@ async def _stub_fix_verify(
     ]
 
 
+async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
+    """No-op ``phase_fix_parallel`` stand-in for fix-cycle harnesses."""
+    return {}
+
+
+async def _noop_commit(*_a: Any, **_k: Any) -> None:
+    """No-op ``phase_commit_push`` stand-in for fix-cycle harnesses."""
+    return None
+
+
 @pytest.mark.asyncio
 async def test_fix_cycle_awaken_hero_followed_by_model_line(
     monkeypatch: pytest.MonkeyPatch,
@@ -1646,12 +1656,6 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
-
-    async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
-        return {}
-
-    async def _noop_commit(*_a: Any, **_k: Any) -> None:
-        return None
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _noop_fix)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
@@ -1739,9 +1743,6 @@ async def test_fix_cycle_items_severity_ordered(
             output_tree_key=key,
         )
         return TestAndHealResult(True, 0, True, False, (attempt,))
-
-    async def _noop_commit(*_a: Any, **_k: Any) -> None:
-        return None
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _spy_fix_parallel)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _noop_test)
@@ -1964,9 +1965,6 @@ async def _drive_fix_cycle_failing(
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
-
-    async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
-        return {}
 
     commit_calls: list[bool] = []
 

@@ -32,7 +32,9 @@ from daydream.archive.index import append_label_observation
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.materialize import (
+    _ANNOTATIONS_FILENAME,
     _CONFLICTED_DISPOSITION,
+    _MANIFEST_FILENAME,
     _SESSIONS_OUT_FILENAME,
     index_sessions,
 )
@@ -50,9 +52,6 @@ from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.labeler_versions import REPLY_CLASSIFIER_VERSION
 
 __all__ = ["AnnotationDriftError", "run_canonical_harvest"]
-
-_ANNOTATIONS_FILENAME = "annotations.jsonl"
-_MANIFEST_FILENAME = "preview-manifest.json"
 
 
 def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:

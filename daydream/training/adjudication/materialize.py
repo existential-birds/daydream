@@ -32,6 +32,7 @@ __all__ = ["run_materialize"]
 
 _SESSIONS_OUT_FILENAME = "sessions.jsonl"
 _MANIFEST_FILENAME = "preview-manifest.json"
+_ANNOTATIONS_FILENAME = "annotations.jsonl"
 
 # Disposition written for a conflicted generation's materialized records
 # (sessions.jsonl). The operator queue (``queue.build_queue``'s default
