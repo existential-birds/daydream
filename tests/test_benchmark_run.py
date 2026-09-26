@@ -606,17 +606,32 @@ def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) 
     assert "reviewer_effort" in m
 
 
-def test_ledger_records_reviewer_effort_when_present(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("extra_kwargs", "expected_profile_digest", "expected_effort"),
+    [
+        ({"profile_digest": "d" * 64, "reviewer_effort": "high"}, "d" * 64, "high"),
+        ({}, None, None),
+    ],
+    ids=["present", "omitted"],
+)
+def test_ledger_records_reviewer_effort(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    expected_profile_digest: str | None,
+    expected_effort: str | None,
+) -> None:
 
     ws = _ws(tmp_path)
     run_id = "run-1"
     run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
                                   job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
-                                  profile_digest="d" * 64, reviewer_effort="high")
+                                  **extra_kwargs)
     run_mod.ledger_mark(ws, run_id, state="complete")
     doc = run_mod._load_ledger(ws)
-    assert doc["runs"][0]["profile_digest"] == "d" * 64
-    assert doc["runs"][0]["reviewer_effort"] == "high"
+    assert doc["runs"][0]["profile_digest"] == expected_profile_digest
+    # Issue #888: an omitted effort stays None on the entry (byte-stable for
+    # legacy callers); the objective reader surfaces it as None, never 0/"".
+    assert doc["runs"][0]["reviewer_effort"] == expected_effort
 
 
 # Oracle mapping accepts the legacy calibration field without using it.
@@ -663,16 +678,3 @@ def test_default_run_still_blocks_without_oracle_receipt(tmp_path: Path) -> None
     lock_sha = _compiled_lock_sha(ws)
     reason = run_mod._default_run_gate(ws, env=_env(), compiled_lock_sha256=lock_sha)
     assert reason is not None and "no matching oracle receipt" in reason
-
-
-def test_ledger_reviewer_effort_defaults_none_when_omitted(tmp_path: Path) -> None:
-
-    ws = _ws(tmp_path)
-    run_id = "run-1"
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
-                                  job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()))
-    run_mod.ledger_mark(ws, run_id, state="complete")
-    doc = run_mod._load_ledger(ws)
-    # Issue #888: an omitted effort stays None on the entry (byte-stable for
-    # legacy callers); the objective reader surfaces it as None, never 0/"".
-    assert doc["runs"][0]["reviewer_effort"] is None

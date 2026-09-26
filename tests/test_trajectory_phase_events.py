@@ -724,12 +724,9 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     target = multi_stack_target
     origin = bare_remote(tmp_path / "origin.git")
     no_ci_remote.connect(target, origin)
-    backend = StubBackend(target)
+    backend = _install_stub_backend(monkeypatch, target, pin_skill_availability=False)
     backend.fail_batched_fix_file = "api.py"
     backend.fix_edit_line = "\n"
-    monkeypatch.setattr(
-        "daydream.runner.create_backend", lambda *args, **kwargs: backend
-    )
 
     # Preserve the work watchdog in addition to the separately bounded remote-CI
     # wait. The outer bound must scale with the no-CI harness discovery window:

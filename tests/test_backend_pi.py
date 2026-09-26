@@ -1244,35 +1244,32 @@ def test_pi_transient_failures_are_retryable(message: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_eof_without_finish_reason_is_retryable_pi_error() -> None:
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param(
+            [
+                '{"type":"session","sessionId":"pi_ses_truncated"}',
+                '{"type":"agent_start"}',
+                '{"type":"turn_start"}',
+            ],
+            id="without-finish-reason",
+        ),
+        pytest.param(
+            [
+                '{"type":"session","sessionId":"pi_ses_truncated"}',
+                '{"type":"agent_start"}',
+                '{"type":"turn_start"}',
+                '{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}',
+                '{"type":"turn_start"}',
+            ],
+            id="after-completed-earlier-turn",
+        ),
+    ],
+)
+async def test_stream_eof_without_finish_reason_is_retryable_pi_error(lines: list[str]) -> None:
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(
-        [
-            '{"type":"session","sessionId":"pi_ses_truncated"}',
-            '{"type":"agent_start"}',
-            '{"type":"turn_start"}',
-        ]
-    )
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(PiError, match="finish_reason") as raised:
-            async for _ in backend.execute(Path("/tmp"), "Truncated"):
-                pass
-    assert raised.value.retryable is True
-    assert raised.value.category == "STREAM_TRUNCATION"
-
-
-@pytest.mark.asyncio
-async def test_stream_eof_after_completed_earlier_turn_is_retryable_pi_error() -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(
-        [
-            '{"type":"session","sessionId":"pi_ses_truncated"}',
-            '{"type":"agent_start"}',
-            '{"type":"turn_start"}',
-            '{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}',
-            '{"type":"turn_start"}',
-        ]
-    )
+    mock_proc = make_mock_process(lines)
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError, match="finish_reason") as raised:
             async for _ in backend.execute(Path("/tmp"), "Truncated"):

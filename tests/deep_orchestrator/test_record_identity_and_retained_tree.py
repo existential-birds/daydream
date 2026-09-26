@@ -610,6 +610,19 @@ async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
     assert isinstance(item["id"], int), item
 
 
+def _retained_work(repo: Path, sha: str) -> WorkContext:
+    return WorkContext(
+        repo=repo,
+        source=repo,
+        base_branch="main",
+        base_sha=sha,
+        head_branch="main",
+        head_sha=sha,
+        is_ephemeral=False,
+        run_id="s",
+    )
+
+
 @pytest.mark.parametrize("scratch_is_related", [False, True])
 def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
     tmp_path: Path,
@@ -643,33 +656,9 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
         footprint=footprint,
     )
     (repo / "a.py").write_text("A = 2\n")
-    first = capture_retained_tree(
-        WorkContext(
-            repo=repo,
-            source=repo,
-            base_branch="main",
-            base_sha=state.stable_head,
-            head_branch="main",
-            head_sha=state.stable_head,
-            is_ephemeral=False,
-            run_id="s",
-        ),
-        state,
-    )
+    first = capture_retained_tree(_retained_work(repo, state.stable_head), state)
     (repo / "c.py").write_text("C = 9\n")
-    second = capture_retained_tree(
-        WorkContext(
-            repo=repo,
-            source=repo,
-            base_branch="main",
-            base_sha=state.stable_head,
-            head_branch="main",
-            head_sha=state.stable_head,
-            is_ephemeral=False,
-            run_id="s",
-        ),
-        state,
-    )
+    second = capture_retained_tree(_retained_work(repo, state.stable_head), state)
     assert first.paths == second.paths == frozenset({"a.py"})
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
@@ -707,16 +696,7 @@ def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path
         footprint=footprint,
     )
     (repo / "b.py").write_text("B = 2\n")
-    work = WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha=head,
-        head_branch="main",
-        head_sha=head,
-        is_ephemeral=False,
-        run_id="s",
-    )
+    work = _retained_work(repo, head)
 
     snapshot = capture_retained_tree(work, state)
 

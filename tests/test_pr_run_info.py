@@ -26,9 +26,8 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from daydream.workspace import WorkContext
 from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import git
+from tests.harness.git_helpers import work_context
 from tests.harness.trajectory import make_recorder
 
 
@@ -102,20 +101,6 @@ def _recorder(
     return recorder
 
 
-def _work(repo: Path) -> WorkContext:
-    sha = git(repo, "rev-parse", "HEAD")
-    return WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha=sha,
-        head_branch="main",
-        head_sha=sha,
-        is_ephemeral=False,
-        run_id="run-info",
-    )
-
-
 @pytest.mark.parametrize(
     ("source", "diagnostic"),
     [
@@ -144,7 +129,7 @@ async def test_live_provider_renders_parent_and_real_retained_complete_sibling(
     session_id = "live-run-info"
     owner = resolve_private_workspace_owner(repo, locations=private_root_locations())
     async with open_artifact_session(
-        _work(repo),
+        work_context(repo, run_id="run-info"),
         session_id=session_id,
         owner=owner,
     ) as artifacts:

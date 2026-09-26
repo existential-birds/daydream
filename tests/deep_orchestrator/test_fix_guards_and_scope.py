@@ -41,7 +41,6 @@ from tests.test_deep_orchestrator import (
     _read_quality_gate,
     _run_quality_gate_fixture,
     _silence,
-    _StubBackend,
 )
 
 
@@ -105,8 +104,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     untouched_untracked.write_bytes(b"-- untouched draft\r\n")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
-    stub = _StubBackend(project)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     stub.merge_items = [
         _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
         _merge_item(2, "api.py", "high", desc="source fix"),
@@ -171,8 +169,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     head_before = _git(project, "rev-parse", "HEAD")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
-    stub = _StubBackend(project)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     # A one-file diff collapses to single-stack mode (no cross-stack merge
     # agent), so the finding is driven through the per-stack parse: the go
     # review's record points at the sole reviewed file, main.go.
@@ -217,8 +214,7 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     pre_migration = migration.read_bytes()
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False)
-    stub = _StubBackend(project)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fail_first_test_run = True
     stub.heal_fix_generated = "migrations/0001_init.sql"
@@ -264,9 +260,7 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(heal=True, commit=False)
-    stub = _StubBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
     monkeypatch.setattr(

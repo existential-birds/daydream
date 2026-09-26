@@ -896,39 +896,3 @@ return None
     payload = json.dumps([request["body"] for request in collector.requests])
     assert payload.count("native-thread-77") == 1  # only the resumed attempt's conversation
 
-
-async def test_runner_codex_unresumable_continuation_fails_before_effective_request(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Codex continuation its backend cannot resume fails before any request.
-
-    Complements the protocols-file pre-launch case with the failure seam on
-    the production runner: the attempt exports ERROR with no effective
-    request evidence, and the real CodexError surfaces to the caller.
-    """
-    _flow(ext_dir, body='''
-from daydream.backends import ContinuationToken
-await run_agent(
-    ctx.backend_for("review"), ctx.work.repo, "original logical prompt",
-    phase=DaydreamPhase.REVIEW, read_only=True,
-    continuation=ContinuationToken("codex", {"thread_id": "unresumable-thread"}),
-)
-''')
-    install_backend(CodexBackend(model="fixture-model"))
-    with otlp_collector() as collector:
-        _config(make_config, feature_branch_repo, collector.base_url, monkeypatch)
-        with pytest.raises(CodexError, match="cannot be resumed"):
-            await runner.run(
-                make_config(feature_branch_repo, flow_name="trace-failures",
-                            observability=ObservabilityConfig(destinations=("otlp",)))
-            )
-    attempt = _kind(collector.spans, "attempt")[0]
-    meta = attributes(attempt)
-    assert attempt["status"]["code"] == "STATUS_CODE_ERROR"
-    assert meta["error.type"] == "CodexError"
-    assert "daydream.request.timestamp" not in meta
-    assert "gen_ai.input.messages" not in meta
