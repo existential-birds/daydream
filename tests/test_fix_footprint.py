@@ -27,23 +27,8 @@ from daydream.repository_paths import (
     canonicalize_repository_file_path,
     git_observed_path_is_confined,
 )
-from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo
-
-
-def _work(repo: Path) -> WorkContext:
-    head = _git(repo, "rev-parse", "HEAD")
-    return WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha=head,
-        head_branch="main",
-        head_sha=head,
-        is_ephemeral=False,
-        run_id="test-run",
-    )
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo, work_context
 
 
 def _seed(repo: Path, files: dict[str, bytes]) -> None:
@@ -403,7 +388,7 @@ def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_rem
     residual.write_bytes(b"remove me")
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked=baseline,
@@ -456,7 +441,7 @@ def test_runtime_artifacts_do_not_enter_fix_scope_or_invalidate_content_evidence
     )) != before
     footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.txt"}, [])
     result = enforce_authorized_fix_footprint(
-        _work(git_repo), "HEAD", footprint, preexisting_untracked=protected,
+        work_context(git_repo, run_id="test-run"), "HEAD", footprint, preexisting_untracked=protected,
         phase="post-test", round_number=1,
     )
     assert result.mutated
@@ -564,7 +549,7 @@ def test_scope_issue_diff_failure_still_restores_and_audits_without_sensitive_wa
     )
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},
@@ -608,7 +593,7 @@ def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_res
     )
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},
@@ -647,7 +632,7 @@ def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_ef
     )
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},
@@ -724,7 +709,7 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
     )
     failures = await phase_fix_parallel(
         cast(Backend, backend),
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         items,
         footprint=footprint,
         round_snapshot=snapshot,
@@ -783,7 +768,7 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
     async def _run_phase() -> None:
         await phase_fix_parallel(
             cast(Backend, backend),
-            _work(git_repo),
+            work_context(git_repo, run_id="test-run"),
             [item],
             footprint=footprint,
             round_snapshot=snapshot,
@@ -1012,7 +997,7 @@ def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path)
     _git(nested, "checkout", "--detach", indexed)
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},

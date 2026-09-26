@@ -377,7 +377,6 @@ async def pre_scan(
                     specialist_failed = True
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 specialist_failed = True
-                pass
 
     # Builders split this bounded static map into changed targets and optional
     # context for each specialist, so imported files never become new targets.
@@ -540,7 +539,6 @@ async def repo_scan(
                     specialist_failed = True
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 specialist_failed = True
-                pass
 
     async with dispatch_scope(
         recorder,

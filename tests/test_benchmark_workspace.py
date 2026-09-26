@@ -152,7 +152,7 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     ``snapshot.bundle_sha256`` and whose tree IDs + canonical diff digest are
     recorded from that origin, and a ``CaseDocument`` whose ``pull_request``/
     ``snapshot``/``source``/``curation`` model-validate without any
-    ``_schema_ready`` strip.
+    ``_schema_ready`` strip. ``curation_state`` is ``"ready"`` or ``"draft"``.
     """
 
 
@@ -228,17 +228,6 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
             "clean_attested": False,
             "gold_status": "findings",
             "findings": [finding],
-            "exclusions": [],
-            "case_exclusion": None,
-            "task_spec_sha256": "d" * 64,
-        }
-    elif curation_state == "clean":
-        curation = {
-            "state": "ready",
-            "snapshot_attested": True,
-            "clean_attested": True,
-            "gold_status": "clean",
-            "findings": [],
             "exclusions": [],
             "case_exclusion": None,
             "task_spec_sha256": "d" * 64,
