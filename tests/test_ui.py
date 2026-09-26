@@ -30,6 +30,7 @@ from daydream.ui.tools import (
     _BASH_COMMAND_MAX_CHARS,
     _build_tool_header,
     _primary_tool_value,
+    _redacted_bash_command,
     format_callback_progress,
 )
 from tests.harness.backend import ScriptedBackend
@@ -535,3 +536,45 @@ def test_callback_progress_cd_split_matches_live_surfaces() -> None:
     shell_line = format_callback_progress("shell", {"command": "cd /app && echo hello"}, None)
     assert "echo hello" in shell_line.plain
     assert "cd /app" not in shell_line.plain
+
+
+_BOUNDARY_PAD = 185  # 200-char cap: a token starting here straddles it (15 of 20 chars inside)
+_AKIA_TOKEN = "AKIA" + "Q7" * 8  # AKIA + 16 [A-Z0-9] — the pattern needs all 16
+_JWT_TOKEN = (
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+    ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+)
+
+
+def _straddling_command(token: str) -> str:
+    """A >cap command whose credential token starts at _BOUNDARY_PAD."""
+    prefix = "echo " + "a" * (_BOUNDARY_PAD - 12) + " --key "
+    assert len(prefix) == _BOUNDARY_PAD
+    return prefix + token + " tail"
+
+
+@pytest.mark.parametrize("token", [_AKIA_TOKEN, _JWT_TOKEN])
+def test_redacted_bash_command_redacts_before_the_cap(token: str) -> None:
+    """The order is strip -> redact the COMPLETE value -> cap (issue #1227).
+
+    The token straddles the cap boundary, so the fragment surviving a cap-first
+    order is too short to match its own pattern and would print in the clear.
+    """
+    command = _straddling_command(token)
+    assert len(command) > _BASH_COMMAND_MAX_CHARS
+    displayed = _redacted_bash_command("Bash", command)
+    assert token[:8] not in displayed  # no fragment of the credential survives
+    assert "[REDACTED" in displayed
+    assert len(displayed) == _BASH_COMMAND_MAX_CHARS
+
+
+def test_redacted_bash_command_strip_is_codex_only_and_precedes_redaction() -> None:
+    """The strip applies to Codex 'shell' only, and before the redaction (issue #1227)."""
+    command = _straddling_command(_AKIA_TOKEN)
+    wrapped = '/bin/zsh -lc "cd /srv/app && ' + command + '"'
+    shell_displayed = _redacted_bash_command("shell", wrapped)
+    bash_displayed = _redacted_bash_command("Bash", "cd /srv/app && " + command)
+    assert "cd /srv/app" not in shell_displayed  # Codex wrapper prefix stripped
+    assert "cd /srv/app" in bash_displayed  # operator-authored prefix kept
+    assert _AKIA_TOKEN[:8] not in shell_displayed
+    assert _AKIA_TOKEN[:8] not in bash_displayed
