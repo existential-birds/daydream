@@ -19,8 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.json_utils import canonical_json as _canonical
+from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.corpus_projection.identity import record_id as compute_record_id
 
 __all__ = ["EXPORT_KEYS", "validate_export_rows", "write_export_rows"]

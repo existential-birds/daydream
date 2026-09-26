@@ -40,6 +40,7 @@ the repository root and one ``git grep`` per symbol fallback.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,13 @@ from daydream.config import (
     DIAGRAM_MAX_PARTICIPANTS,
 )
 from daydream.deep.coverage import _path_component_matches, _strip_dot_slash
-from daydream.deep.diagram_types import CandidateRoot
+from daydream.deep.diagram_types import (
+    CandidateRoot,
+    as_dict as _as_dict,
+    as_int as _norm_line,
+    as_list as _as_list,
+    as_optional_str as _norm_optional_str,
+)
 from daydream.git_ops import GitError, grep_fixed_matches
 from daydream.repository_paths import path_is_confined, valid_repository_file_path
 from daydream.tree_sitter_index import (
@@ -432,29 +439,9 @@ class _SourceCache:
         return rows[line - 1] if 1 <= line <= len(rows) else ""
 
 
-def _as_list(value: Any) -> list[Any]:
-    """Return ``value`` when it is a list, else the empty list."""
-    return value if isinstance(value, list) else []
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    """Return ``value`` when it is a dict, else the empty dict."""
-    return value if isinstance(value, dict) else {}
-
-
 def _norm_str(value: Any) -> str:
     """Return ``value`` when it is a string, else ``""``."""
     return value if isinstance(value, str) else ""
-
-
-def _norm_optional_str(value: Any) -> str | None:
-    """Return ``value`` when it is a non-empty string, else None."""
-    return value if isinstance(value, str) and value else None
-
-
-def _norm_line(value: Any) -> int:
-    """Return ``value`` when it is a real int (not a bool), else 0."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _token_on_line(text: str, symbol: str) -> bool:
@@ -554,22 +541,28 @@ def _snap_symbol(
     return None
 
 
-def _branch_line(sources: _SourceCache, file: str, line: int) -> bool:
-    """Whether ``file:line`` opens a control-flow branch (fail-open on a bad install)."""
+def _language_line(
+    sources: _SourceCache,
+    file: str,
+    line: int,
+    predicate: Callable[[str | None, bytes, int], bool],
+) -> bool:
+    """Run a tree-sitter line *predicate*, falling back to its ``None``-language path."""
     source = sources.read(file) or b""
     try:
-        return is_branch_line(language_for_path(file), source, line)
+        return predicate(language_for_path(file), source, line)
     except Exception:
-        return is_branch_line(None, source, line)
+        return predicate(None, source, line)
+
+
+def _branch_line(sources: _SourceCache, file: str, line: int) -> bool:
+    """Whether ``file:line`` opens a control-flow branch (fail-open on a bad install)."""
+    return _language_line(sources, file, line, is_branch_line)
 
 
 def _terminal_line(sources: _SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` ends a control-flow path (fail-open on a bad install)."""
-    source = sources.read(file) or b""
-    try:
-        return is_terminal_line(language_for_path(file), source, line)
-    except Exception:
-        return is_terminal_line(None, source, line)
+    return _language_line(sources, file, line, is_terminal_line)
 
 
 def _reply_line(sources: _SourceCache, file: str, line: int) -> bool:

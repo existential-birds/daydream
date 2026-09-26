@@ -30,11 +30,13 @@ from daydream.git_ops import (
     WrongBranchError,
 )
 from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import configure_identity as _configure_identity
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import (
+    bare_remote as _bare_remote,
+    commit as _commit,
+    configure_identity as _configure_identity,
+    git as _git,
+    init_repo as _init_repo,
+)
 
 
 def _patch_subprocess_run(
@@ -49,6 +51,13 @@ def _patch_subprocess_run(
         "daydream.git_ops.subprocess.run",
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr),
     )
+
+
+def _repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
+    bare = _bare_remote(tmp_path / "remote.git")
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "remote", "add", "origin", str(bare))
+    return repo, bare
 
 
 def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
@@ -695,9 +704,7 @@ def test_independent_snapshot_accepts_git_exported_default_exec_path_in_pre_push
     tmp_path: Path,
 ) -> None:
     """A real pre-push hook may pass Git's own helper path to the snapshot."""
-    repo = _make_repo_with_main(tmp_path)
-    remote = _bare_remote(tmp_path / "remote.git")
-    _git(repo, "remote", "add", "origin", str(remote))
+    repo, remote = _repo_with_origin(tmp_path)
     destination = tmp_path / "snapshot"
     observed = tmp_path / "hook-exec-path"
     probe = tmp_path / "prepare-in-hook.py"
@@ -891,9 +898,7 @@ def test_current_branch_returns_none_when_detached(tmp_path: Path) -> None:
 
 
 def test_default_branch_uses_origin_head(tmp_path: Path) -> None:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     _git(repo, "push", "-u", "origin", "main")
     _git(repo, "remote", "set-head", "origin", "main")
     assert git_ops.default_branch(repo) == "main"
@@ -949,9 +954,7 @@ def test_default_branch_fallback(tmp_path: Path, init_branch: str, expected: obj
 
 
 def test_remote_url_returns_url_when_remote_configured(tmp_path: Path) -> None:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     assert git_ops.remote_url(repo) == str(bare)
 
 
@@ -961,9 +964,7 @@ def test_remote_url_returns_none_when_remote_missing(tmp_path: Path) -> None:
 
 
 def test_remote_url_returns_none_for_unknown_remote_name(tmp_path: Path) -> None:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     assert git_ops.remote_url(repo, "upstream") is None
 
 
@@ -1043,9 +1044,7 @@ def test_commit_exists_rejects_origin_only(tmp_path: Path) -> None:
     plain name has no local commit-ish, so commit_exists (the rev-parse --verify probe)
     must report it as not existing.
     """
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     _git(repo, "push", "-u", "origin", "main")
     _git(repo, "checkout", "-b", "remote-only")
     (repo / "r.txt").write_text("r\n")
@@ -1111,9 +1110,7 @@ def test_merge_base_returns_shared_commit(tmp_path: Path) -> None:
 
 def test_merge_base_prefers_upstream_when_remote_ahead(tmp_path: Path) -> None:
     """Port of codex's merge_base_prefers_upstream_when_remote_ahead test."""
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     _git(repo, "push", "-u", "origin", "main")
 
     _git(repo, "checkout", "-b", "feature")
@@ -1194,10 +1191,8 @@ def test_resolve_pr_merge_base_uses_local_branch_without_remotes(tmp_path: Path)
 
 
 def test_resolve_pr_merge_base_prefers_present_remote_over_stale_local(tmp_path: Path) -> None:
-    remote = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
+    repo, remote = _repo_with_origin(tmp_path)
     stale_local = git_ops.head_sha(repo)
-    _git(repo, "remote", "add", "origin", str(remote))
     _git(repo, "push", "-u", "origin", "main")
     (repo / "base-update.txt").write_text("new base\n")
     _git(repo, "add", "base-update.txt")
@@ -1517,9 +1512,7 @@ def test_upstream_ahead_count_no_upstream(tmp_path: Path) -> None:
 
 
 def test_upstream_ahead_count_when_remote_ahead(tmp_path: Path) -> None:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     _git(repo, "push", "-u", "origin", "main")
 
     # Push two extra commits to origin/main via a sidecar clone, then fetch.
@@ -1541,9 +1534,7 @@ def test_upstream_ahead_count_when_remote_ahead(tmp_path: Path) -> None:
 
 
 def test_fetch_pulls_new_commits(tmp_path: Path) -> None:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path, name="repo")
-    _git(repo, "remote", "add", "origin", str(bare))
+    repo, bare = _repo_with_origin(tmp_path)
     _git(repo, "push", "-u", "origin", "main")
 
     sidecar = tmp_path / "sidecar"

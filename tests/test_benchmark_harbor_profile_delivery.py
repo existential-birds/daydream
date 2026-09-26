@@ -13,8 +13,7 @@ import pytest
 
 from daydream import review_profile as rp
 from daydream.benchmark import cli as bc
-from daydream.benchmark.harbor import calibrate, entrypoint, run
-from daydream.benchmark.harbor import run as run_mod
+from daydream.benchmark.harbor import calibrate, entrypoint, run, run as run_mod
 from daydream.config_file import DaydreamFileConfig
 from daydream.review_profile import ProfileError
 

@@ -15,8 +15,6 @@ from daydream.training.corpus_projection.projector import project_findings
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.dispositions import (
     NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
-)
-from daydream.training.dispositions import (
     is_decisive,
 )
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
@@ -111,14 +109,10 @@ def build_queue(
     """
     items: list[dict[str, object]] = []
     for session in sessions:
-        if include_decisive or prior_observations:
-            records, adjudication = project_findings(session, return_adjudication=True)
-            entries = adjudication + [
-                r for r in records if is_decisive(str(r.get("disposition")))
-            ]
-        else:
-            _, adjudication = project_findings(session, return_adjudication=True)
-            entries = adjudication
+        records, adjudication = project_findings(session, return_adjudication=True)
+        entries = adjudication + [
+            r for r in records if is_decisive(str(r.get("disposition")))
+        ]
         for entry in adjudication:
             if entry["disposition"] not in _NON_DECISIVE_DISPOSITIONS:
                 raise ValueError(
@@ -159,7 +153,7 @@ def build_queue(
                     f"{session_id!r} is missing required field 'evidence_digest'"
                 )
             item: dict[str, object] = {
-                "record_id": record_id(session_id, trajectory_id, segment_id, fingerprint),
+                "record_id": finding_id,
                 "fingerprint": fingerprint,
                 "disposition": disposition,
                 "evidence": entry["evidence"],

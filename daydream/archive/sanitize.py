@@ -36,13 +36,13 @@ import json
 import shutil
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from daydream.archive import scan
 from daydream.archive._console import warn as _warn
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
+from daydream.timeutil import now_iso_utc
 from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
 
 __all__ = ["ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive", "sanitize_bundle"]
@@ -53,10 +53,6 @@ _AUDIT_FILENAME = "audit.jsonl"
 # tell our own copy from an imported source bundle parked in the same
 # ``quarantine/<name>`` namespace by :func:`import_bundle` (M14).
 _DERIVATIVE_MARKER = ".daydream_derivative_marker"
-
-
-def _now_iso_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass(frozen=True)
@@ -120,13 +116,8 @@ def _sanitize_json_document(doc: Any) -> Any:
     if isinstance(doc, list):
         return [_sanitize_json_document(child) for child in doc]
     if isinstance(doc, str):
-        return _sanitize_text(_sanitize_url_string(doc))
+        return redact_text(_sanitize_url_string(doc))
     return doc
-
-
-def _sanitize_text(text: str) -> str:
-    """Use the live redactor's shared credential rules for text and JSON leaves."""
-    return redact_text(text)
 
 
 def _sanitize_derivative(derivative_dir: Path) -> None:
@@ -147,7 +138,7 @@ def _sanitize_derivative(derivative_dir: Path) -> None:
                     encoding="utf-8",
                 )
                 continue
-        file_path.write_text(_sanitize_text(text), encoding="utf-8")
+        file_path.write_text(redact_text(text), encoding="utf-8")
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -203,7 +194,7 @@ def _mark_done(sanitized_dir: Path, session_id: str, derivative_digest: str) -> 
         {
             "session_id": session_id,
             "derivative_digest": derivative_digest,
-            "completed_at": _now_iso_utc(),
+            "completed_at": now_iso_utc(),
         },
     )
 
@@ -217,7 +208,7 @@ def _append_quarantine_audit(sanitized_dir: Path, run_dir: Path, session_id: str
             "session_id": session_id,
             "derivative_digest": "",
             "status": "quarantined",
-            "completed_at": _now_iso_utc(),
+            "completed_at": now_iso_utc(),
         },
     )
 
@@ -243,7 +234,7 @@ def _quarantine_derivative(
             # park this failed derivative in a unique sibling slot instead.
             quarantine_dir = quarantine_dir.with_name(f"{session_id}.{int(time.time())}")
         shutil.move(str(derivative_dir), str(quarantine_dir))
-        (quarantine_dir / _DERIVATIVE_MARKER).write_text(_now_iso_utc(), encoding="utf-8")
+        (quarantine_dir / _DERIVATIVE_MARKER).write_text(now_iso_utc(), encoding="utf-8")
     _append_quarantine_audit(sanitized_dir, run_dir, session_id)
 
 
@@ -310,7 +301,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
             "session_id": session_id,
             "derivative_digest": digest,
             "status": "sanitized",
-            "completed_at": _now_iso_utc(),
+            "completed_at": now_iso_utc(),
         },
     )
     return SanitizeResult(

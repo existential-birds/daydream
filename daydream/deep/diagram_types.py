@@ -19,6 +19,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+
+def as_list(value: Any) -> list[Any]:
+    """Return ``value`` when it is a list, else the empty list."""
+    return value if isinstance(value, list) else []
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """Return ``value`` when it is a dict, else the empty dict."""
+    return value if isinstance(value, dict) else {}
+
+
+def as_int(value: Any) -> int:
+    """Return ``value`` when it is a real int (not a bool), else 0."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def as_optional_str(value: Any) -> str | None:
+    """Return ``value`` when it is a non-empty string, else ``None``."""
+    return value if isinstance(value, str) and value else None
+
 # One kind's diagram outcome, as written to ``diagram.json``,
 # ``ctx.data["diagrams"]`` and the Phase A findings artifact::
 #

@@ -39,7 +39,7 @@ from daydream.archive.hydrate import (
     _curated_dir,
     _manifest_license_evidence,
     _manifest_repo_slug,
-    _read_manifest_dict,
+    _require_manifest_dict,
 )
 from daydream.training.corpus_projection.license import normalize_repo_slug
 from daydream.trajectory import RUNS_DIRNAME, redact_text
@@ -268,11 +268,7 @@ def enrich_license_evidence(
     if not runs_dir.is_dir():
         return resolved
     for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-        data = _read_manifest_dict(derivative)
-        if data is None:
-            raise HydrationError(
-                redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-            )
+        data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
         sid = str(data.get("session_id") or derivative.name)
         declared = _manifest_license_evidence(data)
         if declared is not None:

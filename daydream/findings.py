@@ -40,6 +40,13 @@ FINDINGS_SCHEMA_VERSION = 1
 
 MAX_ARTIFACT_BYTES = 1_048_576
 
+
+def _enforce_max_artifact_bytes(size: int) -> None:
+    if size > MAX_ARTIFACT_BYTES:
+        raise FindingsValidationError(
+            f"artifact size check failed: {size} bytes exceeds the {MAX_ARTIFACT_BYTES}-byte cap"
+        )
+
 FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -278,10 +285,7 @@ def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
     """
     text = json.dumps(artifact, indent=2, ensure_ascii=False) + "\n"
     size = len(text.encode("utf-8"))
-    if size > MAX_ARTIFACT_BYTES:
-        raise FindingsValidationError(
-            f"artifact size check failed: {size} bytes exceeds the {MAX_ARTIFACT_BYTES}-byte cap"
-        )
+    _enforce_max_artifact_bytes(size)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
@@ -307,10 +311,7 @@ def load_findings_artifact(
     """
     try:
         size = path.stat().st_size
-        if size > MAX_ARTIFACT_BYTES:
-            raise FindingsValidationError(
-                f"artifact size check failed: {size} bytes exceeds the {MAX_ARTIFACT_BYTES}-byte cap"
-            )
+        _enforce_max_artifact_bytes(size)
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise FindingsValidationError(f"artifact read failed: {path}: {exc}") from exc

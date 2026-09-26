@@ -100,7 +100,7 @@ from daydream.archive.index import (
 )
 from daydream.git_ops import GitError, GitHubAuth, RateLimitError
 from daydream.training import labeler_versions, reward
-from daydream.training._immutable_json import thaw_json
+from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.base_sha import materialize_base_sha
 from daydream.training.harvest_types import BaseShaStatus, HarvestEvidence, HarvestRow
@@ -738,7 +738,9 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
         reviewer_logins=list(evidence.reviewer_logins),
         has_posterior=isinstance(rb, reward.PosteriorBreakdown),
         reply_classifier_version=labeler_versions.REPLY_CLASSIFIER_VERSION,
-        reply_evidence_digest=_reply_evidence_digest(rubric),
+        reply_evidence_digest=record_evidence_digest(
+            [resolution.evidence for resolution in rubric.per_finding_resolutions or []]
+        ),
     )
 
 def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
@@ -770,20 +772,6 @@ def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
             if isinstance(created_at, str) and created_at:
                 stamps.append(created_at)
     return min(stamps) if stamps else None
-
-
-def _reply_evidence_digest(rubric: Rubric) -> str | None:
-    """Stable digest over the session's combined reply evidence (M14).
-
-    ``None`` when no reply evidence was collected, so a digest-less row never
-    collides with a digested one under the versioned dedup key.
-    """
-    evidence = [
-        thaw_json(entry)
-        for resolution in rubric.per_finding_resolutions or []
-        for entry in resolution.evidence
-    ]
-    return labeler_versions.reply_evidence_digest(evidence) if evidence else None
 
 
 # Repo resolution — source_path first, then identity-based clone (issue #981):

@@ -2,17 +2,32 @@
 
 import asyncio
 import json
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from daydream.backends import ClaudeRequestConfig, PiRequestConfig, RequestEvent, ResultEvent, ToolStartEvent
+from daydream.backends import (
+    ClaudeRequestConfig,
+    CodexRequestConfig,
+    EffectiveRequestConfig,
+    OspreyRequestConfig,
+    PiRequestConfig,
+    RequestEvent,
+    ResultEvent,
+    ToolStartEvent,
+)
 from daydream.backends.claude import ClaudeBackend
 from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
+from daydream.extensions.registry import Registry
+from daydream.observability.config import ObservabilityConfig
+from daydream.observability.runtime import trace_run
+from daydream.observability.spans import agent_scope, attempt_scope
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -164,15 +179,6 @@ async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutati
 @pytest.mark.asyncio
 @pytest.mark.parametrize("custom_config", [False, True])
 async def test_effective_finalization_configuration_reaches_exported_telemetry(custom_config: bool) -> None:
-    from dataclasses import dataclass
-
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
-    from daydream.extensions.registry import Registry
-    from daydream.observability.config import ObservabilityConfig
-    from daydream.observability.runtime import trace_run
-    from daydream.observability.spans import agent_scope, attempt_scope
-
     @dataclass(frozen=True)
     class CustomConfig(PiRequestConfig):
         private_data: str = "PRIVATE CONFIG"
@@ -208,10 +214,6 @@ async def test_effective_finalization_configuration_reaches_exported_telemetry(c
 
 
 def test_new_request_controls_preserve_existing_positional_config_arguments() -> None:
-    from dataclasses import fields
-
-    from daydream.backends import CodexRequestConfig, EffectiveRequestConfig, OspreyRequestConfig
-
     expected = {
         EffectiveRequestConfig: [
             "temperature", "max_turns", "read_only", "persist_session", "continuation_mode", "model_mode",

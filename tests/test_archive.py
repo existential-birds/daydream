@@ -748,13 +748,7 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
             "run_started_at": "2026-01-01T00:00:00Z",
             "run_ended_at": "2026-01-01T00:00:10Z",
             "phase_events": [
-                {
-                    "phase": "review",
-                    "event": "phase_start",
-                    "timestamp": "2026-01-01T00:00:02Z",
-                    "session_id": session_id,
-                    "scope_id": "review",
-                },
+                _phase_start_event("review", session_id, timestamp="2026-01-01T00:00:02Z", scope_id="review"),
                 {
                     "phase": "review",
                     "event": "phase_end",
@@ -2735,21 +2729,9 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
             recorder,
             phase_events=[
                 *_merge_events(recorder.session_id, "succeeded"),
-                {
-                    "phase": "fix",
-                    "event": "phase_start",
-                    "timestamp": "2026-09-06T12:00:00Z",
-                    "session_id": recorder.session_id,
-                    "scope_id": "fix-scope",
-                },
+                _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
                 *[
-                    {
-                        "phase": phase.value,
-                        "event": "phase_start",
-                        "timestamp": "2026-09-06T12:00:00Z",
-                        "session_id": recorder.session_id,
-                        "scope_id": f"{phase.value}-scope",
-                    }
+                    _phase_start_event(phase.value, recorder.session_id, timestamp="2026-09-06T12:00:00Z")
                     for phase in (DaydreamPhase.PUSH, DaydreamPhase.REMOTE_CI)
                 ],
             ],
@@ -2904,13 +2886,7 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
             recorder,
             phase_events=[
                 *_merge_events(recorder.session_id, "succeeded"),
-                {
-                    "phase": "fix",
-                    "event": "phase_start",
-                    "timestamp": "2026-09-06T12:00:00Z",
-                    "session_id": recorder.session_id,
-                    "scope_id": "fix-scope",
-                },
+                _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
             ],
         ),
     )
@@ -3205,13 +3181,7 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
             recorder,
             phase_events=[
                 *_merge_events(recorder.session_id, "succeeded"),
-                {
-                    "phase": "fix",
-                    "event": "phase_start",
-                    "timestamp": "2026-09-06T12:00:00Z",
-                    "session_id": recorder.session_id,
-                    "scope_id": "fix-scope",
-                },
+                _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
             ],
         ),
     )
@@ -3238,13 +3208,7 @@ def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifac
     target = _frozen_target(tmp_path)
     recorder = make_recorder(target, run_flow=DaydreamRunFlow.NORMAL)
     phase_events = [
-        {
-            "phase": phase.value,
-            "event": "phase_start",
-            "timestamp": "2026-09-06T12:00:00Z",
-            "session_id": recorder.session_id,
-            "scope_id": f"{phase.value}-scope",
-        }
+        _phase_start_event(phase.value, recorder.session_id, timestamp="2026-09-06T12:00:00Z")
         for phase in (DaydreamPhase.PUSH, DaydreamPhase.REMOTE_CI)
     ]
     assert recorder._phase_events == []
@@ -3272,6 +3236,22 @@ def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifac
     assert manifest["pipeline_status"] == "partial"
 
 
+def _phase_start_event(
+    phase: str,
+    session_id: str,
+    *,
+    timestamp: str = "2026-01-01T00:00:00Z",
+    scope_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "event": "phase_start",
+        "timestamp": timestamp,
+        "session_id": session_id,
+        "scope_id": scope_id or f"{phase}-scope",
+    }
+
+
 def _merge_events(
     session_id: str,
     status: str,
@@ -3279,13 +3259,7 @@ def _merge_events(
     scope_id: str = "merge-scope",
 ) -> list[dict[str, Any]]:
     return [
-        {
-            "phase": "merge",
-            "event": "phase_start",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "session_id": session_id,
-            "scope_id": scope_id,
-        },
+        _phase_start_event("merge", session_id, scope_id=scope_id),
         {
             "phase": "merge",
             "event": "phase_end",
@@ -3505,13 +3479,7 @@ def test_current_archive_survives_invalid_utf8_fix_failures(
     )
     phase_events = [
         *_merge_events(session_id, "succeeded"),
-        {
-            "phase": "fix",
-            "event": "phase_start",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "session_id": session_id,
-            "scope_id": "fix-scope",
-        },
+        _phase_start_event("fix", session_id),
     ]
 
     _strict_archive(
@@ -3548,13 +3516,7 @@ def test_start_at_fix_archive_does_not_require_or_inherit_merge(
     _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
     _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
     _write_deep(target, "test-verdict.json", {"session_id": session_id, "passed": True})
-    fix_start = {
-        "phase": "fix",
-        "event": "phase_start",
-        "timestamp": "2026-01-01T00:00:00Z",
-        "session_id": session_id,
-        "scope_id": "fix-scope",
-    }
+    fix_start = _phase_start_event("fix", session_id)
 
     _strict_archive(
         target=target,

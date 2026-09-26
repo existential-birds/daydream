@@ -42,6 +42,7 @@ from daydream.reconcile import PriorDiagramComment
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import RunConfig, _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
+from tests.harness.review_profile import sample_pr
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 _gh_available = shutil.which("gh") is not None
@@ -361,16 +362,7 @@ def test_snap_to_hunk_empty_hunks() -> None:
 
 @pytest.fixture
 def pr() -> PRInfo:
-    return PRInfo(
-        number=42,
-        head_sha="head123",
-        base_sha="base456",
-        base_ref="main",
-        head_ref="feature",
-        owner="acme",
-        repo="widgets",
-        url="https://github.com/acme/widgets/pull/42",
-    )
+    return sample_pr()
 
 
 def _assert_hunks_resolve(

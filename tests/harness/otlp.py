@@ -89,6 +89,13 @@ def _loopback_http_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[str
         thread.join(timeout=2)
 
 
+class _QuietHTTPHandler(BaseHTTPRequestHandler):
+    """BaseHTTPRequestHandler that keeps test output free of request logs."""
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
 @contextmanager
 def otlp_collector(
     *,
@@ -99,7 +106,7 @@ def otlp_collector(
     """Receive real protobuf exports; close all listener resources on exit."""
     collector = TraceCollector(status=status)
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(_QuietHTTPHandler):
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             collector.capture(self.path, {key.lower(): value for key, value in self.headers.items()}, body)
@@ -109,9 +116,6 @@ def otlp_collector(
             for key, value in (response_headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
-
-        def log_message(self, format: str, *args: Any) -> None:
-            """Keep test output free of HTTP request logs."""
 
     with _loopback_http_server(Handler) as collector.base_url:
         yield collector
@@ -135,7 +139,7 @@ def scripted_otlp_collector(
 
     collector = TraceCollector()
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(_QuietHTTPHandler):
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             headers = {key.lower(): value for key, value in self.headers.items()}
@@ -168,9 +172,6 @@ def scripted_otlp_collector(
             if response.body:
                 self.wfile.write(response.body)
 
-        def log_message(self, format: str, *args: Any) -> None:
-            """Keep test output free of HTTP request logs."""
-
     with _loopback_http_server(Handler) as collector.base_url:
         yield collector
 
@@ -194,7 +195,7 @@ class TrickleServer:
 
         outer = self
 
-        class Handler(BaseHTTPRequestHandler):
+        class Handler(_QuietHTTPHandler):
             def do_POST(self) -> None:
                 self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 try:
@@ -214,9 +215,6 @@ class TrickleServer:
                     outer.peer_observed_close = outer._close.is_set()
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     outer.peer_observed_close = True
-
-            def log_message(self, format: str, *args: Any) -> None:
-                """Keep test output free of HTTP request logs."""
 
         self._server = ThreadingHTTPServer((host, 0), Handler)
         self.base_url = f"http://{host}:{self._server.server_port}"

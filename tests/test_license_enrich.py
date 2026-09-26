@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.archive.hydrate import _curated_dir
 from daydream.archive.license_enrich import (
+    _GITHUB_API,
     EnrichedEvidence,
+    GithubLicenseResolver,
     enrich_license_evidence,
+    publish_enrichment_cache,
 )
 
 
@@ -88,7 +93,6 @@ def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Pat
     enrich_license_evidence(stage, resolver=_make_resolver())
     cache_path = stage / "_enrich" / "evidence.jsonl"
     assert cache_path.is_file()
-    import json
     entries = [json.loads(line) for line in cache_path.read_text().splitlines() if line.strip()]
     e = next(x for x in entries if x["session_id"] == "sess-legacy")
     assert e["status"] == "resolved" and e["spdx_id"] == "MIT"
@@ -129,11 +133,9 @@ def test_enrich_reuses_cached_resolution_across_runs(tmp_path: Path) -> None:
 
 
 def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
-    from daydream.archive.hydrate import _curated_dir
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-legacy", "acme/widget", None)])
     enrich_license_evidence(stage, resolver=_make_resolver())
-    from daydream.archive.license_enrich import publish_enrichment_cache
     publish_enrichment_cache(stage, revision="a" * 40)
     published = _curated_dir(stage, "a" * 40) / "license-evidence.jsonl"
     assert published.is_file()
@@ -147,11 +149,9 @@ def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPat
     the head commit lives on the branch resource, and the contents-style
     license response carries a blob ``sha`` (no ``commit_sha`` field).
     """
-    from daydream.archive.license_enrich import _GITHUB_API, GithubLicenseResolver
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secrettokenvalue")
     resolver = GithubLicenseResolver()
     # The token never appears in the request URL — only in the Authorization header.
-    import urllib.request
 
     captured: dict[str, Any] = {}
     commit = "b" * 40

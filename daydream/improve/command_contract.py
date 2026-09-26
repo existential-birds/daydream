@@ -14,10 +14,8 @@ from jsonschema import Draft202012Validator
 
 from daydream.output_schema import strict_object
 from daydream.repository_paths import (
-    DIRECTORY_SCOPE_PATTERN,
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_MAX_LENGTH,
-    REPOSITORY_FILE_PATH_PATTERN,
     REPOSITORY_FILE_PATH_SCHEMA,
     REPOSITORY_FILE_PATH_SEGMENTS,
     canonicalize_directory_scope,
@@ -558,7 +556,6 @@ def _validate_command_records(
 __all__ = [
     "APPLICABILITY_SCHEMA",
     "COMMAND_REF_SCHEMA",
-    "DIRECTORY_SCOPE_PATTERN",
     "DIRECTORY_SCOPE_SCHEMA",
     "EVIDENCE_SCHEMA",
     "EXPECTED_SUCCESS_SCHEMA",
@@ -566,7 +563,6 @@ __all__ = [
     "HOST_EVIDENCE_SCHEMA",
     "HOST_RECON_COMMAND_SCHEMA",
     "RECON_COMMAND_SCHEMA",
-    "REPOSITORY_FILE_PATH_PATTERN",
     "REPOSITORY_FILE_PATH_SCHEMA",
     "SCOPE_SCHEMA",
     "canonicalize_directory_scope",

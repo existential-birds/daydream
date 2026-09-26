@@ -14,9 +14,6 @@ if TYPE_CHECKING:
     from daydream.phases import PushReceipt
 
 
-_MISSING = object()
-
-
 class DeepState:
     """Checked access to the exact extension-visible deep-flow state mapping.
 
@@ -42,10 +39,12 @@ class DeepState:
         value: object = self._data[key]
         return self._check(key, value, expected, expected_name)
 
-    def _optional(self, key: str, expected: type[object], expected_name: str) -> object | None:
+    def _optional(
+        self, key: str, expected: type[object], expected_name: str, default: object | None = None
+    ) -> object | None:
         value: object | None = self._data.get(key)
         if value is None:
-            return None
+            return default
         return self._check(key, value, expected, expected_name)
 
     @property
@@ -58,10 +57,7 @@ class DeepState:
 
     @property
     def diff_or_empty(self) -> str:
-        value: object = self._data.get("diff", _MISSING)
-        if value is _MISSING or value is None:
-            return ""
-        return cast(str, self._check("diff", value, str, "str"))
+        return cast(str, self._optional("diff", str, "str")) or ""
 
     @property
     def diff_path(self) -> Path:
@@ -73,10 +69,7 @@ class DeepState:
 
     @property
     def diff_truncated(self) -> bool:
-        value: object = self._data.get("diff_truncated", _MISSING)
-        if value is _MISSING:
-            return False
-        return cast(bool, self._check("diff_truncated", value, bool, "bool"))
+        return cast(bool, self._optional("diff_truncated", bool, "bool", False))
 
     @property
     def diff_truncation(self) -> DeepDiffBoundInfo | None:
@@ -152,10 +145,7 @@ class DeepState:
 
     @property
     def items_or_empty(self) -> list[dict[str, Any]]:
-        value: object | None = self._data.get("items")
-        if value is None:
-            return []
-        return cast(list[dict[str, Any]], self._check("items", value, list, "list"))
+        return cast(list[dict[str, Any]], self._optional("items", list, "list", []))
 
     @property
     def diagrams(self) -> dict[str, Any] | None:
@@ -170,23 +160,11 @@ class DeepState:
 
     @property
     def import_graph(self) -> dict[str, set[str]]:
-        value: object | None = self._data.get("import_graph")
-        if value is None:
-            return {}
-        return cast(
-            dict[str, set[str]],
-            self._check("import_graph", value, dict, "dict"),
-        )
+        return cast(dict[str, set[str]], self._optional("import_graph", dict, "dict", {}))
 
     @property
     def intent_authoritative(self) -> bool:
-        value: object = self._data.get("intent_authoritative", _MISSING)
-        if value is _MISSING:
-            return False
-        return cast(
-            bool,
-            self._check("intent_authoritative", value, bool, "bool"),
-        )
+        return cast(bool, self._optional("intent_authoritative", bool, "bool", False))
 
     @intent_authoritative.setter
     def intent_authoritative(self, value: bool) -> None:
@@ -236,14 +214,10 @@ class DeepState:
 
     @property
     def failed_stacks_or_none(self) -> dict[str, str] | None:
-        value: object | None = self._data.get("failed_stacks")
-        if value is None:
-            return None
-        checked = cast(
-            dict[str, str],
-            self._check("failed_stacks", value, dict, "dict or None"),
+        return cast(
+            dict[str, str] | None,
+            self._optional("failed_stacks", dict, "dict or None") or None,
         )
-        return checked or None
 
     @property
     def intent_summary(self) -> str:
@@ -303,13 +277,7 @@ class DeepState:
 
     @property
     def structural_records(self) -> list[dict[str, Any]]:
-        value: object | None = self._data.get("structural_records")
-        if value is None:
-            return []
-        return cast(
-            list[dict[str, Any]],
-            self._check("structural_records", value, list, "list"),
-        )
+        return cast(list[dict[str, Any]], self._optional("structural_records", list, "list", []))
 
     @structural_records.setter
     def structural_records(self, value: list[dict[str, Any]]) -> None:
@@ -317,12 +285,8 @@ class DeepState:
 
     @property
     def structural_record_sources(self) -> list[str]:
-        value: object | None = self._data.get("structural_record_sources")
-        if value is None:
-            return []
         return cast(
-            list[str],
-            self._check("structural_record_sources", value, list, "list"),
+            list[str], self._optional("structural_record_sources", list, "list", [])
         )
 
     @structural_record_sources.setter
@@ -391,12 +355,8 @@ class DeepState:
 
     @property
     def fix_outcomes(self) -> dict[str, dict[str, Any]]:
-        value: object | None = self._data.get("fix_outcomes")
-        if value is None:
-            return {}
         return cast(
-            dict[str, dict[str, Any]],
-            self._check("fix_outcomes", value, dict, "dict"),
+            dict[str, dict[str, Any]], self._optional("fix_outcomes", dict, "dict", {})
         )
 
     @fix_outcomes.setter

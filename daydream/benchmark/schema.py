@@ -112,14 +112,20 @@ def _validate_ts(v: str | datetime | None) -> datetime | None:
     return _rfc3339(v)
 
 
+def _canonical_source_id(v: str) -> str:
+    if not _SOURCE_ID_RE.fullmatch(v):
+        raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
+    return v
+
+
 Sha40 = Annotated[str, AfterValidator(_validate_sha40)]
 Sha64 = Annotated[str, AfterValidator(_hex64)]
 Sha64OrEmpty = Annotated[str, AfterValidator(_hex64_or_empty)]
 NullableSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
-CommitSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
 PositiveLine = Annotated[int | None, AfterValidator(_validate_positive_line)]
 Timestamp = Annotated[datetime, BeforeValidator(_validate_ts)]
 OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_validate_ts)]
+SourceId = Annotated[str, AfterValidator(_canonical_source_id)]
 
 
 def normalize_hostname(raw: str) -> str:
@@ -284,19 +290,11 @@ class BenchmarkManifest(BaseModel):
 
     schema_version: Literal[1] = 1
     benchmark_id: UUID
-    created_at: datetime
+    created_at: Timestamp
     source: Source
     privacy: Privacy
     pull_requests: list[PullRequestEntry] = []
     cases: list[CaseIndexEntry] = []
-
-    @field_validator("created_at")
-    @classmethod
-    def _created_at_utc(cls, v: str | datetime) -> datetime:
-        value = v if isinstance(v, datetime) else datetime.fromisoformat(v)
-        if value.tzinfo is None:
-            raise ValueError(f"created_at must carry a UTC offset, got {v!r}")
-        return value.astimezone(timezone.utc)
 
     @model_validator(mode="after")
     def _cases_ordered(self) -> "BenchmarkManifest":
@@ -524,7 +522,7 @@ class AuthoringAnchor(BaseModel):
 
     version: Literal[1]
     status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"]
-    commit_id: CommitSha40
+    commit_id: NullableSha40
     path: str | None
     start_line: PositiveLine
     end_line: PositiveLine
@@ -559,7 +557,7 @@ class EvidenceRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_id: str
+    source_id: SourceId
     kind: Literal["review", "inline_comment", "thread_comment", "issue_comment"]
     database_id: int
     node_id: str
@@ -569,8 +567,8 @@ class EvidenceRecord(BaseModel):
     created_at: Timestamp
     updated_at: Timestamp
     submitted_at: OptionalTimestamp = None
-    commit_id: CommitSha40 = None
-    original_commit_id: CommitSha40 = None
+    commit_id: NullableSha40 = None
+    original_commit_id: NullableSha40 = None
     path: str | None = None
     original_path: str | None = None
     line: PositiveLine = None
@@ -591,13 +589,6 @@ class EvidenceRecord(BaseModel):
     is_bot: bool
     url: str
 
-    @field_validator("source_id")
-    @classmethod
-    def _canonical_source_id(cls, v: str) -> str:
-        if not _SOURCE_ID_RE.fullmatch(v):
-            raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
-        return v
-
     @model_validator(mode="after")
     def _body_hash(self) -> "EvidenceRecord":
         if self.body and self.body_sha256 != hashlib.sha256(self.body.encode("utf-8")).hexdigest():
@@ -610,20 +601,13 @@ class Candidate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_id: str
+    source_id: SourceId
     title: str
     body: str
     severity: None = None
     location: Location | None = None
     exact_acceptable: bool
     not_exact_reason: str | None = None
-
-    @field_validator("source_id")
-    @classmethod
-    def _canonical_source_id(cls, v: str) -> str:
-        if not _SOURCE_ID_RE.fullmatch(v):
-            raise ValueError(f"source_id must be github canonical, got {v!r}")
-        return v
 
     @model_validator(mode="after")
     def _reason(self) -> "Candidate":
@@ -850,7 +834,6 @@ class EvidenceExclusion(_NoteForOther):
 
     source_id: str
     reason: _EVIDENCE_REASON
-    note: str | None = None
 
 
 _CASE_EXCLUSION_REASON = Literal["unreplayable", "not_suitable", "duplicate_case", "other"]
@@ -863,7 +846,6 @@ class CaseExclusion(_NoteForOther):
     _exclusion_noun: ClassVar[str] = "case exclusion"
 
     reason: _CASE_EXCLUSION_REASON
-    note: str | None = None
 
 
 # Single source of truth for the snapshot-comparison fact extraction version.
@@ -1114,18 +1096,19 @@ _CASE_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+def _validate_transition(table: dict[str, set[str]], frm: str, to: str) -> None:
+    if to not in table.get(frm, set()):
+        raise TransitionError(frm, to)
+
+
 def validate_pr_transition(frm: str, to: str) -> None:
     """Raise :class:`TransitionError` unless ``frm -> to`` is a valid PR ledger move."""
-    allowed = _PR_TRANSITIONS.get(frm, set())
-    if to not in allowed:
-        raise TransitionError(frm, to)
+    _validate_transition(_PR_TRANSITIONS, frm, to)
 
 
 def validate_case_transition(frm: str, to: str) -> None:
     """Raise :class:`TransitionError` unless ``frm -> to`` is a valid curation move."""
-    allowed = _CASE_TRANSITIONS.get(frm, set())
-    if to not in allowed:
-        raise TransitionError(frm, to)
+    _validate_transition(_CASE_TRANSITIONS, frm, to)
 
 
 def derive_workspace_state(

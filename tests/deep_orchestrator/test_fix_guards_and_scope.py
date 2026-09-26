@@ -15,12 +15,11 @@ from daydream.deep.scope_issues import _scope_edit_fingerprint, _scope_edit_mark
 from daydream.git_ops import GitError
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _run_loop,
     _scan_phase_events,
     _scan_trajectory_extra,
 )
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import bare_remote as _bare_remote, commit as _commit, git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.test_deep_orchestrator import (
     INTENT_SENTINEL,
@@ -42,7 +41,6 @@ from tests.test_deep_orchestrator import (
     _read_quality_gate,
     _run_quality_gate_fixture,
     _silence,
-    _StubBackend,
 )
 
 
@@ -106,8 +104,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     untouched_untracked.write_bytes(b"-- untouched draft\r\n")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
-    stub = _StubBackend(project)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     stub.merge_items = [
         _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
         _merge_item(2, "api.py", "high", desc="source fix"),
@@ -172,8 +169,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     head_before = _git(project, "rev-parse", "HEAD")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
-    stub = _StubBackend(project)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     # A one-file diff collapses to single-stack mode (no cross-stack merge
     # agent), so the finding is driven through the per-stack parse: the go
     # review's record points at the sole reviewed file, main.go.
@@ -218,8 +214,7 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     pre_migration = migration.read_bytes()
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False)
-    stub = _StubBackend(project)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fail_first_test_run = True
     stub.heal_fix_generated = "migrations/0001_init.sql"
@@ -265,9 +260,7 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(heal=True, commit=False)
-    stub = _StubBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
     monkeypatch.setattr(
@@ -553,14 +546,7 @@ async def test_fix_tool_veto_allows_unmatched_write(
         'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
     )
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "App.tsx").read_text() == "backend resumed"
@@ -586,14 +572,7 @@ async def test_fix_tool_veto_stops_subsequent_calls(
     api_before = (multi_stack_target / "api.py").read_bytes()
     app_before = (multi_stack_target / "App.tsx").read_bytes()
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "api.py").read_bytes() == api_before
@@ -615,14 +594,7 @@ async def test_fix_tool_supervisor_off_writes(
     stub.deferred_write_pairs = ["api.py"]
     (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "off"\n')
 
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        )
-    )
+    rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "api.py").read_text() == "backend resumed"

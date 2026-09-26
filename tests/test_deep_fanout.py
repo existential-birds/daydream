@@ -11,22 +11,15 @@ import pytest
 
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep import prompts as _prompts
-from daydream.deep import sharding
-from daydream.deep.artifacts import deep_dir as _deep_dir
-from daydream.deep.artifacts import per_stack_records_path
+from daydream.deep import prompts as _prompts, sharding
+from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
 from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.phases import phase_per_stack_reviews
-from daydream.phases import phase_per_stack_reviews as _phase
+from daydream.phases import phase_per_stack_reviews, phase_per_stack_reviews as _phase
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
-)
-from tests.harness.trajectory import (
     dispatch_encloses_children as _dispatch_encloses_children,
-)
-from tests.harness.trajectory import (
     make_recorder,
     read_trajectory,
 )

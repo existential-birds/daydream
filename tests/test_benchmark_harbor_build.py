@@ -12,13 +12,9 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream.benchmark import curation as cu
-from daydream.benchmark import github_import as gi
-from daydream.benchmark import snapshot, storage
-from daydream.benchmark import storage as _storage
+from daydream.benchmark import curation as cu, github_import as gi, snapshot, storage, storage as _storage
 from daydream.benchmark.cli import _handle_benchmark_command
-from daydream.benchmark.harbor import build
-from daydream.benchmark.harbor import verifier_core as vc
+from daydream.benchmark.harbor import build, verifier_core as vc
 from daydream.benchmark.harbor.build import CompileError, compile_workspace
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
@@ -26,8 +22,7 @@ from daydream.benchmark.workspace import init_workspace
 from daydream.pr_review import FINDING_MARKER_RE, finding_marker
 from tests.harness.benchmark_judge import MatchClient, judge_env
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git as _seed_git
-from tests.harness.git_helpers import init_repo, seed_pr_origin
+from tests.harness.git_helpers import git as _seed_git, init_repo, seed_pr_origin
 
 REPO = Path(__file__).resolve().parents[1]
 

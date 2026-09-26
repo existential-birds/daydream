@@ -12,8 +12,7 @@ from typing import Any
 
 import pytest
 
-from daydream import review_profile as rp
-from daydream import severity
+from daydream import review_profile as rp, severity
 from daydream.deep.coverage import (
     _strip_dot_slash,
     build_uncovered_sweep_prompt,

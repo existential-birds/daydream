@@ -30,8 +30,7 @@ from tests.harness.claude_sdk import (
     MockTextBlock,
     patch_claude_sdk,
 )
-from tests.harness.git_helpers import bare_remote, commit, git
-from tests.harness.git_helpers import tracked_source_state as _tracked_source_state
+from tests.harness.git_helpers import bare_remote, commit, git, tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 
 SOURCE_CANARY = "SOURCE_CANARY"

@@ -21,9 +21,7 @@ from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESC
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
 from daydream.runner import RunConfig, run
 from daydream.workspace import _resolve_base
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.stub_backend import PARTIAL_FIX_MARKER, StubBackend, force_interactive, install_stub_backend, silence
 
 if TYPE_CHECKING:

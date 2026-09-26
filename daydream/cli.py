@@ -58,14 +58,16 @@ from daydream.observability.config import ObservabilityConfig, ObservabilityErro
 from daydream.phases import UnconfinedFindingError
 from daydream.run_context import active_backends
 from daydream.runner import RunConfig, run
-from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, flush_active_signal_recorders
+from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, flush_active_signal_recorders, redact_text
 from daydream.ui import (
+    NEON_THEME,
     ShutdownPanel,
     create_console,
     get_shutdown_panel,
     print_error,
     print_info,
     print_success,
+    print_warning,
     set_shutdown_panel,
 )
 
@@ -503,12 +505,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Maximum projected share of any single native profile, in (0, 1]",
     )
 
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Print the projection summary, write nothing",
-    )
+    _add_dry_run_argument(parser, "Print the projection summary, write nothing")
 
     parser.add_argument(
         "--as-of",
@@ -537,7 +534,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     from dataclasses import replace
 
     from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_build_corpus_parser()
     args = parser.parse_args(argv)
@@ -1202,6 +1198,16 @@ def _add_archive_dir_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> None:
+    """Add the shared ``--dry-run`` option to a corpus/train subcommand parser."""
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help=help_text,
+    )
+
+
 def _build_harvest_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream corpus harvest [...]``.
 
@@ -1218,12 +1224,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
             "(RL/fine-tuning corpus prep)."
         ),
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Build annotations but do not write observations or the resume log.",
-    )
+    _add_dry_run_argument(parser, "Build annotations but do not write observations or the resume log.")
     parser.add_argument(
         "--session",
         type=str,
@@ -1277,7 +1278,6 @@ def _handle_harvest_command(argv: list[str]) -> int:
     """
     import daydream.archive as _archive
     import daydream.training.harvest as _harvest
-    from daydream.ui import create_console, print_info
 
     parser = _build_harvest_parser()
     args = parser.parse_args(argv)
@@ -1387,14 +1387,10 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
         "owner/repo slug (case-insensitive); only meaningful with --license-policy",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help=(
-            "Plan only: discover and normalize sessions, download, ingest, and tally "
-            "discovered/admitted/rejected candidates — no Hub publication."
-        ),
+    _add_dry_run_argument(
+        parser,
+        "Plan only: discover and normalize sessions, download, ingest, and tally "
+        "discovered/admitted/rejected candidates — no Hub publication.",
     )
     return parser
 
@@ -1564,7 +1560,6 @@ def _handle_calibrate_reward_command(argv: list[str]) -> int:
         validation or gate failure.
     """
     from daydream.training import calibration as _calibration
-    from daydream.ui import create_console, print_error, print_info
 
     parser = _build_calibrate_reward_parser()
     console = create_console()
@@ -1644,8 +1639,6 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     import os
 
     from daydream.archive import hydrate as _hydrate
-    from daydream.trajectory import redact_text
-    from daydream.ui import create_console, print_warning
 
     parser = _build_hydrate_hub_parser()
     console = create_console()
@@ -1775,21 +1768,32 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
     if summary.license_admission:
-        buckets = summary.license_admission
-        print_info(
-            console,
-            "license admission: "
-            f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
-            f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
-            f"evidence-missing {buckets['license_evidence_missing']}",
-        )
+        _print_license_admission(console, summary.license_admission)
     if summary.dry_run_incomplete_manifests:
-        print_warning(
-            console,
-            "hydration yield reduced: incomplete manifest(s) discovered and "
-            "dropped: " + redact_text("; ".join(summary.dry_run_incomplete_manifests)),
+        _print_incomplete_manifests(
+            console, summary.dry_run_incomplete_manifests, prefix="hydration"
         )
     return 0
+
+
+def _print_license_admission(console: Any, buckets: Any) -> None:
+    """Print the value-free license-admission tally shared by hydrate paths."""
+    print_info(
+        console,
+        "license admission: "
+        f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
+        f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
+        f"evidence-missing {buckets['license_evidence_missing']}",
+    )
+
+
+def _print_incomplete_manifests(console: Any, manifests: Any, *, prefix: str) -> None:
+    """Print the reduced-yield warning shared by hydrate paths."""
+    print_warning(
+        console,
+        f"{prefix} yield reduced: incomplete manifest(s) discovered and "
+        "dropped: " + redact_text("; ".join(manifests)),
+    )
 
 
 def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
@@ -1801,8 +1805,6 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     rejections) lands in exactly one per-repository license bucket.
     """
     from daydream.archive import hydrate as _hydrate
-    from daydream.trajectory import redact_text
-    from daydream.ui import print_warning
 
     try:
         client = _hydrate._make_client(config.source_repo)
@@ -1892,14 +1894,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
     if license_admission:
-        print_info(
-            console,
-            "license admission: "
-            f"admitted {license_admission['admitted']}; "
-            f"c5-excluded {license_admission['c5_excluded']}; "
-            f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
-            f"evidence-missing {license_admission['license_evidence_missing']}",
-        )
+        _print_license_admission(console, license_admission)
     for repo_slug in sorted(per_repo):
         buckets = per_repo[repo_slug]
         print_info(
@@ -1912,11 +1907,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         )
     incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
     if incomplete:
-        print_warning(
-            console,
-            "dry-run yield reduced: incomplete manifest(s) discovered and "
-            "dropped: " + redact_text("; ".join(incomplete)),
-        )
+        _print_incomplete_manifests(console, incomplete, prefix="dry-run")
     return 0
 
 
@@ -1955,7 +1946,6 @@ def _handle_list_reanchored_command(argv: list[str]) -> int:
     from rich.markup import escape
 
     from daydream.improve.plans import reanchored_plan_rows
-    from daydream.ui import create_console, print_info
 
     parser = _build_list_reanchored_parser()
     args = parser.parse_args(argv)
@@ -2043,7 +2033,6 @@ def _handle_label_command(argv: list[str]) -> int:
     """
     import daydream.archive as _archive
     from daydream.archive import index as _index
-    from daydream.ui import create_console, print_info
 
     parser = _build_label_parser()
     args = parser.parse_args(argv)
@@ -2134,12 +2123,10 @@ def _build_train_parser() -> argparse.ArgumentParser:
         default=0,
         help="Master seed (split freeze + training determinism; default: 0)",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        dest="dry_run",
-        help="Execute everything that needs no GPU (corpus load, stage0 gate, "
-             "manifest) and mark the GPU stages skipped_dry — the CI path",
+    _add_dry_run_argument(
+        parser,
+        "Execute everything that needs no GPU (corpus load, stage0 gate, "
+        "manifest) and mark the GPU stages skipped_dry — the CI path",
     )
     return parser
 
@@ -2232,9 +2219,7 @@ def _print_namespace_help(usage: str, *, error: bool = False) -> None:
             when ``False`` (default) write to stdout (bare invocation / help
             request path).
     """
-    from rich.console import Console
 
-    from daydream.ui import NEON_THEME
 
     Console(stderr=error, theme=NEON_THEME).print(usage)
 
@@ -2463,7 +2448,6 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         (issue #1176) — so it is not a post-findings failure.
     """
     from daydream import pr_review
-    from daydream.ui import create_console, print_warning
 
     parser = _build_post_findings_parser()
     args = parser.parse_args(argv)

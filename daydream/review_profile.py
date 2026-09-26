@@ -20,7 +20,7 @@ import json
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from daydream import severity
@@ -179,23 +179,7 @@ class ReviewProfile:
             "strategies": {
                 key: strategy.content for key, strategy in sorted(self.strategies.items())
             },
-            "pipeline": {
-                "review_wall_budget_s": self.pipeline.review_wall_budget_s,
-                "structural_enabled": self.pipeline.structural_enabled,
-                "uncovered_sweep_enabled": self.pipeline.uncovered_sweep_enabled,
-                "uncovered_sweep_max_files": self.pipeline.uncovered_sweep_max_files,
-                "uncovered_sweep_min_hunk_lines": self.pipeline.uncovered_sweep_min_hunk_lines,
-                "arbitration": {
-                    "enabled": self.pipeline.arbitration.enabled,
-                    "min_severity": self.pipeline.arbitration.min_severity,
-                    "contested_location": self.pipeline.arbitration.contested_location,
-                },
-                "suppression": {
-                    "enabled": self.pipeline.suppression.enabled,
-                    "severity_classes": list(self.pipeline.suppression.severity_classes),
-                    "confidence_classes": list(self.pipeline.suppression.confidence_classes),
-                },
-            },
+            "pipeline": asdict(self.pipeline),
         }
 
     @property
@@ -731,11 +715,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
                 f"{sorted(_SEVERITY_LEVELS)}",
                 source,
             )
-        arbitration = Arbitration(
-            enabled=arbitration.enabled,
-            min_severity=severity,
-            contested_location=arbitration.contested_location,
-        )
+        arbitration = replace(arbitration, min_severity=severity)
     suppression = Suppression(
         enabled=_bool("suppression_enabled", defaults.suppression.enabled),
         severity_classes=_severity_classes(
@@ -794,6 +774,17 @@ class ResolvedProfile:
     def name(self) -> str:
         """Human-readable name of the resolved profile (delegates to the value)."""
         return self.profile.name
+
+
+def resolve_pipeline(profile: ResolvedProfile | None) -> Pipeline:
+    """Return the resolved profile's bounded pipeline, else the packaged default's.
+
+    ``None`` (profile unresolved) falls back to the packaged default so
+    pipeline-driven call sites never branch on resolution state.
+    """
+    if profile is not None:
+        return profile.profile.pipeline
+    return build_default_profile().pipeline
 
 
 def _read_and_parse(path: Path, source: str) -> ReviewProfile:

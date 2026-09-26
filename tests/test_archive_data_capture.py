@@ -30,10 +30,7 @@ import pytest
 from rich.console import Console
 
 from daydream import artifact_visibility, git_ops
-from daydream.archive import finalize_archive_run
 from daydream.archive.index import query_runs
-from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactTreeSnapshot, manifest_tree
 from daydream.backends import (
     AgentEvent,
     DiagnosticEvent,
@@ -46,10 +43,9 @@ from daydream.backends.codex import CodexBackend
 from daydream.eval.analyzer import analyze_session
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.review_budget import ReviewLimits
-from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities
 from daydream.runner import RunConfig, run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
-from daydream.trajectory import DaydreamRunFlow, RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
+from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
 from tests.harness.backend import ScriptedBackend
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.fake_gh import FakeGh
@@ -67,6 +63,7 @@ from tests.harness.stub_backend import (
     silence,
 )
 from tests.harness.trajectory import diff_adding
+from tests.test_archive import _manifest_write_snapshot, _strict_archive
 from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
 
 
@@ -1792,76 +1789,20 @@ def _finalize_minimal_run(
 
     target = tmp_path / f"target-{session_id}"
     target.mkdir()
-    payload = {
-        "session_id": session_id,
-        "trajectory_id": session_id,
-        "steps": [],
-        "final_metrics": {
-            "total_prompt_tokens": 10,
-            "total_completion_tokens": 5,
-            "total_cached_tokens": 0,
-            "total_cost_usd": 0.01,
-        },
-        "extra": {"phase_events": phase_events},
-    }
-    write_snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-01-01T00:00:01Z",
-        root_trajectory_id=session_id,
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id=session_id,
-                path=Path("/frozen/trajectory.json"),
-                json_bytes=json.dumps(payload).encode(),
-            ),
-        ),
-    )
-    identity = ManifestRunIdentity(
-        skill="python",
-        model=None,
-        backend="claude",
-        review_backend=None,
-        fix_backend="claude",
-        test_backend="claude",
-        per_stack_review_backend="claude",
-        per_stack_review_model="sonnet",
-        review_only=False,
-        deep=True,
-        profile=None,
-        phases=RunPhaseCapabilities(
-            per_stack_review=True,
-            merge=True,
-            fix=True,
-            test=True,
-            push=True,
-            remote_ci=True,
-        ),
-    )
-    finalize_archive_run(
-        run=ArchiveRunSnapshot(
-            recorder_provenance=archive_recorder_provenance_from_snapshot(
-                write_snapshot=write_snapshot,
-                run_flow=DaydreamRunFlow.NORMAL,
-            ),
-            identity=identity,
-            trajectories=write_snapshot,
-        ),
-        artifacts=ArtifactTreeSnapshot(
-            session_id=session_id,
-            workspace_key="workspace",
-            root=target,
-            manifest=manifest_tree(target),
-            destinations=(),
-        ),
-        artifact_provenance=ArtifactEvidenceProvenance(
-            workspace_key="workspace",
-            session_id=session_id,
-            public_source=target,
-            live_root=target,
-        ),
+    _strict_archive(
+        target=target,
+        session_id=session_id,
         config=RunConfig(target=str(target), archive=True, run_eval=False),
-        work=None,
-        upload=False,
+        write_snapshot=_manifest_write_snapshot(
+            session_id=session_id,
+            final_metrics={
+                "total_prompt_tokens": 10,
+                "total_completion_tokens": 5,
+                "total_cached_tokens": 0,
+                "total_cost_usd": 0.01,
+            },
+            extra={"phase_events": phase_events},
+        ),
     )
     return archive_dir / "runs" / session_id
 

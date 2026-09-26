@@ -44,7 +44,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from daydream.archive import get_archive_dir
 from daydream.json_utils import atomic_write_json
 from daydream.training import gate as gate_mod
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
@@ -53,7 +52,6 @@ from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
 from daydream.training.stacks import V2Projection, load_v2_projection
-from daydream.trajectory import RUNS_DIRNAME
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
@@ -236,6 +234,18 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     return gold, {"gold": len(gold), "silver": silver}
 
 
+def _record_views(
+    rec: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Read a record's v2-first ``code_context``/``task_identity``/``lineage`` views."""
+
+    def view(key: str) -> dict[str, Any]:
+        value = rec.get(key)
+        return value if isinstance(value, dict) else {}
+
+    return view("code_context"), view("task_identity"), view("lineage")
+
+
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Deterministic SFT prompt built from a record's frozen review context.
 
@@ -245,14 +255,7 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
     same order :func:`_rft_rows` uses), so a v2 prompt carries the record's
     real repo slug and frozen task shas instead of degrading to 'unknown'.
     """
-    code_ctx: dict[str, Any] = {}
-    raw_ctx = rec.get("code_context")
-    if isinstance(raw_ctx, dict):
-        code_ctx = raw_ctx
-    task_identity = rec.get("task_identity")
-    identity = task_identity if isinstance(task_identity, dict) else {}
-    raw_lineage = rec.get("lineage")
-    lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
+    code_ctx, identity, lineage_obj = _record_views(rec)
     repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get(
         "repo_slug", "unknown"
     )
@@ -268,41 +271,6 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
     if changed:
         parts.append("changed_files: " + ", ".join(str(p) for p in changed))
     return "; ".join(parts)
-
-
-def _materialize_diff(rec: dict[str, Any]) -> str | None:
-    """Materialize the RFT diff body from the archive for production records.
-
-    v1 records exports carry only ``fix_diff_ref`` — a
-    pointer to the archived reviewed-INPUT ``diff.patch`` — never a raw
-    ``diff`` body (the training record schema is ``additionalProperties: false``).
-    The pointer is relative to the record's bronze run dir under the archive
-    root; an unavailable, missing, or unreadable patch returns ``None`` so
-    the caller's fail-closed identity check refuses the record rather than
-    recording Stage 2 complete over an unrunnable input.
-    """
-    ref = rec.get("fix_diff_ref")
-    if not isinstance(ref, dict) or not ref.get("available"):
-        return None
-    rel = ref.get("archive_relative_path")
-    if not isinstance(rel, str) or not rel:
-        return None
-    sid = str(rec.get("session_id") or "")
-    if not sid:
-        return None
-    archive_root = get_archive_dir()
-    # M17 derivative bundles legitimately live under ``runs/sanitized/...``,
-    # reached via a ``../sanitized/...`` pointer; anything resolving outside
-    # the archive root is treated as unavailable (fail-closed), never read.
-    target = (archive_root / RUNS_DIRNAME / sid / rel).resolve()
-    if not target.is_relative_to(archive_root.resolve()):
-        return None
-    if not target.is_file():
-        return None
-    try:
-        return target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
 
 
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -336,12 +304,6 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     every candidate at a flat 0.0 composite. ``grounding_rate`` stays absent
     (unknown, never an invented zero).
 
-    ``diff`` falls back to :func:`_materialize_diff` when the record carries
-    no raw ``diff`` body: v1 records exports (schema v1,
-    ``additionalProperties: false``) hold only the ``fix_diff_ref`` pointer
-    to the archived ``diff.patch``, so the documented real-archive journey
-    stays runnable through Stage 2.
-
     Raises:
         RuntimeError: When any record lacks ``repo_slug``/``base_sha``/
             ``head_sha``/``diff`` identity or carries a truncated/non-hex SHA
@@ -349,21 +311,12 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
-        code_ctx: dict[str, Any] = {}
-        raw_ctx = rec.get("code_context")
-        if isinstance(raw_ctx, dict):
-            code_ctx = raw_ctx
-        task_identity = rec.get("task_identity")
-        identity = task_identity if isinstance(task_identity, dict) else {}
-        raw_lineage = rec.get("lineage")
-        lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
+        code_ctx, identity, lineage_obj = _record_views(rec)
         rid = str(rec.get("comment_id") or rec.get("session_id") or "")
         repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get("repo_slug")
         base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")
         head_sha = identity.get("head_sha") or rec.get("head_sha") or code_ctx.get("head_sha")
         diff = rec.get("diff")
-        if not diff:
-            diff = _materialize_diff(rec)
         missing = [
             name
             for name, value in (
@@ -469,20 +422,8 @@ def _frozen_split_from_projection(
             "its holdout split; the gate would evaluate against nothing and refuses closed"
         )
     holdout_rate = float(cast(float, projection.lineage["holdout_rate"]))
-    held_out_ids = [str(r["comment_id"]) for r in held_out]
-    digest = gate_mod._split_digest(held_out_ids, seed)
-    digest_path = gate_mod.write_split_sidecar(
+    return gate_mod._build_frozen_split(
         labels_path,
-        digest=digest,
-        seed=seed,
-        held_out_fraction=holdout_rate,
-        held_out_ids=held_out_ids,
-        train_ids=[str(r["comment_id"]) for r in train],
-    )
-    return FrozenSplit(
-        digest=digest,
-        fingerprint=digest[:8],
-        digest_path=digest_path,
         train_rows=train,
         held_out_rows=held_out,
         seed=seed,
@@ -655,8 +596,9 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         RuntimeError: When Stage 3 is requested without a passed Stage-0 gate,
             or the corpus carries no gold outcome rows for Stage 0.
     """
-    if config.projection is None:  # unreachable: PipelineConfig.__post_init__ enforces the input
-        raise ValueError("no projection input: PipelineConfig requires projection=<frozen projection dir>")
+    # PipelineConfig.__post_init__ enforces a projection input; the assert keeps
+    # the invariant documented and narrows the type for mypy.
+    assert config.projection is not None
     # Frozen projection directory: the v2 loader re-applies the C5/C8 and
     # split-drift gates, and the directory-level digest replaces the
     # single-file corpus digest in the run identity.
@@ -668,7 +610,6 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
 
     out_dir = Path(config.out_dir)
     stage_entries: dict[str, dict[str, Any]] = {}
-    stage_records: dict[str, dict[str, Any]] = {}
     gate_report: GateReport | None = None
 
     # M18/AC4 resume guard, hoisted ahead of the stage loop: the prior
@@ -696,7 +637,6 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                 config, records, stage_dir, projection=projection
             )
             stage_entries[stage] = entry
-            stage_records[stage] = {"records": records}
             split_digest = frozen_split.digest
             continue
 
@@ -721,12 +661,10 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                 # itself is skipped.
                 _run_gpu_stage_shim(config, records, stage, stage_dir)
             stage_entries[stage] = {"status": "skipped_dry"}
-            stage_records[stage] = {"records": records}
             continue
 
         entry = _run_gpu_stage_shim(config, records, stage, stage_dir)
         stage_entries[stage] = entry
-        stage_records[stage] = {"records": records}
 
     # The split is frozen only by Stage 0, so its digest is rechecked against
     # the prior run here; every other locked field was compared pre-loop.
@@ -747,7 +685,7 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         "run_identity": identity.to_dict(),
         "dry_run": dry_run,
         "stages": stage_entries,
-        "stage_digests": stage_digests(stage_records),
+        "stage_digests": stage_digests({stage: {"records": records} for stage in stage_entries}),
         "adapter_path": adapter_path,
         "corpus": str(corpus_path),
     }

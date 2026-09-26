@@ -44,7 +44,6 @@ _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/phases.py",
     "daydream/training/adjudication/materialize.py",
     "daydream/training/adjudication/cli.py",
-    "daydream/training/coordinator.py",
     "daydream/runner.py",
 })
 

@@ -1,14 +1,13 @@
 """Integration tests for the full review-fix-test flow."""
 import asyncio
 import json
-import json as _json
 import re
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.console import Console
@@ -39,10 +38,7 @@ from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.processes import wait_for_process_group_exit
 from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha, write_pre_push_sha_hook
@@ -57,6 +53,23 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 def strip_ansi(text: str) -> str:
     """Strip ANSI escape codes from text for assertion comparisons."""
     return _ANSI_ESCAPE.sub("", text)
+
+
+def _load_trajectory(project: Path, session_id: str) -> dict[str, Any]:
+    """Load the recorded trajectory for ``session_id`` from ``project``'s run dir."""
+    path = project / ".daydream" / "runs" / session_id / "trajectory.json"
+    return cast(dict[str, Any], json.loads(path.read_text()))
+
+
+def _remote_ci_phase_end(trajectory: dict[str, Any]) -> dict[str, Any]:
+    """Return the single ``remote-ci`` ``phase_end`` event, asserting uniqueness."""
+    remote_ends: list[dict[str, Any]] = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
+    ]
+    assert len(remote_ends) == 1
+    return remote_ends[0]
 
 
 # Mock Backends
@@ -111,24 +124,7 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
         ResultEvent(structured_output=None, continuation=None),
     ]
 
-
-    output = StringIO()
-    monkeypatch.setattr(
-        "daydream.agent.console",
-        Console(file=output, force_terminal=True, width=120, theme=NEON_THEME),
-    )
-
-    async def run_() -> None:
-        await run_agent(
-            ScriptedBackend(events=events, model="mock-model"),
-            Path("/tmp"),
-            "Test prompt",
-            phase=DaydreamPhase.REVIEW,
-            run_context=RunContext(InteractionPolicy(quiet=False)),
-        )
-
-    await run_()
-    plain_text = strip_ansi(output.getvalue())
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
 
     assert plain_text.count("Thinking") == 5, "each thought must render its Thinking title once"
 
@@ -147,25 +143,17 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
 def target_project(tmp_path: Path) -> Path:
     """Create a minimal project structure for testing.
 
-    Stage 4.2: ``open_workspace`` requires a real worktree. Initialise a
-    fresh repo with one initial commit on ``main`` and a ``feature`` branch
-    so the WrongBranchError guard does not fire for default-branch runs.
+    Stage 4.2: ``open_workspace`` requires a real worktree. Build the shared
+    two-commit repo so ``main`` has a commit and the ``feature`` branch exists,
+    keeping the WrongBranchError guard from firing for default-branch runs.
     """
-    project = tmp_path / "test_project"
-    project.mkdir()
-
-    (project / "main.py").write_text("def hello():\n    return 'world'\n")
-
-    _init_repo(project)
-    _git(project, "add", "main.py")
-    _commit(project, "init")
-    # Move off main so the WrongBranchError guard doesn't fire on default runs.
-    _git(project, "checkout", "-b", "feature")
-    (project / "main.py").write_text("def hello():\n    return 'universe'\n")
-    _git(project, "add", "main.py")
-    _commit(project, "change")
-
-    return project
+    return _two_commit_repo(
+        tmp_path / "test_project",
+        "main.py",
+        "def hello():\n    return 'world'\n",
+        "def hello():\n    return 'universe'\n",
+        "feature",
+    )
 
 
 @pytest.mark.asyncio
@@ -814,15 +802,10 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     assert manifest["phase_states"]["remote_ci"]["status"] == "succeeded"
     assert manifest["pipeline_status"] == "succeeded"
     trajectory = json.loads((manifests[0].parent / "trajectory.json").read_text())
-    remote_ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
-    ]
-    assert len(remote_ends) == 1
-    assert remote_ends[0]["status"] == "succeeded"
-    assert "reason_code" not in remote_ends[0]
-    assert remote_ends[0]["metadata"]["stop_reason"] == "passed"
+    end = _remote_ci_phase_end(trajectory)
+    assert end["status"] == "succeeded"
+    assert "reason_code" not in end
+    assert end["metadata"]["stop_reason"] == "passed"
 
 
 @pytest.mark.asyncio
@@ -876,24 +859,11 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
     verdict_bytes = (deep / "remote-ci-verdict.json").read_bytes()
     await asyncio.sleep(0.05)
     assert (deep / "remote-ci-verdict.json").read_bytes() == verdict_bytes
-    trajectory = json.loads(
-        (
-            project
-            / ".daydream"
-            / "runs"
-            / verdict["session_id"]
-            / "trajectory.json"
-        ).read_text()
-    )
-    remote_ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
-    ]
-    assert len(remote_ends) == 1
-    assert remote_ends[0]["status"] == "cancelled"
-    assert remote_ends[0]["reason_code"] == "cancelled"
-    assert remote_ends[0]["metadata"]["stop_reason"] == "interrupted"
+    trajectory = _load_trajectory(project, verdict["session_id"])
+    end = _remote_ci_phase_end(trajectory)
+    assert end["status"] == "cancelled"
+    assert end["reason_code"] == "cancelled"
+    assert end["metadata"]["stop_reason"] == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -990,25 +960,12 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     await asyncio.sleep(0.05)
     assert verdict_path.read_bytes() == verdict_bytes
     assert len(fake_gh.process_calls()) == calls
-    trajectory = json.loads(
-        (
-            project
-            / ".daydream"
-            / "runs"
-            / verdict["session_id"]
-            / "trajectory.json"
-        ).read_text()
-    )
+    trajectory = _load_trajectory(project, verdict["session_id"])
     assert trajectory["session_id"] == verdict["session_id"]
-    remote_ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
-    ]
-    assert len(remote_ends) == 1
-    assert remote_ends[0]["status"] == "cancelled"
-    assert remote_ends[0]["reason_code"] == "cancelled"
-    assert remote_ends[0]["metadata"]["stop_reason"] == "cancelled"
+    end = _remote_ci_phase_end(trajectory)
+    assert end["status"] == "cancelled"
+    assert end["reason_code"] == "cancelled"
+    assert end["metadata"]["stop_reason"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -1744,7 +1701,7 @@ async def test_run_populates_exploration_context(
         dd.mkdir(parents=True, exist_ok=True)
         for s in stacks:
             per_stack_records_path(dd, s.stack_name).write_text(
-                _json.dumps({"issues": [], "verdicts": []})
+                json.dumps({"issues": [], "verdicts": []})
             )
         return {s.stack_name: None for s in stacks}, {}
 

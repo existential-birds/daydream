@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 import anyio
 from rich.markup import escape as escape_markup
 
-from daydream import git_ops, github_app
+from daydream import git_ops, github_app, pr_review
 from daydream.agent import console
 from daydream.artifact_visibility import (
     ArtifactDisposition,
@@ -76,6 +76,11 @@ from daydream.extensions import (
     build_registry,
     get_registry,
     set_registry,
+)
+from daydream.findings import (
+    FindingsValidationError,
+    build_findings_artifact,
+    write_findings_artifact,
 )
 from daydream.flows import FlowContext, run_flow
 from daydream.flows.engine import BackendCache, BackendFactory
@@ -119,7 +124,6 @@ from daydream.workspace import (
 )
 
 if TYPE_CHECKING:
-    from daydream import pr_review
     from daydream.pr_review import ParsedIssue
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
@@ -724,34 +728,19 @@ def _resolve_backend(
     )
 
     def _make() -> Backend:
-        if execution_input is not None:
-            return create_backend(
-                backend_name,
-                model=resolved_model,
-                cwd=cwd if backend_name == "pi" else None,
-                reasoning_effort=resolved_effort,
-                audit_root=audit_root,
-                audit_outward_symlinks=audit_outward_symlinks,
-                execution_input=execution_input,
-            )
         # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
         # default model, and widening it churns every patched create_backend.
+        kwargs: dict[str, Any] = {
+            "model": resolved_model,
+            "reasoning_effort": resolved_effort,
+            "audit_root": audit_root,
+            "audit_outward_symlinks": audit_outward_symlinks,
+        }
         if backend_name == "pi":
-            return create_backend(
-                backend_name,
-                model=resolved_model,
-                cwd=cwd,
-                reasoning_effort=resolved_effort,
-                audit_root=audit_root,
-                audit_outward_symlinks=audit_outward_symlinks,
-            )
-        return create_backend(
-            backend_name,
-            model=resolved_model,
-            reasoning_effort=resolved_effort,
-            audit_root=audit_root,
-            audit_outward_symlinks=audit_outward_symlinks,
-        )
+            kwargs["cwd"] = cwd
+        if execution_input is not None:
+            kwargs["execution_input"] = execution_input
+        return create_backend(backend_name, **kwargs)
 
     if cache is None:
         return _make()
@@ -1346,8 +1335,6 @@ def _emit_findings_from_items(
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Write canonical review items; grounded diagrams ride along for Phase B rendering."""
-    from daydream import pr_review
-
     parsed = pr_review.parsed_issues_from_items(items)
     return _write_findings_for_parsed(
         target_dir, config, parsed, diagrams=diagrams, auth=auth,
@@ -1372,13 +1359,6 @@ def _write_findings_for_parsed(
     An unresolved PR is actionable because the artifact must declare a target.
     Empty findings still produce an artifact so Phase B can clear stale comments.
     """
-    from daydream import pr_review
-    from daydream.findings import (
-        FindingsValidationError,
-        build_findings_artifact,
-        write_findings_artifact,
-    )
-
     assert config.findings_out is not None  # caller gates on findings_out
     try:
         if config.pr_number is not None:

@@ -22,17 +22,9 @@ from jsonschema import Draft202012Validator
 
 from daydream.improve.command_contract import (
     command_argv as _command_argv,
-)
-from daydream.improve.command_contract import (
     has_shell_composition as _has_shell_composition,
-)
-from daydream.improve.command_contract import (
     path_is_confined as _path_is_confined,
-)
-from daydream.improve.command_contract import (
     valid_directory_scope_lexical as _valid_directory_scope,
-)
-from daydream.improve.command_contract import (
     valid_repository_file_path as _valid_repository_file_path,
 )
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
@@ -916,6 +908,20 @@ def _collect_issues(
             return False
         return True
 
+    def check_symbol_entries(entries: Any, base: str, code: str) -> None:
+        """Flag each entry whose named test symbol is absent from its file."""
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            pointer = f"{base}/{index}"
+            path = entry.get("path")
+            symbol = entry.get("symbol")
+            if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
+                continue
+            source = _read_repo_file(repo, path)
+            if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
+                add(code, pointer)
+
     _schema_issues(normalized, add)
 
     covered = normalized.get("covered_fingerprints")
@@ -1183,29 +1189,8 @@ def _collect_issues(
                     ),
                 )
 
-    for index, coverage in enumerate(existing_coverage):
-        if not isinstance(coverage, dict):
-            continue
-        pointer = f"/test_plan/existing_coverage/{index}"
-        path = coverage.get("path")
-        symbol = coverage.get("symbol")
-        if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
-            continue
-        source = _read_repo_file(repo, path)
-        if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
-            add("EXISTING_COVERAGE_INVALID", pointer)
-
-    for index, exemplar in enumerate(exemplars):
-        if not isinstance(exemplar, dict):
-            continue
-        pointer = f"/test_plan/exemplars/{index}"
-        path = exemplar.get("path")
-        symbol = exemplar.get("symbol")
-        if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
-            continue
-        source = _read_repo_file(repo, path)
-        if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
-            add("TEST_EXEMPLAR_INVALID", pointer)
+    check_symbol_entries(existing_coverage, "/test_plan/existing_coverage", "EXISTING_COVERAGE_INVALID")
+    check_symbol_entries(exemplars, "/test_plan/exemplars", "TEST_EXEMPLAR_INVALID")
     seen_test_symbols: set[tuple[str, str]] = set()
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
@@ -1288,6 +1273,18 @@ def _expand_optional_ref(
     if ref is None:
         return None
     return _expand_command_ref(ref, recon_by_id=recon_by_id)
+
+
+def _expanded_entry(
+    entry: dict[str, Any],
+    *,
+    recon_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Copy *entry* with its optional ``verification`` command ref expanded."""
+    return {
+        **{key: entry[key] for key in entry if key != "verification"},
+        "verification": _expand_optional_ref(entry["verification"], recon_by_id=recon_by_id),
+    }
 
 
 def _derived_commands_table(
@@ -1565,20 +1562,12 @@ def assemble_plan(
             "mode": normalized["test_plan"]["mode"],
             "rationale": normalized["test_plan"]["rationale"],
             "existing_coverage": [
-                {
-                    **{key: coverage[key] for key in coverage if key != "verification"},
-                    "verification": _expand_optional_ref(coverage["verification"], recon_by_id=recon_by_id),
-                }
+                _expanded_entry(coverage, recon_by_id=recon_by_id)
                 for coverage in normalized["test_plan"]["existing_coverage"]
             ],
             "exemplars": deepcopy(normalized["test_plan"]["exemplars"]),
             "cases": [
-                {
-                    **{key: case[key] for key in case if key != "verification"},
-                    "verification": _expand_optional_ref(
-                        case["verification"], recon_by_id=recon_by_id
-                    ),
-                }
+                _expanded_entry(case, recon_by_id=recon_by_id)
                 for case in normalized["test_plan"]["cases"]
             ],
         },

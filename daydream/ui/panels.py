@@ -208,11 +208,9 @@ class LiveToolPanel:
         if self._name == "TaskOutput" and not self._is_error:
             match = re.search(r"<output>(.*?)</output>", self._result, re.DOTALL)
             snippet = match.group(1).strip() if match else self._result
-            result, _ = _build_result_content(snippet, self._is_error, max_lines)
-            return result
+            return _build_result_content(snippet, self._is_error, max_lines)
 
-        result, _ = _build_result_content(self._result, self._is_error, max_lines)
-        return result
+        return _build_result_content(self._result, self._is_error, max_lines)
 
     def _build_glob_result(self, max_lines: int = _GLOB_MAX_LINES) -> Text:
         """Build formatted Glob result showing file count and paths."""
@@ -253,7 +251,7 @@ class LiveToolPanel:
 
         result = _found_count_header(total_matches, "match", "matches")
 
-        content, _ = _build_result_content(self._result, self._is_error, max_lines)
+        content = _build_result_content(self._result, self._is_error, max_lines)
 
         return Group(result, content)
 
@@ -331,18 +329,12 @@ class LiveToolPanel:
         body_extras = _build_tool_body_extras(self._name, self._args)
 
         if self._result is None:
+            header_with_spinner = Text()
+            header_with_spinner.append_text(header)
             if self._name == "Edit":
-                surgery_indicator = self._build_surgery_phase_indicator()
-                header_with_surgery = Text()
-                header_with_surgery.append_text(header)
-                header_with_surgery.append_text(surgery_indicator)
-                header_with_surgery.append_text(self._spinner.render())
-                content = Group(header_with_surgery)
-            else:
-                header_with_spinner = Text()
-                header_with_spinner.append_text(header)
-                header_with_spinner.append_text(self._spinner.render())
-                content = Group(header_with_spinner, *body_extras)
+                header_with_spinner.append_text(self._build_surgery_phase_indicator())
+            header_with_spinner.append_text(self._spinner.render())
+            content = Group(header_with_spinner, *body_extras)
         elif self._name == "Skill":
             # Skill calls skip the output section; the header already shows the skill name.
             content = Group(header)
@@ -576,10 +568,7 @@ class LiveToolPanelRegistry:
             panel = self._panels.get(tid)
             if panel:
                 self._console.print(panel._render_panel())
-        self._active_order.clear()
-        self._panels.clear()
-        self._call_args.clear()
-        self._task_labels.clear()
+        self.discard_all()
 
     def discard_all(self) -> None:
         """Stop rendering and clear tracked panels without printing them."""

@@ -9,7 +9,7 @@ local ``daydream_plans`` state, which is important for fresh CI checkouts.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -70,15 +70,11 @@ def member_fingerprint_marker(fingerprint: str) -> str:
     )
 
 
-def _member_markers(member_aliases: Sequence[str]) -> tuple[str, ...]:
-    return tuple(member_marker(alias) for alias in dict.fromkeys(member_aliases))
-
-
-def _member_fingerprint_markers(fingerprints: Sequence[str]) -> tuple[str, ...]:
-    return tuple(
-        member_fingerprint_marker(fingerprint)
-        for fingerprint in dict.fromkeys(fingerprints)
-    )
+def _distinct_markers(
+    values: Sequence[str], marker: Callable[[str], str]
+) -> tuple[str, ...]:
+    """Map ``marker`` over ``values``, preserving first-occurrence order."""
+    return tuple(marker(value) for value in dict.fromkeys(values))
 
 
 def issue_body(
@@ -93,8 +89,8 @@ def issue_body(
         raise ValueError("plan Markdown must not be empty")
     markers = (
         package_marker(package_id),
-        *_member_markers(member_aliases),
-        *_member_fingerprint_markers(member_fingerprints),
+        *_distinct_markers(member_aliases, member_marker),
+        *_distinct_markers(member_fingerprints, member_fingerprint_marker),
     )
     return f"{'\n'.join(markers)}\n\n{plan_markdown}"
 
@@ -279,8 +275,8 @@ class IssuePublisher:
         except ValueError as exc:
             raise ImprovePublishError(str(exc)) from exc
         marker = package_marker(package_id)
-        alias_markers = _member_markers(member_aliases)
-        fingerprint_markers = _member_fingerprint_markers(member_fingerprints)
+        alias_markers = _distinct_markers(member_aliases, member_marker)
+        fingerprint_markers = _distinct_markers(member_fingerprints, member_fingerprint_marker)
         # A repeated stable alias is deliberately ambiguous: two independent
         # findings share the same semantic anchor. In that case only the raw
         # member fingerprints can prove that every member is covered.

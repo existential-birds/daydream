@@ -1,7 +1,6 @@
 """Focused coverage for deep-review wire-contract policy delivery."""
 
 from pathlib import Path
-from typing import TypedDict
 
 from daydream.deep.prompts import (
     build_generic_fallback_prompt,
@@ -12,31 +11,13 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
-from tests.harness.review_profile import default_strategy as _default_strategy
-
-
-class _PromptPaths(TypedDict):
-    diff_path: Path
-    intent_path: Path
-    alternatives_path: Path
-    output_path: Path
-    cwd: Path
-
-
-def _paths(tmp_path: Path) -> _PromptPaths:
-    return {
-        "diff_path": tmp_path / ".daydream" / "diff.patch",
-        "intent_path": tmp_path / ".daydream" / "deep" / "intent.md",
-        "alternatives_path": tmp_path / ".daydream" / "deep" / "alternatives.json",
-        "output_path": tmp_path / ".daydream" / "deep" / "stack-review.md",
-        "cwd": tmp_path,
-    }
+from tests.harness.review_profile import default_strategy as _default_strategy, prompt_paths
 
 
 def test_wire_contract_checklists_are_delivered_only_to_their_intended_prompts(
     tmp_path: Path,
 ) -> None:
-    p = _paths(tmp_path)
+    p = prompt_paths(tmp_path)
     rust = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"),
         stack_name="rust",

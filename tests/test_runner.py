@@ -67,13 +67,11 @@ from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.claude_sdk import patch_claude_sdk
-from tests.harness.git_helpers import bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend, silence
+from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,
     _FakeSDKClient,
@@ -179,12 +177,9 @@ _VALID_DOCUMENT_BYTES = json.dumps(
 @pytest.fixture
 def capture_recorder(tmp_path: Path) -> TrajectoryRecorder:
     """A bare recorder identifying the ``session`` run for capture tests."""
-    return TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test",
-        session_id="session",
+    return make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="test", session_id="session",
     )
 
 
@@ -1616,6 +1611,16 @@ async def _stub_fix_verify(
     ]
 
 
+async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
+    """No-op ``phase_fix_parallel`` stand-in for fix-cycle harnesses."""
+    return {}
+
+
+async def _noop_commit(*_a: Any, **_k: Any) -> None:
+    """No-op ``phase_commit_push`` stand-in for fix-cycle harnesses."""
+    return None
+
+
 @pytest.mark.asyncio
 async def test_fix_cycle_awaken_hero_followed_by_model_line(
     monkeypatch: pytest.MonkeyPatch,
@@ -1648,12 +1653,6 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
-
-    async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
-        return {}
-
-    async def _noop_commit(*_a: Any, **_k: Any) -> None:
-        return None
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _noop_fix)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
@@ -1741,9 +1740,6 @@ async def test_fix_cycle_items_severity_ordered(
             output_tree_key=key,
         )
         return TestAndHealResult(True, 0, True, False, (attempt,))
-
-    async def _noop_commit(*_a: Any, **_k: Any) -> None:
-        return None
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _spy_fix_parallel)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _noop_test)
@@ -1966,9 +1962,6 @@ async def _drive_fix_cycle_failing(
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
     monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
-
-    async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
-        return {}
 
     commit_calls: list[bool] = []
 

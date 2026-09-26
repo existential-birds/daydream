@@ -46,8 +46,7 @@ from daydream import cli, git_ops
 from daydream.backends.codex import CodexError
 from daydream.phases import UnconfinedFindingError
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import bare_remote, git
-from tests.harness.git_helpers import tracked_source_state as _tracked_source_state
+from tests.harness.git_helpers import bare_remote, git, tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 
 # Reuse the artifact-visibility seeding/assertion helpers instead of duplicating them.

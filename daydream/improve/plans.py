@@ -7,7 +7,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -267,7 +267,6 @@ def _attempt_diagnostic(
         "disposition": disposition,
         "stage": stage,
         "errors": [_validation_error(error) for error in errors],
-        "validation_errors": [_validation_error(error) for error in errors],
         "received": _received_metadata(received),
         "artifact": artifact,
     }
@@ -475,25 +474,7 @@ def _fully_covered(identities: tuple[frozenset[str], ...], coverage: set[str] | 
 
 
 def _entry_payload(entry: PlanIndexEntry) -> dict[str, Any]:
-    return {
-        "number": entry.number,
-        "slug": entry.slug,
-        "title": entry.title,
-        "fingerprint": entry.fingerprint,
-        "package_fingerprint": entry.package_fingerprint,
-        "member_fingerprints": list(entry.member_fingerprints),
-        "member_aliases": list(entry.member_aliases),
-        "priority": entry.priority,
-        "effort": entry.effort,
-        "risk": entry.risk,
-        "category": entry.category,
-        "planned_at": entry.planned_at,
-        "status": entry.status,
-        "host_blocked": entry.host_blocked,
-        "change_shape": entry.change_shape,
-        "maintenance_signals": list(entry.maintenance_signals),
-        "reuse_target": entry.reuse_target,
-    }
+    return asdict(entry)
 
 
 def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
@@ -1474,7 +1455,7 @@ class PlanWriteSession:
             # The plan text is worktree-independent: land the durable copy in the
             # main index too, so it survives the next run's worktree pruning.
             (self._plans_dir / filename).write_text(text, encoding="utf-8")
-            self._reanchored[number] = _index_entry(
+            entry = _index_entry(
                 number=number,
                 slug=slug,
                 title=selection.get("title") or title,
@@ -1483,6 +1464,7 @@ class PlanWriteSession:
                 planned_at=new_head,
                 status="TODO",
             )
+            self._reanchored[number] = entry
             entries = dict(self._entries)
             entries.update(self._reanchored)
             self._write_index_files(
@@ -1496,13 +1478,8 @@ class PlanWriteSession:
             landed_rel = (
                 (self._plans_dir / filename).relative_to(self._repo).as_posix()
             )
-            self._entries[number] = _index_entry(
-                number=number,
-                slug=slug,
-                title=selection.get("title") or title,
-                fingerprint=reservation.fingerprint,
-                finding=finding,
-                planned_at=new_head,
+            self._entries[number] = replace(
+                entry,
                 status=f"{REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
             )
             # Index the durable main copy immediately so an interrupted run can

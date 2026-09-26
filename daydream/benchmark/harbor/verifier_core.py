@@ -200,17 +200,12 @@ def _finding_kwargs(
     raw: dict[str, object], *, side: str, id_key: str
 ) -> dict[str, object]:
     """Validate a raw finding dict and return its model constructor kwargs."""
-    if not isinstance(raw, dict):
-        raise VerifierError(f"{side} finding must be a dict")
     validate_exact_keys(
         raw,
         CANDIDATE_FINDING_KEYS if side == "candidate" else GOLD_FINDING_KEYS,
         f"{side} finding",
     )
-    try:
-        ident = _validate_hex64(raw[id_key], id_key)
-    except KeyError as exc:
-        raise VerifierError(f"missing required field {exc.args[0]}") from exc
+    ident = _validate_hex64(raw[id_key], id_key)
     fields = parse_finding_content(
         {field: raw[field] for field in _FINDING_CONTENT_KEYS}
     )
@@ -252,6 +247,23 @@ def derive_candidate_id(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def assign_candidate_id(
+    case_key: str,
+    finding: CandidateFinding | dict[str, object],
+    seen: dict[tuple[object, ...], int],
+) -> str:
+    """Derive a finding's id, advancing the ordinal for identical content.
+
+    ``seen`` groups findings by their canonical six-field tuple so duplicate
+    content gets consecutive ordinals, matching the verifier's own per-content
+    ordinal. Mutates ``seen``.
+    """
+    canonical = _canonical_tuple(finding)
+    ordinal = seen.get(canonical, 0)
+    seen[canonical] = ordinal + 1
+    return derive_candidate_id(case_key, finding, ordinal)
+
+
 # candidate artifact + gold set validation
 
 
@@ -269,14 +281,11 @@ def _canonical_tuple(finding: object) -> tuple[object, ...]:
 def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding]:
     """Validate a §9 candidate artifact and return its parsed findings."""
     validate_exact_keys(raw, CANDIDATE_ARTIFACT_KEYS, "candidate artifact")
-    try:
-        schema_version = raw["schema_version"]
-        case_id = raw["case_id"]
-        base_ref = raw["base_ref"]
-        head_ref = raw["head_ref"]
-        findings = raw["findings"]
-    except KeyError as exc:
-        raise VerifierError(f"missing artifact field {exc.args[0]}") from exc
+    schema_version = raw["schema_version"]
+    case_id = raw["case_id"]
+    base_ref = raw["base_ref"]
+    head_ref = raw["head_ref"]
+    findings = raw["findings"]
     if schema_version != 1:
         raise VerifierError(f"unsupported schema_version {schema_version!r}")
     if not isinstance(case_id, str) or not isinstance(base_ref, str) or not isinstance(head_ref, str):
@@ -293,10 +302,7 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
     seen: dict[tuple[object, ...], int] = {}
     ids: set[str] = set()
     for finding in parsed:
-        canon = _canonical_tuple(finding)
-        ordinal = seen.get(canon, 0)
-        seen[canon] = ordinal + 1
-        expected = derive_candidate_id(case_id, finding, ordinal)
+        expected = assign_candidate_id(case_id, finding, seen)
         if finding.candidate_id != expected:
             raise VerifierError("candidate_id does not match the derived id")
         if finding.candidate_id in ids:
@@ -473,25 +479,20 @@ LOCATION_TOLERANCE: Final = 3
 # below 3 lines the "near" tier would measure the posting snapper's behavior,
 # not the reviewer's actual localization accuracy.
 
-_RANGE_DISTANCE_DOC = """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
-
-``0`` when ``line`` lies inside the range, else the distance to the nearer
-boundary (``start`` when ``line`` is below it, ``end`` when above).
-
-Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
-(the source of truth).
-"""
-
-
 def _range_distance(line: int, start: int, end: int) -> int:
+    """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
+
+    ``0`` when ``line`` lies inside the range, else the distance to the nearer
+    boundary (``start`` when ``line`` is below it, ``end`` when above).
+
+    Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
+    (the source of truth).
+    """
     if start <= line <= end:
         return 0
     if line < start:
         return start - line
     return line - end
-
-
-_range_distance.__doc__ = _RANGE_DISTANCE_DOC
 
 
 _SEVERITY_RANK: Final = {"high": 3, "medium": 2, "low": 1}

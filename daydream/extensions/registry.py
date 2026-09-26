@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Sequence
+from typing import TypeVar
 
 from daydream.extensions.api import (
     ExtensionError,
@@ -24,6 +25,8 @@ from daydream.extensions.api import (
 from daydream.observability.config import ObservabilityError, TraceExporterFactory, validate_destination_name
 
 FlowEntry = str | LoopGroup
+
+_T = TypeVar("_T")
 
 _VALIDATE_HINT = "run 'daydream ext validate' to check the extension registry"
 
@@ -48,10 +51,7 @@ class Registry:
 
     def phase(self, name: str) -> FlowStep:
         """Return the registered phase, or raise ``UnresolvedExtensionError``."""
-        try:
-            return self._phases[name]
-        except KeyError:
-            raise UnresolvedExtensionError(f"phase '{name}' is not registered; {_VALIDATE_HINT}") from None
+        return self._lookup(self._phases, "phase", name)
 
     def set_flow(self, flow_name: str, entries: Sequence[FlowEntry]) -> None:
         """Define a flow as an ordered list of phase names and loop groups.
@@ -91,11 +91,15 @@ class Registry:
         entries = self._entries(flow_name)
         entries.insert(self._index_of(flow_name, entries, anchor) + offset, step)
 
-    def _entries(self, flow_name: str) -> list[FlowEntry]:
+    @staticmethod
+    def _lookup(mapping: dict[str, _T], kind: str, name: str) -> _T:
         try:
-            return self._flows[flow_name]
+            return mapping[name]
         except KeyError:
-            raise UnresolvedExtensionError(f"flow '{flow_name}' is not registered; {_VALIDATE_HINT}") from None
+            raise UnresolvedExtensionError(f"{kind} '{name}' is not registered; {_VALIDATE_HINT}") from None
+
+    def _entries(self, flow_name: str) -> list[FlowEntry]:
+        return self._lookup(self._flows, "flow", flow_name)
 
     @staticmethod
     def _entry_name(entry: FlowEntry) -> str:
@@ -121,10 +125,7 @@ class Registry:
 
     def prompt(self, name: str) -> Callable[..., str]:
         """Return the named prompt builder, or raise ``UnresolvedExtensionError``."""
-        try:
-            return self._prompts[name]
-        except KeyError:
-            raise UnresolvedExtensionError(f"prompt '{name}' is not registered; {_VALIDATE_HINT}") from None
+        return self._lookup(self._prompts, "prompt", name)
 
     def prompt_names(self) -> tuple[str, ...]:
         """Return every registered prompt name in registration order."""
@@ -138,10 +139,7 @@ class Registry:
 
     def renderer(self, name: str) -> Callable[..., str]:
         """Return the named renderer, or raise ``UnresolvedExtensionError``."""
-        try:
-            return self._renderers[name]
-        except KeyError:
-            raise UnresolvedExtensionError(f"renderer '{name}' is not registered; {_VALIDATE_HINT}") from None
+        return self._lookup(self._renderers, "renderer", name)
 
     def renderer_names(self) -> tuple[str, ...]:
         """Return every registered renderer name in registration order."""
@@ -177,10 +175,7 @@ class Registry:
 
     def trace_exporter(self, name: str) -> TraceExporterFactory:
         """Look up a selected factory without invoking it."""
-        try:
-            return self._trace_exporters[name]
-        except KeyError:
-            raise UnresolvedExtensionError(f"trace exporter '{name}' is not registered; {_VALIDATE_HINT}") from None
+        return self._lookup(self._trace_exporters, "trace exporter", name)
 
     def trace_exporter_names(self) -> tuple[str, ...]:
         """Return destination names in deterministic registration order."""

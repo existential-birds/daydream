@@ -11,9 +11,7 @@ import pytest
 
 from daydream import runner as _runner
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep import dedup as _dedup
-from daydream.deep import detection as _detection
-from daydream.deep import prompts as _prompts
+from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
 from daydream.deep.artifacts import (
     arbiter_input_path,
     deep_dir,

@@ -24,9 +24,7 @@ from tests.deep_orchestrator.support import (
     _count_review_prompts,
     _root_phase_events,
 )
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,

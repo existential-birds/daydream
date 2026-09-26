@@ -40,6 +40,11 @@ from tests.harness.pi_replay import make_mock_process as make_mock_process_pi
 # Claude loader — synthesize SDK message objects, mock receive_response()
 
 
+def _tool_results_by_id(script: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index the canonical script's tool results by tool-call id."""
+    return {tr["id"]: tr for tr in script.get("tool_results", [])}
+
+
 def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
     """Translate the canonical script into a Claude SDK message sequence.
 
@@ -53,9 +58,7 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
        ``CostEvent`` mirroring Codex's ``turn.completed``.
     """
     turns = script["turns"]
-    tool_results_by_id: dict[str, dict[str, Any]] = {
-        tr["id"]: tr for tr in script.get("tool_results", [])
-    }
+    tool_results_by_id = _tool_results_by_id(script)
     final_usage: dict[str, Any] | None = script.get("final_usage")
 
     messages: list[Any] = []
@@ -142,9 +145,7 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
     ``ResultMessage`` carrying the same usage dict.
     """
     turns = script["turns"]
-    tool_results_by_id: dict[str, dict[str, Any]] = {
-        tr["id"]: tr for tr in script.get("tool_results", [])
-    }
+    tool_results_by_id = _tool_results_by_id(script)
     final_usage = script.get("final_usage") or {}
 
     lines: list[str] = [
@@ -291,9 +292,7 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
     not affect Step parity.
     """
     turns = script["turns"]
-    tool_results_by_id: dict[str, dict[str, Any]] = {
-        tr["id"]: tr for tr in script.get("tool_results", [])
-    }
+    tool_results_by_id = _tool_results_by_id(script)
     final_usage = script.get("final_usage") or {}
 
     lines: list[str] = [

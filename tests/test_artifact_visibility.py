@@ -36,20 +36,16 @@ from daydream.artifact_visibility import (
     PrivateRootLocations,
     PrivateWorkspaceOwner,
     TrajectoryOutputRoute,
+    _manifest as _pv_manifest,
     artifact_dir_for,
     artifact_session_active,
     derive_workspace_identity,
+    open_artifact_session as _open_artifact_session,
     operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
     review_output_path_for,
     validate_private_workspace_owner,
-)
-from daydream.artifact_visibility import (
-    _manifest as _pv_manifest,
-)
-from daydream.artifact_visibility import (
-    open_artifact_session as _open_artifact_session,
 )
 from daydream.deep.artifacts import check_deep_artifacts
 from daydream.trajectory import (
@@ -61,6 +57,7 @@ from daydream.trajectory import (
     siblings_directory,
 )
 from daydream.workspace import WorkContext
+from tests.harness.git_helpers import git as _git
 
 _TRANSITIONS = (
     "DETACH_STAGED",
@@ -92,17 +89,6 @@ class _Entry:
     mode: int
     size: int
     sha256: str | None
-
-
-def _git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(  # noqa: S603 - fixed test-only Git argv
-        ["git", *args],  # noqa: S607 - Git is the tested external boundary
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return proc.stdout.strip()
 
 
 def _init_repo(repo: Path) -> None:

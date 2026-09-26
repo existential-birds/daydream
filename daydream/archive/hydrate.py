@@ -25,8 +25,7 @@ import shutil
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
-from dataclasses import fields as dataclass_fields
+from dataclasses import dataclass, field, fields as dataclass_fields
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
@@ -46,10 +45,11 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_SECRETS_SCAN_DIRTY,
     REASON_CODE_UNTRUSTED_REMOTE_HOST,
 )
-from daydream.archive.index import upsert_run
+from daydream.archive.index import query_runs, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
+from daydream.timeutil import now_iso_utc
 from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME, redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -501,7 +501,7 @@ def download_snapshot(
                 "source_relpath": source_relpath,
                 "sha256": sha,
                 "size": len(data),
-                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "fetched_at": now_iso_utc(),
             }
         )
 
@@ -542,6 +542,14 @@ def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _require_manifest_dict(bundle_dir: Path, *, label: str) -> dict[str, Any]:
+    """Read a derivative manifest fail-closed; ``label`` names it in the error."""
+    data = _read_manifest_dict(bundle_dir)
+    if data is None:
+        raise HydrationError(redact_text(f"{label} has an unreadable manifest"))
+    return data
+
+
 def _read_manifest_field(data: dict[str, Any], key: str) -> Any:
     """Read a provenance field from a produced manifest, with flat fallback.
 
@@ -563,10 +571,6 @@ class IngestResult:
     session_id: str
     status: str  # "admitted" | "quarantined"
     reason_code: str | None = None
-
-
-def _utc_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
@@ -847,11 +851,7 @@ def apply_license_gate(
     runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-                )
+            data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
             sid = str(data.get("session_id") or derivative.name)
             if not _is_bare_segment(sid):
                 raise HydrationError(
@@ -876,7 +876,7 @@ def apply_license_gate(
             _append_dedupe_entry(
                 ledger_path,
                 {"session_id": sid, "status": "excluded", "reason_code": reason_code,
-                 "content_digest": None, "revision": str(revision), "at": _utc_now()},
+                 "content_digest": None, "revision": str(revision), "at": now_iso_utc()},
             )
             rejected.append((sid, reason_code))
     if rejected:
@@ -937,11 +937,7 @@ def rebuild_index(stage: Path) -> None:
     if not runs_dir.is_dir():
         return
     for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-        data = _read_manifest_dict(derivative)
-        if data is None:
-            raise HydrationError(
-                redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-            )
+        data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
         # ``daydream`` provenance is a nested dict in produced manifests; the
         # index expects the executable-provenance object, so it is dropped from
         # the hydrated rebuild (never coerced into a Manifest field).
@@ -979,8 +975,6 @@ def build_resolution_map(
     hydration never clones or fetches (M5). Raw URLs are consumed as data only
     and never appear in the map. Unexpected IO errors propagate.
     """
-    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle at module load
-
     cmap: dict[str, Any] = {}
     unavailable: list[str] = []
     indexed: set[str] = set()
@@ -1124,11 +1118,7 @@ def _policy_binding(
     runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
-                )
+            data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
             decision = resolve_repo_decision(
                 _manifest_repo_slug(data) or "",
                 _manifest_license_evidence(data),
@@ -1154,13 +1144,7 @@ def _policy_binding(
     excluded_dir = stage / "excluded"
     if excluded_dir.is_dir():
         for derivative in sorted(p for p in excluded_dir.iterdir() if p.is_dir()):
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(
-                        f"excluded derivative {derivative.name} has an unreadable manifest"
-                    )
-                )
+            data = _require_manifest_dict(derivative, label=f"excluded derivative {derivative.name}")
             sid = str(data.get("session_id") or derivative.name)
             entry = recorded_excluded.get(sid) or {}
             code = entry.get("reason_code")
@@ -1302,8 +1286,6 @@ def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
     whose derivative digest changed, refresh the admitted baseline copy and
     append a new ``admitted`` ledger entry carrying the enriched digest
     (latest-entry-wins, same convention as the dedupe pass itself)."""
-    from daydream.archive import sanitize  # noqa: PLC0415  # local: avoid import cycle
-
     runs_dir = stage / RUNS_DIRNAME
     if not runs_dir.is_dir():
         return
@@ -1323,7 +1305,7 @@ def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
         _append_dedupe_entry(
             ledger_path,
             {"session_id": sid, "status": "admitted", "reason_code": None,
-             "content_digest": digest, "revision": str(revision), "at": _utc_now()},
+             "content_digest": digest, "revision": str(revision), "at": now_iso_utc()},
         )
 
 
@@ -1408,11 +1390,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             name = derivative.name
-            data = _read_manifest_dict(derivative)
-            if data is None:
-                raise HydrationError(
-                    redact_text(f"admitted derivative {name} has an unreadable manifest")
-                )
+            data = _require_manifest_dict(derivative, label=f"admitted derivative {name}")
             sid = str(data.get("session_id") or name)
             if not _is_bare_segment(sid):
                 # M4: the manifest's session id must never be joined into a
@@ -1442,7 +1420,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                 _append_dedupe_entry(
                     ledger_path,
                     {"session_id": sid, "status": "excluded", "reason_code": code,
-                     "content_digest": None, "revision": revision, "at": _utc_now()},
+                     "content_digest": None, "revision": revision, "at": now_iso_utc()},
                 )
                 result.excluded.append((sid, code))
                 continue
@@ -1473,7 +1451,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                         ledger_path,
                         {"session_id": sid, "status": "admitted", "reason_code": None,
                          "content_digest": sanitize._derivative_digest(baseline),
-                         "revision": revision, "at": _utc_now()},
+                         "revision": revision, "at": now_iso_utc()},
                     )
                     result.admitted += 1
                     continue
@@ -1492,7 +1470,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                     ledger_path,
                     {"session_id": sid, "status": "collision",
                      "reason_code": REASON_CODE_IDENTITY_COLLISION,
-                     "content_digest": digest, "revision": revision, "at": _utc_now()},
+                     "content_digest": digest, "revision": revision, "at": now_iso_utc()},
                 )
                 result.collisions += 1
                 result.collision_ids.append(sid)
@@ -1505,7 +1483,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
             _append_dedupe_entry(
                 ledger_path,
                 {"session_id": sid, "status": "admitted", "reason_code": None,
-                 "content_digest": digest, "revision": revision, "at": _utc_now()},
+                 "content_digest": digest, "revision": revision, "at": now_iso_utc()},
             )
             result.admitted += 1
     rebuild_index(stage)
@@ -1701,7 +1679,7 @@ def build_import_ledger(
         "pinned_revision": revision,
         "source_commit": source_commit,
         "curation_id": curated.name,
-        "generated_at": _utc_now(),
+        "generated_at": now_iso_utc(),
         "imported": imported,
         "quarantined": sorted(quarantined, key=lambda x: x["session_id"]),
         "excluded": sorted(excluded, key=lambda x: x["session_id"]),
@@ -1994,7 +1972,7 @@ def _write_resume_ledger(curated: Path, curation_id: str) -> None:
                 "batch_digest": sanitize._derivative_digest(batch),
                 "source_commit": source_commit,
                 "curation_id": curation_id,
-                "at": _utc_now(),
+                "at": now_iso_utc(),
             }
     resume_path = curated / "resume" / "ledger.jsonl"
     existing: dict[str, dict[str, Any]] = {}
@@ -2527,8 +2505,6 @@ def verify_publication(
         else:
             kwargs["repo_slug"], kwargs["remote_url"] = None, None
         upsert_run(verify_dir, Manifest(**kwargs))
-
-    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle
 
     verify_admitted = len(query_runs(verify_dir))
     if verify_admitted != dry_run_admitted:

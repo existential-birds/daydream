@@ -88,10 +88,7 @@ def jaccard(a: set[str], b: set[str]) -> float:
     """Return Jaccard similarity, or 0.0 when both sets are empty."""
     if not a and not b:
         return 0.0
-    union = a | b
-    if not union:
-        return 0.0
-    return len(a & b) / len(union)
+    return len(a & b) / len(a | b)
 
 
 def descriptions_match(a: str, b: str, *, threshold: float = _SIM_THRESHOLD) -> bool:

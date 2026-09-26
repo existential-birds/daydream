@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import re
 import stat
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
 
-from daydream import git_ops
-from daydream import review_profile as _rp
+import anyio
+
+from daydream import git_ops, review_profile as _rp
+from daydream.agent import run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
@@ -227,6 +230,27 @@ def _parse_envelope(envelope: dict[str, Any]) -> ExplorationContext:
     )
 
 
+def _finish_exploration_dispatch(
+    dispatch: DispatchHandle | None,
+    timeout_scope: Any,
+    specialist_failed: bool,
+    results: object,
+) -> None:
+    """Close a specialist dispatch with the shared timeout/failure policy.
+
+    A cancelled scope is TIMED_OUT; otherwise a failed specialist closes the
+    dispatch PARTIAL when ``results`` holds a success, else ALL_CHILDREN_FAILED.
+    """
+    if dispatch is None:
+        return
+    if timeout_scope.cancel_called:
+        dispatch.finish(
+            LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
+        )
+    elif specialist_failed:
+        finish_partial_or_failed(dispatch, results)
+
+
 @bind_resolved_run_context
 async def pre_scan(
     backend: Backend,
@@ -269,10 +293,6 @@ async def pre_scan(
             "exploration.test_mapping": defaults["exploration.test_mapping"].content,
             "exploration.repository_survey": defaults["exploration.repository_survey"].content,
         }
-    import anyio
-
-    from daydream.agent import run_agent
-
     static_files: list[FileInfo] = []
     try:
         static_files = detect_affected_files(diff_text, repo_root)
@@ -357,7 +377,6 @@ async def pre_scan(
                     specialist_failed = True
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 specialist_failed = True
-                pass
 
     # Builders split this bounded static map into changed targets and optional
     # context for each specialist, so imported files never become new targets.
@@ -365,16 +384,7 @@ async def pre_scan(
     # Paths are cwd-absolute (rooted at repo_root, the actual worktree). In a
     # linked worktree the agent must not re-root a bare relative path via git
     # topology, which points at the sibling main worktree.
-    static_files_abs = [
-        FileInfo(
-            path=str(repo_root / f.path),
-            role=f.role,
-            summary=f.summary,
-            provenance=f.provenance,
-            source_file=f.source_file,
-        )
-        for f in static_files
-    ]
+    static_files_abs = [replace(f, path=str(repo_root / f.path)) for f in static_files]
 
     async with dispatch_scope(
         recorder,
@@ -435,13 +445,7 @@ async def pre_scan(
                                 ].content,
                             ), TEST_MAPPER_SCHEMA, dispatch,
                         )
-        if dispatch is not None:
-            if timeout_scope.cancel_called:
-                dispatch.finish(
-                    LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
-                )
-            elif specialist_failed:
-                finish_partial_or_failed(dispatch, results)
+        _finish_exploration_dispatch(dispatch, timeout_scope, specialist_failed, results)
 
     if not results:
         static_context.completed = not (specialist_failed or timeout_scope.cancel_called)
@@ -496,10 +500,6 @@ async def repo_scan(
                 "exploration.repository_survey"
             ].content,
         }
-    import anyio
-
-    from daydream.agent import run_agent
-
     paths: list[str] = []
     try:
         paths = git_ops.ls_files(repo_root)
@@ -539,7 +539,6 @@ async def repo_scan(
                     specialist_failed = True
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 specialist_failed = True
-                pass
 
     async with dispatch_scope(
         recorder,
@@ -548,16 +547,7 @@ async def repo_scan(
     ) as dispatch:
         with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
             await _run_specialist(dispatch)
-        if dispatch is not None:
-            if timeout_scope.cancel_called:
-                dispatch.finish(
-                    LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
-                )
-            elif specialist_failed:
-                dispatch.finish(
-                    LifecycleStatus.FAILED,
-                    LifecycleReasonCode.ALL_CHILDREN_FAILED,
-                )
+        _finish_exploration_dispatch(dispatch, timeout_scope, specialist_failed, survey)
 
     return ExplorationContext(
         conventions=_coerce_conventions(survey.get("conventions")),

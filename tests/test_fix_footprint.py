@@ -27,25 +27,8 @@ from daydream.repository_paths import (
     canonicalize_repository_file_path,
     git_observed_path_is_confined,
 )
-from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo
-
-
-def _work(repo: Path) -> WorkContext:
-    head = _git(repo, "rev-parse", "HEAD")
-    return WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha=head,
-        head_branch="main",
-        head_sha=head,
-        is_ephemeral=False,
-        run_id="test-run",
-    )
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo, work_context
 
 
 def _seed(repo: Path, files: dict[str, bytes]) -> None:
@@ -191,6 +174,21 @@ def test_git_observed_confinement_accepts_non_model_names_but_rejects_escapes(tm
     assert git_observed_path_is_confined(repo, "odd\n$name[1].txt")
     assert not git_observed_path_is_confined(repo, "../outside")
     assert not git_observed_path_is_confined(repo, "/outside")
+
+
+def test_git_observed_confinement_leaf_symlink_only_with_flag(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    (repo / "leaf").symlink_to(outside / "target.txt")
+    (repo / "dirlink").symlink_to(outside, target_is_directory=True)
+
+    # A symlink leaf is an escape by default; inspecting the leaf itself is
+    # allowed only when the caller opts in, and a symlinked parent is never.
+    assert not git_observed_path_is_confined(repo, "leaf")
+    assert git_observed_path_is_confined(repo, "leaf", allow_leaf_symlink=True)
+    assert not git_observed_path_is_confined(repo, "dirlink/target.txt", allow_leaf_symlink=True)
 
 
 def test_footprint_uses_item_uids_and_exact_item_group_and_run_unions(tmp_path: Path) -> None:
@@ -390,7 +388,7 @@ def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_rem
     residual.write_bytes(b"remove me")
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked=baseline,
@@ -443,7 +441,7 @@ def test_runtime_artifacts_do_not_enter_fix_scope_or_invalidate_content_evidence
     )) != before
     footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.txt"}, [])
     result = enforce_authorized_fix_footprint(
-        _work(git_repo), "HEAD", footprint, preexisting_untracked=protected,
+        work_context(git_repo, run_id="test-run"), "HEAD", footprint, preexisting_untracked=protected,
         phase="post-test", round_number=1,
     )
     assert result.mutated
@@ -551,7 +549,7 @@ def test_scope_issue_diff_failure_still_restores_and_audits_without_sensitive_wa
     )
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},
@@ -595,7 +593,7 @@ def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_res
     )
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},
@@ -634,7 +632,7 @@ def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_ef
     )
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},
@@ -711,7 +709,7 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
     )
     failures = await phase_fix_parallel(
         cast(Backend, backend),
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         items,
         footprint=footprint,
         round_snapshot=snapshot,
@@ -770,7 +768,7 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
     async def _run_phase() -> None:
         await phase_fix_parallel(
             cast(Backend, backend),
-            _work(git_repo),
+            work_context(git_repo, run_id="test-run"),
             [item],
             footprint=footprint,
             round_snapshot=snapshot,
@@ -870,12 +868,8 @@ def test_tree_key_is_binary_safe_mode_type_delete_new_and_order_deterministic(gi
 
 
 def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     original_head = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     baseline = git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
 
     _seed(nested, {"source.py": b"value = 2\n"})
@@ -892,11 +886,7 @@ def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path
 def test_dirty_gitlink_cannot_claim_commit_only_test_evidence(
     git_repo: Path, dirty_path: str,
 ) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
+    nested = _add_gitlink(git_repo)
     (nested / dirty_path).write_bytes(b"value = 2\n")
 
     with pytest.raises(GitError, match="dirty gitlink"):
@@ -914,6 +904,16 @@ def test_uninitialized_gitlink_cannot_capture_parent_repository_head(git_repo: P
         git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
 
 
+def _add_gitlink(git_repo: Path) -> Path:
+    """Seed a committed ``dependency`` gitlink and return the nested repo."""
+    nested = git_repo / "dependency"
+    init_repo(nested)
+    _seed(nested, {"source.py": b"value = 1\n"})
+    _git(git_repo, "add", "dependency")
+    _commit(git_repo, "record dependency")
+    return nested
+
+
 def _gitlink_rollback_snapshot(
     repo: Path, path: str = "dependency"
 ) -> WorktreeRollbackSnapshot:
@@ -926,12 +926,8 @@ def _gitlink_rollback_snapshot(
 
 
 def test_gitlink_group_rollback_restores_captured_nested_oid(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     captured = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     snapshot = _gitlink_rollback_snapshot(git_repo)
     _seed(nested, {"source.py": b"value = 2\n"})
     assert _git(nested, "rev-parse", "HEAD") != captured
@@ -943,12 +939,8 @@ def test_gitlink_group_rollback_restores_captured_nested_oid(git_repo: Path) -> 
 
 
 def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     indexed = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     _seed(nested, {"source.py": b"value = 2\n"})
     captured = _git(nested, "rev-parse", "HEAD")
     assert captured != indexed
@@ -964,11 +956,7 @@ def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: P
 def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(
     git_repo: Path,
 ) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
+    nested = _add_gitlink(git_repo)
     snapshot = _gitlink_rollback_snapshot(git_repo)
     original_head = _git(nested, "rev-parse", "HEAD")
     (nested / "source.py").write_bytes(b"owner dirty bytes\n")
@@ -985,12 +973,8 @@ def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(
 
 
 def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    init_repo(nested)
-    _seed(nested, {"source.py": b"value = 1\n"})
+    nested = _add_gitlink(git_repo)
     indexed = _git(nested, "rev-parse", "HEAD")
-    _git(git_repo, "add", "dependency")
-    _commit(git_repo, "record dependency")
     _seed(nested, {"source.py": b"value = 2\n"})
     protected = _git(nested, "rev-parse", "HEAD")
     assert protected != indexed
@@ -999,7 +983,7 @@ def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path)
     _git(nested, "checkout", "--detach", indexed)
 
     result = enforce_authorized_fix_footprint(
-        _work(git_repo),
+        work_context(git_repo, run_id="test-run"),
         "HEAD",
         footprint,
         preexisting_untracked={},

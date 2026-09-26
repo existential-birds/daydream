@@ -17,7 +17,7 @@ from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import project_findings
-from tests.harness.adjudication import make_hydrated_sqlite_index
+from tests.harness.adjudication import make_hydrated_sqlite_index, seed_index_dispositions
 
 _PIN = {
     "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
@@ -192,28 +192,7 @@ def _seed_decisive_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     disposition set the widened materialize emits and the drift gate must
     re-derive via ``build_queue(..., include_decisive=True)``."""
     root = tmp_path / "index"
-    root.mkdir(exist_ok=True)
-    resolutions = [
-        {
-            "fingerprint": f"fp-{n}", "disposition": disposition,
-            "evidence": [{"reply_id": n, "body_sha256": "abc",
-                          "created_at": "2026-01-01T00:00:00+00:00"}],
-            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
-            "comment_id": 7,
-        }
-        for n, disposition in enumerate(("accepted", "rejected", "unanswered"), start=1)
-    ]
-    sessions = [
-        {
-            "session_id": f"s{n}", "trajectory_id": f"s{n}-t", "segment_id": f"s{n}-seg",
-            "resolutions": [resolution],
-        }
-        for n, resolution in enumerate(resolutions, start=1)
-    ]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
-    (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
+    seed_index_dispositions(root)
     archive = tmp_path / "archive"
     _seed_archive(archive)
     conn = _get_connection(archive)

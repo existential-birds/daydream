@@ -5,13 +5,16 @@ from typing import Any, cast
 
 import pytest
 
+import daydream.extensions as ext
 from daydream.extensions import (
     ExtensionError,
     FlowStep,
     LoopGroup,
+    ObservabilityConfig,
     Registry,
     ToolDecision,
     ToolSupervisor,
+    TraceExporterFactory,
     UnresolvedExtensionError,
 )
 from daydream.trajectory import DaydreamPhase
@@ -33,8 +36,6 @@ def test_registry_has_no_skill_methods() -> None:
 
 
 def test_trace_exporter_registry_is_lazy_and_replace_is_explicit() -> None:
-    from daydream.extensions import ObservabilityConfig, TraceExporterFactory
-
     def factory(config: ObservabilityConfig) -> Any:
         raise AssertionError("registration and lookup must never create an exporter")
 
@@ -51,8 +52,6 @@ def test_trace_exporter_registry_is_lazy_and_replace_is_explicit() -> None:
 
 @pytest.mark.parametrize("kind", ["none", "async", "async-object", "name"])
 def test_trace_exporter_registry_rejects_invalid_factories(kind: str) -> None:
-    from daydream.extensions import TraceExporterFactory
-
     async def async_factory(config: Any) -> Any:
         return None
 
@@ -148,8 +147,6 @@ def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
 
 
 def test_comment_contract_types_are_frozen_and_public() -> None:
-    import daydream.extensions as ext
-
     cf = ext.CommentFinding(
         path="a.py",
         line=3,

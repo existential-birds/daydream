@@ -33,8 +33,7 @@ from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
 from daydream.runner import run
 from tests.harness import diagram_repos as dr
-from tests.harness.diagram_repos import build_large_cross_module_repo
-from tests.harness.diagram_repos import load_diagram_artifact as _artifact
+from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
 from tests.harness.scripts import cli_main as _cli_main

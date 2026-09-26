@@ -7,10 +7,8 @@ order. Segmentation must never be a coin-flip, so duplicate sibling keys
 raise.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-from daydream.training.corpus import _build_spans
 
 
 @dataclass(frozen=True)
@@ -20,7 +18,6 @@ class Segment:
     segment_id: str
     trajectory_id: str
     session_id: str
-    spans: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _descriptor(trajectory_id: str) -> str:
@@ -36,13 +33,9 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
     (fork registration order, per the Task 0B pinned rule). The root trajectory
     is ``seg-0`` only when no siblings exist; otherwise siblings are ``seg-0..n-1``.
 
-    Spans are computed per sibling document with the v1 ``_build_spans``
-    helper (Pattern Q) when the ref inlines a document (``steps`` key);
-    external refs (``trajectory_path`` only) carry empty spans.
-
     Raises:
-        ValueError: when two sibling refs share the same
-            ``(descriptor, trajectory_id)`` key — the message names both.
+        ValueError: when two sibling refs share the same ``trajectory_id`` —
+            the message names the duplicated id.
     """
     refs = trajectory.get("subagent_trajectory_ref") or []
     if not refs:
@@ -52,29 +45,24 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
                 segment_id="seg-0",
                 trajectory_id=root_id,
                 session_id=str(trajectory.get("session_id", "")),
-                spans=_build_spans(trajectory),
             )
         ]
 
-    seen: dict[tuple[str, str], str] = {}
+    seen: set[str] = set()
     segments: list[Segment] = []
     for order_index, ref in enumerate(refs):
         trajectory_id = str(ref.get("trajectory_id", ""))
-        descriptor = _descriptor(trajectory_id)
-        key = (descriptor, trajectory_id)
-        if key in seen:
+        if trajectory_id in seen:
             raise ValueError(
-                f"duplicate segmentation key (descriptor={descriptor!r}): "
-                f"{seen[key]!r} and {trajectory_id!r} — segmentation must be a total order"
+                f"duplicate segmentation key (descriptor={_descriptor(trajectory_id)!r}): "
+                f"{trajectory_id!r} — segmentation must be a total order"
             )
-        seen[key] = trajectory_id
-        spans = _build_spans(ref if "steps" in ref else {})
+        seen.add(trajectory_id)
         segments.append(
             Segment(
                 segment_id=f"seg-{order_index}",
                 trajectory_id=trajectory_id,
                 session_id=str(ref.get("session_id", trajectory.get("session_id", ""))),
-                spans=spans if "steps" in ref else [],
             )
         )
     return segments

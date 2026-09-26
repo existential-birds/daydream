@@ -100,14 +100,18 @@ def canonicalize_repository_file_path(repo: Path, value: object) -> str:
     return canonical
 
 
-def git_observed_path_is_confined(repo: Path, value: str) -> bool:
+def git_observed_path_is_confined(
+    repo: Path, value: str, *, allow_leaf_symlink: bool = False
+) -> bool:
     """Return whether an exact Git-observed path remains inside *repo*.
 
     Git can track names outside the deliberately narrow model-output grammar
     (newlines and shell metacharacters included), so this boundary performs no
     schema validation. It rejects absolute paths, NUL, empty/dot/parent
     components, and every current symlink component before checking resolved
-    containment.
+    containment. With ``allow_leaf_symlink`` the final component may be a
+    symlink: callers that inspect or replace the leaf itself (rather than
+    following it) walk only the parent components.
     """
     if not isinstance(value, str) or not value or "\0" in value or value.startswith("/"):
         return False
@@ -115,7 +119,7 @@ def git_observed_path_is_confined(repo: Path, value: str) -> bool:
     if any(part in {"", ".", ".."} for part in parts):
         return False
     root = repo.resolve()
-    walked = _walk_components(repo, parts)
+    walked = _walk_components(repo, parts[:-1] if allow_leaf_symlink else parts)
     if walked is None:
         return False
     try:

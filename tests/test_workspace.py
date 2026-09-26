@@ -41,11 +41,13 @@ from daydream.workspace import (
     open_audit_workspace,
     open_workspace,
 )
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import configure_identity as _configure_identity
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import (
+    bare_remote as _bare_remote,
+    commit as _commit,
+    configure_identity as _configure_identity,
+    git as _git,
+    init_repo as _init_repo,
+)
 
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,7 +115,7 @@ def _make_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
 
 def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "main") -> str:
     """Add a commit to *branch* on *bare* via a fresh sidecar clone; return its SHA."""
-    token = _secrets_token()
+    token = secrets.token_hex(3)
     sidecar = tmp_path / f"sidecar-{branch}-{token}"
     _git(tmp_path, "clone", str(bare), str(sidecar))
     _configure_identity(sidecar)
@@ -136,12 +138,6 @@ def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "m
     sha = _commit(sidecar, f"sidecar commit on {branch}")
     _git(sidecar, "push", "origin", branch)
     return sha
-
-
-def _secrets_token() -> str:
-
-    return secrets.token_hex(3)
-
 
 
 async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
@@ -202,10 +198,7 @@ async def test_external_worktrees_use_supplied_private_workspace_owner(
     assert payload["source"] == str(repo.resolve())
     assert payload["git_common_dir"] == str(git_ops.git_common_dir(repo))
 
-    def unexpected_default_lookup() -> Path:
-        raise AssertionError("a supplied owner must not consult the default provider")
-
-    monkeypatch.setattr(artifact_visibility, "_default_private_base", unexpected_default_lookup)
+    _forbid_default_private_base(monkeypatch)
     captured: list[Path] = []
     async with _open(repo, owner, ephemeral=True) as first:
         captured.append(first.repo)
@@ -262,10 +255,7 @@ async def test_open_workspace_rejects_wrong_supplied_owner_before_git_mutation(
     wrong_owner = _private_owner(first_repo, tmp_path)
     before = _git(second_repo, "worktree", "list", "--porcelain")
 
-    def unexpected_default_lookup() -> Path:
-        raise AssertionError("a supplied owner must not consult the default provider")
-
-    monkeypatch.setattr(artifact_visibility, "_default_private_base", unexpected_default_lookup)
+    _forbid_default_private_base(monkeypatch)
     with pytest.raises(ArtifactVisibilityError, match="owner identity mismatch"):
         async with _open(second_repo, wrong_owner, ephemeral=True):
             pass

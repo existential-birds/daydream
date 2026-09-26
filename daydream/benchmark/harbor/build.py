@@ -97,12 +97,6 @@ ASSIGNMENT_TEXT = (
 MAX_PR_CONTEXT_BYTES = 32 * 1024
 
 
-_ESCAPED_HISTORICAL_TAGS = {
-    "<historical_pr_context>": "&lt;historical_pr_context&gt;",
-    "</historical_pr_context>": "&lt;/historical_pr_context&gt;",
-}
-
-
 def _escape_historical_delimiters(text: str) -> str:
     """Neutralize the ``<historical_pr_context>`` block delimiters in untrusted text.
 
@@ -114,9 +108,9 @@ def _escape_historical_delimiters(text: str) -> str:
     delimiter.
     """
     return text.replace(
-        "<historical_pr_context>", _ESCAPED_HISTORICAL_TAGS["<historical_pr_context>"]
+        "<historical_pr_context>", "&lt;historical_pr_context&gt;"
     ).replace(
-        "</historical_pr_context>", _ESCAPED_HISTORICAL_TAGS["</historical_pr_context>"]
+        "</historical_pr_context>", "&lt;/historical_pr_context&gt;"
     )
 
 
@@ -429,21 +423,11 @@ def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> di
     # Candidate ids are derived from canonical content + an occurrence ordinal
     # (mirrors the verifier's own per-content dedup ordinal), so the compiled
     # artifact re-derives identical ids under ``validate_candidate_artifact``.
-    groups: dict[tuple[str, ...], int] = {}
+    groups: dict[tuple[object, ...], int] = {}
     entries = []
     for flattened, _ in flat:
-        canon = (
-            str(flattened.get("title") or ""),
-            str(flattened.get("body") or ""),
-            str(flattened.get("severity") or ""),
-            str(flattened.get("path") or ""),
-            str(flattened.get("start_line") or ""),
-            str(flattened.get("end_line") or ""),
-        )
-        ordinal = groups.get(canon, 0)
-        groups[canon] = ordinal + 1
         entry = dict(flattened)
-        entry["candidate_id"] = vc.derive_candidate_id(opaque_key, entry, ordinal)
+        entry["candidate_id"] = vc.assign_candidate_id(opaque_key, entry, groups)
         entries.append(entry)
     result = {
         "schema_version": 1,
@@ -498,6 +482,10 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
 
 # control-plane leakage scan (issue #778)
 
+#: A URL carrying userinfo (``scheme://user@host``) — a credential leak. Shared by
+#: the leak rules and the raw bundle-inventory check so the two cannot drift.
+_AUTHENTICATED_URL_PATTERN = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@")
+
 _LEAK_RULES = [
     ("original-git-sha", re.compile(r"\b[0-9a-f]{40}\b")),
     ("authoring-case-id", re.compile(r"\bpr-\d{6}-[0-9a-f]{12}\b")),
@@ -511,7 +499,7 @@ _LEAK_RULES = [
     ("credential",
      re.compile(r"(?i)\b(sk-[a-z0-9]{16,}|ghp_[a-z0-9]{20,}|gho_[a-z0-9]{20,}|"
                 r"github_pat_[a-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b")),
-    ("authenticated-url", re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@")),
+    ("authenticated-url", _AUTHENTICATED_URL_PATTERN),
     ("pull-number", re.compile(r"\bpull/[0-9]+\b")),
 ]
 
@@ -573,7 +561,7 @@ def validate_bundle_inventory(bundle_path: Path) -> None:
             "expected exactly refs/heads/base and refs/heads/head"
         )
     raw = bundle_path.read_bytes().decode("utf-8", errors="replace")
-    m = re.search(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@", raw)
+    m = _AUTHENTICATED_URL_PATTERN.search(raw)
     if m is not None:
         raise CompileError(f"bundle {bundle_path} contains a credential-bearing URL")
     return None
@@ -730,10 +718,10 @@ def _compile_case(
     bundle_dst = case_stage / "environment" / "repository.bundle"
     bundle_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(bundle_src, bundle_dst)
-    actual = hashlib.sha256(bundle_dst.read_bytes()).hexdigest()
-    if actual != expected:
+    bundle_sha256 = hashlib.sha256(bundle_dst.read_bytes()).hexdigest()
+    if bundle_sha256 != expected:
         raise CompileError(
-            f"case {case_id} bundle sha mismatch (wanted {expected}, got {actual})"
+            f"case {case_id} bundle sha mismatch (wanted {expected}, got {bundle_sha256})"
         )
     validate_bundle_inventory(bundle_dst)
 
@@ -742,6 +730,7 @@ def _compile_case(
     gold_path = case_stage / "tests" / "golden-review.json"
     gold_path.parent.mkdir(parents=True, exist_ok=True)
     gold_path.write_bytes(gold_bytes)
+    gold_sha256 = hashlib.sha256(gold_bytes).hexdigest()
 
     # Immutable, deterministic per-case verifier metadata beside the gold file
     # (no timestamps): opaque task key + base/head refs + the hidden-gold sentinel.
@@ -756,7 +745,7 @@ def _compile_case(
         "base_ref": "base",
         "head_ref": "head",
         "template_version": TEMPLATE_VERSION,
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+        "gold_sha256": gold_sha256,
     }
     meta_path = case_stage / "tests" / "verifier-metadata.json"
     meta_path.write_text(json.dumps(metadata, sort_keys=True))
@@ -766,15 +755,21 @@ def _compile_case(
     oracle_path = case_stage / "solution" / "golden-review.json"
     oracle_path.parent.mkdir(parents=True, exist_ok=True)
     oracle_path.write_bytes(oracle_bytes)
+    oracle_sha256 = hashlib.sha256(oracle_bytes).hexdigest()
 
     assets = _copy_assets(case_stage)
 
-    files: dict[str, str] = {}
+    # The bundle/gold/oracle digests were computed above; reuse them instead of
+    # re-reading and re-hashing the same bytes.
+    files: dict[str, str] = {
+        "environment/repository.bundle": bundle_sha256,
+        "tests/golden-review.json": gold_sha256,
+        "solution/golden-review.json": oracle_sha256,
+    }
     for rel in (
-        "README.md", "instruction.md", "Task.md", "task.toml", "environment/repository.bundle",
+        "README.md", "instruction.md", "Task.md", "task.toml",
         "environment/Dockerfile", "environment/runtime-requirements.lock",
-        "tests/golden-review.json", "tests/verifier-metadata.json",
-        "solution/golden-review.json",
+        "tests/verifier-metadata.json",
     ):
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
     for rel, sha in assets:
@@ -794,9 +789,9 @@ def _compile_case(
         "original_base_sha": snapshot.get("original_base_sha"),
         "requested_base_sha": snapshot.get("requested_base_sha"),
         "original_head_sha": snapshot.get("original_head_sha"),
-        "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
-        "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "bundle_sha256": bundle_sha256,
+        "gold_sha256": gold_sha256,
+        "oracle_sha256": oracle_sha256,
         "task_spec_sha256": task_spec_sha256,
         "verifier_script_sha256": hashlib.sha256(
             (case_stage / "tests" / "score_review.py").read_bytes()

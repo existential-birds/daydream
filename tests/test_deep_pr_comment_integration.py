@@ -27,6 +27,10 @@ from typing import Any
 
 import pytest
 
+from daydream import pr_review
+from daydream.exploration import ExplorationContext
+from daydream.runner import RunConfig, run
+from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
 from tests.conftest import silence_module_console
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
@@ -38,9 +42,7 @@ from tests.harness.claude_sdk import (
     patch_claude_sdk,
 )
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 
 FIXTURE_MODEL_ID = "fixture-model-id"
 _PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
@@ -48,7 +50,6 @@ _PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
 
 def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
     """Exercise the real session sink from the fake external backend boundary."""
-    from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
 
     recorder = get_current_recorder()
     assert recorder is not None
@@ -453,7 +454,6 @@ class _CapturedPost:
 def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
     """Wire PR discovery and fake gh so the complete submission runs and we see
     the rendered markdown without ever touching GitHub."""
-    from daydream import pr_review
 
     captured = _CapturedPost(fake_gh)
 
@@ -552,8 +552,6 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     every phase function, ``Invocation._dispatch``, ``build_payload``, the
     ``pr_comment_renderer`` — runs unmodified.
     """
-    from daydream.exploration import ExplorationContext
-    from daydream.runner import RunConfig, run
 
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
@@ -671,7 +669,6 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
 
     The assertions below pin every column the user called out as broken.
     """
-    from daydream.runner import RunConfig, run
 
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
@@ -794,7 +791,6 @@ async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A bad retained document degrades run details, not the authorized post."""
-    from daydream.runner import RunConfig, run
 
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)

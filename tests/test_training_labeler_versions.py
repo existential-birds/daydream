@@ -1,7 +1,6 @@
 """Tests for labeler version constants and reply evidence digest."""
 
-from daydream.training import labeler_versions as lv
-from daydream.training import reward
+from daydream.training import labeler_versions as lv, reward
 
 
 def test_versions_are_independent() -> None:

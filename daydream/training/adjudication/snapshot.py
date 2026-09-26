@@ -9,10 +9,10 @@ by construction (C4).
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from daydream.json_utils import canonical_json
 from daydream.training._immutable_json import thaw_json
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
@@ -53,11 +53,9 @@ def record_evidence_digest(
     """Digest over the session's flattened per-finding reply evidence.
 
     Delegates to ``labeler_versions.reply_evidence_digest`` — the shared
-    implementation, never a re-implementation (K4/K5; spike-verified
-    byte-identical to ``training/harvest.py:_reply_evidence_digest``).
-    ``None`` when no reply evidence was collected, matching the harvest twin
-    so a digest-less row never collides with a digested one under the
-    versioned dedup key.
+    implementation, never a re-implementation (K4/K5). ``None`` when no reply
+    evidence was collected, so a digest-less row never collides with a
+    digested one under the versioned dedup key.
     """
     evidence = [thaw_json(entry) for per_finding in per_finding_evidence_lists for entry in per_finding]
     return reply_evidence_digest(evidence) if evidence else None
@@ -144,7 +142,5 @@ def snapshot_id(pin: Mapping[str, str]) -> str:
         if not isinstance(value, str) or not value:
             raise ValueError(f"snapshot_id: pin is missing required component {field!r}")
         components[field] = value
-    canonical = json.dumps(
-        components, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+    canonical = canonical_json(components)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

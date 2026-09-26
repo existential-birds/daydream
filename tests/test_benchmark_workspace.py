@@ -11,8 +11,7 @@ import pytest
 import yaml
 
 from daydream import cli as top_cli
-from daydream.benchmark import github_import as gi
-from daydream.benchmark import snapshot as sn
+from daydream.benchmark import github_import as gi, snapshot as sn
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import build
 from daydream.benchmark.harbor.build import task_spec_digest
@@ -153,7 +152,7 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     ``snapshot.bundle_sha256`` and whose tree IDs + canonical diff digest are
     recorded from that origin, and a ``CaseDocument`` whose ``pull_request``/
     ``snapshot``/``source``/``curation`` model-validate without any
-    ``_schema_ready`` strip.
+    ``_schema_ready`` strip. ``curation_state`` is ``"ready"`` or ``"draft"``.
     """
 
 
@@ -229,17 +228,6 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
             "clean_attested": False,
             "gold_status": "findings",
             "findings": [finding],
-            "exclusions": [],
-            "case_exclusion": None,
-            "task_spec_sha256": "d" * 64,
-        }
-    elif curation_state == "clean":
-        curation = {
-            "state": "ready",
-            "snapshot_attested": True,
-            "clean_attested": True,
-            "gold_status": "clean",
-            "findings": [],
             "exclusions": [],
             "case_exclusion": None,
             "task_spec_sha256": "d" * 64,
@@ -446,23 +434,10 @@ def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Pa
     assert case_path.read_bytes() == before
 
 
-def _seed_frozen_case(ws: Any) -> Any:
-    """Seed one ``ready`` snapshot case + its bundle + the indexed ledger.
-
-    Builds on ``_write_curated_workspace``'s fully-valid ready case shape,
-    writing the frozen ``snapshot.ready`` block (bundle_file + bundle_sha256)
-    and a real ``snapshots/<case>.bundle`` whose sha256 matches, plus the
-    fetched ledger entry + import file. Resolves the source identity so
-    ``validate_workspace`` reaches exit 0.
-    """
-    _write_case_docs(ws, "ready")
-    return ws
-
-
 def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_frozen_case(ws)   # one ready case: bundle YAML + snapshots/<case>.bundle
+    _write_case_docs(ws, "ready")   # one ready case: bundle YAML + snapshots/<case>.bundle
     code, _ = validate_workspace(ws)
     assert code == 0
     # Corrupt the bundle bytes (keeps the case document and ledger intact).
@@ -479,7 +454,7 @@ def test_status_reports_snapshot_state_per_case(tmp_path: Path, capsys: pytest.C
     """``status`` surfaces each case's snapshot state + frozen head prefix."""
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_frozen_case(ws)   # one ready case (from Task 11's helper)
+    _write_case_docs(ws, "ready")   # one ready case (from Task 11's helper)
     st = workspace_status(ws)
     assert st.workspace_state in ("ready", "curating")
     rc = _handle_benchmark_command(["status", str(ws)])

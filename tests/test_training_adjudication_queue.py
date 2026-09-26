@@ -4,8 +4,7 @@ from pathlib import Path
 import pytest
 
 from daydream.training.adjudication import queue as queue_module
-from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS as queue_set
-from daydream.training.adjudication.queue import build_queue
+from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS as queue_set, build_queue
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import project_findings
 from daydream.training.corpus_projection.tiers import _NON_DECISIVE_DISPOSITIONS as tiers_set

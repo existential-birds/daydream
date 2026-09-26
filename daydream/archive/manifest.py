@@ -33,8 +33,8 @@ from typing import TYPE_CHECKING, Any
 from daydream.archive.git_context import GitContext
 from daydream.run_snapshot import (
     ArchiveRecorderProvenance as ArchiveRecorderProvenance,
+    ArchiveRunSnapshot,
 )
-from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import DaydreamRunFlow
 
 if TYPE_CHECKING:

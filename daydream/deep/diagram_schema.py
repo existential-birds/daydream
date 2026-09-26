@@ -40,8 +40,8 @@ from typing import Any, Literal
 from daydream.output_schema import strict_object
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
+    valid_repository_file_path,
 )
-from daydream.repository_paths import valid_repository_file_path
 
 _PARTICIPANT_KINDS = ("internal", "external")
 _MESSAGE_KINDS = ("call", "reply", "self")

@@ -24,11 +24,11 @@ from daydream.archive import _read_json_artifact
 from daydream.remote_ci import (
     CIObservation,
     RequiredContext,
+    _normalize_repository as _normalize_remote_repository,
+    _require_sha as _require_remote_sha,
     required_context_label,
     required_context_matches,
 )
-from daydream.remote_ci import _normalize_repository as _normalize_remote_repository
-from daydream.remote_ci import _require_sha as _require_remote_sha
 from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
     DaydreamPhase,

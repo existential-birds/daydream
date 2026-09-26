@@ -52,44 +52,20 @@ _FACTUAL_DISAGREEMENT_RULES: tuple[str, ...] = (
 _NEGATION_TOKENS = re.compile(r"\b(?:not|never)\b|\bn't\b", re.IGNORECASE)
 
 
-def _sentence_containing(text: str, start: int, end: int) -> str:
-    """Return the sentence (split on .!?; and newlines) containing [start, end)."""
-    sentence_starts = [0] + [m.end() for m in re.finditer(r"[.!?;\n]", text) if m.end() <= start]
-    start_idx = sentence_starts[-1]
-    tail = re.search(r"[.!?;\n]", text[end:])
-    end_idx = end + (tail.start() if tail else len(text[end:]))
-    return text[start_idx:end_idx]
-
-
 def _is_negated(text: str, start: int) -> bool:
     """True when a negation token appears before ``start`` in the same sentence."""
-    sentence = _sentence_containing(text, start, start)
-    return bool(_NEGATION_TOKENS.search(sentence[: _sentence_offset(sentence, text, start)]))
+    prefix = text[:start]
+    boundaries = [m.end() for m in re.finditer(r"[.!?;\n]", prefix)]
+    sentence_start = boundaries[-1] if boundaries else 0
+    return bool(_NEGATION_TOKENS.search(text[sentence_start:start]))
 
 
-def _sentence_offset(sentence: str, text: str, start: int) -> int:
-    # Offset of `start` within its sentence.
-    idx = text.find(sentence)
-    return start - idx if idx >= 0 else start
-
-
-def _match_rules(text: str, rules: tuple[str, ...], *, guard_negation: bool) -> bool:
+def _match_rules(text: str, rules: tuple[str, ...]) -> bool:
     for pattern in rules:
         for m in re.finditer(pattern, text, re.IGNORECASE):
-            if guard_negation and _is_negated(text, m.start()):
+            if _is_negated(text, m.start()):
                 continue
             return True
-    return False
-
-
-def _dispute_present(text: str) -> bool:
-    """Any dispute marker, un-negated, co-occurring in the body."""
-    for pattern in _DISPUTE_RULES[1:]:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
-            if not _is_negated(text, m.start()):
-                return True
-    # "won't fix" itself is a dispute trigger phrase but does not self-satisfy;
-    # a *second*, distinct dispute marker is required.
     return False
 
 
@@ -99,11 +75,13 @@ def _direction(body: str) -> str:
     for line in lines:
         if not line.strip():
             continue
-        has_accept = _match_rules(line, _ACCEPT_RULES, guard_negation=True)
+        has_accept = _match_rules(line, _ACCEPT_RULES)
         has_wontfix = bool(re.search(_DISPUTE_RULES[0], line, re.IGNORECASE))
-        has_dispute = _dispute_present(line)
-        has_reject = _match_rules(line, _REJECT_RULES, guard_negation=True) or (has_wontfix and has_dispute)
-        has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES, guard_negation=True)
+        # "won't fix" itself is a dispute trigger phrase but does not self-satisfy;
+        # a *second*, distinct dispute marker is required.
+        has_dispute = _match_rules(line, _DISPUTE_RULES[1:])
+        has_reject = _match_rules(line, _REJECT_RULES) or (has_wontfix and has_dispute)
+        has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES)
         if has_accept:
             directions.add("accepted")
         if has_reject or has_factual:
@@ -135,6 +113,32 @@ def _identity_gates_pass(reply: dict[str, Any]) -> bool:
     return True
 
 
+def qualification_reason(
+    reply: dict[str, Any],
+    pr_author_logins: set[str] | frozenset[str],
+    review_author_logins: set[str] | frozenset[str] = frozenset(),
+) -> str:
+    """Name why the reply's author counts (M6) — the persisted evidence reason.
+
+    Returns ``excluded:self-reply``/``excluded:bot``/``excluded:non-qualifying``
+    when the author is not a human whose judgment counts, else ``pr_author``,
+    ``review_author``, or ``assoc:<ASSOCIATION>`` naming the qualifying gate.
+    """
+    if reply.get("is_self_reply"):
+        return "excluded:self-reply"
+    if not _identity_gates_pass(reply):
+        return "excluded:bot"
+    assoc = reply.get("author_association")
+    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
+        return f"assoc:{assoc}"
+    login = _user_str(reply, "login")
+    if login in pr_author_logins:
+        return "pr_author"
+    if login in review_author_logins:
+        return "review_author"
+    return "excluded:non-qualifying"
+
+
 def is_qualifying_author(
     reply: dict[str, Any],
     pr_author_logins: set[str] | frozenset[str],
@@ -146,17 +150,7 @@ def is_qualifying_author(
     a daydream agent, is not a marked self-reply, and is either a PR author,
     a formal-review author, or holds OWNER/MEMBER/COLLABORATOR association.
     """
-    if reply.get("is_self_reply"):
-        return False
-    if not _identity_gates_pass(reply):
-        return False
-    login = _user_str(reply, "login")
-    assoc = reply.get("author_association")
-    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
-        return True
-    if login in pr_author_logins or login in review_author_logins:
-        return True
-    return False
+    return not qualification_reason(reply, pr_author_logins, review_author_logins).startswith("excluded:")
 
 
 def classify_reply(reply: dict[str, Any]) -> str:

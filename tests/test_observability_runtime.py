@@ -11,9 +11,7 @@ from typing import Any
 
 import anyio
 import pytest
-from opentelemetry import context as otel_context
-from opentelemetry import metrics, trace
-from opentelemetry import trace as otel_trace
+from opentelemetry import context as otel_context, metrics, trace, trace as otel_trace
 from opentelemetry._logs import get_logger_provider
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.metrics import get_meter_provider

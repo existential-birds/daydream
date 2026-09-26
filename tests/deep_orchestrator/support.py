@@ -12,16 +12,15 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.config_file import load_file_config
 from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
 from daydream.extensions import Registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
-from daydream.runner import RunConfig
+from daydream.runner import RunConfig, run as _run
 from daydream.workspace import WorkContext
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     Mute,
     _force_interactive,
@@ -63,16 +62,12 @@ def _make_record_issue(issues: list[tuple[Any, ...]]) -> Callable[..., str]:
 
 def _merged_item_files(target: Path) -> list[str]:
     """Return the ``file`` of every item in the canonical merged-items.json."""
-    items_file = target / ".daydream" / "deep" / "merged-items.json"
-    items = json.loads(items_file.read_text())["items"]
-    return [it.get("file") for it in items]
+    return [cast("str", it.get("file")) for it in _merged_items(target / ".daydream" / "deep")]
 
 
 def _merged_item_descriptions(target: Path) -> list[str]:
     """Return the ``description`` of every item in the canonical merged-items.json."""
-    items_file = target / ".daydream" / "deep" / "merged-items.json"
-    items = json.loads(items_file.read_text())["items"]
-    return [it.get("description", "") for it in items]
+    return [it.get("description", "") for it in _merged_items(target / ".daydream" / "deep")]
 
 
 def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[bool]) -> None:
@@ -217,6 +212,18 @@ def _install_accept_gate_pipeline(monkeypatch: pytest.MonkeyPatch, target: Path,
     mute()
 
     return _install_stub_backend(monkeypatch, target)
+
+
+async def _run_loop(target: Path, make_config: Any) -> int:
+    """Run the deep pipeline in loop output mode with *target*'s file config."""
+    return await _run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            file_config=load_file_config(target),
+        )
+    )
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:

@@ -38,9 +38,7 @@ from tests.deep_orchestrator.support import (
     _remote_identity_context,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     _merge_item,
 )

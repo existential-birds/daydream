@@ -59,10 +59,9 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
-from daydream.improve.render import render_plan as real_render
 from daydream.improve.repo_commands import enumerate_repository_commands
-from tests.harness.git_helpers import bare_remote as _bare_remote
-from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
+from tests.harness.git_helpers import bare_remote as _bare_remote, commit, git, init_repo, write_and_stage
+from tests.harness.improve_backend import plan_ref as _ref
 
 
 @pytest.mark.parametrize(
@@ -642,18 +641,6 @@ def test_recon_applicability_directory_scopes_fail_closed(
     assert errors == [
         "RECON_APPLICABILITY_INVALID@/commands/0/applicability/scope/paths/0"
     ]
-
-
-def _ref(
-    recon_command_id: str = "test-suite",
-    appended_args: str | None = None,
-    note: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "recon_command_id": recon_command_id,
-        "appended_args": appended_args,
-        "note": note,
-    }
 
 
 def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
@@ -1707,7 +1694,7 @@ def test_plan_anchor_git_timeout_blocks_plan(
     diagnostic = result["diagnostics"][0]
     assert diagnostic["stage"] == "semantic"
     assert diagnostic["disposition"] == "blocked"
-    assert diagnostic["validation_errors"] == [
+    assert diagnostic["errors"] == [
         {"code": "PLANNED_AT_CHECK_FAILED", "pointer": "/"}
     ]
     sidecar = json.loads(
@@ -2640,10 +2627,10 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
         "fp-authoring": ("authoring", "blocked"),
         "fp-success": ("success", "success"),
     }
-    assert diagnostics["fp-transport"]["validation_errors"] == [
+    assert diagnostics["fp-transport"]["errors"] == [
         {"code": "NO_STRUCTURED_OBJECT", "pointer": "/"}
     ]
-    assert diagnostics["fp-authoring"]["validation_errors"] == [
+    assert diagnostics["fp-authoring"]["errors"] == [
         {
             "code": "AUTHOR_SCHEMA_INVALID",
             "pointer": "/title",
@@ -4511,7 +4498,7 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
         if calls["n"] == 1:
             raise RuntimeError("first re-anchor render fails")
         # second render (re-anchor of the next finding) succeeds
-        return real_render(*args, **kwargs)
+        return render_plan(*args, **kwargs)
 
     monkeypatch.setattr("daydream.improve.plans.render_plan", _boom)
 

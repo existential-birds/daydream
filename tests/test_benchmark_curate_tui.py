@@ -11,8 +11,7 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream.benchmark import curate_tui as tui
-from daydream.benchmark import curation as cu
+from daydream.benchmark import curate_tui as tui, curation as cu
 from daydream.benchmark.curate_tui import (
     parse_indices,
     render_case,
@@ -28,6 +27,14 @@ def _scripted(*lines: Any) -> Any:
     """A ``read_line`` callable that yields *lines* then raises StopIteration."""
     it = iter(lines)
     return lambda _prompt: next(it)
+
+
+def _install_editor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
+    editor = tmp_path / "editor"
+    editor.write_text(script)
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
 
 
 def test_parse_indices_accepts_commas_and_ranges() -> None:
@@ -195,8 +202,8 @@ def test_action_new_via_real_editor_persists_authored(
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     log = tmp_path / "editor.log"
-    editor = tmp_path / "edit.py"
-    editor.write_text(
+    _install_editor(
+        tmp_path, monkeypatch,
         "#!/usr/bin/env python3\n"
         "import os\n"
         "import stat\n"
@@ -208,9 +215,6 @@ def test_action_new_via_real_editor_persists_authored(
         "    fh.write('findings:\\n  - title: New concern\\n    body: fresh wording\\n"
         "    severity: medium\\n    location: null\\n    source_ids: []\\n')\n"
     )
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.setenv("LOG", str(log))
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
@@ -223,40 +227,27 @@ def test_action_new_via_real_editor_persists_authored(
     assert not Path(buf).exists()               # buffer removed after the edit
 
 
-def test_editor_nonzero_exit_leaves_state_unchanged(
+@pytest.mark.parametrize(
+    "editor_script",
+    [
+        pytest.param("#!/bin/sh\nexit 3\n", id="nonzero-exit"),
+        pytest.param(
+            "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n",
+            id="malformed-buffer",
+        ),
+    ],
+)
+def test_editor_failure_leaves_state_unchanged(
     tmp_path: Path,
     fake_gh: FakeGh,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"
-    before = path.read_bytes()
-    editor = tmp_path / "fail.sh"
-    editor.write_text("#!/bin/sh\nexit 3\n")
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
-
-    run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
-    assert path.read_bytes() == before
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_editor_malformed_buffer_is_discarded(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    editor_script: str,
 ) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
-    editor = tmp_path / "bad.sh"
-    editor.write_text("#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n")
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
+    _install_editor(tmp_path, monkeypatch, editor_script)
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
     assert path.read_bytes() == before
@@ -266,16 +257,13 @@ def test_editor_malformed_buffer_is_discarded(
 def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     current = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    editor = tmp_path / "edit2.sh"
-    editor.write_text(
+    _install_editor(
+        tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n"
         "  - title: Reworked\n    body: edited wording\n"
         "    severity: low\n    location: null\n"
         f"    source_ids: [{current['source_id']}]\nEOF\n"
     )
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
 
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "e", "1", "q"))
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
@@ -289,15 +277,12 @@ def test_action_edit_authors_edited_finding_from_non_candidate_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    editor = tmp_path / "auth.sh"
-    editor.write_text(
+    _install_editor(
+        tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: From approval\n"
         "    body: edited wording\n    severity: null\n    location: null\n"
         "    source_ids: [github:review:100]\nEOF\n"
     )
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
     run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["title"] == "From approval" and f["provenance"]["kind"] == "edited"
@@ -314,16 +299,13 @@ def test_edit_author_prefills_selected_evidence_source_ids(
     cannot slip past the callers that rewrite source_ids in their heredocs."""
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     log = tmp_path / "prefill.log"
-    editor = tmp_path / "prefill.sh"
-    editor.write_text(
+    _install_editor(
+        tmp_path, monkeypatch,
         "#!/bin/sh\n"
         "cat > \"$LOG\" < \"$1\"\n"
         "cat > \"$1\" <<'EOF'\nfindings:\n  - title: From selected\n    body: pinned\n"
         "    severity: null\n    location: null\n    source_ids: [github:review:100]\nEOF\n"
     )
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.setenv("LOG", str(log))
 
     run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
@@ -341,16 +323,13 @@ def test_action_edit_splits_one_evidence_into_two_findings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    editor = tmp_path / "split.sh"
-    editor.write_text(
+    _install_editor(
+        tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Part A\n    body: a\n"
         "    severity: null\n    location: null\n    source_ids: [github:inline_comment:1]\n"
         "  - title: Part B\n    body: b\n    severity: null\n    location: null\n"
         "    source_ids: [github:inline_comment:1]\nEOF\n"
     )
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
     run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1", "q"))
     fs = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
     assert len(fs) == 2 and {f["provenance"]["kind"] for f in fs} == {"edited"}
@@ -362,15 +341,12 @@ def test_action_edit_merges_range_into_one_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _f = _seed_ready_case_mixed(tmp_path, fake_gh)
-    editor = tmp_path / "merge.sh"
-    editor.write_text(
+    _install_editor(
+        tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Merged\n    body: combined\n"
         "    severity: null\n    location: null\n"
         "    source_ids: [github:inline_comment:1, github:review:100]\nEOF\n"
     )
-    editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor))
-    monkeypatch.delenv("EDITOR", raising=False)
     run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1,4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100"]

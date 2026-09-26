@@ -11,8 +11,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from daydream import git_ops
-from daydream import review_profile as rp
+from daydream import git_ops, review_profile as rp
 from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,
@@ -78,6 +77,7 @@ from tests.harness.improve_backend import (
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import force_interactive as _force_interactive
+from tests.harness.trajectory import root_trajectory as _root_run_trajectory
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -1022,14 +1022,6 @@ def _untracked(repo: Path) -> list[str]:
     ).stdout.splitlines()
 
 
-def _root_run_trajectory(repo: Path) -> dict[str, Any]:
-    paths = list((repo / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(paths) == 1
-    payload = json.loads(paths[0].read_text(encoding="utf-8"))
-    assert isinstance(payload, dict)
-    return payload
-
-
 def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:
     steps = [
         step
@@ -1129,6 +1121,11 @@ def _improve_observable_texts(repo: Path) -> list[str]:
 
 def _raise_enumeration_failure(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
     raise RuntimeError("unparseable repository manifest")
+
+
+def _no_open_issues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub GitHub issue enumeration with an empty result."""
+    monkeypatch.setattr("daydream.git_ops.gh_issue_list_strict", lambda *args, **kwargs: [])
 
 
 @pytest.mark.anyio
@@ -4505,10 +4502,7 @@ async def test_configured_headless_publish_selects_all_and_embeds_local_plans(
         improve_monorepo_target,
         n_findings=len(AUDIT_CATEGORIES),
     )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     created: list[dict[str, Any]] = []
 
     def _create_issue(*args: Any, **kwargs: Any) -> str:
@@ -4659,10 +4653,7 @@ async def test_reused_plan_publishes_its_stored_package_and_member_identities(
         json.dumps(sidecar, indent=2) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     created: list[dict[str, Any]] = []
 
     def _create_issue(*args: Any, **kwargs: Any) -> str:
@@ -4712,10 +4703,7 @@ async def test_configured_publish_records_partial_plan_write_failure(
         failed_title="Production finding 03",
     )
     install_capable_improve_backend(monkeypatch, backend)
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     created: list[str] = []
 
     def _create_issue(*args: Any, **kwargs: Any) -> str:
@@ -4752,10 +4740,7 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
         improve_monorepo_target,
         n_findings=1,
     )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: [],
-    )
+    _no_open_issues(monkeypatch)
     monkeypatch.setattr(
         "daydream.git_ops.gh_issue_create",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("offline")),

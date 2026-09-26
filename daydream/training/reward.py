@@ -85,13 +85,6 @@ class RewardWeights:
         fp_penalty_map: Maintainer outcome label → posterior penalty
             (``accepted → 0.0``, ``contested → 0.5``, ``rejected → 1.0``).
             An unmapped/``"unknown"`` label leaves the axis absent.
-        is_default: Identity marker set ``True`` on :data:`DEFAULT_WEIGHTS`.
-            Advisory metadata only — the canonical-vs-custom version stamp in
-            :func:`score_trajectory` keys off object identity
-            (``weights is DEFAULT_WEIGHTS``), not this flag, so setting it on
-            another instance cannot forge the canonical :data:`REWARD_VERSION`.
-            Excluded from :func:`_weights_fingerprint` (identity metadata, not
-            a scoring parameter).
     """
 
     w_correctness: float = 0.6
@@ -106,7 +99,6 @@ class RewardWeights:
     fp_penalty_map: types.MappingProxyType[str, float] = field(
         default_factory=lambda: types.MappingProxyType(dict(_FP_PENALTY_MAP))
     )
-    is_default: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.len_scale <= 0:
@@ -116,7 +108,7 @@ class RewardWeights:
             )
 
 
-DEFAULT_WEIGHTS = RewardWeights(is_default=True)
+DEFAULT_WEIGHTS = RewardWeights()
 """The golden-locked weights; scoring under these is byte-identical to the
 canonical corpus reward stamped by :data:`REWARD_VERSION`. Only this instance
 earns the canonical stamp, keyed by object identity in
@@ -128,8 +120,7 @@ def _weights_fingerprint(weights: RewardWeights) -> str:
 
     Serializes the six scalar fields plus the two map fields (as plain
     ``dict``) via sorted-key JSON, then takes the leading 8 hex chars of the
-    SHA-256 digest. ``is_default`` is excluded — it is identity metadata, not
-    a scoring parameter. Pure; no I/O.
+    SHA-256 digest. Pure; no I/O.
 
     Returns:
         The first 8 hex characters of the SHA-256 digest of the canonical

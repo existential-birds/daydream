@@ -22,8 +22,7 @@ import yaml
 from pydantic import BaseModel
 
 from daydream import git_ops
-from daydream.benchmark import schema
-from daydream.benchmark import snapshot as snapshot_mod
+from daydream.benchmark import schema, snapshot as snapshot_mod
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.schema import (
     BenchmarkManifest,
@@ -40,15 +39,13 @@ from daydream.benchmark.schema import (
 )
 from daydream.benchmark.storage import (
     Transaction,
+    WorkspaceCorrupt as WorkspaceCorrupt,
     WorkspaceLock,
     load_json_strict,
     load_yaml_strict,
     recover_startup,
     resolve_authoring_path,
     sha256_file,
-)
-from daydream.benchmark.storage import (
-    WorkspaceCorrupt as WorkspaceCorrupt,
 )
 
 _SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache")
@@ -313,7 +310,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 
 
 def _derived_state(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument] | None = None
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> tuple[str, bool]:
     """Shared (workspace state, identity-resolved) derivation for status+validate.
 
@@ -325,8 +322,6 @@ def _derived_state(
     them. An unreadable/invalid case or failed proof surfaces as
     :class:`WorkspaceCorrupt`.
     """
-    if docs is None:
-        docs = load_case_documents(root, manifest)
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
     state = derive_workspace_state(
         pull_requests=pr_dicts,
@@ -602,7 +597,7 @@ def _verify_cross_document(
     root: Path,
     manifest: BenchmarkManifest,
     docs: dict[str, CaseDocument],
-    imports: dict[str, ImportDocument] | None = None,
+    imports: dict[str, ImportDocument],
 ) -> None:
     """Verify every cross-document identity link and exact index membership.
 
@@ -649,11 +644,7 @@ def _verify_cross_document(
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} import provenance mismatches its ledger entry"
             )
-        imp = (
-            imports[entry.import_file]
-            if imports is not None and entry.import_file in imports
-            else _load_import_document(root, entry.import_file)
-        )
+        imp = imports[entry.import_file]
         if doc.pull_request != imp.pull_request:
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} import provenance PR metadata mismatch"
@@ -669,11 +660,7 @@ def _verify_cross_document(
                 )
         if pr.import_state != "fetched" or pr.import_file is None:
             continue
-        imp = (
-            imports[pr.import_file]
-            if imports is not None and pr.import_file in imports
-            else _load_import_document(root, pr.import_file)
-        )
+        imp = imports[pr.import_file]
         if imp.pull_request.number != pr.number:
             raise WorkspaceCorrupt(
                 f"{root}: import {pr.import_file} pull_request.number "
@@ -756,7 +743,7 @@ def _verify_duplicate_inodes(root: Path, paths: dict[str, Path]) -> None:
 
 
 def _case_curation_states(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument] | None = None
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> list[dict[str, str]]:
     """The ``curation.state`` per indexed case, for workspace-state derivation.
 
@@ -769,23 +756,18 @@ def _case_curation_states(
     (storage's strict-loader invariant: a corrupt file is an error, never
     defaulted). A validated model always carries a concrete ``curation.state``.
     """
-    if docs is None:
-        docs = load_case_documents(root, manifest)
     states: list[dict[str, str]] = []
     for case in manifest.cases:
         doc = docs[case.case_file]
         state = doc.curation.state
-        if state == "ready":
-            from daydream.benchmark.harbor.build import task_spec_approval
-
-            if task_spec_approval(doc.model_dump(mode="json")).state == "stale":
-                state = "stale"
+        if state == "ready" and _task_spec_approval_state(doc) == "stale":
+            state = "stale"
         states.append({"curation_state": state})
     return states
 
 
 def _case_snapshot_summaries(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument] | None = None
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> list[dict[str, str]]:
     """Per-case snapshot summary for ``status``: snapshot state + frozen head.
 
@@ -795,8 +777,6 @@ def _case_snapshot_summaries(
     unreplayable snapshots. An unreadable/invalid case surfaces as
     :class:`WorkspaceCorrupt` (shared with the validate path).
     """
-    if docs is None:
-        docs = load_case_documents(root, manifest)
     summaries: list[dict[str, str]] = []
     for case in manifest.cases:
         doc = docs[case.case_file]

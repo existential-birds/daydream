@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -35,8 +36,10 @@ from daydream.backends.osprey import (
     _required_non_negative_int,
     _stderr_diagnostic_sink,
 )
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
+from tests.harness.protocol_cli import install_protocol_cli
+from tests.harness.trajectory import make_recorder
 
 
 @pytest.mark.asyncio
@@ -44,10 +47,6 @@ from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
 async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_terminal_envelope(
     tmp_path: Path, sandbox: bool,
 ) -> None:
-    import hashlib
-
-    from tests.harness.protocol_cli import install_protocol_cli
-
     target = (tmp_path / "model cwd with spaces").resolve()
     target.mkdir()
     (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
@@ -517,12 +516,9 @@ async def test_trajectory_records_coalesced_thinking_as_prose(tmp_path: Path) ->
             "usage_reported": False,
         },
     )
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="osprey",
-        session_id="daydream-session",
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="osprey", session_id="daydream-session",
     )
 
     async with recorder:
@@ -895,12 +891,9 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
             "duration_ms": 1,
         },
     )
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="osprey",
-        session_id="daydream-session",
+    recorder = make_recorder(
+        tmp_path, path=tmp_path / "trajectory.json",
+        agent_model_name="osprey", session_id="daydream-session",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:

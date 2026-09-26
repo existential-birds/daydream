@@ -22,8 +22,13 @@ from pathlib import Path
 import anyio
 import pytest
 
-from daydream.agent import _LogRedactingConsole, _print_log, _summarize_input, _summarize_output
-from daydream.agent import console as phases_console
+from daydream.agent import (
+    _LogRedactingConsole,
+    _print_log,
+    _summarize_input,
+    _summarize_output,
+    console as phases_console,
+)
 from daydream.backends import (
     AgentEvent,
     CostEvent,

@@ -121,6 +121,17 @@ def _gate(condition: bool, message: str) -> None:
         raise CalibrationError(message)
 
 
+def _rate(raw: Any, key: str, path: Path) -> float:
+    """Validate a bundle split rate (numeric, within [0, 1]) and return it as float."""
+    _gate(
+        isinstance(raw, (int, float)) and not isinstance(raw, bool),
+        f"{path}: {key} {raw!r} is not numeric",
+    )
+    value = float(raw)
+    _gate(0.0 <= value <= 1.0, f"{path}: {key} {value!r} is outside [0, 1]")
+    return value
+
+
 def _parse_iso(value: str, field_name: str) -> datetime:
     try:
         return datetime.fromisoformat(value)
@@ -749,26 +760,8 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
             f"record {rid}: license decision {decision!r} is not one of {sorted(_ALLOWED_LICENSE_DECISIONS)}",
         )
 
-    holdout_rate_raw = bundle["holdout_rate"]
-    val_rate_raw = bundle["val_rate"]
-    _gate(
-        isinstance(holdout_rate_raw, (int, float)) and not isinstance(holdout_rate_raw, bool),
-        f"{lineage_path}: holdout_rate {holdout_rate_raw!r} is not numeric",
-    )
-    _gate(
-        isinstance(val_rate_raw, (int, float)) and not isinstance(val_rate_raw, bool),
-        f"{lineage_path}: val_rate {val_rate_raw!r} is not numeric",
-    )
-    holdout_rate = float(holdout_rate_raw)
-    val_rate = float(val_rate_raw)
-    _gate(
-        0.0 <= holdout_rate <= 1.0,
-        f"{lineage_path}: holdout_rate {holdout_rate!r} is outside [0, 1]",
-    )
-    _gate(
-        0.0 <= val_rate <= 1.0,
-        f"{lineage_path}: val_rate {val_rate!r} is outside [0, 1]",
-    )
+    holdout_rate = _rate(bundle["holdout_rate"], "holdout_rate", lineage_path)
+    val_rate = _rate(bundle["val_rate"], "val_rate", lineage_path)
     _gate(
         holdout_rate + val_rate <= 1.0,
         f"{lineage_path}: holdout_rate + val_rate {holdout_rate + val_rate!r} exceeds 1.0",

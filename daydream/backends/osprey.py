@@ -66,7 +66,6 @@ _KNOWN_IGNORED_EVENTS = frozenset(
         "verification_checkpoint",
         "context_compaction",
         "driver_retry",
-        "message_end",
         "todo_updated",
         "moa_reference_start",
         "moa_reference_delta",

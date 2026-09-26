@@ -70,7 +70,11 @@ from daydream.archive.importer import (
     redact_metadata_value,
     run_pure_import,
 )
-from daydream.archive.index import _get_connection, readonly_connection
+from daydream.archive.index import (
+    LABEL_OBSERVATION_NAMES,
+    _get_connection,
+    readonly_connection,
+)
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
@@ -97,6 +101,7 @@ from daydream.training.labeler_versions import (
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
 )
+from daydream.ui import create_console, print_error, print_success
 
 __all__ = [
     "handle_adjudicate",
@@ -400,7 +405,6 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
 
 def handle_build(argv: list[str]) -> int:
     """Handle ``corpus adjudicate build --index-root <path> --state-dir <path>``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["build", *argv])
     try:
@@ -434,7 +438,6 @@ def handle_build(argv: list[str]) -> int:
 
 def handle_show(argv: list[str]) -> int:
     """Handle ``corpus adjudicate show --state-dir <path>``."""
-    from daydream.ui import create_console, print_error
 
     args = _build_adjudicate_parser().parse_args(["show", *argv])
     try:
@@ -459,7 +462,6 @@ def handle_show(argv: list[str]) -> int:
 
 def handle_label(argv: list[str]) -> int:
     """Handle ``corpus adjudicate label --state-dir <path> ...``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["label", *argv])
     try:
@@ -527,7 +529,6 @@ def _load_sessions_for_index(index_root: Path) -> list[dict[str, Any]]:
 
 def handle_export(argv: list[str]) -> int:
     """Handle ``corpus adjudicate export --index-root <path> --state-dir <path>``."""
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_adjudicate_parser()
     args = parser.parse_args(["export", *argv])
@@ -599,7 +600,6 @@ def _report_items(
 
 def handle_report(argv: list[str]) -> int:
     """Handle ``corpus adjudicate report --index-root <path> --state-dir <path>``."""
-    from daydream.ui import create_console, print_error
 
     args = _build_adjudicate_parser().parse_args(["report", *argv])
     try:
@@ -663,7 +663,6 @@ def _print_conflicts(enriched: list[dict[str, Any]]) -> None:
 
 def handle_materialize(argv: list[str]) -> int:
     """Handle ``corpus adjudicate materialize --index-root <path> --out-dir <path> ...``."""
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_adjudicate_parser()
     args = parser.parse_args(["materialize", *argv])
@@ -684,7 +683,6 @@ def handle_materialize(argv: list[str]) -> int:
 
 def handle_publish_state(argv: list[str]) -> int:
     """Handle ``corpus adjudicate publish-state --state-dir <path> --manifest <path>``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["publish-state", *argv])
     try:
@@ -704,7 +702,6 @@ def handle_publish_state(argv: list[str]) -> int:
 
 def handle_resume_state(argv: list[str]) -> int:
     """Handle stable-curation checkpoint discovery and verified restoration."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["resume-state", *argv])
     try:
@@ -760,7 +757,6 @@ def handle_publish_final(argv: list[str]) -> int:
     """
     from daydream.training.adjudication.final_bundle import build_final_bundle, final_snapshot_id
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
     bundle_dir = args.materialize_dir / "final-bundle"
@@ -819,7 +815,6 @@ def handle_publish_final(argv: list[str]) -> int:
 def handle_download_final(argv: list[str]) -> int:
     """Handle a pinned clean-room download of a final annotation bundle."""
     from daydream.training.adjudication.publish import download_final_annotation_bundle
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["download-final", *argv])
     try:
@@ -844,7 +839,6 @@ def handle_download_final(argv: list[str]) -> int:
 
 def handle_harvest_snapshot(argv: list[str]) -> int:
     """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
-    from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["harvest-snapshot", *argv])
     try:
@@ -866,31 +860,6 @@ def handle_harvest_snapshot(argv: list[str]) -> int:
     )
     return 0
 
-
-# Full modern ``label_observations`` column list. Legacy-schema roots are
-# introspected via ``PRAGMA table_info`` and missing version columns are
-# surfaced as the ``"legacy"`` sentinel (never gold-eligible, still imported
-# as evidence).
-_IMPORT_OBSERVATION_COLUMNS = (
-    "session_id",
-    "observed_at",
-    "labels",
-    "pr_state",
-    "labeler_version",
-    "evidence_sha",
-    "rubric_json",
-    "valid_at",
-    "reward_version",
-    "reward_json",
-    "composite_reward",
-    "reviewer_logins",
-    "has_posterior",
-    "source",
-    "labeler_policy_version",
-    "reply_classifier_version",
-    "reply_evidence_digest",
-    "legacy",
-)
 
 _IMPORT_VERSION_COLUMNS = (
     "labeler_policy_version",
@@ -936,7 +905,7 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
                 f"archive root {root} has no label_observations table in index.db"
             )
         columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(label_observations)")]
-        selected = [column for column in _IMPORT_OBSERVATION_COLUMNS if column in columns]
+        selected = [column for column in LABEL_OBSERVATION_NAMES if column in columns]
         rows = [
             dict(row)
             for row in conn.execute(
@@ -1483,7 +1452,6 @@ def handle_import_local_observations(argv: list[str]) -> int:
     ``--state-dir/import-report.json`` with the ledger in
     ``--state-dir/import-ledger.json``. Dry-run writes nothing (S2).
     """
-    from daydream.ui import create_console, print_error, print_success
 
     parser = _build_adjudicate_parser()
     args = parser.parse_args(["import-local-observations", *argv])

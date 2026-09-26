@@ -57,8 +57,6 @@ def _emit(exporter: SpanExporter) -> None:
 
 def _emit_spans() -> list[ReadableSpan]:
     """One attributable attempt span for direct exporter.export() calls."""
-    from opentelemetry.trace import SpanContext
-
     return [
         ReadableSpan(
             "attempt",
@@ -68,7 +66,7 @@ def _emit_spans() -> list[ReadableSpan]:
                 "daydream.billing.owner": "structural_attempt",
                 "gen_ai.usage.input_tokens": 100,
             },
-            context=SpanContext(
+            context=trace_api.SpanContext(
                 trace_id=0x11111111111111111111111111111111, span_id=0x2222222222222222, is_remote=False
             ),
         )

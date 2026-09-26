@@ -41,7 +41,7 @@ from daydream.retry_policy import (
     decode_retry_recovery_allowance,
     undeclared_retry_allowance_message,
 )
-from daydream.trajectory import now_iso
+from daydream.trajectory import now_iso, redact_structured_text
 
 logger = logging.getLogger(__name__)
 
@@ -319,19 +319,6 @@ _BIDI_FORMAT_CATEGORIES = frozenset({"Cf"})
 _LINE_SEPARATOR_CATEGORIES = frozenset({"Zl", "Zp"})
 _CONTROL_CATEGORIES = frozenset({"Cc"})
 
-# Characters that can smuggle a directional override through a name.
-_BIDI_CODEPOINTS = (
-    "\u202a",  # LRE
-    "\u202b",  # RLE
-    "\u202c",  # PDF
-    "\u202d",  # LRO
-    "\u202e",  # RLO
-    "\u2066",  # LRI
-    "\u2067",  # RLI
-    "\u2068",  # FSI
-    "\u2069",  # PDI
-)
-
 # POSIX + Windows absolute-path spellings, and the drive/UNC prefixes that
 # reveal a host filesystem location. Model namespace slashes (``org/model``,
 # ``provider//model``) never match because they are not absolute.
@@ -348,13 +335,10 @@ class EvidenceDiagnostic:
 
 def _has_unicode_controls(value: str) -> bool:
     """Reject C0/C1 controls and bidi/line-separator format characters."""
-    return bool(_BIDI_CODEPOINTS_RE.search(value)) or any(
+    return any(
         unicodedata.category(ch) in _CONTROL_CATEGORIES | _BIDI_FORMAT_CATEGORIES | _LINE_SEPARATOR_CATEGORIES
         for ch in value
     )
-
-
-_BIDI_CODEPOINTS_RE = re.compile("|".join(re.escape(cp) for cp in _BIDI_CODEPOINTS))
 
 
 def _changed_by_redaction(value: str) -> bool:
@@ -364,8 +348,6 @@ def _changed_by_redaction(value: str) -> bool:
     like a credential must never be emitted verbatim into telemetry; the
     admission boundary drops it with a fixed diagnostic instead.
     """
-    from daydream.trajectory import redact_structured_text
-
     return redact_structured_text(value) != value
 
 
@@ -683,7 +665,6 @@ class OspreyRequestConfig(EffectiveRequestConfig):
     immutable_surface: bool | None = None
     compress_context: bool | None = None
     ultracode: bool | None = None
-    max_turns: int | None = None
     turn_timeout: int | None = None
     stream_idle_timeout_secs: int | None = None
     streaming_timeout_secs: int | None = None
@@ -1388,8 +1369,6 @@ def create_backend(
     from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
     if name == "claude":
-        from daydream.backends.claude import ClaudeBackend
-
         return ClaudeBackend(
             model=model or DEFAULT_CLAUDE_MODEL,
             reasoning_effort=reasoning_effort,
@@ -1408,8 +1387,6 @@ def create_backend(
             execution_input=execution_input,
         )
     if name == "pi":
-        from daydream.backends.pi import PiBackend
-
         return PiBackend(
             model=model,
             cwd=cwd,
@@ -1419,8 +1396,6 @@ def create_backend(
     if name == "osprey":
         if execution_input is not None:
             raise ValueError("explicit BackendExecutionInput is not supported for osprey")
-        from daydream.backends.osprey import OspreyBackend
-
         return OspreyBackend(
             model=model,
             cwd=cwd,

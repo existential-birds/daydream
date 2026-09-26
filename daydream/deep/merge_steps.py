@@ -828,9 +828,7 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     # the exit message when the canonical file is absent (e.g. a --start-at fix
     # resume where the copy to the canonical path never ran). Non-fatal.
     if not merged_report.exists():
-        from daydream.deep.artifacts import merged_report_path as _deep_report_path
-
-        deep_copy = _deep_report_path(dd)
+        deep_copy = merged_report_path(dd)
         if deep_copy.exists():
             merged_report.write_text(deep_copy.read_text())
 

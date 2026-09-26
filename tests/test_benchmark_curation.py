@@ -18,10 +18,7 @@ import yaml
 
 import daydream.benchmark as bm
 from daydream import git_ops
-from daydream.benchmark import curation as cu
-from daydream.benchmark import github_import as gi
-from daydream.benchmark import snapshot as sn
-from daydream.benchmark import storage
+from daydream.benchmark import curation as cu, github_import as gi, snapshot as sn, storage
 from daydream.benchmark.curation import BAND_RANK, REASON_CODES, classify_evidence
 from daydream.benchmark.harbor import build
 from daydream.benchmark.schema import Curation, Finding, derive_finding_id

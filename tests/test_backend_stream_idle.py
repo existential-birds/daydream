@@ -44,13 +44,14 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     SIGKILL_RC,
     SIGTERM_RC,
     FakeCliProcess,
     install_fake_cli_process,
 )
+from tests.harness.trajectory import make_recorder
 
 # A complete, valid stream for each CLI.
 PI_LINES = [
@@ -351,12 +352,9 @@ async def test_stall_retry_is_limited_below_backend_retry_budget(
     assert backend.retry_attempts == 3, "test must exercise a backend that does retry"
 
     trajectory_path = tmp_path / ".daydream" / "trajectory.json"
-    recorder = TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="stall-test",
+    recorder = make_recorder(
+        tmp_path, path=trajectory_path,
+        agent_model_name="test-model", session_id="stall-test",
     )
 
     with pytest.raises(StreamStalledError):

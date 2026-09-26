@@ -46,12 +46,11 @@ from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnav
 from daydream.runner import RunConfig, run
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
-from tests.harness.diagram_repos import build_large_cross_module_repo
-from tests.harness.diagram_repos import load_diagram_artifact as _artifact
+from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit, git, init_repo
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import commit, git, git as _git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.trajectory import root_trajectory as _root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
@@ -202,14 +201,6 @@ async def _dispatch_run(config: Any) -> int:
     return await run(config)
 
 
-def _root_trajectory(target: Path) -> dict[str, Any]:
-    paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(paths) == 1
-    payload = json.loads(paths[0].read_text(encoding="utf-8"))
-    assert isinstance(payload, dict)
-    return payload
-
-
 def _diagram_lifecycle(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     trajectory = _root_trajectory(target)
     events = [
@@ -241,6 +232,9 @@ def _assert_diagram_dispatch_children(
     descriptors: list[str],
 ) -> list[dict[str, Any]]:
     """Prove one exact child document and invocation per dispatch result."""
+    assert dispatch["extra"]["planned_count"] == len(descriptors)
+    assert dispatch["extra"]["attempted_count"] == len(descriptors)
+    assert dispatch["extra"]["completed_count"] == len(descriptors)
     root = _root_trajectory(target)
     results = dispatch["observation"]["results"]
     assert [result["content"] for result in results] == [
@@ -569,9 +563,6 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
         "Dispatched to diagram-sequence",
         "Dispatched to diagram-sequence-repair",
     ]
-    assert dispatch["extra"]["planned_count"] == 2
-    assert dispatch["extra"]["attempted_count"] == 2
-    assert dispatch["extra"]["completed_count"] == 2
     _assert_diagram_dispatch_children(
         target,
         dispatch,
@@ -1134,9 +1125,6 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     assert end["reason_code"] == "some_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "partial"
     assert dispatch["extra"]["reason_code"] == "some_children_failed"
-    assert dispatch["extra"]["planned_count"] == 2
-    assert dispatch["extra"]["attempted_count"] == 2
-    assert dispatch["extra"]["completed_count"] == 2
     _assert_diagram_dispatch_children(
         target,
         dispatch,
@@ -1180,9 +1168,6 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
     assert end["reason_code"] == "all_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "failed"
     assert dispatch["extra"]["reason_code"] == "all_children_failed"
-    assert dispatch["extra"]["planned_count"] == 2
-    assert dispatch["extra"]["attempted_count"] == 2
-    assert dispatch["extra"]["completed_count"] == 2
     _assert_diagram_dispatch_children(
         target,
         dispatch,

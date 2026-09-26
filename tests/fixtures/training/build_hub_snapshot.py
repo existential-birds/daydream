@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from daydream.archive import license_enrich
 from daydream.archive.hydrate import RepoInfo
 from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.hydrate_rules import (
@@ -352,3 +353,16 @@ def build_publication_hubs() -> PublicationHubs:
         source_revision=SNAPSHOT_REVISION,
         policy_path=PINNED_POLICY_FIXTURE,
     )
+
+
+class ExternalLicenseResolver:
+    """Offline license resolver returning a deterministic MIT result."""
+
+    def resolve(self, repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+        commit = repo_commit or "a" * 40
+        return license_enrich.EnrichedEvidence("MIT", f"github:{repo_slug}@{commit}", commit)
+
+
+def install_external_license_resolver(monkeypatch: Any) -> None:
+    """Install the offline resolver over the production factory seam."""
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", ExternalLicenseResolver)

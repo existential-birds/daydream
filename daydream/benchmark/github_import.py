@@ -32,8 +32,7 @@ import yaml
 from pydantic import ValidationError
 
 from daydream import git_ops
-from daydream.benchmark import curation as cu
-from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark import curation as cu, schema, snapshot, storage
 from daydream.benchmark.schema import EXTRACTION_VERSION
 from daydream.pr_review import FINDING_MARKER_RE
 

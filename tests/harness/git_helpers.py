@@ -19,6 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from daydream.workspace import WorkContext
+
 SEED_ENV: dict[str, str] = {
     "GIT_AUTHOR_NAME": "Tester",
     "GIT_AUTHOR_EMAIL": "test@example.com",
@@ -50,6 +52,21 @@ def configure_identity(repo: Path) -> None:
 def commit(repo: Path, message: str, *, env: dict[str, str] | None = None) -> str:
     git(repo, "commit", "-m", message, env=env)
     return git(repo, "rev-parse", "HEAD")
+
+
+def work_context(repo: Path, *, run_id: str) -> WorkContext:
+    """A real-HEAD, non-ephemeral ``WorkContext`` for a source checkout."""
+    head = git(repo, "rev-parse", "HEAD")
+    return WorkContext(
+        repo=repo,
+        source=repo,
+        base_branch="main",
+        base_sha=head,
+        head_branch="main",
+        head_sha=head,
+        is_ephemeral=False,
+        run_id=run_id,
+    )
 
 
 def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:

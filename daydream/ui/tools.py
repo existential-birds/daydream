@@ -269,8 +269,10 @@ def format_callback_progress(
     if value:
         if name in ("Bash", "shell") and key == "command":
             value = _redacted_bash_command(name, value, max_chars=max_len)
+        else:
+            value = value[:max_len]
         line.append(" ")
-        line.append(value[:max_len], style=_primary_value_style(key))
+        line.append(value, style=_primary_value_style(key))
     return line
 
 
@@ -682,14 +684,10 @@ def _build_result_content(
     content: str,
     is_error: bool = False,
     max_lines: int = _RESULT_MAX_LINES,
-) -> tuple[Text | Syntax | Group, bool]:
+) -> Text | Syntax | Group:
     """Build styled result content with syntax highlighting.
 
     Used by LiveToolPanel._build_result_content().
-
-    Returns:
-        Tuple of (renderable content, was_truncated).
-
     """
     lines = content.split("\n")
     truncated = False
@@ -714,8 +712,8 @@ def _build_result_content(
                 f"\n... ({total_lines - max_lines} more lines)",
                 style=Style(color=NEON_COLORS["yellow"], italic=True),
             )
-            return Group(syntax, truncation_text), truncated
-        return syntax, truncated
+            return Group(syntax, truncation_text)
+        return syntax
 
     result_text = Text()
     for i, line in enumerate(lines):
@@ -730,4 +728,4 @@ def _build_result_content(
             style=Style(color=NEON_COLORS["yellow"], italic=True),
         )
 
-    return result_text, truncated
+    return result_text

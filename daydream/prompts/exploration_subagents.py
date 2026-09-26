@@ -19,7 +19,6 @@ share its diff framing.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +28,7 @@ from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
+from daydream.prompts.schema_block import schema_block
 from daydream.repository_paths import is_test_path
 
 if TYPE_CHECKING:
@@ -87,10 +87,6 @@ TEST_MAPPER_SCHEMA: dict[str, Any] = strict_object({
         }),
     },
 })
-
-
-def _schema_block(schema: dict[str, Any]) -> str:
-    return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
 
 
 def _files_block(affected_files: list[FileInfo]) -> str:
@@ -214,7 +210,7 @@ to read every file; use the minimum evidence needed for your specialist task.
 
 {_inspect_changes_block(diff_ref, inline_diff)}
 
-{_schema_block(schema)}
+{schema_block(schema)}
 """
 
 
@@ -293,7 +289,7 @@ The sample above is {coverage} — it is a starting point, NOT the repository's
 contents. Run `git ls-files` or Glob to see the full tree, and Read/Grep the
 files you need. Work file-by-file so your context stays small.
 
-{_schema_block(PATTERN_SCANNER_SCHEMA)}
+{schema_block(PATTERN_SCANNER_SCHEMA)}
 """
 
 

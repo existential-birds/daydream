@@ -34,7 +34,10 @@ from pathlib import Path
 from typing import Any
 
 from daydream.training.corpus_projection.identity import record_id
-from daydream.training.corpus_projection.projector import build_frozen_corpus
+from daydream.training.corpus_projection.projector import (
+    BuildFrozenCorpusConfig,
+    build_frozen_corpus,
+)
 from daydream.training.corpus_projection.splits import assign_split
 from tests.test_corpus_projection import (
     _policy_file,
@@ -92,9 +95,7 @@ def _plan_dispositions() -> dict[str, list[str]]:
     # First two holdout findings pin the two classes on the evaluated side;
     # everything else alternates, so the training side carries both too.
     for position, pair in enumerate(holdout):
-        label_of[(pair[0], pair[1])] = "accepted" if position == 0 else (
-            "rejected" if position == 1 else ("accepted" if position % 2 == 0 else "rejected")
-        )
+        label_of[(pair[0], pair[1])] = "accepted" if position % 2 == 0 else "rejected"
     for position, pair in enumerate(p for p in gold_pairs if p[2] != "holdout"):
         label_of[(pair[0], pair[1])] = "accepted" if position % 2 == 0 else "rejected"
 
@@ -131,21 +132,15 @@ def _add_batch(
     fps = _fingerprints(
         session_id, prefixed=_SESSION_ORDER.index(session_id) > 0
     )
+    head_sha = hashlib.sha256(f"{session_id}-head".encode()).hexdigest()[:40]
+    base_sha = hashlib.sha256(f"{session_id}-base".encode()).hexdigest()[:40]
     (batch_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "git": {
-                    "head_sha": hashlib.sha256(
-                        f"{session_id}-head".encode()
-                    ).hexdigest()[:40],
-                },
+                "git": {"head_sha": head_sha},
                 "code_context": {
-                    "base_sha": hashlib.sha256(
-                        f"{session_id}-base".encode()
-                    ).hexdigest()[:40],
-                    "head_sha": hashlib.sha256(
-                        f"{session_id}-head".encode()
-                    ).hexdigest()[:40],
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
                 },
             },
             sort_keys=True,
@@ -204,8 +199,6 @@ def build_projection_50(tmp_path: Path) -> Path:
             task-only records) — a broken fixture is a test-authoring bug,
             never a silently accepted projection.
     """
-    from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
-
     work = tmp_path / "projection-fixture"
     bundle_dir = _write_bundle(work)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
@@ -235,13 +228,7 @@ def build_projection_50(tmp_path: Path) -> Path:
     # payload files (mirroring the bundle's own manifest) and the bundle's
     # curation-manifest.json, both before nothing depends on ordering — the
     # loader's digest is computed over whatever the directory holds.
-    sums_lines = []
-    for path in sorted(proj_dir.rglob("*")):
-        if not path.is_file() or path.name in {"SHA256SUMS", "_SUCCESS"}:
-            continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        sums_lines.append(f"{digest}  {path.relative_to(proj_dir).as_posix()}\n")
-    (proj_dir / "SHA256SUMS").write_text("".join(sums_lines))
+    _write_sumsums(proj_dir)
     shutil.copyfile(bundle_dir / "curation-manifest.json", proj_dir / "curation-manifest.json")
     return proj_dir
 
@@ -251,7 +238,6 @@ def main() -> None:
     directory to ``--out`` (content-only — the loader's directory digest is
     computed over file bytes, never mtimes)."""
     import argparse
-    import shutil
     import tempfile
 
     parser = argparse.ArgumentParser(description=__doc__)

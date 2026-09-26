@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.archive import sanitize
-from daydream.archive import scan as scan_module
+from daydream.archive import sanitize, scan as scan_module
 from daydream.training.corpus_projection.bundle import BundleError, load_curated_bundle
 
 

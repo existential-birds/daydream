@@ -93,7 +93,6 @@ def test_model_suggested_observations_never_count_as_human_raters() -> None:
     # the numerator; the model-suggested-only one is still *unresolved*.
     assert report["outcome_coverage"] == {"adjudicated": 2, "total": 2}
     assert report["unresolved"] == 1
-    assert report["unresolved"] == 1
     assert report["inter_rater"] == {"items": 0, "agreeing": 0}  # no second human in the dispute
 
 

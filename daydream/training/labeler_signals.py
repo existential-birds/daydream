@@ -35,11 +35,10 @@ from daydream.pr_review import parse_finding_markers
 from daydream.training._immutable_json import thaw_json
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (
-    _QUALIFYING_ASSOCIATIONS,
-    _identity_gates_pass,
     _user_str,
     classify_reply,
     is_qualifying_author,
+    qualification_reason,
 )
 
 # Version-stable footer prefix: matching only this prefix (not the full
@@ -127,27 +126,6 @@ class CommentResolutionSignal:
 PerFindingDisposition = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing"]
 
 
-def _reply_reason(
-    reply: dict[str, Any],
-    pr_author_logins: frozenset[str],
-    review_author_logins: frozenset[str],
-) -> str:
-    """Why this reply's author qualified or was excluded (evidence ``reason``)."""
-    if reply.get("is_self_reply"):
-        return "excluded:self-reply"
-    if not _identity_gates_pass(reply):
-        return "excluded:bot"
-    assoc = reply.get("author_association")
-    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
-        return f"assoc:{assoc}"
-    login = _user_str(reply, "login")
-    if login in pr_author_logins:
-        return "pr_author"
-    if login in review_author_logins:
-        return "review_author"
-    return "excluded:non-qualifying"
-
-
 def _reply_evidence(
     replies: list[dict[str, Any]],
     pr_author_logins: frozenset[str],
@@ -165,7 +143,7 @@ def _reply_evidence(
                 "author_association": reply.get("author_association", ""),
                 "created_at": reply.get("created_at", ""),
                 "body_sha256": hashlib.sha256((reply.get("body") or "").encode("utf-8")).hexdigest(),
-                "reason": _reply_reason(reply, pr_author_logins, review_author_logins),
+                "reason": qualification_reason(reply, pr_author_logins, review_author_logins),
                 # Per-reply classifier axis (``classify_reply`` output): the field
                 # harvest's ``_decisive_evidence_valid_at`` filters on, so an earlier
                 # qualifying-but-ambiguous reply never moves ``valid_at`` ahead of
@@ -188,26 +166,24 @@ def _disposition_for_replies(
 
     Only replies whose author qualifies under the M6 gate
     (:func:`is_qualifying_author`) may cast a decisive vote — the same gate
-    the persisted evidence ``reason`` records (``_reply_reason``). A reply
+    whose persisted evidence ``reason`` is :func:`qualification_reason`. A reply
     whose own evidence says ``excluded:non-qualifying`` must not decide the
     finding, or harvest's ``_decisive_evidence_valid_at`` would drop its
     timestamp as excluded while the disposition kept its vote (M6).
     """
-    if not any(
-        isinstance(reply, dict)
-        and is_qualifying_author(reply, pr_author_logins, review_author_logins)
-        for reply in replies
-    ):
-        return "unanswered"
+    saw_qualifying = False
     votes: set[PerFindingDisposition] = set()
     for reply in replies:
         if not isinstance(reply, dict):
             continue
         if not is_qualifying_author(reply, pr_author_logins, review_author_logins):
             continue
+        saw_qualifying = True
         label = classify_reply(reply)
         if label in ("accepted", "rejected"):
             votes.add(cast(PerFindingDisposition, label))
+    if not saw_qualifying:
+        return "unanswered"
     if len(votes) == 1:
         return votes.pop()
     return "ambiguous"
@@ -356,6 +332,33 @@ def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool
         return False
     haystack_lines = set(post_content.splitlines())
     return all(line in haystack_lines for line in added_lines)
+
+
+def _count_present_hunks(
+    repo_clone: Path,
+    hunks: list[_Hunk],
+    ref: str,
+    file_at_fetcher: Callable[[Path, str, str], str],
+    *,
+    only_files: set[str] | None = None,
+) -> int:
+    """Count hunks whose added lines appear verbatim in each file at *ref*.
+
+    Each distinct file is fetched once. ``only_files`` restricts the walk to a
+    subset of paths (the fix-applied cascade's changed-file overlap).
+    """
+    present = 0
+    cache: dict[str, str] = {}
+    for hunk in hunks:
+        if only_files is not None and hunk.file not in only_files:
+            continue
+        content = cache.get(hunk.file)
+        if content is None:
+            content = file_at_fetcher(repo_clone, hunk.file, ref)
+            cache[hunk.file] = content
+        if _hunk_lines_present(hunk.added_lines, content):
+            present += 1
+    return present
 
 
 def _archive_is_recommended_patch_aware(archive_path: Path) -> bool:
@@ -537,18 +540,10 @@ def fix_applied_signal(
             window_commits=list(window),
         )
 
-    hunks_applied = 0
     post_sha = window[-1]
-    file_content_cache: dict[str, str] = {}
-    for hunk in hunks:
-        if hunk.file not in overlap:
-            continue
-        post_content = file_content_cache.get(hunk.file)
-        if post_content is None:
-            post_content = file_at_fetcher(repo_clone, hunk.file, post_sha)
-            file_content_cache[hunk.file] = post_content
-        if _hunk_lines_present(hunk.added_lines, post_content):
-            hunks_applied += 1
+    hunks_applied = _count_present_hunks(
+        repo_clone, hunks, post_sha, file_at_fetcher, only_files=overlap
+    )
 
     if hunks_total > 0 and (hunks_applied / hunks_total) >= 0.5:
         verdict: Literal["applied", "not_applied", "unknown"] = "applied"
@@ -847,14 +842,8 @@ def _default_branch_applied(
         return LocalCommitAppliedSignal(verdict="unknown")
 
     for ref in (f"origin/{base_branch}", base_branch):
-        file_content_cache: dict[str, str] = {}
-        for hunk in hunks:
-            content = file_content_cache.get(hunk.file)
-            if content is None:
-                content = file_at_fetcher(repo_clone, hunk.file, ref)
-                file_content_cache[hunk.file] = content
-            if _hunk_lines_present(hunk.added_lines, content):
-                return LocalCommitAppliedSignal(verdict="applied")
+        if _count_present_hunks(repo_clone, hunks, ref, file_at_fetcher):
+            return LocalCommitAppliedSignal(verdict="applied")
 
     return LocalCommitAppliedSignal(verdict="unknown")
 
@@ -920,14 +909,8 @@ def local_commit_applied_signal(
         return LocalCommitAppliedSignal(verdict="rejected")
 
     for commit in commits:
-        file_content_cache: dict[str, str] = {}
-        for hunk in hunks:
-            content = file_content_cache.get(hunk.file)
-            if content is None:
-                content = file_at_fetcher(repo_clone, hunk.file, commit)
-                file_content_cache[hunk.file] = content
-            if _hunk_lines_present(hunk.added_lines, content):
-                return LocalCommitAppliedSignal(verdict="applied")
+        if _count_present_hunks(repo_clone, hunks, commit, file_at_fetcher):
+            return LocalCommitAppliedSignal(verdict="applied")
 
     return LocalCommitAppliedSignal(verdict="rejected")
 

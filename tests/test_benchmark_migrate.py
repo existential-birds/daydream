@@ -13,9 +13,7 @@ from daydream import cli as top_cli
 from daydream.benchmark import migrate, schema, storage
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.schema import _schema_ready
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
-from tests.harness.git_helpers import write_and_stage
+from tests.harness.git_helpers import commit as _commit, git as _git, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
@@ -199,7 +197,6 @@ def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path: Path) -> Non
     report = migrate.migrate_workspace(ws)
     assert [c.case_id for c in report.cases] == [case_id]
     assert report.cases[0].finding_ids_recomputed == 1
-    assert report.cases[0].changed is True
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["schema_version"] == 2
     f = raw["curation"]["findings"][0]
@@ -222,7 +219,6 @@ def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Pat
     report = migrate.migrate_workspace(ws)
     assert report.errors == []
     assert [c.case_id for c in report.cases] == [case_id]
-    assert report.cases[0].changed is True
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["schema_version"] == 2
     assert raw["snapshot"]["requested_base_sha"] == requested_tip
@@ -248,7 +244,6 @@ def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Pat
     report = migrate.migrate_workspace(ws)
     assert report.errors == []
     assert report.cases[0].finding_ids_recomputed == 0  # ids untouched
-    assert report.cases[0].changed is True
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["schema_version"] == 2                  # no bump
     assert raw["snapshot"]["requested_base_sha"] == requested_tip
@@ -403,7 +398,7 @@ def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path: Path) -> Non
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1
     migrate.migrate_workspace(ws)
     second = migrate.migrate_workspace(ws)
-    assert all(c.changed is False for c in second.cases)   # no-op second run
+    assert second.cases == []   # no-op second run
 
 
 def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None:

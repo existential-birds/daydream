@@ -52,6 +52,7 @@ from daydream.backends._transport import (
     teardown,
 )
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
+from daydream.trajectory import redact_structured_text
 
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _DIAGNOSTIC_LABEL_MAX_CHARS = 64
@@ -331,19 +332,26 @@ def display_shell_command(command: str) -> str:
     return _CD_PREFIX_RE.sub("", decoded, count=1)
 
 
+def supervisor_shell_command(command: str) -> str:
+    """Decode the Codex wrapper and strip a leading ``cd <dir> &&`` for extension tool supervisors.
+
+    This is strip-only: never redact or cap the value. Supervisors match start-anchored
+    deny patterns (such as ``^make``) against the stripped command, and redaction
+    could change the command prefix those patterns inspect. Outside the display
+    pipeline, this is the only consumer of the strip step.
+    """
+    return display_shell_command(command)
+
+
 def _bounded_diagnostic_label(value: Any) -> str:
     """Return one redacted, bounded scalar label for diagnostic aggregation."""
     if not isinstance(value, (str, int, float, bool)) and value is not None:
         return "<non-scalar>"
-    from daydream.trajectory import redact_structured_text
-
     return redact_structured_text(str(value))[:_DIAGNOSTIC_LABEL_MAX_CHARS]
 
 
 def _bounded_process_excerpt(value: str) -> str:
     """Redact a complete non-JSON line before applying the exception cap."""
-    from daydream.trajectory import redact_structured_text
-
     return redact_structured_text(value)[:_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE]
 
 
@@ -525,7 +533,6 @@ def _file_change_events(
             start_input["file"] = "unknown"
             start_input["action"] = "modified"
         is_error = status != "completed"
-        status = status or None
     elif "file_path" in item:
         # Legacy scalar shape (older CLI): keep as-is.
         item_id = item.get("id", str(uuid.uuid4()))

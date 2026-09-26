@@ -29,10 +29,11 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.index import append_label_observation
-from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.json_utils import canonical_json as _canonical
+from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.adjudication.materialize import (
+    _ANNOTATIONS_FILENAME,
     _CONFLICTED_DISPOSITION,
+    _MANIFEST_FILENAME,
     _SESSIONS_OUT_FILENAME,
     index_sessions,
 )
@@ -50,9 +51,6 @@ from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.labeler_versions import REPLY_CLASSIFIER_VERSION
 
 __all__ = ["AnnotationDriftError", "run_canonical_harvest"]
-
-_ANNOTATIONS_FILENAME = "annotations.jsonl"
-_MANIFEST_FILENAME = "preview-manifest.json"
 
 
 def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:
@@ -224,10 +222,9 @@ def run_canonical_harvest(
         )
 
     # Merge human observations under three-tier precedence (M4/M5).
-    known_record_ids = {str(record["record_id"]) for record in materialized}
     observations = load_observations(observations_path) if observations_path is not None else []
     grouped = group_observations_by_record(
-        observations, known_record_ids, "run_canonical_harvest"
+        observations, materialized_ids, "run_canonical_harvest"
     )
 
     human_adjudicated = 0

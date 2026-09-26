@@ -587,6 +587,14 @@ async def _complete_json_with_http(
     raise VerifierError("Judge request failed after retries")
 
 
+async def _complete_json_via(http: _AsyncHttpClient | None, **kwargs: Any) -> dict[str, Any]:
+    """Run one completion over an injected HTTP client, else a short-lived one."""
+    if http is not None:
+        return await _complete_json_with_http(http, **kwargs)
+    async with httpx.AsyncClient() as created:
+        return await _complete_json_with_http(created, **kwargs)
+
+
 def _anthropic_text(body: dict[str, Any]) -> str:
     """Extract the first text block from an Anthropic Messages response body."""
     if not isinstance(body, dict):
@@ -644,24 +652,14 @@ class AnthropicJudgeClient:
             "anthropic-version": _ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
-        if self.http is not None:
-            return await _complete_json_with_http(
-                self.http,
-                url=_ANTHROPIC_MESSAGES_URL,
-                payload=payload,
-                headers=headers,
-                content=_anthropic_text,
-                allowlist=effective,
-            )
-        async with httpx.AsyncClient() as http:
-            return await _complete_json_with_http(
-                http,
-                url=_ANTHROPIC_MESSAGES_URL,
-                payload=payload,
-                headers=headers,
-                content=_anthropic_text,
-                allowlist=effective,
-            )
+        return await _complete_json_via(
+            self.http,
+            url=_ANTHROPIC_MESSAGES_URL,
+            payload=payload,
+            headers=headers,
+            content=_anthropic_text,
+            allowlist=effective,
+        )
 
 
 class ClaudeCliJudgeClient:
@@ -902,24 +900,14 @@ class OpenAIJudgeClient:
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
         }
-        if self.http is not None:
-            return await _complete_json_with_http(
-                self.http,
-                url=url,
-                payload=payload,
-                headers=headers,
-                content=_openai_content,
-                allowlist=effective,
-            )
-        async with httpx.AsyncClient() as http:
-            return await _complete_json_with_http(
-                http,
-                url=url,
-                payload=payload,
-                headers=headers,
-                content=_openai_content,
-                allowlist=effective,
-            )
+        return await _complete_json_via(
+            self.http,
+            url=url,
+            payload=payload,
+            headers=headers,
+            content=_openai_content,
+            allowlist=effective,
+        )
 
 
 _JUDGE_CONCURRENCY = 10
