@@ -104,6 +104,7 @@ daydream --shallow /path/to/project          # review one stack in one pass
 daydream --yes /path/to/project              # apply fixes without prompting
 daydream --diagram-only flowchart /path/to/project       # post one grounded flowchart comment, then exit
 daydream --review-profile review.toml /path/to/project   # explicit review profile
+daydream --latency-profile fast /path/to/project          # route wonder/arbiter cheap
 daydream -s python /path/to/project                      # force a specific stack
 ```
 
@@ -432,6 +433,40 @@ Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `p
 The resolution order, highest first, is:
 
 **`--reasoning-effort` > config file (phase, then global) > built-in per-phase default.**
+
+### Latency profiles
+
+Deep runs choose wonder and arbiter spend through a named latency profile. Set it
+per run with `--latency-profile <name>`, or for a repository:
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+latency_profile = "fast"
+
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+latency_profile = "fast"
+```
+
+| Name | Wonder | Arbiter | Sharding |
+|------|--------|---------|----------|
+| `fast` | skip | `medium` | on |
+| `balanced` (default) | `medium` | `high` | on |
+| `forensic` | `high` | `xhigh` | off — today's behaviour |
+
+A profile sets an effort *floor*, never a ceiling: a security-, concurrency-,
+persistence-, interface-, or migration-shaped diff raises the route, so a
+sensitive diff is never routed cheap. An unrecognised name **fails safe upward**
+to `forensic` and the run records the fallback — it never routes cheaper than the
+default. A deliberate `--reasoning-effort` pin still outranks the profile.
+
+The route selects effort only on Codex, the one backend whose deep-review phases
+use the built-in effort table; on Claude and Pi it still selects wonder and
+arbiter scheduling while their effort stays the backend default. Each run writes
+its decision to `.daydream/deep/latency-routing.json`, and the archived
+`evaluation.json` carries the selected profile. See
+[review runtime](docs/review-runtime.md#latency-profiles-and-the-per-profile-report)
+for the per-profile report command.
 
 ### Supervisor settings
 

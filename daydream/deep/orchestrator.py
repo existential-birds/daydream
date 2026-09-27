@@ -639,7 +639,7 @@ def _prepare_review_stacks(
     # collapse passes (which must stay byte-identical) and BEFORE
     # ``ctx.data["stacks"]`` is published below. Skipped whenever
     # ``single_stack_mode`` is True (tiny-diff or shallow collapse already
-    # folded everything into one stack) and off by default (forensic mode
+    # folded everything into one stack) and off by default (sharding-off
     # passes the stack list through untouched). ``build_import_graph`` is
     # fail-open (never raises; returns ``{}`` on any failure); byte sizing
     # uses the FULL on-disk ``diff``, not the bounded in-memory value.

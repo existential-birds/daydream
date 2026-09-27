@@ -96,6 +96,8 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `deep/diff.py` | Shared changed-file parsing and full-diff reads, also consumed by scope enforcement and Improve |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
 | `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
+| `deep/latency.py` | Pure latency-profile vocabulary, risk summary, monotone `route_for`, and the `wonder_decision`/`arbiter_plan` predicates |
+| `deep/routing_record.py` | The single writer/reader of `.daydream/deep/latency-routing.json`; write-merged top-level keys, evidence only |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
 | `deep/diagram_{types,trigger,schema,grounding,render}.py` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
 | `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility |
@@ -114,13 +116,18 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `supervision.py` | Runtime findings + tool supervision (extension veto seam) |
 | `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
-| `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis |
+| `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/latency_report.py` renders the per-profile report |
 | `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `collect_annotation` shares acquisition with read-only semantic preview, and `build_annotation(row, evidence)` reduces completed evidence without I/O |
 | `training/calibration.py` | Fail-closed projection validation, deterministic calibration statistics, `calibration-artifact` emission (`corpus calibrate-reward`) |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
 Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.py`, `github_app.py`,
 `bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
+
+**Latency-profile naming.** The concept is `latency_profile` (config key `latency_profile`, CLI
+`--latency-profile`, config-file scalar, `RunConfig.latency_profile`). `forensic` names one profile and
+means exactly "today's wonder+arbiter behaviour" (wonder runs at `high`, arbiter at `xhigh`, unsharded);
+it is not a synonym for "sharding disabled" or "read-only". Sharding-off is called unsharded/sharding-off.
 
 ### Backend protocol
 
@@ -180,7 +187,9 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 
 `config.py` holds `DEFAULT_{CLAUDE,CODEX,PI,EXPLORATION}_MODEL`, `PHASE_DEFAULT_MODELS[backend][phase]`,
 `PHASE_DEFAULT_EFFORT` (deep/review half Codex-only; improve half all three backends), budget constants, and improve `EFFORT_TIERS`. Pi
-resolves its own configured default before falling back to `DEFAULT_PI_MODEL`.
+resolves its own configured default before falling back to `DEFAULT_PI_MODEL`. Effort is not a pure table
+lookup: the run's latency route sits below the explicit user knobs and above `PHASE_DEFAULT_EFFORT` for
+`wonder`/`arbiter`, and each run records the decision in `.daydream/deep/latency-routing.json`.
 
 **Per-phase overrides are config-file-only — there are no per-phase CLI flags.** Set
 `[tool.daydream.phases.<phase>]` in `pyproject.toml` or the top-level equivalent in `.daydream.toml`.

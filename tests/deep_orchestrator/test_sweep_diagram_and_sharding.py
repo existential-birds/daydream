@@ -477,10 +477,10 @@ def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> No
 
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
-    """Sharding is forensic-off by default: DEFAULT_DEEP_SHARD_ENABLED = False."""
+    """Sharding is off by default: DEFAULT_DEEP_SHARD_ENABLED = False."""
 
     assert DEFAULT_DEEP_SHARD_ENABLED is False
-    # Default off (forensic mode): no RunConfig attr, no file config.
+    # Default off (sharding-off): no RunConfig attr, no file config.
     cfg = RunConfig(target=str(tmp_path))
     assert _deep_shard_enabled(cfg) is False
     # Large diffs opt into the existing sharder unless a caller explicitly
@@ -622,19 +622,19 @@ async def test_deep_large_diff_produces_review_and_record_shards(
     assert records
 
 
-async def test_deep_forensic_mode_keeps_single_agent_per_stack(
+async def test_deep_sharding_off_keeps_single_agent_per_stack(
     shard_many_python_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     install_backend: Callable[[object], object],
 ) -> None:
-    """Issue #731: forensic (default off) keeps exactly one agent per stack."""
+    """Issue #731: sharding-off (the default) keeps exactly one agent per stack."""
 
     install_stub_backend(monkeypatch, shard_many_python_target)
     rc = await run(
         RunConfig(
             target=str(shard_many_python_target),
             cleanup=False,
-            deep_shard_enabled=False,  # default / forensic
+            deep_shard_enabled=False,  # default / sharding off
             deep_shard_max_files=1,
         )
     )  # bound ignored when off

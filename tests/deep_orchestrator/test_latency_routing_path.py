@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 from daydream.deep.routing_record import read_routing_record, write_routing_record
+from daydream.eval.analyzer import analyze_routing
 from daydream.review_profile import ResolvedProfile
 from daydream.runner import run
 from tests.deep_orchestrator.support import _merged_items
@@ -73,6 +74,15 @@ def test_routing_record_merges_instead_of_clobbering(tmp_path: Path) -> None:
 
 def test_absent_record_reads_as_an_empty_mapping(tmp_path: Path) -> None:
     assert read_routing_record(tmp_path) == {}
+
+
+def test_evaluated_run_carries_its_latency_profile(tmp_path: Path) -> None:
+    """SH1: an archived run's profile is readable without opening its directory."""
+    dd = tmp_path / ".daydream"
+    (dd / "deep").mkdir(parents=True)
+    write_routing_record(dd / "deep", {"profile": {"selected": "forensic"}, "risk": {"floors": []}})
+    assert analyze_routing(dd)["profile"] == "forensic"
+    assert analyze_routing(tmp_path / "nothing-here") == {"profile": None, "decisions": {}}
 
 
 async def test_skipped_wonder_records_profile_signals_and_reason(
