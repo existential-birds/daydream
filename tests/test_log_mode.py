@@ -233,6 +233,38 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     assert "[REDACTED" in out
 
 
+@pytest.mark.parametrize("name", ["Bash", "shell"])
+def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
+    tiny_diff_target: Path,
+    make_config: MakeConfig,
+    install_backend: InstallBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """The runner's actual log emission applies the command display policy."""
+    cd_prefix = "cd /srv/app && "
+    before_token = "echo " + "a" * (185 - len(cd_prefix) - 12) + " --key " if name == "Bash" else (
+        "echo " + "a" * (185 - 12) + " --key "
+    )
+    command = (cd_prefix if name == "Bash" else "") + before_token + REDACTION_SENTINEL + " tail"
+    if name == "shell":
+        command = cd_prefix + command
+    event = ToolStartEvent(id="boundary-command", name=name, input={"command": command})
+    install_backend(
+        ScriptedBackend(events=[event, ResultEvent(structured_output=None, continuation=None)], retryable=False)
+    )
+    config = make_config(tiny_diff_target, non_interactive=True, log_mode=True, quiet=True, output_mode="review")
+
+    output = _capture_stdout_and_run(config, monkeypatch)
+    tool_line = next(line for line in output.splitlines() if line.startswith(f"[tool:{name}] "))
+    summary = tool_line.removeprefix(f"[tool:{name}] ")
+    assert len(summary) == 200
+    assert "[REDACTED" in summary
+    assert REDACTION_SENTINEL[:8] not in output
+    assert (cd_prefix in summary) is (name == "Bash")
+    assert event.input == {"command": command}
+
+
 def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
     """`--log` summary and callback line key Bash from the shared _PRIMARY_TOOL_ARG table."""
 

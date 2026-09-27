@@ -566,11 +566,11 @@ _JWT_TOKEN = (
 )
 
 
-def _straddling_command(token: str) -> str:
+def _straddling_command(token: str, *, prefix: str = "") -> str:
     """A >cap command whose credential token starts at _BOUNDARY_PAD."""
-    prefix = "echo " + "a" * (_BOUNDARY_PAD - 12) + " --key "
-    assert len(prefix) == _BOUNDARY_PAD
-    return prefix + token + " tail"
+    before_token = prefix + "echo " + "a" * (_BOUNDARY_PAD - len(prefix) - 12) + " --key "
+    assert len(before_token) == _BOUNDARY_PAD
+    return before_token + token + " tail"
 
 
 @pytest.mark.parametrize("token", [_AKIA_TOKEN, _JWT_TOKEN])
@@ -598,3 +598,56 @@ def test_redacted_bash_command_strip_is_codex_only_and_precedes_redaction() -> N
     assert "cd /srv/app" in bash_displayed  # operator-authored prefix kept
     assert _AKIA_TOKEN[:8] not in shell_displayed
     assert _AKIA_TOKEN[:8] not in bash_displayed
+
+
+@pytest.mark.parametrize("token", [_AKIA_TOKEN, _JWT_TOKEN], ids=["akia", "jwt"])
+@pytest.mark.parametrize("name", ["Bash", "shell"])
+def test_command_display_surfaces_redact_straddling_credential(token: str, name: str) -> None:
+    """The real summary, callback, and panel renderers share order and caps."""
+    cd_prefix = "cd /srv/app && "
+    command = (
+        _straddling_command(token, prefix=cd_prefix)
+        if name == "Bash"
+        else cd_prefix + _straddling_command(token)
+    )
+    args: dict[str, object] = {"command": command}
+    summary = _summarize_input(args, name)
+    callback = format_callback_progress(name, args, None).plain
+    header = _build_tool_header(name, args).plain
+
+    assert len(summary) == _BASH_COMMAND_MAX_CHARS
+    assert "[REDACTED" in summary
+    assert callback.endswith(summary)
+    assert header.endswith(summary + "...")
+    for displayed in (summary, callback, header):
+        assert token[:8] not in displayed
+        assert token not in displayed
+        assert (cd_prefix in displayed) is (name == "Bash")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["panel", "callback"])
+async def test_run_agent_command_display_preserves_replayable_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Rendering a Codex tool event never rewrites its stored command."""
+    command = "cd /srv/app && " + _straddling_command(_AKIA_TOKEN)
+    tool_event = ToolStartEvent(id="command-1", name="shell", input={"command": command})
+    backend = ScriptedBackend(
+        events=[tool_event, ResultEvent(structured_output=None, continuation=None)],
+        model="mock-model",
+    )
+    if mode == "panel":
+        rec = Console(file=StringIO(), record=True, width=500)
+        monkeypatch.setattr(agent_mod, "console", rec)
+        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)
+        displayed = rec.export_text()
+    else:
+        lines: list[Text] = []
+        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, progress_callback=lines.append)
+        displayed = "\n".join(line.plain for line in lines)
+
+    assert _AKIA_TOKEN[:8] not in displayed
+    assert "[REDACTED" in displayed
+    assert "cd /srv/app" not in displayed
+    assert tool_event.input == {"command": command}
