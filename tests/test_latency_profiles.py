@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from daydream.deep.arbiter import partition_arbiter_targets
 from daydream.deep.latency import (
     ARBITER_EFFORTS,
     DEFAULT_LATENCY_PROFILE,
@@ -22,6 +23,38 @@ from daydream.deep.latency import (
     summarize_risk,
     wonder_decision,
 )
+
+
+def _rec(uid: str, file: str, line: int, severity: str = "medium") -> dict:
+    return {"uid": uid, "file": file, "line": line, "severity": severity}
+
+
+def test_groups_are_order_independent_and_identity_is_stable() -> None:
+    records = [
+        _rec("py:1", "api.py", 10),
+        _rec("react:1", "App.tsx", 4),
+        _rec("py:2", "api.py", 10),
+        _rec("py:3", "api.py", 12),
+    ]
+    edges = {"api.py": {"App.tsx"}}          # co-located via one import edge
+    first = partition_arbiter_targets(records, [0, 1, 2, 3], edges=edges, max_targets=2)
+    shuffled = partition_arbiter_targets(records, [3, 1, 2, 0], edges=edges, max_targets=2)
+    assert [g.target_uids for g in first] == [g.target_uids for g in shuffled]
+    assert [g.group_id for g in first] == ["arbiter-group-0", "arbiter-group-1"]
+    assert sum(len(g.target_uids) for g in first) == 4
+
+
+def test_a_location_is_never_split_across_groups() -> None:
+    records = [_rec(f"py:{i}", "api.py", 10 if i < 3 else 20) for i in range(1, 5)]
+    groups = partition_arbiter_targets(records, [0, 1, 2, 3], edges={}, max_targets=2)
+    same_location = [g for g in groups if "py:1" in g.target_uids][0]
+    assert {"py:1", "py:2", "py:3"} <= set(same_location.target_uids)
+
+
+def test_unrelated_files_land_in_separate_groups() -> None:
+    records = [_rec("py:1", "api.py", 1), _rec("go:1", "main.go", 2), _rec("rs:1", "lib.rs", 3)]
+    groups = partition_arbiter_targets(records, [0, 1, 2], edges={}, max_targets=3)
+    assert [g.target_uids for g in groups] == [("go:1",), ("py:1",), ("rs:1",)]
 
 
 def _signals(diff: str, *, files: int = 4, stacks: int = 2) -> DiffSignals:

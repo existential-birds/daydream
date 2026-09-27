@@ -16,19 +16,29 @@ A record is selected when EITHER:
 With the default knob, low/medium uncontested findings never reach the arbiter —
 that is the whole point of the cost split. Lowering ``min_severity`` (the
 profile's ``Arbitration.min_severity``) widens the severity branch; the contested
-branch is unaffected.
+branch is unaffected. The contested test itself has one owner,
+:func:`contested_indices`, which :func:`select_arbiter_targets` calls.
 
 Residual risk: a genuinely-high issue that a cheaper per-stack model under-ranked
 as an isolated, uncontested medium/low at a unique location is also never
 arbitrated — an accepted cost trade-off of the high-OR-contested selection scope.
+
+The same module owns the *review-risk* grouping used once targets are selected:
+:func:`partition_arbiter_targets` packs the already-selected target ordinals into
+small co-located :class:`ArbiterGroup` chunks. That grouping is pure,
+deterministic, and stable for a diff (group identity feeds the sharded arbiter's
+resume). It is deliberately not `select_tier`/exploration tiering and not stack
+sharding — those remain their own owners.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
+from daydream.deep.dependency import co_locate_groups
 from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
 from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
 
@@ -94,6 +104,83 @@ def _at_or_above(min_severity: str) -> frozenset[str]:
         )
     rank = SEVERITY_RANK[min_severity]
     return frozenset(level for level, level_rank in SEVERITY_RANK.items() if level_rank <= rank)
+
+
+def contested_indices(
+    records: list[dict[str, Any]],
+    sources: list[str],
+    *,
+    contested_only: Iterable[int] = (),
+) -> frozenset[int]:
+    """Return the indices whose ``(file, line)`` location is contested.
+
+    One definition of "contested": the same location surfaced by two or more
+    distinct stacks that disagree on severity. Grouping widens exactly as
+    :func:`select_arbiter_targets` documents — a ``contested_only`` record
+    anchored at the reserved ``line: 0`` whole-file location co-locates with
+    every line in its file, scoped to records in ``contested_only``.
+
+    Args:
+        records: Parsed per-stack records.
+        sources: Per-record originating stack name, positionally aligned with
+            ``records``.
+        contested_only: Indices allowed to use the ``line: 0`` whole-file
+            widening. Every record remains eligible for an ordinary
+            same-location contest.
+
+    Returns:
+        A ``frozenset`` of indices at a contested location. Pure and
+        order-independent: the result depends only on record locations,
+        severities, and owning stacks.
+    """
+    severity_exempt = set(contested_only)
+    contested: set[int] = set()
+    by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
+    # ``line: 0`` is the reserved whole-file anchor, not a line number, so a
+    # ``contested_only`` record carrying it is about the whole file and belongs
+    # to every group in that file (issue #1103). The widening is scoped to
+    # ``contested_only`` records: an ordinary line-0 record from a non-exempt
+    # stack is not the structural whole-file case this exists for, so it stays a
+    # literal ``(file, 0)`` location instead of sweeping every other line in the
+    # file into its contest check. Collect the eligible whole-file records
+    # separately, then fold each file's whole-file records into that file's line
+    # groups.
+    whole_file: dict[Any, list[int]] = defaultdict(list)
+    for i, record in enumerate(records):
+        if record.get("line") == 0 and i in severity_exempt:
+            whole_file[record.get("file")].append(i)
+        else:
+            by_location[(record.get("file"), record.get("line"))].append(i)
+    # Widening is further scoped to files with exactly one distinct non-exempt
+    # line: with location alone (no description text) there is no way to tell
+    # which of two-or-more reported lines, if any, restates the whole-file
+    # finding, so folding the whole-file record into every line group would
+    # sweep findings that merely share a file -- not the defect -- into
+    # arbitration and out of the precision-mode suppression pool.
+    lines_per_file: dict[Any, set[Any]] = defaultdict(set)
+    for file, line in by_location:
+        lines_per_file[file].add(line)
+    for (file, _line), indices in by_location.items():
+        if len(lines_per_file[file]) == 1:
+            indices.extend(whole_file.get(file, ()))
+    # Every file with at least one whole-file record also gets its own group at
+    # the reserved (file, 0) key, so two whole-file findings from different
+    # stacks can contest each other -- this runs whether or not that file also
+    # has line-anchored records (already widened above). ``setdefault`` guards
+    # the one collision that can occur here: a non-exempt record that itself
+    # reports line 0 already owns the ``(file, 0)`` key (already widened above),
+    # so this must not overwrite it and drop that record.
+    for file, indices in whole_file.items():
+        by_location.setdefault((file, 0), list(indices))
+
+    for indices in by_location.values():
+        # One stack must count once however its records were tagged, hence
+        # `_stack_name` rather than the raw `sources[i]` string.
+        stacks = {_stack_name(records[i], sources[i]) for i in indices}
+        severities = {_severity(records[i]) for i in indices if _severity(records[i])}
+        if len(stacks) >= 2 and len(severities) >= 2:
+            contested.update(indices)
+    return frozenset(contested)
 
 
 def select_arbiter_targets(
@@ -169,59 +256,132 @@ def select_arbiter_targets(
         if i not in severity_exempt and _severity(record) in eligible:
             selected.add(i)
 
-    # Contested: same location reported by >=2 distinct stacks that disagree
-    # on severity. Group by location, then test cross-stack severity divergence.
+    # Contested: the single definition lives in :func:`contested_indices`.
     if contested_location:
-        by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
-        # ``line: 0`` is the reserved whole-file anchor, not a line number, so a
-        # ``contested_only`` record carrying it is about the whole file and
-        # belongs to every group in that file (issue #1103). The widening is
-        # scoped to ``contested_only`` (``severity_exempt``) records: an
-        # ordinary line-0 record from a non-exempt stack is not the structural
-        # whole-file case this exists for, so it stays a literal ``(file, 0)``
-        # location instead of sweeping every other line in the file into its
-        # contest check. Collect the eligible whole-file records separately,
-        # then fold each file's whole-file records into that file's line
-        # groups.
-        whole_file: dict[Any, list[int]] = defaultdict(list)
-        for i, record in enumerate(records):
-            if record.get("line") == 0 and i in severity_exempt:
-                whole_file[record.get("file")].append(i)
-            else:
-                by_location[(record.get("file"), record.get("line"))].append(i)
-        # Widening is further scoped to files with exactly one distinct
-        # non-exempt line: with location alone (no description text) there is
-        # no way to tell which of two-or-more reported lines, if any, restates
-        # the whole-file finding, so folding the whole-file record into every
-        # line group would sweep findings that merely share a file -- not the
-        # defect -- into arbitration and out of the precision-mode suppression
-        # pool.
-        lines_per_file: dict[Any, set[Any]] = defaultdict(set)
-        for file, line in by_location:
-            lines_per_file[file].add(line)
-        for (file, _line), indices in by_location.items():
-            if len(lines_per_file[file]) == 1:
-                indices.extend(whole_file.get(file, ()))
-        # Every file with at least one whole-file record also gets its own
-        # group at the reserved (file, 0) key, so two whole-file findings from
-        # different stacks can contest each other -- this runs whether or not
-        # that file also has line-anchored records (already widened above).
-        # ``setdefault`` guards the one collision that can occur here: a
-        # non-exempt record that itself reports line 0 already owns the
-        # ``(file, 0)`` key (already widened above), so this must not
-        # overwrite it and drop that record.
-        for file, indices in whole_file.items():
-            by_location.setdefault((file, 0), list(indices))
-
-        for indices in by_location.values():
-            # One stack must count once however its records were tagged, hence
-            # `_stack_name` rather than the raw `sources[i]` string.
-            stacks = {_stack_name(records[i], sources[i]) for i in indices}
-            severities = {_severity(records[i]) for i in indices if _severity(records[i])}
-            if len(stacks) >= 2 and len(severities) >= 2:
-                selected.update(indices)
+        selected.update(contested_indices(records, sources, contested_only=severity_exempt))
 
     return sorted(selected)
+
+
+@dataclass(frozen=True)
+class ArbiterGroup:
+    """A stable, location-atomic chunk of selected arbiter target ordinals.
+
+    ``group_id`` is positional (``arbiter-group-<i>``) over the deterministic
+    group ordering, so it is stable for the same diff and safe to use as a
+    resume key. ``target_uids`` mirrors ``target_indices`` and is persisted so a
+    resume can refuse a group whose membership no longer matches.
+    """
+
+    group_id: str
+    target_indices: tuple[int, ...]
+    target_uids: tuple[str, ...]
+
+
+def _line_value(record: dict[str, Any]) -> int:
+    """Return a record's line as a sortable int (missing/non-int -> -1)."""
+    line = record.get("line")
+    return line if isinstance(line, int) else -1
+
+
+def _chunk_location_atomic(
+    members: list[int], records: list[dict[str, Any]], max_targets: int
+) -> list[list[int]]:
+    """Chunk sorted ``members`` into deterministic, location-atomic runs.
+
+    A chunk boundary may never land between two targets sharing the same
+    ``(file, line)``: the arbiter dedupes same-location twins inside one call, so
+    splitting a location would change what it can dedupe (A8). The bound is a
+    soft one -- a run whose members share one location is kept whole even when
+    it exceeds ``max_targets`` -- and a chunk is only closed at a location
+    boundary once it already holds more than ``max_targets`` targets.
+    """
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    for index in members:
+        location = (records[index].get("file"), _line_value(records[index]))
+        if current:
+            previous = (records[current[-1]].get("file"), _line_value(records[current[-1]]))
+            if len(current) > max_targets and location != previous:
+                chunks.append(current)
+                current = []
+        current.append(index)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _group_severity_rank(group: ArbiterGroup, records: list[dict[str, Any]]) -> int:
+    """Most-severe rank in *group* (unknown/absent severity ranks least severe)."""
+    return min(
+        SEVERITY_RANK.get(_severity(records[i]), len(SEVERITY_RANK))
+        for i in group.target_indices
+    )
+
+
+def partition_arbiter_targets(
+    records: list[dict[str, Any]],
+    target_indices: Iterable[int],
+    *,
+    edges: dict[str, set[str]],
+    max_targets: int,
+) -> list[ArbiterGroup]:
+    """Partition selected arbiter targets into deterministic co-located groups.
+
+    This is the *review-risk* grouping of already-selected arbiter targets, not
+    exploration ``select_tier`` and not stack sharding: it changes nothing about
+    which records are selected, only how their adjudication is chunked.
+
+    The partition is pure and order-independent: the caller's
+    ``target_indices`` order never affects the result.
+
+    * File components come from
+      :func:`daydream.deep.dependency.co_locate_groups` over the targets'
+      post-state files and the run's import ``edges``.
+    * Targets inside a component are sorted by ``(file, line, uid)``.
+    * Consecutive chunks are closed at location boundaries once they hold more
+      than ``max_targets`` targets. A same-location run is never split, so a
+      chunk can exceed the bound by keeping that run -- and the target on which
+      it closed -- whole.
+    * The resulting groups are ordered most-severe first (ties broken by the
+      ``target_uids`` tuple), which is deterministic for the same diff, and
+      numbered ``arbiter-group-<i>``.
+
+    Records are never de-duplicated: a repeated uid only appears if the caller
+    passed it twice.
+
+    Raises:
+        ValueError: If any index is outside ``records`` (the message names the
+            offending index) or ``max_targets`` is below 1.
+    """
+    indices = list(target_indices)
+    for index in indices:
+        if not isinstance(index, int) or index < 0 or index >= len(records):
+            raise ValueError(f"arbiter target index out of range: {index!r}")
+    if max_targets < 1:
+        raise ValueError(f"max_targets must be >= 1; got {max_targets}")
+
+    def file_of(index: int) -> str:
+        return str(records[index].get("file"))
+
+    components = co_locate_groups(sorted({file_of(i) for i in indices}), edges)
+    unpacked: list[ArbiterGroup] = []
+    for component in components:
+        members = [i for i in indices if file_of(i) in component]
+        members.sort(key=lambda i: (file_of(i), _line_value(records[i]), record_uid(records[i]), i))
+        for chunk in _chunk_location_atomic(members, records, max_targets):
+            unpacked.append(
+                ArbiterGroup(
+                    "",
+                    tuple(chunk),
+                    tuple(record_uid(records[i]) for i in chunk),
+                )
+            )
+    unpacked.sort(key=lambda group: (_group_severity_rank(group, records), group.target_uids))
+    return [
+        ArbiterGroup(f"arbiter-group-{i}", group.target_indices, group.target_uids)
+        for i, group in enumerate(unpacked)
+    ]
 
 
 def select_suppression_targets(
