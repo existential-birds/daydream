@@ -105,6 +105,19 @@ def _write_checkpoint_inputs(root: Path) -> tuple[Path, Path]:
     return state, manifest
 
 
+def _publish_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path, "AnnotationsHub"]:
+    """Publish the standard ``cur-1`` checkpoint and return the wired hub."""
+    state, manifest = _write_checkpoint_inputs(tmp_path)
+    hub = _wired_hub(monkeypatch)
+    assert handle_adjudicate([
+        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    return state, manifest, hub
+
+
 def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
     captured = capsys.readouterr()
     return "".join((captured.out + captured.err).split()).replace("║", "")
@@ -446,15 +459,7 @@ def test_cli_publish_state_checkpoint_reports_batch_and_actual_revision(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = _wired_hub(monkeypatch)
-
-    assert handle_adjudicate([
-        "publish-state",
-        "--state-dir", str(state),
-        "--manifest", str(manifest),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
+    _state, _manifest, hub = _publish_checkpoint(tmp_path, monkeypatch)
 
     revision = hub.repo_info("main").sha
     pointer_path = "annotations/cur-1/checkpoints/batch-latest.json"
@@ -469,12 +474,7 @@ def test_cli_resume_state_bootstraps_from_curation_without_local_manifest(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = _wired_hub(monkeypatch)
-    assert handle_adjudicate([
-        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
+    _, manifest, hub = _publish_checkpoint(tmp_path, monkeypatch)
     capsys.readouterr()
     revision = hub.repo_info("main").sha
     destination = tmp_path / "restored"
@@ -494,12 +494,7 @@ def test_cli_resume_state_manifest_compatibility_enforces_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = _wired_hub(monkeypatch)
-    assert handle_adjudicate([
-        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
+    _, manifest, hub = _publish_checkpoint(tmp_path, monkeypatch)
 
     assert handle_adjudicate([
         "resume-state",
@@ -550,12 +545,7 @@ def test_cli_resume_state_rejects_existing_destination_before_download(
     monkeypatch: pytest.MonkeyPatch,
     destination_kind: str,
 ) -> None:
-    state, manifest = _write_checkpoint_inputs(tmp_path)
-    hub = _wired_hub(monkeypatch)
-    assert handle_adjudicate([
-        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
+    state, _manifest, hub = _publish_checkpoint(tmp_path, monkeypatch)
     hub.downloaded_revision_log.clear()
     destination = tmp_path / "restored"
     if destination_kind == "file":
