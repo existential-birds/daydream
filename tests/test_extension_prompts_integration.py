@@ -27,6 +27,7 @@ from tests.harness.improve_backend import (
     improve_artifact,
     install_capable_improve_backend,
 )
+from tests.test_deep_orchestrator import _install_stub_backend, _run_deep, _silence
 
 
 async def test_fork_prompt_override_reaches_backend(
@@ -239,8 +240,6 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
 async def test_custom_structural_extension_keeps_alternatives_pass(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.test_deep_orchestrator import _install_stub_backend, _run_deep, _silence
-
     ext_dir.write_module(
         "def register(r):\n"
         "    r.override_prompt('structural', lambda **kw: 'CUSTOM STRUCTURAL BUILDER')\n"

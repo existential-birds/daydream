@@ -685,6 +685,19 @@ def _reset_trajectory_recorder() -> Iterator[Any]:
     _reset()
 
 
+@pytest.fixture
+def recorder(tmp_path: Path) -> Any:
+    """A TrajectoryRecorder rooted at the test's tmp_path.
+
+    Lazy-imports the harness builder so pytest-collect stays free of the
+    Pydantic-heavy ``daydream.trajectory`` import; the recorder is the same
+    object ``make_recorder(tmp_path)`` would return.
+    """
+    from tests.harness.trajectory import make_recorder
+
+    return make_recorder(tmp_path)
+
+
 @pytest.fixture(autouse=True)
 def artifact_runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Keep real artifact transactions out of the operator's runtime store.

@@ -134,6 +134,8 @@ async def test_runner_retry_keeps_failed_billed_attempt_separate_from_success(
 class _NoCancelBackend:
     """Backend stub for tests that never exercise cancellation."""
 
+    model = "lifecycle-model"
+
 
 class _FanoutBackend(_NoCancelBackend):
     model = "shared-model"
@@ -489,8 +491,6 @@ async def _run_lifecycle_flow(
 class _ExactAllocationBackend(_NoCancelBackend):
     """Two complete generations, late per-generation usage, terminal total."""
 
-    model = "lifecycle-model"
-
     def __init__(self) -> None:
         self.ended = False
 
@@ -562,8 +562,6 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
 class _LateMissingMetricsBackend(_NoCancelBackend):
     """Terminal total without any per-generation usage: partial evidence."""
 
-    model = "lifecycle-model"
-
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
         yield _gen_start("gen-late")
@@ -610,8 +608,6 @@ async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
 class _DuplicateMetricsBackend(_NoCancelBackend):
     """Per-generation usage whose sum exceeds the terminal total."""
 
-    model = "lifecycle-model"
-
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
         yield _gen_start("gen-x")
@@ -657,8 +653,6 @@ async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
 class _DuplicateIdempotentBackend(_NoCancelBackend):
     """Identical terminal totals twice: idempotent, children bill."""
 
-    model = "lifecycle-model"
-
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
         yield _gen_start("gen-dup")
@@ -692,8 +686,6 @@ async def test_runner_duplicate_identical_totals_are_idempotent(
 
 class _ResidualTotalBackend(_NoCancelBackend):
     """Terminal total above the per-message sum: residual folds to the chain."""
-
-    model = "lifecycle-model"
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
@@ -733,8 +725,6 @@ async def test_runner_residual_unallocated_total_folds_onto_chain(
 
 class _ToolErrorAfterSealBackend(_NoCancelBackend):
     """Tool error after a sealed completed generation."""
-
-    model = "lifecycle-model"
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
@@ -782,8 +772,6 @@ async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
 
 class _PendingCapBackend(_NoCancelBackend):
     """513 sealed generations trip the 512-draft cap on the final seal."""
-
-    model = "lifecycle-model"
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)

@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from daydream.improve import prioritize
 from daydream.improve.prioritize import (
     aggregate_cross_service,
     leverage_score,
@@ -412,8 +413,6 @@ def test_prioritize_unknown_severity_maps_explicitly() -> None:
     """P-BOUNDARY (R6.2): unknown severity does not silently pass through as
     ``"CRITICAL"``/raw — the axis mapper returns ``None`` and the caller omits
     the axis instead of promoting to a conservative fallback."""
-    from daydream.improve import prioritize
-
     assert prioritize._map_axis_severity(None) is None
     assert prioritize._map_axis_severity("high") == "HIGH"
     assert prioritize._map_axis_severity("weird") is None

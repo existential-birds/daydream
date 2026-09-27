@@ -8,6 +8,7 @@ import pytest
 
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
+from daydream.deep.records import stamp_record_uids
 from daydream.deep.review_steps import _per_stack_body, _step_per_stack_parse
 from daydream.extensions import Registry, get_registry
 from daydream.flows.engine import FlowContext
@@ -119,8 +120,6 @@ async def test_per_stack_rerun_clears_stale_delegation_before_review(
 
 def _mark_delegated_artifacts(deep: Path, scopes: dict[str, list[str]]) -> None:
     """Add the committed host metadata to a primed structural record fixture."""
-    from daydream.deep.records import stamp_record_uids
-
     path = deep / "stack-structure-records.json"
     loaded = json.loads(path.read_text())
     issues = loaded if isinstance(loaded, list) else loaded["issues"]
