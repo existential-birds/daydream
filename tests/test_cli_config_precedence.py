@@ -23,6 +23,7 @@ from daydream.runner import (
     _default_backend_name,
     _resolve_backend,
     _resolved_backend_name,
+    _resolved_latency_profile,
     _resolved_model,
     _resolved_reasoning_effort,
     _resolved_review_backend_name,
@@ -295,3 +296,25 @@ def test_test_command_precedence_cli_over_file_config(tmp_path: Path) -> None:
     assert "test_command" in msg
     assert "tool.daydream" in msg
     assert "--test-command" in msg
+
+
+def test_latency_profile_precedence_cli_over_file_over_default(tmp_path: Path) -> None:
+    """CLI > [tool.daydream] latency_profile > balanced; unknown never goes cheap."""
+    fc = DaydreamFileConfig(latency_profile="forensic")
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _resolved_latency_profile(cfg).profile == "forensic"
+
+    cfg.latency_profile = "fast"
+    assert _resolved_latency_profile(cfg).profile == "fast"
+
+    cfg.latency_profile = "turbo"
+    resolved = _resolved_latency_profile(cfg)
+    assert resolved.profile == "forensic" and resolved.fail_safe is True
+
+    bare = RunConfig(target=str(tmp_path), file_config=DaydreamFileConfig())
+    assert _resolved_latency_profile(bare).profile == "balanced"
+
+
+def test_cli_accepts_the_profile_flag_and_it_wins(tmp_path: Path) -> None:
+    args = _parse_args(["--latency-profile", "forensic", str(tmp_path)])
+    assert args.latency_profile == "forensic"

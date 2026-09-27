@@ -41,6 +41,11 @@ class DaydreamFileConfig:
         backend: Global default backend name, or None if unset.
         reasoning_effort: Global default reasoning-effort override, or None if
             unset. Passed through to supported backends that accept it.
+        latency_profile: Issue #732. Latency profile selecting the wonder/arbiter
+            effort floor (``fast``, ``balanced``, or ``forensic``). ``None``
+            (absent key) means unset and lets the default (``balanced``) apply;
+            an unrecognised value is resolved fail-safe upward to ``forensic`` by
+            ``_resolved_latency_profile`` rather than rejected here.
         phases: Per-phase sub-tables mapping phase name to a dict of keys
             (e.g. ``{"fix": {"backend": "codex", "model": "..."}}``).
         shallow_fanout_threshold: Max changed-file count that triggers the
@@ -162,6 +167,7 @@ class DaydreamFileConfig:
     model: str | None = None
     backend: str | None = None
     reasoning_effort: str | None = None
+    latency_profile: str | None = None
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
@@ -498,6 +504,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,
+        latency_profile=_coerce_string(merged.get("latency_profile")),
         phases=_coerce_phases(merged.get("phases")),
         shallow_fanout_threshold=threshold,
         precision_mode=_coerce_optional_bool(merged.get("precision_mode")),

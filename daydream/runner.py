@@ -68,6 +68,7 @@ from daydream.config import (
     REVIEW_OUTPUT_FILE,
 )
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep.latency import LatencyRoute, ProfileResolution, resolve_latency_profile
 from daydream.exploration import ExplorationContext
 from daydream.extensions import (
     ExtensionError,
@@ -159,6 +160,14 @@ class RunConfig:
     backend: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    # Issue #732: latency profile selecting the wonder/arbiter effort floor.
+    # CLI-tier override; falls through to the file-config scalar then the
+    # built-in default (``balanced``). An unrecognised value resolves fail-safe
+    # upward to ``forensic`` and is recorded, never raised.
+    latency_profile: str | None = None
+    # Resolved once at the composition root (the deep preamble) and consumed by
+    # the effort resolver; ``None`` until then.
+    latency_route: LatencyRoute | None = None
     file_config: DaydreamFileConfig | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
@@ -676,6 +685,22 @@ def capture_manifest_run_identity(
         ),
         phases=phases,
     )
+
+
+def _resolved_latency_profile(config: RunConfig) -> ProfileResolution:
+    """Resolve the latency profile without ever raising.
+
+    Order (highest first): CLI ``config.latency_profile`` then the file-config
+    scalar. An unrecognised value resolves fail-safe upward to ``forensic`` and
+    is recorded on the result, so a typo can never route a run cheap. The
+    ``source`` on the result is ``"cli"``, ``"file"``, or ``"default"``.
+    """
+    if config.latency_profile is not None:
+        return resolve_latency_profile(config.latency_profile, source="cli")
+    file_config = _file_config_or_empty(config)
+    if file_config.latency_profile is not None:
+        return resolve_latency_profile(file_config.latency_profile, source="file")
+    return resolve_latency_profile(None, source="default")
 
 
 def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:

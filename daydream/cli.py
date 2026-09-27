@@ -336,6 +336,18 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
              "--thinking. Takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
+        "--latency-profile",
+        default=None,
+        type=str,
+        dest="latency_profile",
+        metavar="PROFILE",
+        help="Wonder/arbiter effort profile: fast, balanced (default), or "
+             "forensic. Sets the effort floor for the wonder and arbiter "
+             "phases; risk may raise it, never lower it. Codex-only effort "
+             "effects apply where the effort table has an entry. An "
+             "unrecognised value resolves fail-safe to forensic.",
+    )
+    parser.add_argument(
         "--non-interactive",
         action="store_true",
         dest="non_interactive",
@@ -711,6 +723,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
         backend=args.backend,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
+        latency_profile=args.latency_profile,
         file_config=file_config,
         review_profile_path=args.review_profile_path,
         trajectory_path=args.trajectory_path,
@@ -1140,6 +1153,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         observability=observability,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
+        latency_profile=args.latency_profile,
         file_config=file_config,
         review_profile_path=args.review_profile_path,
         # Per-phase overrides are config-file-only; left None so config is the
