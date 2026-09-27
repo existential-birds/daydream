@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,7 @@ from daydream.deep.fix_steps import (
     _step_test,
     _step_verify,
 )
+from daydream.deep.latency import diff_signals, route_for, summarize_risk
 from daydream.deep.merge_steps import (
     _step_arbiter,
     _step_cross_stack_merge,
@@ -64,6 +66,7 @@ from daydream.deep.review_steps import (
     _step_uncovered_sweep,
     _step_wonder_and_per_stack,
 )
+from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_config_value, fold_default_alternatives, fresh_ttt
 from daydream.deep.sharding import shard_stacks
 from daydream.deep.state import DeepState
@@ -697,7 +700,12 @@ async def _run_review_spine(
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.hunk_index import write_hunk_index
     from daydream.phases import _git_branch, _git_log
-    from daydream.runner import _default_backend_name, _open_recorder, _resolve_review_profile
+    from daydream.runner import (
+        _default_backend_name,
+        _open_recorder,
+        _resolve_review_profile,
+        _resolved_latency_profile,
+    )
 
     target_dir = work.repo
 
@@ -737,6 +745,8 @@ async def _run_review_spine(
     write_hunk_index(daydream_dir, diff)
     # Diff is immutable from here on; compute the tiering verdict once and reuse
     # it at both the exploration step's gate and the alternatives step's gate.
+    # The latency route (issue #732) is resolved from the same immutable diff
+    # just before ``run_flow``, once the in-memory diff is bounded.
     tier = review_steps.select_tier(review_steps.count_changed_files(diff))
     dd = deep_dir(
         target_dir,
@@ -878,6 +888,38 @@ async def _run_review_spine(
                 f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained"
                 f"{dropped}{oversize})",
             )
+        # Issue #732: resolve the latency profile once at the composition root,
+        # record the diff's mandatory escalation signals, and pick the route as
+        # the monotone max of the profile floor and the risk floors. Published
+        # on ``config.latency_route`` and ``ctx.data`` BEFORE ``run_flow``, so
+        # every later effort lookup sees the same route. The profile/risk slice
+        # is the routing record's first write; the wonder and arbiter steps
+        # append their own slices through the same write-merge owner.
+        latency_resolution = _resolved_latency_profile(config)
+        latency_signals = diff_signals(
+            diff=bounded_diff, changed_files=len(changed_files), stack_count=len(stacks)
+        )
+        latency_summary = summarize_risk(latency_signals)
+        latency_route = route_for(latency_resolution.profile, latency_summary)
+        config.latency_route = latency_route
+        write_routing_record(
+            dd,
+            {
+                "profile": {
+                    "selected": latency_resolution.profile,
+                    "requested": latency_resolution.requested,
+                    "source": latency_resolution.source,
+                    "fail_safe": latency_resolution.fail_safe,
+                    "reason": latency_resolution.reason,
+                },
+                "risk": {
+                    "signals": asdict(latency_signals),
+                    "floors": list(latency_summary.floors),
+                    "size_score": latency_summary.size_score,
+                    "breadth_score": latency_summary.breadth_score,
+                },
+            },
+        )
         ctx = FlowContext(
             config=config,
             work=work,
@@ -902,6 +944,12 @@ async def _run_review_spine(
                 "diff_truncated": bound_info.truncated,
                 "diff_truncation": bound_info,
                 "tier": tier,
+                # Issue #732: the resolved route plus the summary it was picked
+                # from, so a later step (wonder, arbiter) can state its decision
+                # and the risk floors that forced it without recomputing.
+                "latency_route": latency_route,
+                "risk_summary": latency_summary,
+                "latency_profile_resolution": latency_resolution,
                 "dd": dd,
                 "stacks": stacks,
                 # Issue #1113: the changed-file import graph, published so the

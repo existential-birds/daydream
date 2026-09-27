@@ -284,6 +284,16 @@ def remote_ci_handoff_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "remote-ci-handoff.json"
 
 
+def latency_routing_path(deep_dir_path: Path) -> Path:
+    """Per-run latency-routing record (issue #732).
+
+    The single artifact each step appends its routing decision to: the resolved
+    profile + risk floors, then the wonder and arbiter choices. Evidence only --
+    never an input a step reads to decide behaviour.
+    """
+    return deep_dir_path / "latency-routing.json"
+
+
 def diff_key_path(deep_dir_path: Path) -> Path:
     """Sibling file recording which diff the deep artifacts were produced from."""
     return deep_dir_path / "diff-key"
