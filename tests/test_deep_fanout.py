@@ -335,12 +335,19 @@ async def test_per_stack_prompts_are_skill_free(
     assert "/skill:" not in generic_prompt
 
 
-async def test_fanout_default_concurrency(
+@pytest.mark.parametrize(
+    ("fanout_concurrency", "expected"),
+    [(None, [4]), (2, [2])],
+    ids=["default_concurrency", "low_concurrency"],
+)
+async def test_fanout_concurrency_limiter(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
     monkeypatch: pytest.MonkeyPatch,
+    fanout_concurrency: int | None,
+    expected: list[int],
 ) -> None:
-    """Backend without fanout_concurrency attribute → limiter defaults to 4."""
+    """Backend fanout_concurrency selects the limiter width (absent → 4)."""
     captured: list[int] = []
     real_limiter = anyio.CapacityLimiter
 
@@ -350,11 +357,14 @@ async def test_fanout_default_concurrency(
 
     monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
 
-    # The default-limiter path is only reached when the attribute is ABSENT, so
-    # drop the one ScriptedBackend always sets → getattr(..., 4) returns 4.
-    backend = _review_backend()
-    del backend.fanout_concurrency
-    assert not hasattr(backend, "fanout_concurrency")
+    if fanout_concurrency is None:
+        # The default-limiter path is only reached when the attribute is
+        # ABSENT, so drop the one ScriptedBackend always sets → 4.
+        backend = _review_backend()
+        del backend.fanout_concurrency
+        assert not hasattr(backend, "fanout_concurrency")
+    else:
+        backend = _review_backend(fanout_concurrency=fanout_concurrency)
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
@@ -367,38 +377,7 @@ async def test_fanout_default_concurrency(
         allow_standalone=True,
     )
 
-    assert 4 in captured
-
-
-async def test_fanout_low_concurrency(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Backend with fanout_concurrency=2 → limiter uses 2."""
-    captured: list[int] = []
-    real_limiter = anyio.CapacityLimiter
-
-    def patched_limiter(n: int) -> anyio.CapacityLimiter:
-        captured.append(n)
-        return real_limiter(n)
-
-    monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
-
-    backend = _review_backend(fanout_concurrency=2)
-    diff, intent, alts = _mk_context_files(tmp_path)
-
-    await phase_per_stack_reviews(
-        backend,
-        make_work(tmp_path),
-        _mk_stacks(),
-        diff_path=diff,
-        intent_path=intent,
-        alternatives_path=alts,
-        allow_standalone=True,
-    )
-
-    assert captured == [2]
+    assert captured == expected
 
 
 def test_shards_carry_scope_not_skill() -> None:
