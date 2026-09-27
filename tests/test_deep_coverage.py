@@ -18,7 +18,6 @@ from daydream.deep.coverage import (
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
-    diff_block_for_file,
     filter_sweepable_files,
     resolve_per_stack_verdicts,
     write_coverage_receipts,
@@ -403,14 +402,13 @@ def test_filter_sweepable_files_zero_max_files_sweeps_nothing() -> None:
 
 
 def test_build_uncovered_sweep_prompt_includes_context_and_markers(tmp_path: Path) -> None:
-    """The prompt names the file, inlines hunks, points at intent + output."""
+    """The prompt names the file and references the live diff, intent and host output."""
     intent = tmp_path / ".daydream" / "deep" / "intent.md"
     output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"
-    hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
     prompt = build_uncovered_sweep_prompt(
         strategy=rp.build_default_profile().strategies["uncovered_review"].content,
         file="notes.txt",
-        hunks=hunks,
+        diff_path=tmp_path / "diff.patch",
         intent_path=intent,
         cwd=tmp_path,
         output_path=output,
@@ -420,8 +418,10 @@ def test_build_uncovered_sweep_prompt_includes_context_and_markers(tmp_path: Pat
     assert "uncovered file sweep" in prompt
     assert str(intent) in prompt
     assert str(output) in prompt
-    # Hunks are inlined (not a pointer to diff.patch).
-    assert "+line6" in prompt
+    # Diff contents stay out of the discovery prompt.
+    assert "+line6" not in prompt
+    assert str(tmp_path / "diff.patch") in prompt
+    assert len(prompt.encode("utf-8")) < 32_768
     assert "changed file notes.txt was NOT read" in prompt
     # Reading the source file is REQUIRED, not optional (issue #309 finding 6):
     # a hunk-only review must not be reported as read coverage.
@@ -441,12 +441,11 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
     """The exploration pointer is inlined only when a directory is supplied."""
     intent = tmp_path / ".daydream" / "deep" / "intent.md"
     output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"
-    hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
     exploration = tmp_path / ".daydream" / "exploration"
     prompt = build_uncovered_sweep_prompt(
         strategy=rp.build_default_profile().strategies["uncovered_review"].content,
         file="notes.txt",
-        hunks=hunks,
+        diff_path=tmp_path / "diff.patch",
         intent_path=intent,
         cwd=tmp_path,
         output_path=output,
@@ -459,7 +458,7 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
     prompt_no_dir = build_uncovered_sweep_prompt(
         strategy=rp.build_default_profile().strategies["uncovered_review"].content,
         file="notes.txt",
-        hunks=hunks,
+        diff_path=tmp_path / "diff.patch",
         intent_path=intent,
         cwd=tmp_path,
         output_path=output,
@@ -768,15 +767,30 @@ def test_uncovered_sweep_prompt_carries_severity_rubric(tmp_path: Path) -> None:
 
     intent = tmp_path / ".daydream" / "deep" / "intent.md"
     output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"
-    hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
     strategy = rp.build_default_profile().strategies["uncovered_review"].content
     prompt = build_uncovered_sweep_prompt(
         strategy=strategy,
         file="notes.txt",
-        hunks=hunks,
+        diff_path=tmp_path / "diff.patch",
         intent_path=intent,
         cwd=tmp_path,
         output_path=output,
     )
     assert severity.SEVERITY_RUBRIC in prompt
     assert prompt.index(severity.SEVERITY_RUBRIC) > prompt.index(strategy.format(file="notes.txt"))
+
+
+def test_non_pi_sweep_excerpt_streams_past_large_lines(tmp_path: Path) -> None:
+    from daydream.deep.coverage import bounded_diff_block_for_file
+
+    path = tmp_path / "diff.patch"
+    path.write_text("diff --git a/large.txt b/large.txt\n--- a/large.txt\n+++ b/large.txt\n"
+                    "@@ -0,0 +1 @@\n+" + "x" * 3_690_129 + "\n" + _DIFF)
+    excerpt = bounded_diff_block_for_file(path, "notes.txt")
+    assert "+line6" in excerpt
+    assert "large.txt" not in excerpt
+    assert len(excerpt.encode()) < 12_288
+    large = bounded_diff_block_for_file(path, "large.txt")
+    assert "diff excerpt truncated" in large
+    assert len(large.encode()) <= 12_288
+    assert "unavailable" in bounded_diff_block_for_file(path, "absent.txt")

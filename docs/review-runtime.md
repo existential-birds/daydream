@@ -474,77 +474,56 @@ bounded, and this change does not promise that every review completes before a
 limit.
 
 
-### Finite evidence protocol for modest Pi reviews
+### Pi discovery and prompt transport
 
-Eligible unattended default Pi reviewers receive the complete diff and complete
-assigned source text before making a judgment. The model keeps its configured
-reasoning effort and has no executable tools. It can request one batch of up to
-eight specific file reads or literal searches to resolve concrete candidates.
-The host resolves those requests within the repository and supplies the results
-for one final judgment. Both calls share the existing investigation and final
-response deadline; the second call does not receive a fresh investigation budget.
+Pi discovery uses the actual live session diff path for every diff size. Intent,
+alternatives, per-stack, structural, adjudication and uncovered-file prompts
+retain the admitted path instead of embedding diff content. Reviewers inspect the
+relevant diff sections and source checkout with their read-only tools. Small Pi
+reviews use this same path; the former tools-disabled finite evidence packet and
+primary-owned structural delegation are no longer dispatched. Structural review
+runs explicitly. A per-stack rerun removes stale delegation artifacts; validated
+historical delegation remains readable when resuming an existing merge or fix.
 
-Eligibility requires a diff no larger than 64 KiB, at most ten assigned files,
-and complete assigned text no larger than 192 KiB. Missing, deleted, binary,
-unsafe, schema-incompatible or oversized source packets fall back to the existing reviewer. Custom
-review strategies retain their existing path. Large packets travel through Pi's
-standard input to avoid operating-system argument-size limits.
+A durable diff reference has a separate 128 MiB streaming-validation resource
+limit. It does not consume captured prompt-input allowances (1 MiB per exact file,
+4 MiB combined), which still apply to other inputs. Admission validates a regular,
+non-symlink UTF-8 file, retains identity and hash, and binds it to backend, cwd and
+read-only mode. Each retry revalidates the reference, including its content hash.
+Use the supplied session path: reconstructing `<repo>/.daydream/diff.patch` can
+point into the detached public tree. INLINE transports keep their existing
+bounded capture and isolation behavior.
 
-For modest default intent analysis, the host supplies labeled author context,
-commit metadata and changed paths directly. It does not invent an intent summary
-or promote metadata to authoritative intent. Existing PR freshness checks remain
-in force; reviewers establish behavior from the diff and source.
+The uncovered sweep uses the full durable hunk index for eligibility, so files
+omitted from the short display diff are still reviewed. Its prompt contains file
+assignment metadata and references, not hunks; strategy metadata is bounded in
+UTF-8 bytes. Pi discovery is read-only and the host persists structured findings and
+the Markdown sidecar. Non-Pi sweeps retain their existing access mode and bounded
+selected-file context, streamed from the durable diff without whole-file capture;
+isolated transports receive no new host-private diff pointer. A completed review without a verified source read is labeled
+as such and never credited as source-read coverage.
 
-A host receipt credits supplied source only after a valid final file verdict.
-Unavailable requested evidence leaves dependent files incomplete, even when an
-independently proven finding survives for that file. Those incomplete warnings
-remain in reports and publication gates. Source hashes and line counts are
-preserved in diagnostics; source text itself remains in the live-redacted
-trajectory rather than a new unsanitized packet artifact.
+Recovery finalization remains a tools-disabled serialization step. Pointer-only
+diffs are excluded from sanctioned content capture; reference metadata, established
+findings and bounded evidence from completed investigation reads remain available.
+An uninvestigated file stays incomplete. Finalization must not fetch new evidence.
 
-The prototype completed the incident's seven-file generic scope at high effort
-in 249 seconds with one model call and no tools. Small behavioral fixtures
-retained two local defects and a cross-file configuration defect; a clean fixture
-returned no findings, and an unavailable dependency produced an incomplete verdict
-without a speculative finding. These focused checks are evidence of feasibility,
-not a broad recall benchmark. Giving the standalone structural reviewer either
-all ten source files or the diff plus completed primary summaries still exceeded
-480 seconds without a terminal response. Zero tool calls in those attempts rule
-out tool loops, but do not distinguish internal reasoning from provider latency.
+Normal Pi execution writes the logical prompt and schema appendix to a private,
+invocation-local UTF-8 temporary file and passes its absolute `@file` reference.
+Dynamic review system instructions use the separate system-prompt path argument.
+Both files are closed before spawning, retained until child teardown and removed
+on success, write/spawn failure, cancellation or generator close. Tools-disabled
+execution continues to send the logical prompt over stdin. `RequestEvent` retains
+the useful logical user and system prompts, independent of transport filenames.
 
+The benchmark-pinned Pi 0.84.3 parser and file processor were checked directly
+with a greater-than-3-MB UTF-8 prompt: `@file` becomes a `<file name="...">` wrapper
+around the file contents. The effective model input therefore includes Pi's
+wrapper; it is not byte-identical to the logical prompt. Pi also resolves existing
+system-prompt file paths directly, without an `@` prefix.
 
-When every primary reviewer qualifies for this protocol, their assigned-file
-union exactly covers the structural scope, and the structural policy and prompt
-builder are defaults, those reviewers also own structural checks involving their
-assigned files. Each receives the full change partition and the structural and
-canonical-design criteria. Cross-stack synthesis remains. These are candidate
-owners until every primary completes with valid structured output. Any incomplete
-owner, timeout, exception, or invalid output triggers the ordinary structural
-reviewer before the phase finishes; the original primary failure remains visible.
-Custom builders or policies, an uncovered structural file, or an ineligible
-primary retain the separate structural reviewer.
-
-Delegated calls label each finding `per-stack` for a local implementation defect
-or `structural` for a boundary, canonical-design, lifecycle, or cross-component
-defect. The host removes these invocation-only labels, writes local findings with
-primary UIDs, and reconciles each primary verdict against its local findings.
-When all owners complete, the host aggregates structural findings in primary scope
-order into `stack-structure-records.json`, assigns `structure:N` UIDs, and writes
-an empty verdict list plus `delegated_to`. It writes `structural-delegation.json`
-last as the commit marker, after the structural records and report succeed.
-Uncommitted structural candidates are discarded in favor of the fallback review.
-
-Fresh parsing and `--start-at merge` or `fix` validate the committed sidecar scopes,
-`delegated_to`, and structural UID partition before trusting delegated completion.
-The structure artifact can contain findings; its empty verdict list does not
-claim independent file coverage. Structure UIDs remain the durable provenance
-through merge, suppression, evidence handling, and reporting, including after
-adjudication rewrites the records. Older runs that lost findings need a fresh
-review; resume does not reconstruct them.
-
-Two additional high-effort fixtures checked this combined responsibility. One
-found a changed consumer's unit mismatch against a producer owned by another
-stack in 6.74 seconds. The other requested an unchanged canonical helper and
-identified divergent Unicode normalization in 82.03 seconds. Both finished with
-zero model tool calls. These examples test specific cross-file failure modes;
-they do not establish equivalent recall across arbitrary repositories.
+Deterministic runner tests cover small and 3,690,129-byte single-file diff blocks,
+live-session admission, child-visible references, sweep findings through merge and
+report, and no-read coverage. Separate real protocol-child tests exercise large
+arbitrary prompt transport and concurrent cancellation. These checks establish
+workflow and transport behavior without claiming live-model recall or convergence.

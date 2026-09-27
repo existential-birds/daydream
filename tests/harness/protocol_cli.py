@@ -86,7 +86,7 @@ def _forbidden_path_hits(argv: list[str], prompt: str) -> dict[str, dict[str, bo
 
 
 def _atomic_observation(path: Path, payload: dict[str, Any]) -> None:
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     os.replace(temporary, path)
 
@@ -158,6 +158,8 @@ def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, 
         value = argv[index + 1]
         recorded.extend([flag, "[content omitted]" if flag in content else value])
         if flag in content:
+            if backend == "pi" and value.startswith("/") and Path(value).is_file():
+                value = Path(value).read_text(encoding="utf-8")
             payload = value.encode()
             hashes.setdefault(flag, []).append({"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
         index += 2
@@ -245,6 +247,9 @@ def _run_cli() -> int:
     stdin = sys.stdin.buffer.read()
     piped_prompt = backend == "codex" or (backend == "pi" and bool(stdin))
     prompt = stdin.decode("utf-8") if piped_prompt else argv[-1]
+    attachment = Path(prompt[1:]) if backend == "pi" and not piped_prompt and prompt.startswith("@") else None
+    if attachment is not None:
+        prompt = attachment.read_text(encoding="utf-8")
     args_without_prompt = argv if piped_prompt else argv[:-1]
     recorded_argv, content_arguments = _observed_argv(backend, args_without_prompt)
     cwd = Path(_option(argv, "--cd", str(Path.cwd()))).resolve()
@@ -260,6 +265,9 @@ def _run_cli() -> int:
         "argv": recorded_argv, "content_arguments": content_arguments,
         "inherited_cwd": str(Path.cwd()), "effective_cwd": str(cwd),
         "stdin_bytes": len(stdin), "stdin_sha256": hashlib.sha256(stdin).hexdigest(),
+        "prompt_attachment": str(attachment) if attachment else None,
+        "prompt_attachment_mode": stat.S_IMODE(attachment.stat().st_mode) if attachment else None,
+        "argv_bytes": sum(len(arg.encode()) + 1 for arg in argv),
         "prompt_bytes": len(prompt.encode()), "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "prompt_canaries": {canary: canary in prompt for canary in _CANARIES},
         "sanctioned_reads": opened, "process_outcome": "entered",

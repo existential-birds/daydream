@@ -51,6 +51,8 @@ htmlcov/
 .claude/*
 .claude/skills/
 .agents/
+.hermes/
+/skills-lock.json
 
 # Logs
 logs/

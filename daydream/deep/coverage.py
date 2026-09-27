@@ -43,6 +43,7 @@ from daydream.phases import (
     _dependency_impact_instructions,
     _exploration_pointer,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, truncate_utf8_to_budget
 from daydream.severity import SEVERITY_RUBRIC
 
 
@@ -549,6 +550,30 @@ def diff_block_for_file(diff: str, file: str) -> str | None:
     return None
 
 
+def bounded_diff_block_for_file(path: Path, file: str) -> str:
+    """Stream a bounded file excerpt for the non-Pi sweep compatibility path.
+
+    Both each read and each retained block prefix are bounded, including for
+    diffs containing multi-megabyte single lines. Use the shared path parser
+    so renames and deletions resolve like ordinary in-memory diff blocks.
+    """
+    budget = INLINE_DIFF_BUDGET_BYTES
+    prefix = bytearray()
+    line_start = True
+    with path.open("rb") as stream:
+        while chunk := stream.readline(budget + 1):
+            if line_start and chunk.startswith(b"diff --git "):
+                if _diff_block_path(prefix.decode("utf-8", errors="ignore")) == file:
+                    break
+                prefix.clear()
+            prefix.extend(chunk[:max(0, budget + 1 - len(prefix))])
+            line_start = chunk.endswith(b"\n")
+    text = prefix.decode("utf-8", errors="ignore")
+    if _diff_block_path(text) != file:
+        return "[Diff excerpt unavailable; missing hunks do not establish coverage.]"
+    return truncate_utf8_to_budget(text, budget, "\n[diff excerpt truncated; missing hunks remain unreviewed]")
+
+
 def filter_sweepable_files(
     uncovered_files: list[str],
     index: dict[str, Any],
@@ -592,17 +617,18 @@ def build_uncovered_sweep_prompt(
     *,
     strategy: str,
     file: str,
-    hunks: str,
+    diff_path: Path,
     intent_path: Path,
     cwd: Path,
     output_path: Path,
     exploration_dir: Path | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Build the second-pass sweep reviewer prompt for one uncovered file.
 
     The reviewer scopes itself to ``file``'s hunks only (no per-stack reviewer
-    read this file), uses the TTT intent for authorial context, and writes its
-    findings to ``output_path``. The sweep reviewer is held to the same standard
+    read this file), uses the TTT intent for authorial context, and returns structured
+    findings that the host writes to ``output_path``. The sweep reviewer is held to the same standard
     as ordinary per-stack reviewers -- its findings are parsed into
     ``PER_STACK_RECORD_SCHEMA`` and merged as ordinary findings -- so the prompt
     is composed from the CANONICAL deep prompt primitives (imported from
@@ -622,19 +648,29 @@ def build_uncovered_sweep_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    parts.append(strategy.format(file=file))
+    parts.append(truncate_utf8_to_budget(strategy.format(file=file), 8192, "\n[strategy truncated]"))
     parts.append(f"TTT author intent is at {intent_path}. Read it before starting.")
-    parts.append(
-        f"Relevant diff hunks for {file} (inlined; do NOT re-read "
-        f"diff.patch for these):\n{hunks.rstrip()}"
-    )
+    if inline_diff is not None:
+        # Non-Pi compatibility: no host-private diff pointer is exposed to an
+        # isolated transport, and no whole-diff admission is introduced.
+        excerpt = truncate_utf8_to_budget(inline_diff, INLINE_DIFF_BUDGET_BYTES, "\n[diff excerpt truncated]")
+        parts.append(f"Relevant diff excerpt for {file}:\n{excerpt}")
+    else:
+        parts.append(
+            f"Changed file: {file}\nThe full PR diff is available at {diff_path}.\n"
+            "Use your read-only tools to inspect the relevant section and the source checkout. "
+            "Diff contents are not embedded in this prompt."
+        )
     parts.append(
         "Read the source file FIRST; you may only comment on hunks you have "
-        "read. The inlined hunks are not a substitute for reading the file."
+        "read. A diff reference is not a substitute for reading the file."
     )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
-    parts.append(f"Work in {cwd}. Write your full review to {output_path}.")
+    parts.append(
+        f"Work in {cwd}. Return your findings in the requested structured output. "
+        f"The host writes the review to {output_path}; do not write files yourself."
+    )
     return "\n\n".join(parts)

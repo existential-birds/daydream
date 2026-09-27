@@ -924,19 +924,19 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
             lines.append(f"- Coverage ratio: {ratio}")
         # Issue #309 finding 6: only files with a verified completed read are
         # labeled covered. A completed review output WITHOUT a read is a
-        # completed attempt -- rendered as "reviewed (hunks only)" -- and never
+        # completed attempt -- rendered as "completed without verified source read" -- and never
         # appears on the covered line nor moves the ratio above.
         covered = stats.get("covered_files")
         if isinstance(covered, list) and covered:
             lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in covered)}")
         completed = stats.get("completed_files")
         if isinstance(completed, list):
-            hunks_only = [
+            unverified = [
                 str(f) for f in completed if not (isinstance(covered, list) and f in covered)
             ]
-            if hunks_only:
+            if unverified:
                 lines.append(
-                    f"- Second-pass sweep reviewed (hunks only): {', '.join(hunks_only)}"
+                    f"- Second-pass sweep completed without verified source read: {', '.join(unverified)}"
                 )
         failures = stats.get("sweep_failures")
         if isinstance(failures, dict) and failures:

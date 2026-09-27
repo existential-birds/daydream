@@ -1,7 +1,7 @@
 """Shared Pi mock-process builder.
 
 Mirrors :mod:`tests.harness.codex_replay`, differing only in the subprocess
-shape the backend drives: Pi's prompt is a positional argument (not stdin like
+shape the backend drives: Pi's prompt travels through a positional @file attachment (not stdin like
 Codex), so ``PiBackend.execute`` opens the process with ``stdin=DEVNULL`` and
 never writes, and the mock sets ``stdin=None`` accordingly.
 """

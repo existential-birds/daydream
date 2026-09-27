@@ -14,9 +14,12 @@ from tests.harness.pi_replay import make_mock_process_from_fixture
 
 async def test_bounded_review_system_contract_is_exact_and_does_not_leak_to_fix(tmp_path: Path) -> None:
     commands: list[tuple[str, ...]] = []
+    system_prompts: list[str] = []
 
     async def spawn(*args: str, **kwargs: Any) -> Any:
         commands.append(args)
+        value = args[args.index("--append-system-prompt") + 1]
+        system_prompts.append(Path(value).read_text() if value.startswith("/") else value)
         return make_mock_process_from_fixture("simple_text.jsonl")
 
     backend = PiBackend(model="fixture-model", reasoning_effort="high")
@@ -28,7 +31,8 @@ async def test_bounded_review_system_contract_is_exact_and_does_not_leak_to_fix(
         await run_agent(backend, tmp_path, "Implement the requested fix", phase=DaydreamPhase.FIX,
                         progress_callback=lambda _: None)
 
-    review_system, fix_system = [args[args.index("--append-system-prompt") + 1] for args in commands]
+    review_system, fix_system = system_prompts
+    assert not Path(commands[0][commands[0].index("--append-system-prompt") + 1]).exists()
     assert "at most 17 seconds and 3 tool calls" in review_system
     assert REVIEW_STOPPING_GUIDANCE in review_system
     assert "repository-scoped" in review_system

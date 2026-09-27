@@ -288,7 +288,7 @@ class StubBackend:
         # When True, the uncovered-file-sweep branch writes its review output
         # but emits NO Read tool call -- a successful hunk-only review (issue
         # #309 finding 6). The file must be recorded as a completed ATTEMPT
-        # ("reviewed (hunks only)"), never as covered.
+        # ("completed without verified source read"), never as covered.
         self.sweep_no_read: bool = False
         # When True, the uncovered-file-sweep branch raises -- exercising the
         # sweep's fail-open contract.

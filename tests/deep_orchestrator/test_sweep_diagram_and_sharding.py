@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import re
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from daydream.backends import AgentEvent
 from daydream.config import (
     DEFAULT_DEEP_SHARD_ENABLED,
     DEFAULT_DEEP_SHARD_MAX_BYTES,
@@ -255,7 +257,7 @@ async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_cover
     assert stats["completed_files"] == ["notes.txt"]
     # But no verified completed read of the file -> never "covered".
     assert stats["covered_files"] == []
-    assert stats["sweep_attempt_status"] == {"notes.txt": "reviewed (hunks only)"}
+    assert stats["sweep_attempt_status"] == {"notes.txt": "completed without verified source read"}
     # The coverage numbers are unchanged by the hunk-only review.
     assert stats["post_sweep"]["files_read_by_reviewers"] == 3
     assert stats["post_sweep"]["coverage_ratio"] == pre_sweep["coverage_ratio"] == 0.75
@@ -263,7 +265,7 @@ async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_cover
     report = (target / ".review-output.md").read_text()
     assert "## Coverage" in report
     assert "Second-pass sweep covered" not in report
-    assert "Second-pass sweep reviewed (hunks only): notes.txt" in report
+    assert "Second-pass sweep completed without verified source read: notes.txt" in report
     assert "Files read by reviewers: 3" in report
     assert "Coverage ratio: 0.75" in report
 
@@ -285,11 +287,24 @@ async def test_run_deep_uncovered_sweep_structured_output_without_review_file_is
     stub.sweep_no_read = True
     stub.merge_echo_records = True
 
+    original_execute = stub.execute
+
+    async def block_sidecar(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        if "uncovered file sweep" in prompt:
+            match = re.search(r"The host writes the review to (.+?);", prompt)
+            assert match is not None
+            # A real filesystem collision makes only the optional sidecar
+            # unwritable; required structured artifacts remain writable.
+            Path(match[1]).mkdir()
+        async for event in original_execute(cwd, prompt, *args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(stub, "execute", block_sidecar)
     exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
     assert exit_code == 0
 
     deep = target / ".daydream" / "deep"
-    assert not list(deep.glob("uncovered-*-review.md"))
+    assert (deep / "uncovered-0-review.md").is_dir()
     records = json.loads((deep / "stack-uncovered-records.json").read_text())
     assert [record["file"] for record in records] == ["notes.txt"]
     merged = json.loads((deep / "merged-items.json").read_text())["items"]
@@ -298,7 +313,7 @@ async def test_run_deep_uncovered_sweep_structured_output_without_review_file_is
     stats = json.loads((deep / "coverage-stats.json").read_text())
     assert stats["completed_files"] == ["notes.txt"]
     assert stats["covered_files"] == []
-    assert stats["sweep_attempt_status"] == {"notes.txt": "reviewed (hunks only)"}
+    assert stats["sweep_attempt_status"] == {"notes.txt": "completed without verified source read"}
     assert stats["sweep_finding_count"] == 1
     assert stats["sweep_failures"] == {}
 

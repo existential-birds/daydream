@@ -857,7 +857,7 @@ def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Pa
         ),
         build_uncovered_sweep_prompt(
             strategy=_default_strategy("uncovered_review"),
-            file="api.py", hunks="", intent_path=p["intent_path"],
+            file="api.py", diff_path=tmp_path / "diff.patch", intent_path=p["intent_path"],
             cwd=p["cwd"], output_path=p["output_path"],
         ),
     ]

@@ -14,7 +14,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -332,12 +332,14 @@ async def test_structured_output() -> None:
         "issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]
     }
 
-    # Schema is emulated via prompt appendix (not a CLI flag) — verify the
-    # positional prompt argument carries the schema instruction.
+    # Request records preserve the logical prompt; argv carries only an attachment.
     flat_args = list(mock_exec.call_args.args)
     positional = flat_args[-1]
-    assert "JSON schema" in positional
-    assert json.dumps(schema) in positional
+    assert positional.startswith("@/")
+    assert not Path(positional[1:]).exists()
+    request = next(e for e in events if isinstance(e, RequestEvent))
+    assert "JSON schema" in request.prompt
+    assert json.dumps(schema) in request.prompt
 
 
 @pytest.mark.asyncio
@@ -1787,3 +1789,167 @@ async def test_pi_usage_events_carry_turn_end_and_terminal_provenance() -> None:
     terminal = costs[-1]
     assert terminal.measurement_source == "terminal"
     assert terminal.cost_source == "reported"
+
+
+@pytest.mark.parametrize("mode", ["success", "process_error"])
+async def test_large_prompt_uses_private_attachment_until_child_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Literal["success", "process_error"],
+) -> None:
+    fixture = install_protocol_cli(tmp_path / "fixture", "pi", response_mode=mode)
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
+    prompt = "合法 prompt sentinel\n" + "x" * 3_690_129
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+    events: list[Any] = []
+    try:
+        async for event in PiBackend(model="fixture").execute(tmp_path, prompt, output_schema=schema):
+            events.append(event)
+    except PiError:
+        assert mode == "process_error"
+    observed = fixture.read_observations()[0]
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert observed["prompt_sha256"] == hashlib.sha256(request.prompt.encode()).hexdigest()
+    assert request.prompt.startswith(prompt)
+    assert json.dumps(schema) in request.prompt
+    attachment = Path(observed["prompt_attachment"])
+    assert attachment.is_absolute()
+    assert not attachment.exists()
+    assert observed["prompt_attachment_mode"] == 0o600
+    assert observed["argv_bytes"] < 32_768
+
+
+@pytest.mark.parametrize("real_spawn", [True, False])
+async def test_prompt_attachment_removed_after_spawn_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_spawn: bool,
+) -> None:
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
+    observed: list[Path] = []
+
+    async def fail(*args: Any, **kwargs: Any) -> Any:
+        path = Path(args[-1][1:])
+        assert path.read_text() == "spawn failure prompt"
+        observed.append(path)
+        raise OSError("mock spawn failure")
+
+    if not real_spawn:
+        monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", fail)
+    with pytest.raises(OSError):
+        async for _ in PiBackend(model="fixture").execute(tmp_path, "spawn failure prompt"):
+            pass
+    assert not list(tmp_path.glob("daydream-pi-prompt-*"))
+    assert real_spawn or len(observed) == 1
+
+
+@pytest.mark.parametrize("after_spawn", [False, True])
+async def test_prompt_attachment_generator_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_spawn: bool,
+) -> None:
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    monkeypatch.setattr(
+        "daydream.backends._transport.asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc),
+    )
+    stream = PiBackend(model="fixture").execute(tmp_path, "close prompt")
+    assert isinstance(await anext(stream), RequestEvent)
+    assert not list(tmp_path.glob("daydream-pi-prompt-*"))
+    if after_spawn:
+        await anext(stream)
+        paths = list(tmp_path.glob("daydream-pi-prompt-*"))
+        assert len(paths) == 1
+        assert paths[0].read_text() == "close prompt"
+    await stream.aclose()
+    assert not list(tmp_path.glob("daydream-pi-prompt-*"))
+
+
+async def test_concurrent_prompt_attachments_survive_until_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = install_protocol_cli(tmp_path / "fixture", "pi", response_mode="block")
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
+    backend = PiBackend(model="fixture")
+
+    async def consume(prompt: str) -> None:
+        async for _ in backend.execute(tmp_path, prompt):
+            pass
+
+    tasks = [asyncio.create_task(consume(prompt)) for prompt in ("first invocation", "second invocation")]
+    try:
+        async with asyncio.timeout(5):
+            while len(fixture.read_observations()) < 2:
+                await asyncio.sleep(0.01)
+        paths = [Path(item["prompt_attachment"]) for item in fixture.read_observations()]
+        assert len(set(paths)) == 2
+        assert {path.read_text() for path in paths} == {"first invocation", "second invocation"}
+        tasks[0].cancel()
+        await asyncio.gather(tasks[0], return_exceptions=True)
+        remaining = [path for path in paths if path.exists()]
+        assert len(remaining) == 1
+        assert remaining[0].read_text() == "second invocation"
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert not any(path.exists() for path in paths)
+    assert backend._transports == []
+
+
+async def test_prompt_attachment_removed_even_if_teardown_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec",
+                        AsyncMock(return_value=make_mock_process_from_fixture("simple_text.jsonl")))
+    monkeypatch.setattr("daydream.backends.pi.teardown", AsyncMock(side_effect=RuntimeError("teardown failed")))
+    with pytest.raises(RuntimeError, match="teardown failed"):
+        async for _ in PiBackend(model="fixture").execute(tmp_path, "teardown prompt"):
+            pass
+    assert not list(tmp_path.glob("daydream-pi-prompt-*"))
+
+
+async def test_large_review_instructions_use_system_prompt_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = install_protocol_cli(tmp_path / "fixture", "pi")
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
+    instructions = "bounded review policy\n" + "x" * 3_690_129
+    requests = [event async for event in PiBackend(model="fixture").execute(
+        tmp_path, "Review source", review_instructions=instructions,
+    ) if isinstance(event, RequestEvent)]
+    observed = fixture.read_observations()[0]
+    assert requests[0].system_prompt is not None
+    assert instructions in requests[0].system_prompt
+    assert observed["content_arguments"]["--append-system-prompt"] == [{
+        "bytes": len(requests[0].system_prompt.encode()),
+        "sha256": hashlib.sha256(requests[0].system_prompt.encode()).hexdigest(),
+    }]
+    assert observed["argv_bytes"] < 32_768
+
+
+async def test_prompt_attachment_removed_after_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    create_file = tempfile.NamedTemporaryFile
+
+    def failing_file(*args: Any, **kwargs: Any) -> Any:
+        opened = create_file(*args, **kwargs)
+        monkeypatch.setattr(opened, "write", MagicMock(side_effect=OSError("disk full")))
+        return opened
+
+    monkeypatch.setattr("daydream.backends.pi.tempfile.NamedTemporaryFile", failing_file)
+    with pytest.raises(OSError, match="disk full"):
+        async for _ in PiBackend(model="fixture").execute(tmp_path, "write failure prompt"):
+            pass
+    assert not list(tmp_path.glob("daydream-pi-prompt-*"))
