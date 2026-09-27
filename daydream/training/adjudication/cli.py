@@ -1130,10 +1130,11 @@ def _load_import_index_runs(
     db_path = index_root / "index.db"
     if not db_path.is_file():
         return {}
-    from daydream.training.adjudication.materialize import _query_runs_readonly
+    from daydream.training.adjudication.materialize import _readonly_query
 
     available = {
-        str(row["session_id"]): row for row in _query_runs_readonly(db_path)
+        str(row["session_id"]): row
+        for row in _readonly_query(db_path, "SELECT * FROM runs")
     }
     eligible = {str(session["session_id"]) for session in sessions}
     missing = sorted(eligible - available.keys())
