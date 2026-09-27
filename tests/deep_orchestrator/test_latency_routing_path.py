@@ -17,6 +17,72 @@ from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig, Mute
 
+#: The pre-#732 ``.daydream/deep/`` artifact names for a forensic run, captured
+#: from the pre-change tree through this same stub scenario. ``latency-routing.json``
+#: is the one additive artifact issue #732 mandates (A12), so the gate subtracts it
+#: before comparing the two sides.
+_FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
+    "alternatives.json",
+    "arbiter-complete.marker",
+    "arbiter-input.json",
+    "coverage-receipts.json",
+    "coverage-stats.json",
+    "dedup-candidates.json",
+    "diagram.json",
+    "diagram.md",
+    "diff-key",
+    "intent.md",
+    "merged-items.json",
+    "review-output.md",
+    "stack-generic-records.json",
+    "stack-generic-review.md",
+    "stack-python-records.json",
+    "stack-python-review.md",
+    "stack-react-records.json",
+    "stack-react-review.md",
+    "stack-structure-records.json",
+    "stack-structure-review.md",
+})
+
+#: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the
+#: forensic path must reproduce it byte-for-byte (A12), never a re-ordered or
+#: re-shaped selection.
+_FORENSIC_BASELINE_ARBITER_INPUT: list[dict[str, object]] = [
+    {
+        "arb_id": 1,
+        "confidence": "MEDIUM",
+        "description": "Sample issue",
+        "evidence": "api.py:1",
+        "file": "api.py",
+        "line": 1,
+        "rationale": "stub",
+        "severity": "high",
+        "uid": "generic:1",
+    },
+    {
+        "arb_id": 2,
+        "confidence": "MEDIUM",
+        "description": "Sample issue",
+        "evidence": "api.py:1",
+        "file": "api.py",
+        "line": 1,
+        "rationale": "stub",
+        "severity": "high",
+        "uid": "python:1",
+    },
+    {
+        "arb_id": 3,
+        "confidence": "MEDIUM",
+        "description": "Sample issue",
+        "evidence": "api.py:1",
+        "file": "api.py",
+        "line": 1,
+        "rationale": "stub",
+        "severity": "high",
+        "uid": "react:1",
+    },
+]
+
 
 def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
     """Per-stack findings at three distinct ``(file, line)`` locations.
@@ -108,6 +174,94 @@ async def test_skipped_wonder_records_profile_signals_and_reason(
     assert record["profile"]["selected"] == "fast"
     assert record["risk"]["floors"] == []
     assert "fast" in record["wonder"]["reason"]
+
+
+async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """MH2 + A12: same artifacts, same effort values, same marker meaning."""
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    mute_side_effects()
+    config = make_config(
+        multi_stack_target,
+        latency_profile="forensic",
+        review_profile=independent_alternatives_profile(),
+    )
+    with anyio.fail_after(120):
+        assert await run(config) in (0, 1)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert (deep / "arbiter-complete.marker").exists()
+    assert not list(deep.glob("arbiter-group-*-input.json"))
+    # A12: the only artifact the profile work adds is the routing record.
+    assert {
+        path.name for path in deep.iterdir() if path.name != "latency-routing.json"
+    } == _FORENSIC_BASELINE_DEEP_ARTIFACTS
+    assert json.loads((deep / "arbiter-input.json").read_text()) == _FORENSIC_BASELINE_ARBITER_INPUT
+    record = read_routing_record(deep)
+    assert record["arbiter"]["sharded"] is False
+    assert [g["effort"] for g in record["arbiter"]["groups"]] == ["xhigh"]
+    assert record["wonder"]["effort"] == "high"
+
+
+async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A sharding profile with one co-located group still runs today's single xhigh call.
+
+    All selected records sit at ``api.py:1``, so ``partition_arbiter_targets``
+    returns one group and ``arbiter_plan`` takes the unsharded path. The arbiter
+    artifacts must therefore equal the forensic baseline's exactly, not merely
+    "also exist".
+    """
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    mute_side_effects()
+    config = make_config(
+        multi_stack_target,
+        latency_profile="balanced",
+        review_profile=independent_alternatives_profile(),
+    )
+    with anyio.fail_after(120):
+        assert await run(config) in (0, 1)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert json.loads((deep / "arbiter-input.json").read_text()) == _FORENSIC_BASELINE_ARBITER_INPUT
+    assert (deep / "arbiter-complete.marker").exists()
+    assert not list(deep.glob("arbiter-group-*-input.json"))
+    record = read_routing_record(deep)
+    assert record["arbiter"]["sharded"] is False
+    assert [g["effort"] for g in record["arbiter"]["groups"]] == ["xhigh"]
+
+
+async def test_forensic_resume_from_the_whole_block_marker_runs_no_arbiter_call(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """The documented `--start-at merge` contract still trusts arbiter-complete.marker."""
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    mute_side_effects()
+    base = dict(latency_profile="forensic", review_profile=independent_alternatives_profile())
+    with anyio.fail_after(120):
+        assert await run(make_config(multi_stack_target, **base)) in (0, 1)
+    stub.calls.clear()
+    with anyio.fail_after(60):
+        assert await run(make_config(multi_stack_target, start_at="merge", **base)) in (0, 1)
+    assert [c for c in stub.calls if "you are the arbiter" in c["prompt"].lower()] == []
+    assert (multi_stack_target / ".daydream" / "deep" / "arbiter-input.json").exists()
 
 
 async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_effort(
