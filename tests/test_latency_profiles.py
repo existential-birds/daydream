@@ -5,9 +5,18 @@ touches the filesystem, the clock, or the environment -- see MH3.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from daydream.deep.arbiter import partition_arbiter_targets
+from daydream.deep.artifacts import (
+    adjudication_complete_path,
+    arbiter_group_complete_path,
+    arbiter_group_input_path,
+    arbiter_group_verdicts_path,
+    arbiter_input_path,
+)
 from daydream.deep.latency import (
     ARBITER_EFFORTS,
     DEFAULT_LATENCY_PROFILE,
@@ -17,6 +26,7 @@ from daydream.deep.latency import (
     WONDER_ROUTES,
     DiffSignals,
     FindingSignals,
+    arbiter_plan,
     diff_signals,
     resolve_latency_profile,
     route_for,
@@ -207,3 +217,33 @@ def test_wonder_decision_is_pure_over_route_summary_tier_and_fold() -> None:
     # A5: the legacy trivial-diff gate survives only under forensic.
     assert wonder_decision(route_for("forensic", summary), summary, folded=False, tier="skip").outcome == "skip"
     assert wonder_decision(route_for("balanced", summary), summary, folded=False, tier="skip").outcome == "run"
+
+
+def test_two_or_more_groups_shard_and_escalate_per_group() -> None:
+    records = [_rec("py:1", "api.py", 1, "high"), _rec("go:1", "main.go", 2), _rec("rs:1", "lib.rs", 3)]
+    plan = arbiter_plan(route_for("balanced", summarize_risk(_signals(ROUTINE_DIFF))),
+                        partition_arbiter_targets(records, [0, 1, 2], edges={}, max_targets=3),
+                        records=records, contested=frozenset())
+    assert plan.sharded is True
+    efforts = {g.group_id: g.effort for g in plan.groups}
+    assert efforts == {"arbiter-group-0": "xhigh", "arbiter-group-1": "high", "arbiter-group-2": "high"}
+    assert "high" in plan.groups[0].reason
+
+
+def test_one_group_or_forensic_stays_unsharded_at_todays_effort() -> None:
+    records = [_rec("py:1", "api.py", 1, "high"), _rec("py:2", "api.py", 2)]
+    groups = partition_arbiter_targets(records, [0, 1], edges={}, max_targets=3)
+    fast = arbiter_plan(route_for("fast", summarize_risk(_signals(ROUTINE_DIFF))), groups,
+                        records=records, contested=frozenset())
+    assert fast.sharded is False and [g.effort for g in fast.groups] == ["xhigh"]
+    assert "unsharded" in (fast.reason or "")
+
+
+def test_group_artifact_paths_are_group_scoped_and_backward_compatible(tmp_path: Path) -> None:
+    dd = tmp_path / "deep"
+    dd.mkdir()
+    assert arbiter_group_input_path(dd, "arbiter-group-1").name == "arbiter-group-1-input.json"
+    assert arbiter_group_verdicts_path(dd, "arbiter-group-1").name == "arbiter-group-1-verdicts.json"
+    assert arbiter_group_complete_path(dd, "arbiter-group-1").name == "arbiter-group-1-complete.marker"
+    assert arbiter_input_path(dd).name == "arbiter-input.json"       # unchanged, MH2
+    assert adjudication_complete_path(dd).name == "arbiter-complete.marker"   # unchanged, MH2

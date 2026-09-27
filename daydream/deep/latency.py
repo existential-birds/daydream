@@ -6,8 +6,12 @@ Unknown profiles fail safe to the highest (forensic) route.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
+
+from daydream.deep.arbiter import ArbiterGroup
+from daydream.severity import SEVERITY_RANK, normalize_severity
 
 LatencyProfile = Literal["fast", "balanced", "forensic"]
 WonderRoute = Literal["skip", "medium", "high"]
@@ -167,6 +171,92 @@ def wonder_decision(
     raised = f" (raised by {', '.join(summary.floors)})" if summary.floors else ""
     return WonderDecision(
         "run", route.wonder, f"profile {route.profile} routes wonder to run at {route.wonder}{raised}"
+    )
+
+
+@dataclass(frozen=True)
+class PlannedGroup:
+    """One arbiter group's final identity, effort, and forcing reason."""
+
+    group_id: str
+    target_uids: tuple[str, ...]
+    effort: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ArbiterPlan:
+    """The arbiter's sharding decision: whether it shards and each group's effort."""
+
+    sharded: bool
+    groups: tuple[PlannedGroup, ...]
+    reason: str | None
+
+
+def _is_high_severity(record: dict[str, Any]) -> bool:
+    """Whether a record's severity is at or above high (absent/unknown is never high)."""
+    severity = normalize_severity(record.get("severity"))
+    return severity is not None and SEVERITY_RANK[severity] <= SEVERITY_RANK["high"]
+
+
+def group_effort(route: LatencyRoute, *, high_severity: bool, contested: bool) -> str:
+    """The effort for one sharded group: ``xhigh`` when a risk signal forces it, else the route.
+
+    Both sides are ranked through the :data:`ARBITER_EFFORTS` ladder, so the
+    result is the max of the route's floor and the group's own forcing signal.
+    """
+    escalation: ArbiterEffort = "xhigh" if (high_severity or contested) else "medium"
+    return _ladder_max(ARBITER_EFFORTS, route.arbiter_effort, escalation)
+
+
+def arbiter_plan(
+    route: LatencyRoute,
+    groups: Sequence[ArbiterGroup],
+    *,
+    records: list[dict[str, Any]],
+    contested: Collection[int],
+) -> ArbiterPlan:
+    """Shape the arbiter fan-out from the route and the already-selected targets.
+
+    Sharding is a property of the route: only a route that asks for it and has
+    more than one co-located group shards. Every other case -- forensic, or a
+    single group -- runs the unsharded path at today's ``xhigh`` with one planned
+    group built from the concatenated target order (A6). When sharded, each
+    group's effort is raised by that group's own high-severity or contested
+    signal, and its reason names the forcing signal (MH9).
+    """
+    if not (route.arbiter_sharded and len(groups) > 1):
+        uids = tuple(uid for group in groups for uid in group.target_uids)
+        return ArbiterPlan(
+            sharded=False,
+            groups=(
+                PlannedGroup(
+                    "arbiter-group-0",
+                    uids,
+                    _ladder_max(ARBITER_EFFORTS, route.arbiter_effort, "xhigh"),
+                    f"unsharded {route.profile} path (single arbiter call at xhigh)",
+                ),
+            ),
+            reason=f"unsharded {route.profile} path",
+        )
+
+    contested_set = set(contested)
+    planned: list[PlannedGroup] = []
+    for group in groups:
+        high_severity = any(_is_high_severity(records[i]) for i in group.target_indices)
+        is_contested = any(i in contested_set for i in group.target_indices)
+        effort = group_effort(route, high_severity=high_severity, contested=is_contested)
+        if high_severity:
+            forcing = "high severity"
+        elif is_contested:
+            forcing = "contested findings"
+        else:
+            forcing = "routine group"
+        planned.append(PlannedGroup(group.group_id, group.target_uids, effort, f"{group.group_id}: {forcing}"))
+    return ArbiterPlan(
+        sharded=True,
+        groups=tuple(planned),
+        reason=f"sharded {route.profile} path into {len(planned)} groups",
     )
 
 

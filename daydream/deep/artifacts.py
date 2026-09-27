@@ -115,8 +115,42 @@ def adjudication_complete_path(deep_dir_path: Path) -> Path:
     satisfies ``--start-at merge`` resume; do not rename the file without a
     migration. The symbol was renamed from ``arbiter_complete_path`` so the scope
     it actually proves (both passes) is not silently under-read as arbiter-only.
+    The per-group markers below are additive siblings: they gate reuse of the
+    sharded arbiter's own groups and never replace this whole-block marker.
     """
     return deep_dir_path / "arbiter-complete.marker"
+
+
+def arbiter_group_input_path(deep_dir_path: Path, group_id: str) -> Path:
+    """Scoped-arbiter input findings JSON for one sharded group (issue #732).
+
+    Group-scoped, additive sibling of :func:`arbiter_input_path`: the unsharded
+    path keeps ``arbiter-input.json`` exactly as before (MH2), while a sharded run
+    writes each planned group's slice to ``<group_id>-input.json``. The filename
+    is a sharded-arbiter resume input, not a whole-block prerequisite.
+    """
+    return deep_dir_path / f"{group_id}-input.json"
+
+
+def arbiter_group_verdicts_path(deep_dir_path: Path, group_id: str) -> Path:
+    """Scoped-arbiter verdicts JSON for one sharded group (issue #732).
+
+    Group-scoped, additive sibling of the shared rewrite path: the group's
+    arbiter verdicts, merged into the per-stack records once every group is
+    complete, so a resume can rerun only a group whose verdicts are absent.
+    """
+    return deep_dir_path / f"{group_id}-verdicts.json"
+
+
+def arbiter_group_complete_path(deep_dir_path: Path, group_id: str) -> Path:
+    """Completion marker for one sharded arbiter group (issue #732).
+
+    Group-scoped, additive sibling of :func:`adjudication_complete_path`: it
+    proves *this* group's verdicts are final and persisted, which lets a
+    ``--start-at merge`` resume rerun only the incomplete groups. It never
+    substitutes for the whole-block ``arbiter-complete.marker``.
+    """
+    return deep_dir_path / f"{group_id}-complete.marker"
 
 
 def dedup_candidates_path(deep_dir_path: Path) -> Path:
