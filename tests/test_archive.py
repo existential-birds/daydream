@@ -1620,19 +1620,21 @@ def _label_obs_columns(archive_dir: Path) -> set[str]:
         conn.close()
 
 
-def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
-    """Insert a label_observations row using the OLD DDL that lacks ``source``."""
+def _seed_legacy_label_row(
+    archive_dir: Path, session_id: str, ddl: str, observed_at: str
+) -> None:
+    """Insert a label_observations row using ``ddl`` (an older table shape)."""
     conn = sqlite3.connect(str(archive_dir / "index.db"))
     try:
         conn.execute("DROP TABLE IF EXISTS label_observations")
-        conn.execute(_OLD_LABEL_OBSERVATIONS_DDL)
+        conn.execute(ddl)
         conn.execute(
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 session_id,
-                "2026-01-01T00:00:00+00:00",
+                observed_at,
                 '["accepted"]',
                 "merged",
                 "v1",
@@ -1647,7 +1649,7 @@ def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
 def test_label_observations_source_column_migrates(tmp_path: Path) -> None:
     # Build schema, then replace the table with the OLD DDL (no `source`) + a legacy row.
     upsert_run(tmp_path, make_manifest(session_id="s-mig"))
-    _seed_legacy_label_observation(tmp_path, "s-mig")
+    _seed_legacy_label_row(tmp_path, "s-mig", _OLD_LABEL_OBSERVATIONS_DDL, "2026-01-01T00:00:00+00:00")
     assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
 
     # The production connection path must ALTER-ADD `source`.
@@ -3939,30 +3941,6 @@ CREATE TABLE IF NOT EXISTS label_observations (
 """
 
 
-def _seed_pre_reply_label_row(archive_dir: Path, session_id: str) -> None:
-    """Insert a label_observations row using the DDL that predates the four new columns."""
-    conn = sqlite3.connect(str(archive_dir / "index.db"))
-    try:
-        conn.execute("DROP TABLE IF EXISTS label_observations")
-        conn.execute(_PRE_REPLY_LABEL_DDL)
-        conn.execute(
-            "INSERT INTO label_observations "
-            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                session_id,
-                _LEGACY_ROW_OBSERVED_AT_SNAPSHOT,
-                '["accepted"]',
-                "merged",
-                "v1",
-                "sha1",
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def test_append_label_observation_persists_versions_and_digest(tmp_path: Path) -> None:
     _seed_one_run(tmp_path, "sess-1")
     ok = append_label_observation(
@@ -4011,7 +3989,7 @@ def test_human_rows_keep_precedence_over_newer_auto(tmp_path: Path) -> None:
 def test_migration_marks_legacy_rows(tmp_path: Path) -> None:
     """Pre-existing auto rows are marked legacy='legacy' and never mutated otherwise (M17/M22)."""
     _seed_one_run(tmp_path, "sess-legacy")
-    _seed_pre_reply_label_row(tmp_path, "sess-legacy")
+    _seed_legacy_label_row(tmp_path, "sess-legacy", _PRE_REPLY_LABEL_DDL, _LEGACY_ROW_OBSERVED_AT_SNAPSHOT)
 
     # The production connection path must ALTER-ADD the new columns and stamp history.
     upsert_run(tmp_path, make_manifest(session_id="sess-legacy-2"))

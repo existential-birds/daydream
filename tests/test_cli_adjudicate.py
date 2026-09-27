@@ -575,6 +575,19 @@ def test_cli_resume_state_rejects_existing_destination_before_download(
     assert not list(tmp_path.glob(".restored.*"))
 
 
+def _download_final_argv(
+    curation_id: str, snapshot_id: str, revision: str, destination: Path, hub_repo: str
+) -> list[str]:
+    return [
+        "download-final",
+        "--curation-id", curation_id,
+        "--snapshot-id", snapshot_id,
+        "--revision", revision,
+        "--destination", str(destination),
+        "--hub-repo", hub_repo,
+    ]
+
+
 def test_cli_download_final_installs_exact_success_revision(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -586,14 +599,10 @@ def test_cli_download_final_installs_exact_success_revision(
     published = publish_final_annotation_bundle(hub, bundle)
     destination = tmp_path / "downloaded"
 
-    assert handle_adjudicate([
-        "download-final",
-        "--curation-id", curation_id,
-        "--snapshot-id", published["final_snapshot_id"],
-        "--revision", published["hub_commit_sha"],
-        "--destination", str(destination),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
+    assert handle_adjudicate(_download_final_argv(
+        curation_id, published["final_snapshot_id"], published["hub_commit_sha"],
+        destination, hub.repo_id,
+    )) == 0
 
     assert sorted(path.name for path in destination.iterdir()) == published["files"]
     assert (destination / "_SUCCESS").is_file()
@@ -621,14 +630,10 @@ def test_cli_download_final_rejects_existing_destination_before_download(
     else:
         destination.symlink_to(bundle, target_is_directory=True)
 
-    assert handle_adjudicate([
-        "download-final",
-        "--curation-id", curation_id,
-        "--snapshot-id", published["final_snapshot_id"],
-        "--revision", published["hub_commit_sha"],
-        "--destination", str(destination),
-        "--hub-repo", hub.repo_id,
-    ]) == 1
+    assert handle_adjudicate(_download_final_argv(
+        curation_id, published["final_snapshot_id"], published["hub_commit_sha"],
+        destination, hub.repo_id,
+    )) == 1
     assert hub.downloaded_revision_log == []
     assert not list(tmp_path.glob(".downloaded.*"))
 
@@ -640,14 +645,9 @@ def test_cli_download_final_hub_failure_exits_1_without_partial_destination(
     hub = _wired_hub(monkeypatch)
     destination = tmp_path / "downloaded"
 
-    assert handle_adjudicate([
-        "download-final",
-        "--curation-id", "cur-1",
-        "--snapshot-id", "e" * 64,
-        "--revision", "f" * 40,
-        "--destination", str(destination),
-        "--hub-repo", hub.repo_id,
-    ]) == 1
+    assert handle_adjudicate(_download_final_argv(
+        "cur-1", "e" * 64, "f" * 40, destination, hub.repo_id,
+    )) == 1
     assert not destination.exists()
     assert not list(tmp_path.glob(".downloaded.*"))
 
