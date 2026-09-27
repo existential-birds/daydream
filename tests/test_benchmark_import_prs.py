@@ -490,21 +490,32 @@ def _set_anchor(
     return rec
 
 
+def _evidence_record(**over: Any) -> schema.EvidenceRecord:
+    """One canonical inline evidence record; ``over`` overrides the base fields."""
+    body = over.pop("body", "fix this")
+    fields: dict[str, Any] = {
+        "source_id": "github:inline_comment:1",
+        "kind": "inline_comment",
+        "database_id": 1,
+        "node_id": "DIFF_1",
+        "author": schema._EvidenceAuthor(login="alice", type="User"),
+        "body": body,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "created_at": _TS,
+        "updated_at": _TS,
+        "commit_id": head_sha,
+        "original_commit_id": head_sha,
+        "is_bot": False,
+        "url": "https://github.com/o/r/pull/101#discussion_r1",
+    }
+    fields.update(over)
+    return schema.EvidenceRecord(**fields)
+
+
 def _rec_dict(**over: Any) -> dict[str, Any]:
     """One canonical inline evidence dict (model_dump shape) for the projection hash."""
 
-    rec = schema.EvidenceRecord(
-        source_id="github:inline_comment:1",
-        kind="inline_comment",
-        database_id=1,
-        node_id="DIFF_1",
-        author=schema._EvidenceAuthor(login="alice", type="User"),
-        body="fix this",
-        body_sha256=hashlib.sha256(b"fix this").hexdigest(),
-        created_at=_TS,
-        updated_at=_TS,
-        commit_id=head_sha,
-        original_commit_id=head_sha,
+    rec = _evidence_record(
         path="a.py",
         original_path="a.py",
         line=4,
@@ -513,8 +524,6 @@ def _rec_dict(**over: Any) -> dict[str, Any]:
         original_start_line=4,
         subject_type="line",
         side="RIGHT",
-        is_bot=False,
-        url="https://github.com/o/r/pull/101#discussion_r1",
     )
     d = rec.model_dump(mode="json")
     d.update(over)
@@ -547,16 +556,7 @@ def _project_from_anchor(
                 version=1, status="derived", commit_id=anchor_commit,
                 path="old.py", start_line=4, end_line=5,
             )
-    rec = schema.EvidenceRecord(
-        source_id="github:inline_comment:1",
-        kind="inline_comment",
-        database_id=1,
-        node_id="DIFF_1",
-        author=schema._EvidenceAuthor(login="alice", type="User"),
-        body="fix this",
-        body_sha256=hashlib.sha256(b"fix this").hexdigest(),
-        created_at=_TS,
-        updated_at=_TS,
+    rec = _evidence_record(
         commit_id=rest_commit_id if rest_commit_id is not None else head_sha,
         original_commit_id=original_commit_id if original_commit_id is not None else head_sha,
         path="new.py",
@@ -568,8 +568,6 @@ def _project_from_anchor(
         subject_type="line",
         side="RIGHT",
         authoring_anchor=anchor,
-        is_bot=False,
-        url="https://github.com/o/r/pull/101#discussion_r1",
     )
     return gi._project_one(rec, head_sha=head_sha)
 
@@ -589,18 +587,20 @@ def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
 ) -> None:
 
     raw_body = raw_template.format(marker=finding_marker("f" * 64))
-    rec = schema.EvidenceRecord(
-        source_id="github:inline_comment:1", kind="inline_comment", database_id=1,
-        node_id="DIFF_1", author=schema._EvidenceAuthor(login="alice", type="User"),
-        body=raw_body, body_sha256=hashlib.sha256(raw_body.encode()).hexdigest(),
-        created_at=_TS, updated_at=_TS, commit_id="a" * 40, original_commit_id="a" * 40,
-        path="feature.py", line=2, original_line=2, subject_type="line", side="RIGHT",
+    rec = _evidence_record(
+        body=raw_body,
+        commit_id="a" * 40,
+        original_commit_id="a" * 40,
+        path="feature.py",
+        line=2,
+        original_line=2,
+        subject_type="line",
+        side="RIGHT",
         authoring_anchor=schema.AuthoringAnchor(
             version=1, status="derived", commit_id="a" * 40,
             path="feature.py", start_line=2, end_line=2,
         ),
-        outdated=outdated, is_bot=False,
-        url="https://github.com/o/r/pull/101#discussion_r1",
+        outdated=outdated,
     )
     before = rec.model_dump()
 
@@ -674,22 +674,11 @@ def test_file_level_comment_exactness_gated_by_anchor() -> None:
     """
 
     def project(anchor: schema.AuthoringAnchor | None) -> schema.Candidate:
-        rec = schema.EvidenceRecord(
-            source_id="github:inline_comment:1",
-            kind="inline_comment",
-            database_id=1,
-            node_id="DIFF_1",
-            author=schema._EvidenceAuthor(login="alice", type="User"),
-            body="fix this",
-            body_sha256=hashlib.sha256(b"fix this").hexdigest(),
-            created_at=_TS,
-            updated_at=_TS,
+        rec = _evidence_record(
             commit_id="a" * 40,
             original_commit_id="a" * 40,
             subject_type="file",
             authoring_anchor=anchor,
-            is_bot=False,
-            url="https://github.com/o/r/pull/101#discussion_r1",
         )
         return gi._project_one(rec, head_sha="a" * 40)
 
@@ -736,16 +725,7 @@ def test_derive_one_anchor_inverted_range_and_bad_path_fail_closed(
     """
 
     def rec(*, original_start_line: int, original_line: int) -> schema.EvidenceRecord:
-        return schema.EvidenceRecord(
-            source_id="github:inline_comment:1",
-            kind="inline_comment",
-            database_id=1,
-            node_id="DIFF_1",
-            author=schema._EvidenceAuthor(login="alice", type="User"),
-            body="fix this",
-            body_sha256=hashlib.sha256(b"fix this").hexdigest(),
-            created_at=_TS,
-            updated_at=_TS,
+        return _evidence_record(
             commit_id="a" * 40,
             original_commit_id="a" * 40,
             path="a.py",
@@ -754,8 +734,6 @@ def test_derive_one_anchor_inverted_range_and_bad_path_fail_closed(
             original_start_line=original_start_line,
             subject_type="line",
             side="RIGHT",
-            is_bot=False,
-            url="https://github.com/o/r/pull/101#discussion_r1",
         )
 
     mirror = tmp_path / "mirror.git"

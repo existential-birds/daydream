@@ -30,6 +30,23 @@ def _issue(package_id: str, *, state: str = "open", number: int = 7) -> dict[str
     }
 
 
+def _stub_existing_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    issues: list[dict[str, object]],
+    *,
+    create_failure: str,
+) -> None:
+    """Stub the issue listing and make any create attempt a test failure."""
+    monkeypatch.setattr(
+        git_ops, "gh_issue_list_strict", lambda *args, **kwargs: issues
+    )
+    monkeypatch.setattr(
+        git_ops,
+        "gh_issue_create",
+        lambda *args, **kwargs: pytest.fail(create_failure),
+    )
+
+
 def test_issue_body_preserves_complete_plan_markdown() -> None:
     plan = "# Plan\n\nKeep leading structure and final newline.\n"
 
@@ -117,15 +134,10 @@ def test_existing_closed_issue_is_reused_without_creating_a_duplicate(
 ) -> None:
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Complete plan\n", encoding="utf-8")
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_list_strict",
-        lambda *args, **kwargs: [_issue("reuse-handler", state="closed")],
-    )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_create",
-        lambda *args, **kwargs: pytest.fail("must not create a duplicate issue"),
+    _stub_existing_issue(
+        monkeypatch,
+        [_issue("reuse-handler", state="closed")],
+        create_failure="must not create a duplicate issue",
     )
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
@@ -151,15 +163,8 @@ def test_all_member_aliases_reconcile_a_regrouped_package(
         "old plan",
         member_aliases=("member:aaa", "member:bbb"),
     )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_list_strict",
-        lambda *args, **kwargs: [existing],
-    )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_create",
-        lambda *args, **kwargs: pytest.fail("must reuse complete alias coverage"),
+    _stub_existing_issue(
+        monkeypatch, [existing], create_failure="must reuse complete alias coverage"
     )
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
@@ -185,15 +190,8 @@ def test_partial_member_alias_overlap_fails_instead_of_creating_duplicate_work(
         "old plan",
         member_aliases=("member:shared",),
     )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_list_strict",
-        lambda *args, **kwargs: [existing],
-    )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_create",
-        lambda *args, **kwargs: pytest.fail("must not create overlapping work"),
+    _stub_existing_issue(
+        monkeypatch, [existing], create_failure="must not create overlapping work"
     )
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
@@ -218,15 +216,8 @@ def test_matching_package_marker_cannot_hide_stale_member_coverage(
         "old plan",
         member_aliases=("member:old",),
     )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_list_strict",
-        lambda *args, **kwargs: [existing],
-    )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_create",
-        lambda *args, **kwargs: pytest.fail("must not publish stale coverage"),
+    _stub_existing_issue(
+        monkeypatch, [existing], create_failure="must not publish stale coverage"
     )
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
@@ -252,15 +243,8 @@ def test_colliding_member_aliases_require_every_raw_fingerprint(
         member_aliases=("member:shared",),
         member_fingerprints=("raw-first",),
     )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_list_strict",
-        lambda *args, **kwargs: [existing],
-    )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_create",
-        lambda *args, **kwargs: pytest.fail("one alias cannot cover two members"),
+    _stub_existing_issue(
+        monkeypatch, [existing], create_failure="one alias cannot cover two members"
     )
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
@@ -364,18 +348,10 @@ def test_duplicate_package_markers_fail_closed(
 ) -> None:
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Complete plan\n", encoding="utf-8")
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_list_strict",
-        lambda *args, **kwargs: [
-            _issue("reuse-handler", number=2),
-            _issue("reuse-handler", number=3),
-        ],
-    )
-    monkeypatch.setattr(
-        git_ops,
-        "gh_issue_create",
-        lambda *args, **kwargs: pytest.fail("ambiguous state must not create"),
+    _stub_existing_issue(
+        monkeypatch,
+        [_issue("reuse-handler", number=2), _issue("reuse-handler", number=3)],
+        create_failure="ambiguous state must not create",
     )
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 

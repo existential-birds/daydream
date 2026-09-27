@@ -584,11 +584,7 @@ def _reply_definition(
 
 def _executable_line(sources: _SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` starts an executable statement."""
-    source = sources.read(file) or b""
-    try:
-        return is_executable_statement_line(language_for_path(file), source, line)
-    except Exception:
-        return False
+    return _language_line(sources, file, line, is_executable_statement_line)
 
 
 def _summary(elements: list[ElementCheck]) -> dict[str, int]:

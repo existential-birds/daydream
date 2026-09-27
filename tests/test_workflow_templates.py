@@ -51,6 +51,15 @@ def has_checkout(job: dict[str, Any]) -> bool:
     return any("actions/checkout" in s.get("uses", "") for s in job["steps"])
 
 
+def _dispatch_step(wf: dict[str, Any]) -> dict[str, Any]:
+    """Return the `dispatch` job step that triggers the review workflow."""
+    return next(
+        step
+        for step in job_steps(wf, "dispatch")
+        if "gh workflow run daydream-review.yml" in step.get("run", "")
+    )
+
+
 # Action-ref policy (all bot workflows, live + shipped): every non-local
 # `uses:` must resolve to a full commit SHA, never a mutable tag, branch,
 # expression, Docker reference, short hash, or non-hex revision, and must carry
@@ -92,11 +101,7 @@ def test_command_workflows_dispatch_approved_head() -> None:
     """The live trusted command workflow binds the PR head at approval time."""
     path = REPO_WORKFLOWS_DIR / "daydream-command.yml"
     wf = load_workflow(path)
-    dispatch = next(
-        step
-        for step in job_steps(wf, "dispatch")
-        if "gh workflow run daydream-review.yml" in step.get("run", "")
-    )
+    dispatch = _dispatch_step(wf)
 
     assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
     assert '-f approved_head_sha="$HEAD_SHA"' in dispatch["run"]
@@ -113,11 +118,7 @@ def test_template_command_workflow_dispatches_approved_head() -> None:
     """The packaged command template binds the PR head at approval time."""
     path = TEMPLATES_DIR / "daydream-command.yml"
     wf = load_workflow(path)
-    dispatch = next(
-        step
-        for step in job_steps(wf, "dispatch")
-        if "gh workflow run daydream-review.yml" in step.get("run", "")
-    )
+    dispatch = _dispatch_step(wf)
     assert "approved_head_sha" in dispatch["run"]
     assert "approved_at" in dispatch["run"]
     assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
@@ -142,11 +143,7 @@ def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: P
     """
     wf = load_workflow(wf_path)
     steps = job_steps(wf, "dispatch")
-    dispatch = next(
-        step
-        for step in steps
-        if "gh workflow run daydream-review.yml" in step.get("run", "")
-    )
+    dispatch = _dispatch_step(wf)
     ack = next(step for step in steps if step.get("name") == "Acknowledge with eyes reaction")
 
     # The ack must follow the dispatch in step order.
@@ -530,11 +527,7 @@ def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:
     untouched by the new commands.
     """
     wf = load_workflow(wf_path)
-    dispatch = next(
-        step
-        for step in job_steps(wf, "dispatch")
-        if "gh workflow run daydream-review.yml" in step.get("run", "")
-    )
+    dispatch = _dispatch_step(wf)
 
     assert dispatch["env"]["COMMAND"] == "${{ steps.match.outputs.command }}"
     assert '-f command="$COMMAND"' in dispatch["run"]

@@ -404,47 +404,6 @@ def _admit_runtime_tool_name(value: Any) -> tuple[str | None, EvidenceDiagnostic
     return admitted, None
 
 
-def _admit_bool(value: Any, context: str) -> tuple[bool | None, EvidenceDiagnostic | None]:
-    """Admit an optional real ``bool`` (``type(value) is bool``)."""
-    if value is None:
-        return None, None
-    if type(value) is not bool:
-        return None, EvidenceDiagnostic(_DIAG_BOOL_TYPE, context)
-    return value, None
-
-
-def _admit_nonnegative_int(value: Any, context: str) -> tuple[int | None, EvidenceDiagnostic | None]:
-    """Admit an optional exact ``int`` in ``[0, 2**63-1]`` (bool rejected)."""
-    if value is None:
-        return None, None
-    if isinstance(value, bool) or type(value) is not int:
-        return None, EvidenceDiagnostic(_DIAG_INT_TYPE, context)
-    if not 0 <= value <= _INT64_MAX:
-        return None, EvidenceDiagnostic(_DIAG_INT_RANGE, context)
-    return value, None
-
-
-def _admit_finite_float(value: Any, context: str) -> tuple[float | None, EvidenceDiagnostic | None]:
-    """Admit an optional finite ``float`` (bool rejected; NaN/inf rejected)."""
-    if value is None:
-        return None, None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None, EvidenceDiagnostic(_DIAG_FLOAT_TYPE, context)
-    result = float(value)
-    if not math.isfinite(result):
-        return None, EvidenceDiagnostic(_DIAG_FLOAT_NOT_FINITE, context)
-    return result, None
-
-
-def _admit_literal(value: Any, allowed: tuple[str, ...], context: str) -> tuple[str | None, EvidenceDiagnostic | None]:
-    """Admit one exact case-sensitive closed-mode member."""
-    if value is None:
-        return None, None
-    if value in allowed:
-        return value, None
-    return None, EvidenceDiagnostic(_DIAG_LITERAL, context)
-
-
 def _admit_native_unix_ms(value: Any) -> tuple[int | None, EvidenceDiagnostic | None]:
     """Admit a strict native Unix-millisecond timestamp.
 
@@ -527,27 +486,37 @@ class _AdmissionBase:
 
 
 def _require_bool(value: Any, field: str) -> None:
-    admitted, diagnostic = _admit_bool(value, field)
-    if diagnostic is not None:
-        raise ValueError(f"{field}: {diagnostic.code}")
+    """Reject a non-``bool`` value at construction."""
+    if value is None or type(value) is bool:
+        return
+    raise ValueError(f"{field}: {_DIAG_BOOL_TYPE}")
 
 
 def _require_nonnegative_int(value: Any, field: str) -> None:
-    admitted, diagnostic = _admit_nonnegative_int(value, field)
-    if diagnostic is not None:
-        raise ValueError(f"{field}: {diagnostic.code}")
+    """Reject a non-``int`` or out-of-range value at construction."""
+    if value is None:
+        return
+    if isinstance(value, bool) or type(value) is not int:
+        raise ValueError(f"{field}: {_DIAG_INT_TYPE}")
+    if not 0 <= value <= _INT64_MAX:
+        raise ValueError(f"{field}: {_DIAG_INT_RANGE}")
 
 
 def _require_finite_float(value: Any, field: str) -> None:
-    admitted, diagnostic = _admit_finite_float(value, field)
-    if diagnostic is not None:
-        raise ValueError(f"{field}: {diagnostic.code}")
+    """Reject a non-finite or non-numeric value at construction."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field}: {_DIAG_FLOAT_TYPE}")
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{field}: {_DIAG_FLOAT_NOT_FINITE}")
 
 
 def _require_literal(value: Any, allowed: tuple[str, ...], field: str) -> None:
-    admitted, diagnostic = _admit_literal(value, allowed, field)
-    if diagnostic is not None:
-        raise ValueError(f"{field}: {diagnostic.code}")
+    """Reject a value outside ``allowed`` at construction."""
+    if value is None or value in allowed:
+        return
+    raise ValueError(f"{field}: {_DIAG_LITERAL}")
 
 
 @dataclass(frozen=True)

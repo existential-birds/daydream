@@ -40,7 +40,11 @@ from daydream.deep.artifacts import (
     test_verdict_path,
 )
 from daydream.deep.records import stamp_item_uids
-from daydream.deep.scope_issues import _resolve_changed_files, enforce_authorized_fix_footprint
+from daydream.deep.scope_issues import (
+    ScopeEnforcementResult,
+    _resolve_changed_files,
+    enforce_authorized_fix_footprint,
+)
 from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import BreakLoop, Stop
@@ -904,6 +908,27 @@ def _round_rollback_snapshot(state: FixCycleState, work: WorkContext) -> Worktre
     )
 
 
+def _enforce_footprint(
+    ctx: FlowContext,
+    state: FixCycleState,
+    *,
+    phase: str,
+    round_number: int | None,
+) -> ScopeEnforcementResult:
+    """Restore unauthorized state and return the enforced footprint result."""
+    return enforce_authorized_fix_footprint(
+        ctx.work,
+        state.stable_ref,
+        state.footprint,
+        preexisting_untracked=state.preexisting_untracked,
+        preexisting_gitlinks=state.preexisting_gitlinks,
+        phase=phase,
+        round_number=round_number,
+        file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
+        auth=ctx.github_execution.auth,
+    )
+
+
 def _strict_scope_and_scrub(
     ctx: FlowContext,
     state: FixCycleState,
@@ -963,17 +988,7 @@ def _strict_scope_and_scrub(
             },
             sort_keys=True,
         )
-    enforced = enforce_authorized_fix_footprint(
-        ctx.work,
-        state.stable_ref,
-        state.footprint,
-        preexisting_untracked=state.preexisting_untracked,
-        preexisting_gitlinks=state.preexisting_gitlinks,
-        phase=phase,
-        round_number=round_number,
-        file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
-        auth=ctx.github_execution.auth,
-    )
+    enforced = _enforce_footprint(ctx, state, phase=phase, round_number=round_number)
     scrub_smart_quotes_changed_files(
         ctx.work.repo,
         sorted(enforced.retained_paths),
@@ -992,17 +1007,7 @@ def _enforce_terminal_confinement(
 ) -> str | None:
     """Restore all out-of-run/protected state and durably audit a failed exit."""
     try:
-        enforce_authorized_fix_footprint(
-            ctx.work,
-            state.stable_ref,
-            state.footprint,
-            preexisting_untracked=state.preexisting_untracked,
-            preexisting_gitlinks=state.preexisting_gitlinks,
-            phase=phase,
-            round_number=round_number,
-            file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
-            auth=ctx.github_execution.auth,
-        )
+        _enforce_footprint(ctx, state, phase=phase, round_number=round_number)
         key = EvidenceKey(
             _capture_full_delta_key(ctx.work, state),
             state.footprint.policy_revision,

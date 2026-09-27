@@ -191,11 +191,11 @@ def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]
     Mirrors the ``pr_review._parse_hunks`` contract: ``(new_start,
     new_start + count - 1)`` for each hunk, in diff order.
     """
-    ranges: list[tuple[int, int]] = []
-    for info in parsed.values():
-        for hunk in info["hunks"]:
-            ranges.append((hunk["new_start"], hunk["new_end"]))
-    return ranges
+    return [
+        pair
+        for per_file in head_side_ranges_by_file(parsed).values()
+        for pair in per_file
+    ]
 
 
 def head_side_ranges_by_file(parsed: dict[str, dict[str, Any]]) -> dict[str, list[tuple[int, int]]]:

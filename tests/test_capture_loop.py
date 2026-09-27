@@ -106,6 +106,23 @@ def _scripted_review_backend(issue: dict[str, Any]) -> PhaseDispatchBackend:
     )
 
 
+def _issue(*, line: int) -> dict[str, Any]:
+    """A scripted review issue citing ``main.py`` at ``line``."""
+    return {
+        "id": 1,
+        "title": "Module lacks a rollback barrier",
+        "description": "No `quiescent_rollback_barrier` guards this module",
+        "recommendation": "Introduce a `quiescent_rollback_barrier`",
+        "severity": "medium",
+        "confidence": "HIGH",
+        "files": ["main.py"],
+        "file": "main.py",
+        "line": line,
+        "rationale": "",
+        "evidence": f"main.py:{line}",
+    }
+
+
 async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     feature_branch_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -127,19 +144,7 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     place exercises the file-level fallback this test guards.
     """
     out = tmp_path / "findings.json"
-    issue = {
-        "id": 1,
-        "title": "Module lacks a rollback barrier",
-        "description": "No `quiescent_rollback_barrier` guards this module",
-        "recommendation": "Introduce a `quiescent_rollback_barrier`",
-        "severity": "medium",
-        "confidence": "HIGH",
-        "files": ["main.py"],
-        "file": "main.py",
-        "line": 9,
-        "rationale": "",
-        "evidence": "main.py:9",
-    }
+    issue = _issue(line=9)
     with _review_run_env(
         feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh
     ) as config:
@@ -172,19 +177,7 @@ async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
     inline on the cited line.
     """
     out = tmp_path / "findings.json"
-    issue = {
-        "id": 1,
-        "title": "Module lacks a rollback barrier",
-        "description": "No `quiescent_rollback_barrier` guards this module",
-        "recommendation": "Introduce a `quiescent_rollback_barrier`",
-        "severity": "medium",
-        "confidence": "HIGH",
-        "files": ["main.py"],
-        "file": "main.py",
-        "line": 1,
-        "rationale": "",
-        "evidence": "main.py:1",
-    }
+    issue = _issue(line=1)
     with _review_run_env(
         feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh
     ) as config:
