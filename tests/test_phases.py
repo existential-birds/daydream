@@ -3880,19 +3880,12 @@ def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
     assert deep == archive_run_dir / "deep"
 
 
-def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path: Path) -> None:
+def test_resolve_handoff_paths_inplace_uses_live_target_dir(
+    tmp_path: Path, make_work: Callable[..., WorkContext]
+) -> None:
     """In-place: artifact references stay under recorder.target_dir."""
 
-    work = WorkContext(
-        repo=tmp_path,
-        source=tmp_path,
-        base_branch="main",
-        base_sha="DEADBEEF",
-        head_branch="feat/x",
-        head_sha="CAFEBABE",
-        is_ephemeral=False,
-        run_id="20260101000000-deadbeef",
-    )
+    work = make_work(tmp_path)
 
     class _Recorder:
         target_dir = tmp_path
@@ -3913,7 +3906,9 @@ def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path: Path) -> N
     assert deep == tmp_path / ".daydream" / "deep"
 
 
-def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path: Path) -> None:
+def test_resolve_handoff_paths_returns_paths_even_when_files_missing(
+    tmp_path: Path, make_work: Callable[..., WorkContext]
+) -> None:
     """Trajectory ref is set even though the recorder has not flushed yet.
 
     The old behavior gated artifact refs on ``is_file()`` / ``is_dir()``,
@@ -3923,16 +3918,7 @@ def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path: P
     reference unconditionally.
     """
 
-    work = WorkContext(
-        repo=tmp_path,
-        source=tmp_path,
-        base_branch="main",
-        base_sha="DEADBEEF",
-        head_branch="feat/x",
-        head_sha="CAFEBABE",
-        is_ephemeral=False,
-        run_id="20260101000000-deadbeef",
-    )
+    work = make_work(tmp_path)
 
     class _Recorder:
         target_dir = tmp_path

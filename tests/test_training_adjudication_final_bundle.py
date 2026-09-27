@@ -9,11 +9,9 @@ without touching the Hub.
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import _get_connection
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import run_canonical_harvest
@@ -29,28 +27,11 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import seed_index_dispositions
+from tests.harness.adjudication import policy_binding, seed_index_dispositions
 from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
 _SOURCE = "b" * 40
-_POLICY_BINDING: dict[str, Any] = {
-    "schema_version": "2",
-    "policy_digest": "1" * 64,
-    "policy_version": "production-v1",
-    "allow_copyleft": ["owner/repo"],
-    "exclusions_digest": "2" * 64,
-    "resolved_decisions_digest": "3" * 64,
-    "distribution_digest": "4" * 64,
-}
-_CURATION_ID = derive_curation_id(
-    _SOURCE,
-    _POLICY_BINDING["policy_digest"],
-    _POLICY_BINDING["policy_version"],
-    frozenset(_POLICY_BINDING["allow_copyleft"]),
-    _POLICY_BINDING["exclusions_digest"],
-    _POLICY_BINDING["resolved_decisions_digest"],
-    _POLICY_BINDING["distribution_digest"],
-)
+_POLICY_BINDING, _CURATION_ID = policy_binding(_SOURCE)
 _PIN = {**_CANONICAL_PIN, "curation_id": _CURATION_ID, "sanitized_hub_commit": _SOURCE}
 
 

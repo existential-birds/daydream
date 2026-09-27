@@ -4,8 +4,33 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
+from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import _get_connection
+
+
+def policy_binding(source: str) -> tuple[dict[str, Any], str]:
+    """The v2 policy-binding dict and its derived curation id for ``source``."""
+    binding: dict[str, Any] = {
+        "schema_version": "2",
+        "policy_digest": "1" * 64,
+        "policy_version": "production-v1",
+        "allow_copyleft": ["owner/repo"],
+        "exclusions_digest": "2" * 64,
+        "resolved_decisions_digest": "3" * 64,
+        "distribution_digest": "4" * 64,
+    }
+    curation_id = derive_curation_id(
+        source,
+        binding["policy_digest"],
+        binding["policy_version"],
+        frozenset(binding["allow_copyleft"]),
+        binding["exclusions_digest"],
+        binding["resolved_decisions_digest"],
+        binding["distribution_digest"],
+    )
+    return binding, curation_id
 
 
 def make_hydrated_sqlite_index(

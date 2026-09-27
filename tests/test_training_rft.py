@@ -11,22 +11,11 @@ propagation on missing identity / scalar thresholds.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from daydream.training.rft import RftConfig, run_rft
-
-
-@dataclass(frozen=True)
-class FrozenRftInputs:
-    """A frozen replay corpus plus the identity fields the records carry."""
-
-    path: Path
-    base_sha: str
-    head_sha: str
-    diff: str
 
 
 def _record(rid: str, **overrides: object) -> dict[str, object]:
@@ -56,19 +45,14 @@ def _write_corpus(tmp_path: Path, records: list[dict[str, object]]) -> Path:
 
 
 @pytest.fixture()
-def frozen_rft_inputs(tmp_path: Path) -> FrozenRftInputs:
-    return FrozenRftInputs(
-        path=_write_corpus(tmp_path, [_record("r1"), _record("r2")]),
-        base_sha="a" * 40,
-        head_sha="b" * 40,
-        diff="diff --git a/f.py b/f.py\n",
-    )
+def frozen_rft_inputs(tmp_path: Path) -> Path:
+    return _write_corpus(tmp_path, [_record("r1"), _record("r2")])
 
 
-def test_winners_byte_identical_on_rerun(frozen_rft_inputs: FrozenRftInputs, tmp_path: Path) -> None:
-    cfg_a = RftConfig(inputs=frozen_rft_inputs.path, seed=11, rubric_version="2026.08.29-1",
+def test_winners_byte_identical_on_rerun(frozen_rft_inputs: Path, tmp_path: Path) -> None:
+    cfg_a = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
                       output_dir=tmp_path / "a")
-    cfg_b = RftConfig(inputs=frozen_rft_inputs.path, seed=11, rubric_version="2026.08.29-1",
+    cfg_b = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
                       output_dir=tmp_path / "b")
     w1 = run_rft(cfg_a)
     w2 = run_rft(cfg_b)
@@ -77,9 +61,9 @@ def test_winners_byte_identical_on_rerun(frozen_rft_inputs: FrozenRftInputs, tmp
     assert w1.records, "expected at least one winner from a well-formed corpus"
 
 
-def test_filter_threshold_reads_breakdown(frozen_rft_inputs: FrozenRftInputs, tmp_path: Path) -> None:
+def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Path) -> None:
     cfg = RftConfig(
-        inputs=frozen_rft_inputs.path,
+        inputs=frozen_rft_inputs,
         seed=11,
         rubric_version="2026.08.29-1",
         output_dir=tmp_path / "c",
@@ -93,7 +77,7 @@ def test_filter_threshold_reads_breakdown(frozen_rft_inputs: FrozenRftInputs, tm
 
 
 def test_spec_axes_match_score_trajectory_breakdown_fields(
-    frozen_rft_inputs: FrozenRftInputs, tmp_path: Path
+    frozen_rft_inputs: Path, tmp_path: Path
 ) -> None:
     """Stage-boundary contract: allowed spec axes are the breakdown's actual attribute names."""
     # "correctness" is not a field of score_trajectory's RewardBreakdown — the real
@@ -101,14 +85,14 @@ def test_spec_axes_match_score_trajectory_breakdown_fields(
     # config time (fail closed), and the real axis name must filter.
     with pytest.raises(TypeError, match="unknown axis"):
         RftConfig(
-            inputs=frozen_rft_inputs.path,
+            inputs=frozen_rft_inputs,
             seed=11,
             rubric_version="v",
             output_dir=tmp_path / "axis-bogus",
             min_breakdown={"correctness": 0.5},
         )
     cfg = RftConfig(
-        inputs=frozen_rft_inputs.path,
+        inputs=frozen_rft_inputs,
         seed=11,
         rubric_version="v",
         output_dir=tmp_path / "axis-real",
@@ -120,11 +104,11 @@ def test_spec_axes_match_score_trajectory_breakdown_fields(
         assert min(w.breakdown.correctness_per_finding) >= 0.5
 
 
-def test_scalar_threshold_is_rejected(frozen_rft_inputs: FrozenRftInputs, tmp_path: Path) -> None:
+def test_scalar_threshold_is_rejected(frozen_rft_inputs: Path, tmp_path: Path) -> None:
     # M12: the filter threshold names axes, never a bare scalar.
     with pytest.raises(TypeError, match="min_breakdown"):
         RftConfig(
-            inputs=frozen_rft_inputs.path,
+            inputs=frozen_rft_inputs,
             seed=11,
             rubric_version="v",
             output_dir=tmp_path / "d",
@@ -138,8 +122,8 @@ def test_missing_identity_fails_closed_naming_the_record(tmp_path: Path) -> None
         run_rft(RftConfig(inputs=path, seed=11, rubric_version="v", output_dir=tmp_path / "e"))
 
 
-def test_winners_header_stamps_provenance(frozen_rft_inputs: FrozenRftInputs, tmp_path: Path) -> None:
-    result = run_rft(RftConfig(inputs=frozen_rft_inputs.path, seed=11, rubric_version="2026.08.29-1",
+def test_winners_header_stamps_provenance(frozen_rft_inputs: Path, tmp_path: Path) -> None:
+    result = run_rft(RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
                                output_dir=tmp_path / "f", model_id="test-model"))
     payload = json.loads(result.winners_path.read_text())
     header = payload["header"]

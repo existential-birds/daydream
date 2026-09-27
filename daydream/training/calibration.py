@@ -278,8 +278,6 @@ def _load_inputs(
     config: CalibrationConfig, record_ids: list[str]
 ) -> tuple[dict[str, bool], dict[str, dict[str, float]]]:
     """Join gold labels and intrinsic breakdowns onto the corpus by record_id."""
-    _gate(config.gold_labels.exists(), f"missing gold labels at {config.gold_labels}")
-    _gate(config.breakdowns.exists(), f"missing breakdowns at {config.breakdowns}")
     gold_raw = json.loads(config.gold_labels.read_text())
     _gate(isinstance(gold_raw, dict), f"{config.gold_labels}: gold labels must be an object keyed by record_id")
     known_ids = set(record_ids)
@@ -494,10 +492,6 @@ def _load_stage0_scores(
     record and every record must have a score — no partial join. When
     ``config.model_digest`` is set, every score must carry the same digest.
     """
-    _gate(
-        config.stage0_scores.exists(),  # type: ignore[union-attr]
-        f"missing stage-0 scores at {config.stage0_scores}",
-    )
     raw = json.loads(config.stage0_scores.read_text())  # type: ignore[union-attr]
     _gate(
         isinstance(raw, dict),

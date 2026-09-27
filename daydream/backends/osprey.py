@@ -399,32 +399,29 @@ class OspreyBackend:
             "--observation-budget-admission-bytes",
             str(_OSPREY_OBSERVATION_ADMISSION_BYTES),
         ]
+
+        def add_value(flag: str, value: object | None) -> None:
+            if value is not None:
+                args.extend([flag, str(value)])
+
         if self.persona:
             args.extend(["--persona", self.persona])
         if self.toolset:
             args.extend(["--toolset", self.toolset])
         if self._model_override:
             args.extend(["--model", self._model_override])
-        if self.temperature is not None:
-            args.extend(["--temperature", str(self.temperature)])
-        if self.atif_output is not None:
-            args.extend(["--atif-output", str(self.atif_output)])
+        add_value("--temperature", self.temperature)
+        add_value("--atif-output", self.atif_output)
         if self.atif_system_prompt_plaintext:
             args.append("--atif-system-prompt-plaintext")
         if self.immutable_runtime_surface:
             args.append("--immutable-runtime-surface")
-        if max_turns is not None:
-            args.extend(["--max-turns", str(max_turns)])
-        if self.turn_timeout is not None:
-            args.extend(["--turn-timeout", str(self.turn_timeout)])
-        if self.stream_idle_timeout_secs is not None:
-            args.extend(["--stream-idle-timeout-secs", str(self.stream_idle_timeout_secs)])
-        if self.streaming_timeout_secs is not None:
-            args.extend(["--streaming-timeout-secs", str(self.streaming_timeout_secs)])
-        if self.empty_completion_threshold is not None:
-            args.extend(["--empty-completion-threshold", str(self.empty_completion_threshold)])
-        if self.driver_max_retries is not None:
-            args.extend(["--driver-max-retries", str(self.driver_max_retries)])
+        add_value("--max-turns", max_turns)
+        add_value("--turn-timeout", self.turn_timeout)
+        add_value("--stream-idle-timeout-secs", self.stream_idle_timeout_secs)
+        add_value("--streaming-timeout-secs", self.streaming_timeout_secs)
+        add_value("--empty-completion-threshold", self.empty_completion_threshold)
+        add_value("--driver-max-retries", self.driver_max_retries)
 
         if read_only:
             args.append("--read-only")
@@ -441,10 +438,6 @@ class OspreyBackend:
             args.append("--sandbox")
         for root in self.allowed_roots:
             args.extend(["--allowed-root", root])
-
-        def add_value(flag: str, value: object | None) -> None:
-            if value is not None:
-                args.extend([flag, str(value)])
 
         if self.compress_context is not None:
             args.append(f"--compress-context={str(self.compress_context).lower()}")

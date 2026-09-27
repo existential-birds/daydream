@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from daydream.archive.hydrate import HubDownloadError, HydrationError, PublicDestinationError
-from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.training.adjudication.final_bundle import FINAL_IDENTITY_FILES, final_snapshot_id
 from daydream.training.adjudication.publish import (
     download_final_annotation_bundle,
@@ -18,6 +17,7 @@ from daydream.training.adjudication.publish import (
     resume_annotation_state,
 )
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+from tests.harness.adjudication import policy_binding
 
 # M6: production manifests always pin index_revision (materialize writes it),
 # so the Hub-verified 40-hex branch — not the synthetic digest fallback — is
@@ -690,24 +690,7 @@ def test_publish_and_resume_refuse_public_repository(tmp_path: Path) -> None:
 
 def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
     source = "a" * 40
-    binding: dict[str, Any] = {
-        "schema_version": "2",
-        "policy_digest": "1" * 64,
-        "policy_version": "production-v1",
-        "allow_copyleft": ["owner/repo"],
-        "exclusions_digest": "2" * 64,
-        "resolved_decisions_digest": "3" * 64,
-        "distribution_digest": "4" * 64,
-    }
-    curation_id = derive_curation_id(
-        source,
-        binding["policy_digest"],
-        binding["policy_version"],
-        frozenset(binding["allow_copyleft"]),
-        binding["exclusions_digest"],
-        binding["resolved_decisions_digest"],
-        binding["distribution_digest"],
-    )
+    binding, curation_id = policy_binding(source)
     root = tmp_path / "final"
     root.mkdir()
     snapshot_id = "b" * 64
