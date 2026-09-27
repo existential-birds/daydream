@@ -6,11 +6,18 @@ import pytest
 
 from daydream import cli
 from daydream.training.adjudication import cli as adjudication_cli
+from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.final_bundle import final_snapshot_id
+from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import append_observation
 from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.publish import AnnotationHubClient, publish_final_annotation_bundle
 from daydream.training.corpus_projection.identity import record_id
+from daydream.training.labeler_versions import (
+    ADJUDICATION_LABELER_VERSION,
+    REPLY_CLASSIFIER_VERSION,
+    RUBRIC_SCHEMA_VERSION,
+)
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 from tests.test_training_adjudication_publish import _final_bundle
 
@@ -167,10 +174,8 @@ def test_adjudicate_show_lists_queue_and_progress(tmp_path: Path, capsys: pytest
     assert "ambiguous" in out and "unanswered" in out
 
 
-def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
-    """Hydrated index + state dir with a built queue, one human decision, and
-    a digest-pinned preview ledger (export harvest input)."""
-
+def _built_queue(tmp_path: Path) -> tuple[Path, Path, list[dict[str, object]]]:
+    """Build the hydrated-index queue shared by the adjudication seed helpers."""
     root = tmp_path
     state = tmp_path / "adj"
     _write_sessions(root)
@@ -178,6 +183,14 @@ def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
         ["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
     ) == 0
     queue = json.loads((state / "queue.json").read_text())
+    return root, state, queue
+
+
+def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
+    """Hydrated index + state dir with a built queue, one human decision, and
+    a digest-pinned preview ledger (export harvest input)."""
+
+    root, state, queue = _built_queue(tmp_path)
     record_id = str(queue[0]["record_id"])
     assert cli._handle_corpus_command(
         ["adjudicate", "label", "--state-dir", str(state), "--record-id", record_id,
@@ -191,13 +204,7 @@ def _seed_with_conflict(tmp_path: Path) -> tuple[Path, Path]:
     """State dir where two records each have two disagreeing human raters;
     the first record's conflict is older than the second's."""
 
-    root = tmp_path
-    state = tmp_path / "adj"
-    _write_sessions(root)
-    assert cli._handle_corpus_command(
-        ["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
-    ) == 0
-    queue = json.loads((state / "queue.json").read_text())
+    root, state, queue = _built_queue(tmp_path)
     obs_path = state / "observations.jsonl"
     older_record, newer_record = queue[0], queue[1]
     common = {
@@ -302,16 +309,6 @@ def test_adjudicate_build_preserves_observations_and_is_idempotent(tmp_path: Pat
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
     assert len(queue) == 2
 
-
-# ---- snapshot pipeline verbs (issue #1055, task 6) ----
-
-from daydream.training.adjudication.cli import handle_adjudicate  # noqa: E402
-from daydream.training.adjudication.materialize import run_materialize  # noqa: E402
-from daydream.training.labeler_versions import (  # noqa: E402
-    ADJUDICATION_LABELER_VERSION,
-    REPLY_CLASSIFIER_VERSION,
-    RUBRIC_SCHEMA_VERSION,
-)
 
 _PIN_ARGS = [
     "--curation-id", "cur-1",

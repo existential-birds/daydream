@@ -116,18 +116,8 @@ def test_loader_resolves_sibling_verifier_core() -> None:
 
 
 def test_client_builder_threads_http_seam() -> None:
-    calls = []
-
-    class Fake:
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            calls.append(1)
-            content = '{"match": false, "confidence": 0.2, "reasoning": "n"}'
-            body = {"choices": [{"message": {"content": content}}]}
-            return type("R", (), {"status_code": 200, "text": "ok",
-                                  "json": lambda self: body})()
-    env = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
-           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9"}
-    client = _build_calibration_client(env, http=Fake())
+    fake, calls = _scripted_http([{"match": False, "confidence": 0.2, "reasoning": "n"}])
+    client = _build_calibration_client(_env(), http=fake)
     raw = asyncio.run(client.complete_json(user="<p>"))
     assert calls == [1]                      # the fake seam was used, not a real socket
     assert raw == {"match": False, "confidence": 0.2, "reasoning": "n"}
@@ -170,20 +160,12 @@ def test_judge_pairs_makes_exactly_72_calls() -> None:
 
     sr = _load_judge_template()
     pairs = _load_fixture()
-    calls = []
-
-    class Fake:
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            calls.append(1)
-            content = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
-            body = {"choices": [{"message": {"content": content}}]}
-            return type("R", (), {"status_code": 200, "text": "ok",
-                                  "json": lambda self: body})()
-    client = sr.OpenAIJudgeClient("k", "m", base_url="http://127.0.0.1:9", http=Fake())
+    fake, calls = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
+    client = sr.OpenAIJudgeClient("k", "m", base_url="http://127.0.0.1:9", http=fake)
     per_pair = _judge_pairs(sr, client, pairs, attempts=3)
     assert len(per_pair) == 24
     assert all(len(runs) == 3 for runs in per_pair)
-    assert len(calls) == 72
+    assert calls[0] == 72
     assert all(r.match is True and r.confidence == 0.9 for runs in per_pair for r in runs)
 
 

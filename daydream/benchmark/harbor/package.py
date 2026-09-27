@@ -7,7 +7,6 @@ import hashlib
 import importlib.metadata
 import importlib.resources
 import json
-import re
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -74,11 +73,6 @@ def validate_wheel(wheel_path: Path, *, daydream_version: str) -> WheelInfo:
         raise PackageError(
             f"wheel {wheel_path.name!r} is missing or mismatched; expected {expected!r}",
             remediation="run `uv build --wheel` and pass the wheel for the running Daydream version",
-        )
-    if not re.fullmatch(r"daydream-[^-]+-py3-none-any\.whl", wheel_path.name):
-        raise PackageError(
-            f"wheel {wheel_path.name!r} is not the expected Daydream wheel {expected!r}",
-            remediation="run `uv build --wheel`",
         )
     try:
         digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()

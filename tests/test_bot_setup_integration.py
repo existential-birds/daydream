@@ -20,6 +20,41 @@ from tests.harness.rsa import generate_rsa_pem
 from tests.harness.scripts import cli_main
 
 
+def _install_workflows(
+    repo: Path,
+    *,
+    drift: tuple[str, str, str] | None = None,
+    unique: bool = True,
+    message: str = "add workflows",
+    push: bool = True,
+) -> Path:
+    """Write every packaged workflow template into *repo*, optionally applying
+    one exact-anchor *drift*, then commit (and by default push to origin/main).
+
+    By default the drift anchor must occur exactly once (an outdated/lost
+    anchor fails loudly here rather than silently writing an unchanged
+    template); pass ``unique=False`` for a repeated token where only the first
+    occurrence is intentionally replaced. Returns the workflow directory so
+    callers can inspect the landed files.
+    """
+    workflows_dir = repo / ".github/workflows"
+    workflows_dir.mkdir(parents=True)
+    for template in workflow_template_files():
+        content = template.read_text()
+        if drift is not None and template.name == drift[0]:
+            if unique:
+                assert content.count(drift[1]) == 1, f"{template.name}: anchor no longer present"
+            else:
+                assert drift[1] in content, f"{template.name}: anchor no longer present"
+            content = content.replace(drift[1], drift[2], 1)
+        (workflows_dir / template.name).write_text(content)
+    _git(repo, "add", ".github/workflows")
+    _commit(repo, message)
+    if push:
+        _git(repo, "push", "origin", "main")
+    return workflows_dir
+
+
 def test_callback_listener_captures_code_then_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
     """The callback seam exchanges the manifest code for creds + slug."""
     monkeypatch.setattr(
@@ -171,14 +206,7 @@ def test_verify_healthy_install_passes_all_checks(
 
     # _check_workflows resolves files via `git show origin/<base>:<path>`, so the
     # commit must be pushed to the bare remote (origin).
-    wf = repo_with_origin / ".github/workflows"
-    wf.mkdir(parents=True)
-
-    for template in workflow_template_files():
-        (wf / template.name).write_text(template.read_text())
-    _git(repo_with_origin, "add", ".github/workflows")
-    _commit(repo_with_origin, "add workflows")
-    _git(repo_with_origin, "push", "origin", "main")
+    _install_workflows(repo_with_origin, message="add workflows")
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     assert result.ok is True
@@ -190,22 +218,17 @@ def test_verify_healthy_install_passes_all_checks(
 def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """A present but stale workflow — one that lost the approval gate — fails the doctor."""
 
-    workflows_dir = repo_with_origin / ".github/workflows"
-    workflows_dir.mkdir(parents=True)
-    for template in workflow_template_files():
-        content = template.read_text()
-        if template.name == "daydream-review.yml":
-            # Pre-gate shape: auto-triggers on PR open instead of binding an
-            # approved head, re-opening the unapproved-review hole.
-            content = content.replace(
-                "on:\n  workflow_dispatch:",
-                "on:\n  pull_request:\n    types: [opened, ready_for_review]\n  workflow_dispatch:",
-                1,
-            )
-        (workflows_dir / template.name).write_text(content)
-    _git(repo_with_origin, "add", ".github/workflows")
-    _commit(repo_with_origin, "add stale workflows")
-    _git(repo_with_origin, "push", "origin", "main")
+    _install_workflows(
+        repo_with_origin,
+        # Pre-gate shape: auto-triggers on PR open instead of binding an
+        # approved head, re-opening the unapproved-review hole.
+        drift=(
+            "daydream-review.yml",
+            "on:\n  workflow_dispatch:",
+            "on:\n  pull_request:\n    types: [opened, ready_for_review]\n  workflow_dispatch:",
+        ),
+        message="add stale workflows",
+    )
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     workflows_check = next(check for check in result.checks if check.name == "workflows")
@@ -246,17 +269,9 @@ def test_verify_rejects_workflow_that_loosens_the_command_contract(
     stops binding the resolved live head to ``approved_head_sha``.
     """
 
-    workflows_dir = repo_with_origin / ".github/workflows"
-    workflows_dir.mkdir(parents=True)
-    for template in workflow_template_files():
-        content = template.read_text()
-        if template.name == target:
-            assert content.count(old) == 1, f"{target}: anchor no longer present"
-            content = content.replace(old, new, 1)
-        (workflows_dir / template.name).write_text(content)
-    _git(repo_with_origin, "add", ".github/workflows")
-    _commit(repo_with_origin, "add loosened workflows")
-    _git(repo_with_origin, "push", "origin", "main")
+    _install_workflows(
+        repo_with_origin, drift=(target, old, new), message="add loosened workflows"
+    )
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     workflows_check = next(check for check in result.checks if check.name == "workflows")
@@ -273,18 +288,14 @@ def test_verify_accepts_customized_workflow_with_intact_gate(
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
     fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
 
-    workflows_dir = repo_with_origin / ".github/workflows"
-    workflows_dir.mkdir(parents=True)
-    for template in workflow_template_files():
-        content = template.read_text()
-        if template.name == "daydream-review.yml":
-            # Backend-variant customization: the gate (approved_head_sha input,
-            # no pull_request trigger) is intact, credential/backend swapped.
-            content = content.replace("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-        (workflows_dir / template.name).write_text(content)
-    _git(repo_with_origin, "add", ".github/workflows")
-    _commit(repo_with_origin, "add customized workflows")
-    _git(repo_with_origin, "push", "origin", "main")
+    _install_workflows(
+        repo_with_origin,
+        # Backend-variant customization: the gate (approved_head_sha input,
+        # no pull_request trigger) is intact, credential/backend swapped.
+        drift=("daydream-review.yml", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
+        unique=False,
+        message="add customized workflows",
+    )
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     workflows_check = next(check for check in result.checks if check.name == "workflows")
@@ -301,15 +312,13 @@ def test_land_workflows_warns_before_overwriting_customized_workflow(
 ) -> None:
     """land_workflows warns that customization is unsupported before replacing it."""
 
-    workflows_dir = repo_with_origin / ".github/workflows"
-    workflows_dir.mkdir(parents=True)
-    for template in workflow_template_files():
-        content = template.read_text()
-        if template.name == "daydream-review.yml":
-            content = content.replace("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-        (workflows_dir / template.name).write_text(content)
-    _git(repo_with_origin, "add", ".github/workflows")
-    _commit(repo_with_origin, "add customized workflows")
+    workflows_dir = _install_workflows(
+        repo_with_origin,
+        drift=("daydream-review.yml", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
+        unique=False,
+        message="add customized workflows",
+        push=False,
+    )
 
     warnings: list[str] = []
     monkeypatch.setattr("daydream.bot_setup.print_warning", lambda console, msg: warnings.append(msg))

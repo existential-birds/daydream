@@ -422,43 +422,13 @@ def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:
     assert steps["per-stack-parse"].phase_key == "parse"
 
 
-def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
-    """The sweep toggle resolves from the profile pipeline (M8), not config tiers."""
-
-    def _ctx(config: RunConfig, review_profile: "ResolvedProfile | None" = None) -> FlowContext:
-        work = WorkContext(
-            repo=tmp_path,
-            source=tmp_path,
-            base_branch="main",
-            base_sha="",
-            head_branch=None,
-            head_sha="",
-            is_ephemeral=False,
-            run_id="test",
-        )
-        return FlowContext(
-            config=config,
-            work=work,
-            registry=Registry(),
-            review_profile=review_profile,
-            data={},
-        )
-
-    # Default profile pipeline (uncovered_sweep_enabled True) -> on.
-    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)))) is True
-    # A profile disabling uncovered_sweep_enabled -> off.
-    off = _profile_with_pipeline(uncovered_sweep_enabled=False)
-    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)), review_profile=off)) is False
-    # Merge/fix resumes always disable the sweep.
-    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), start_at="merge"))) is False
-
-
-def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> None:
-    """The sweep numeric caps resolve from the profile pipeline (already host-clamped)."""
-
+def _flow_ctx(
+    root: Path, config: RunConfig, review_profile: "ResolvedProfile | None" = None
+) -> FlowContext:
+    """Build a standard FlowContext over *root* for the sweep resolution tests."""
     work = WorkContext(
-        repo=tmp_path,
-        source=tmp_path,
+        repo=root,
+        source=root,
         base_branch="main",
         base_sha="",
         head_branch=None,
@@ -466,28 +436,43 @@ def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> No
         is_ephemeral=False,
         run_id="test",
     )
-
-    profile = _profile_with_pipeline(uncovered_sweep_max_files=3, uncovered_sweep_min_hunk_lines=6)
-    ctx = FlowContext(
-        config=RunConfig(target=str(tmp_path)),
+    return FlowContext(
+        config=config,
         work=work,
         registry=Registry(),
-        review_profile=profile,
+        review_profile=review_profile,
         data={},
     )
+
+
+def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
+    """The sweep toggle resolves from the profile pipeline (M8), not config tiers."""
+
+    # Default profile pipeline (uncovered_sweep_enabled True) -> on.
+    assert _uncovered_sweep_enabled(_flow_ctx(tmp_path, RunConfig(target=str(tmp_path)))) is True
+    # A profile disabling uncovered_sweep_enabled -> off.
+    off = _profile_with_pipeline(uncovered_sweep_enabled=False)
+    assert _uncovered_sweep_enabled(
+        _flow_ctx(tmp_path, RunConfig(target=str(tmp_path)), off)
+    ) is False
+    # Merge/fix resumes always disable the sweep.
+    assert _uncovered_sweep_enabled(
+        _flow_ctx(tmp_path, RunConfig(target=str(tmp_path), start_at="merge"))
+    ) is False
+
+
+def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> None:
+    """The sweep numeric caps resolve from the profile pipeline (already host-clamped)."""
+
+    profile = _profile_with_pipeline(uncovered_sweep_max_files=3, uncovered_sweep_min_hunk_lines=6)
+    ctx = _flow_ctx(tmp_path, RunConfig(target=str(tmp_path)), profile)
     assert _uncovered_sweep_max_files(ctx) == 3
     assert _uncovered_sweep_min_hunk_lines(ctx) == 6
 
     # Clamped pipeline values (review_profile._parse_pipeline HOST_CAPS) are
     # what the orchestrator sees: a sub-floor max_files is clamped up to 1.
     clamped = _profile_with_pipeline(uncovered_sweep_max_files=0)
-    ctx_clamped = FlowContext(
-        config=RunConfig(target=str(tmp_path)),
-        work=work,
-        registry=Registry(),
-        review_profile=clamped,
-        data={},
-    )
+    ctx_clamped = _flow_ctx(tmp_path, RunConfig(target=str(tmp_path)), clamped)
     assert _uncovered_sweep_max_files(ctx_clamped) == 1
 
 

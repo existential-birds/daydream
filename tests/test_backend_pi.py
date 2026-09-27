@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -1822,8 +1823,6 @@ async def test_large_prompt_uses_private_attachment_until_child_exits(
 async def test_prompt_attachment_removed_after_spawn_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_spawn: bool,
 ) -> None:
-    import tempfile
-
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setenv("PATH", "")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
@@ -1848,8 +1847,6 @@ async def test_prompt_attachment_removed_after_spawn_failure(
 async def test_prompt_attachment_generator_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_spawn: bool,
 ) -> None:
-    import tempfile
-
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     monkeypatch.setattr(
@@ -1903,8 +1900,6 @@ async def test_concurrent_prompt_attachments_survive_until_cancelled(
 async def test_prompt_attachment_removed_even_if_teardown_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tempfile
-
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec",
                         AsyncMock(return_value=make_mock_process_from_fixture("simple_text.jsonl")))
@@ -1938,8 +1933,6 @@ async def test_large_review_instructions_use_system_prompt_file(
 async def test_prompt_attachment_removed_after_write_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tempfile
-
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     create_file = tempfile.NamedTemporaryFile
 

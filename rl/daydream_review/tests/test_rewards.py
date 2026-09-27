@@ -546,14 +546,9 @@ async def test_missing_run_dir_scores_zero(
 async def test_green_suite_records_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
     task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, patch=_REAL_PATCH)
     assert task.data.test_command == "python -m unittest discover -q"
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, task=task, edit=_CALC_FIXED, patch=_REAL_PATCH)
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["suite_non_regression"] == 1.0
@@ -652,13 +647,7 @@ fixture_manifest_path: Path,
 async def test_red_suite_records_no_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_BROKEN, patch=_REAL_PATCH)
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, edit=_CALC_BROKEN, patch=_REAL_PATCH)
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["suite_non_regression"] == 0.0
@@ -668,13 +657,7 @@ async def test_suite_result_is_telemetry_not_reward(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
 ) -> None:
     """A green suite no longer sums into the reward: only intrinsic_composite remains."""
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, patch=_REAL_PATCH)
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, edit=_CALC_FIXED, patch=_REAL_PATCH)
 
     assert set(trace.rewards) == {"intrinsic_composite"}
     assert "fix_tests_pass" not in trace.rewards
@@ -739,6 +722,36 @@ async def test_suite_rejects_protected_test_path_changes(
     await task.score(trace, runtime)
 
     _assert_gate_held(trace)
+
+
+async def _score(
+    tmp_path: Path,
+    fixture_manifest_path: Path,
+    runtime: SubprocessRuntime,
+    *,
+    edit: str | None = None,
+    patch: str | None = None,
+    commit: bool = False,
+    commit_patch: bool = False,
+    task: DaydreamReviewTask | None = None,
+    archive_root: Path | None = None,
+    seal_ok: bool = False,
+) -> vf.Trace:
+    """Stage a standard repo/archive task and run its real ``task.score``.
+
+    ``task``/``archive_root`` let a caller pre-arrange state; otherwise both are built.
+    """
+    archive_root = archive_root or tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True, exist_ok=True)
+    task = task or _task(fixture_manifest_path)
+    repo = _stage_repo(
+        tmp_path / "repo", task.data.head_sha, edit=edit, patch=patch, commit=commit, commit_patch=commit_patch
+    )
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+    if seal_ok:
+        trace.info["daydream_seal_ok"] = True
+    await task.score(trace, runtime)
+    return trace
 
 
 async def _score_fail_closed(
@@ -1050,13 +1063,7 @@ async def test_no_fixes_records_no_non_regression(
     after a rollout that changed nothing. Reading it as "a fix landed" would hand
     out a free green non-regression reading off the still-green baseline, for free, forever.
     """
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=patch, commit=commit)
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, patch=patch, commit=commit)
 
     assert trace.metrics["fixes_applied"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
@@ -1262,13 +1269,7 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
     A fix-detection rule that only looked at working-tree changes would score
     every successful rollout as "no fix" — the exact inverse mistake.
     """
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, edit=_CALC_FIXED, commit=True)
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["suite_non_regression"] == 1.0
@@ -1288,15 +1289,7 @@ async def test_committed_daydream_artifacts_not_a_fix(
     artifacts (force-added, since the fixture ignores them) must record
     ``suite_non_regression`` 0.0.
     """
-    archive_root = tmp_path / "archive"
-    (archive_root / "runs").mkdir(parents=True)
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(
-        tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH, commit=True, commit_patch=True
-    )
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-
-    await task.score(trace, runtime)
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, patch=_REAL_PATCH, commit=True, commit_patch=True)
 
     assert trace.metrics["fixes_applied"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
@@ -1418,14 +1411,11 @@ async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
     (``seal_verified`` 0.0, zero intrinsic, no honest non-regression) instead
     of scoring the run at full trust.
     """
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)  # staged copy carries no seal.json
-    task = _task(fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    trace = _trace(task, archive_root=archive_root, repo_path=repo)
-    trace.info["daydream_seal_ok"] = True  # the harness claims it sealed the run
-
-    await task.score(trace, runtime)
+    archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
+    trace = await _score(
+        tmp_path, fixture_manifest_path, runtime,
+        task=task, archive_root=archive_root, edit=_CALC_FIXED, commit=True, seal_ok=True,
+    )
 
     assert trace.metrics["seal_verified"] == 0.0
     assert trace.rewards["intrinsic_composite"] == 0.0

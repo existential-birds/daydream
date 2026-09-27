@@ -1300,6 +1300,18 @@ def _load_transfer_intents(stage: Path, *, owner: dict[str, Any] | None = None) 
     return result
 
 
+def _write_transfer_intents(stage: Path, *, stage_id: str, intents: list[dict[str, Any]]) -> None:
+    """Persist the complete, fsynced intents.json payload for a transfer stage."""
+    _atomic_json(
+        stage / "intents.json",
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "stage_id": stage_id,
+            "intents": intents,
+        },
+    )
+
+
 def _record_transfer_intent(stage: Path, *, path: Path, relative: str, expected: ArtifactManifestEntry) -> None:
     owner = _load_json(stage / "stage-owner.json")
     intents = _load_transfer_intents(stage, owner=owner)
@@ -1312,14 +1324,7 @@ def _record_transfer_intent(stage: Path, *, path: Path, relative: str, expected:
             "expected": asdict(expected),
         }
     )
-    _atomic_json(
-        stage / "intents.json",
-        {
-            "schema_version": _SCHEMA_VERSION,
-            "stage_id": owner["stage_id"],
-            "intents": intents,
-        },
-    )
+    _write_transfer_intents(stage, stage_id=owner["stage_id"], intents=intents)
 
 
 def _append_conflict(
@@ -1484,14 +1489,7 @@ def _remove_manifested(
             }
             for index, entry in enumerate(file_entries)
         ]
-        _atomic_json(
-            stage / "intents.json",
-            {
-                "schema_version": _SCHEMA_VERSION,
-                "stage_id": owner["stage_id"],
-                "intents": intents,
-            },
-        )
+        _write_transfer_intents(stage, stage_id=owner["stage_id"], intents=intents)
     for entry in file_entries:
         _transfer_entry(
             root / entry.path,
