@@ -368,7 +368,6 @@ class HttpxOtlpTransport:
         self._client_factory = httpx.AsyncClient
         self._state = "OPEN"
         self._lock = threading.Lock()
-        self._portal_cm: Any = None
         self._portal: Any = None
         self._client: Any = None
         self._portal_cm = anyio.from_thread.start_blocking_portal()
@@ -508,18 +507,17 @@ class HttpxOtlpTransport:
             client, portal_cm = self._client, self._portal_cm
             self._client = None
         try:
-            if portal_cm is not None and client is not None:
+            if portal_cm is not None:
                 # Close the owned AsyncClient through the portal BEFORE the
                 # portal stops: the pool's keep-alive connections must be
                 # closed by the client itself, and once the portal's loop
                 # stops it can no longer run async cleanup. A close failure
                 # is logged and never blocks the exactly-once portal stop.
-                try:
-                    self._portal.call(client.aclose)
-                except Exception:  # noqa: BLE001 - sanitized transport failure seam
-                    _logger.warning("Failed to close owned OTLP HTTP client cleanly", exc_info=True)
-                portal_cm.__exit__(None, None, None)
-            elif portal_cm is not None:
+                if client is not None:
+                    try:
+                        self._portal.call(client.aclose)
+                    except Exception:  # noqa: BLE001 - sanitized transport failure seam
+                        _logger.warning("Failed to close owned OTLP HTTP client cleanly", exc_info=True)
                 portal_cm.__exit__(None, None, None)
         finally:
             self._state = "CLOSED"

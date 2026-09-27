@@ -183,21 +183,6 @@ def _deep_shard_max_files(config: RunConfig) -> int:
     return _deep_shard_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
 
 
-def _deep_shard_max_bytes(config: RunConfig) -> int:
-    """Resolve the per-shard max changed-byte bound (issue #731)."""
-    return _deep_shard_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES)
-
-
-def _deep_shard_fanout_cap(config: RunConfig) -> int:
-    """Resolve the total shard fan-out cap (issue #731)."""
-    return _deep_shard_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP)
-
-
-def _deep_shard_frontier_max(config: RunConfig) -> int:
-    """Resolve the per-shard cross-shard frontier cap (issue #731)."""
-    return _deep_shard_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX)
-
-
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
     """Resolve the uncovered-file sweep toggle from the profile pipeline (issue #309).
 
@@ -666,9 +651,9 @@ def _prepare_review_stacks(
             stacks,
             diff,
             max_files=_deep_shard_max_files(config),
-            max_bytes=_deep_shard_max_bytes(config),
-            fanout_cap=_deep_shard_fanout_cap(config),
-            frontier_max=_deep_shard_frontier_max(config),
+            max_bytes=_deep_shard_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES),
+            fanout_cap=_deep_shard_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP),
+            frontier_max=_deep_shard_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX),
             graph=import_graph,
         )
 
