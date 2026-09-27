@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
     from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
-    from daydream.deep.latency import LatencyRoute, ProfileResolution, RiskSummary
+    from daydream.deep.latency import ArbiterPlan, LatencyRoute, ProfileResolution, RiskSummary
     from daydream.deep.prompts import DeepDiffBoundInfo
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
@@ -234,6 +234,22 @@ class DeepState:
                 "ProfileResolution or None",
             ),
         )
+
+    @property
+    def arbiter_plan(self) -> ArbiterPlan | None:
+        value: object | None = self._data.get("arbiter_plan")
+        if value is None:
+            return None
+        from daydream.deep.latency import ArbiterPlan
+
+        return cast(
+            ArbiterPlan,
+            self._check("arbiter_plan", value, ArbiterPlan, "ArbiterPlan or None"),
+        )
+
+    @arbiter_plan.setter
+    def arbiter_plan(self, value: ArbiterPlan) -> None:
+        self._data["arbiter_plan"] = value
 
     @property
     def log(self) -> str:

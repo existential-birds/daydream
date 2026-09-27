@@ -86,6 +86,10 @@ class StubBackend:
         # verdict), simulating a truncated/lazy Opus response so a test can assert
         # the selected high-severity record fails open and survives (#175).
         self.arbiter_omit_verdicts: bool = False
+        # When set to a sharded group id (e.g. ``arbiter-group-1``), the arbiter
+        # branch raises for that group only, so a test can force one group's
+        # failure and observe fail-open recording plus resume behaviour (#732).
+        self.arbiter_fail_group: str | None = None
         # #232 knobs: per-stack parse override (drives suppression selection with a
         # distinct file/severity/confidence per stack, so a HIGH and a borderline
         # LOW finding coexist at NON-colliding locations -> uncontested), and the
@@ -792,7 +796,14 @@ class StubBackend:
         # points at, echoes every arb_id back with keep=true, and stamps the
         # description so the arbitrated finding is observable downstream.
         if "you are the arbiter" in pl:
-            in_match = re.search(r"listed in (\S+arbiter-input\.json)", prompt)
+            # #732: the sharded fan-out names one ``<group_id>-input.json`` per
+            # call while the unsharded path keeps naming ``arbiter-input.json``;
+            # the branch reads whichever file the prompt points at.
+            in_match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
+            if self.arbiter_fail_group is not None and in_match is not None:
+                group_match = re.search(r"(arbiter-group-\d+)", in_match.group(1))
+                if group_match is not None and group_match.group(1) == self.arbiter_fail_group:
+                    raise RuntimeError(f"stub: forced failure of {self.arbiter_fail_group}")
             findings: list[dict[str, Any]] = []
             if in_match is not None and not self.arbiter_omit_verdicts:
                 arb_inputs = json.loads(Path(in_match.group(1)).read_text())
