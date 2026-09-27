@@ -66,12 +66,12 @@ def _count_prompt_budget_reads(monkeypatch: pytest.MonkeyPatch) -> Callable[[], 
 
 
 def _captured_artifact(
-    tmp_path: Path,
+    tmp_path: Path, *, backend: ScriptedBackend | None = None
 ) -> tuple[Path, ScriptedBackend, PreparedSanctionedInputs]:
     """A captured exact input file with its backend and prepared input set."""
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("captured", encoding="utf-8")
-    backend = ScriptedBackend()
+    backend = backend or ScriptedBackend()
     prepared = prepare_sanctioned_inputs(backend, tmp_path, {"artifact": artifact}, read_only=False)
     return artifact, backend, prepared
 
@@ -436,9 +436,6 @@ async def test_run_agent_revalidates_sanctioned_inputs_before_backend_entry(
 
 @pytest.mark.anyio
 async def test_run_agent_revalidates_sanctioned_input_before_retry(tmp_path: Path) -> None:
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-
     class RetryableFailure(RuntimeError):
         retryable = True
 
@@ -450,9 +447,9 @@ async def test_run_agent_revalidates_sanctioned_input_before_retry(tmp_path: Pat
                     raise RetryableFailure("retry")
                 yield event
 
-    backend = MutatingBackend(retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0)
-    prepared = prepare_sanctioned_inputs(
-        backend, tmp_path, {"artifact": artifact}, read_only=False
+    artifact, backend, prepared = _captured_artifact(
+        tmp_path,
+        backend=MutatingBackend(retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0),
     )
 
     with pytest.raises(SanctionedInputUnavailable, match="changed"):
@@ -464,11 +461,8 @@ async def test_run_agent_revalidates_sanctioned_input_before_retry(tmp_path: Pat
 async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes(
     tmp_path: Path,
 ) -> None:
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-    backend = ScriptedBackend(sandbox=False)
-    prepared = prepare_sanctioned_inputs(
-        backend, tmp_path, {"artifact": artifact}, read_only=False
+    artifact, backend, prepared = _captured_artifact(
+        tmp_path, backend=ScriptedBackend(sandbox=False)
     )
     setattr(backend, "sandbox", True)
 

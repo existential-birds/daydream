@@ -29,8 +29,9 @@ from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.calibration import run_calibration
 from daydream.training.corpus_projection import projector
 from daydream.training.corpus_projection.projector import build_frozen_corpus
+from tests.harness.adjudication import write_sessions_index
 from tests.test_calibration import _build_fixture, _config
-from tests.test_cli_adjudicate import _seed_adjudicated, _write_sessions
+from tests.test_cli_adjudicate import _seed_adjudicated
 from tests.test_corpus_projection import _config_for, _write_annotations_snapshot, _write_bundle
 from tests.test_training_adjudication_canonical import _PIN, _index
 from tests.test_training_adjudication_final_bundle import seed_final_bundle_state
@@ -167,7 +168,7 @@ class TestWriterCharacterization:
             assert stat.S_IMODE((config.out_dir / name).stat().st_mode) == 0o644
 
     def test_queue_bytes_and_private_mode(self, tmp_path: Path) -> None:
-        _write_sessions(tmp_path)
+        write_sessions_index(tmp_path)
         state = tmp_path / "adj"
         assert cli._handle_corpus_command(
             ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
@@ -416,7 +417,7 @@ class TestCandidateKnobs:
 class TestQueueKnobs:
     def test_queue_calls_the_primitive_and_keeps_0600(self, tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
-        _write_sessions(tmp_path)
+        write_sessions_index(tmp_path)
         state = tmp_path / "adj"
         calls = _instrument(monkeypatch, "daydream.training.adjudication.cli")
         assert cli._handle_corpus_command(
@@ -430,7 +431,7 @@ class TestQueueKnobs:
 
     def test_queue_failure_keeps_prior_bytes_and_leaves_no_temp(self, tmp_path: Path,
                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
-        _write_sessions(tmp_path)
+        write_sessions_index(tmp_path)
         state = tmp_path / "adj"
         assert cli._handle_corpus_command(
             ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]

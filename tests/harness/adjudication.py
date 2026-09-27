@@ -70,6 +70,39 @@ def make_hydrated_sqlite_index(
     return root
 
 
+def write_sessions_index(root: Path, *, profiles: list[str] | None = None) -> Path:
+    """Write a two-session hydrated ``sessions.jsonl`` under *root* and return *root*.
+
+    One ambiguous + one unanswered finding across two sessions, in the shape
+    the adjudication queue builder consumes. ``profiles`` overrides the
+    per-session profile (default: both ``pr_review``).
+    """
+    session_profiles = profiles or ["pr_review", "pr_review"]
+    root.mkdir(parents=True, exist_ok=True)
+    sessions = [
+        {
+            "session_id": "s1", "trajectory_id": "s1-traj", "segment_id": "s1-seg",
+            "resolutions": [{
+                "fingerprint": "fp-b", "disposition": "unanswered",
+                "evidence": [{"reply_id": "r1", "body_sha256": "abc"}],
+                "evidence_digest": "d2" * 32, "profile": session_profiles[0], "stack": "python",
+            }],
+        },
+        {
+            "session_id": "s2", "trajectory_id": "s2-traj", "segment_id": "s2-seg",
+            "resolutions": [{
+                "fingerprint": "fp-a", "disposition": "ambiguous",
+                "evidence": [{"reply_id": "r2", "body_sha256": "abd"}],
+                "evidence_digest": "d1" * 32, "profile": session_profiles[1], "stack": "python",
+            }],
+        },
+    ]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    return root
+
+
 def seed_index_dispositions(root: Path) -> None:
     """Write the accepted/rejected/unanswered finding index both decisive fixtures re-derive."""
     root.mkdir(exist_ok=True)

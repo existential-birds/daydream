@@ -62,6 +62,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -205,6 +207,16 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _connection(archive_dir: Path, *, readonly: bool = False) -> Iterator[sqlite3.Connection]:
+    """Yield an index connection, closing it on exit — read-only when *readonly*."""
+    conn = readonly_connection(archive_dir) if readonly else _get_connection(archive_dir)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _project_daydream(daydream: Any) -> dict[str, Any]:
     """Project the ``manifest.daydream`` provenance onto per-column values.
 
@@ -317,15 +329,12 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
     its placeholders and its parameters cannot drift apart.
     """
     values = _run_upsert_values(manifest)
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         conn.execute(
             _UPSERT_SQL,
             {col.name: values[col.name] for col in RUNS_COLUMNS if col.upserted},
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def append_label_observation(
@@ -490,8 +499,7 @@ def append_label_observation(
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
     has_posterior_int = int(has_posterior)
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         cursor = conn.execute(
             "SELECT session_id FROM runs WHERE session_id = ?",
             (session_id,),
@@ -600,8 +608,6 @@ def append_label_observation(
         )
         conn.commit()
         return True
-    finally:
-        conn.close()
 
 
 def latest_label_observation(
@@ -624,8 +630,7 @@ def latest_label_observation(
     """
     cutoff = "AND observed_at <= ? " if as_of is not None else ""
     params: tuple[Any, ...] = (session_id,) if as_of is None else (session_id, as_of)
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         cursor = conn.execute(
             f"SELECT * FROM label_observations WHERE session_id = ? "
             f"{cutoff}ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
@@ -633,9 +638,6 @@ def latest_label_observation(
         )
         row = cursor.fetchone()
         return dict(row) if row is not None else None
-    finally:
-        conn.close()
-
 
 
 def reviewer_set_penalty_prior(
@@ -720,12 +722,9 @@ def reviewer_set_penalty_prior(
             WHERE _rn = 1
             """
 
-    conn = readonly_connection(archive_dir) if readonly else _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir, readonly=readonly) as conn:
         cursor = conn.execute(sql, params)
         rows = cursor.fetchall()
-    finally:
-        conn.close()
 
     penalties: list[float] = []
     for row in rows:
@@ -764,15 +763,12 @@ def label_observation_history(archive_dir: Path, session_id: str) -> list[dict[s
     Returns:
         List of row dicts ordered by ``observed_at`` ascending.
     """
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         cursor = conn.execute(
             "SELECT * FROM label_observations WHERE session_id = ? ORDER BY observed_at ASC",
             (session_id,),
         )
         return [dict(row) for row in cursor.fetchall()]
-    finally:
-        conn.close()
 
 
 def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool:
@@ -792,15 +788,12 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
     Raises:
         ValueError: If the prefix matches more than one session.
     """
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         cursor = conn.execute(
             "SELECT session_id FROM runs WHERE session_id LIKE ? || '%'",
             (session_id,),
         )
         matches = cursor.fetchall()
-    finally:
-        conn.close()
 
     if not matches:
         return False
@@ -836,15 +829,12 @@ def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo:
     ``label_observations`` or any cache column. A zero-row match (no such
     ``session_id``) is a silent no-op; the caller guarantees the row exists.
     """
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         conn.execute(
             "UPDATE runs SET pr_number = ?, pr_repo = ? WHERE session_id = ?",
             (pr_number, pr_repo, session_id),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def query_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -855,14 +845,11 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ())
             Example: ``"repo_slug = ? AND status = ?"``.
         params: Parameter tuple to bind to the WHERE clause placeholders.
     """
-    conn = _get_connection(archive_dir)
-    try:
+    with _connection(archive_dir) as conn:
         sql = "SELECT * FROM runs"
         if where:
             sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
         cursor = conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
-    finally:
-        conn.close()
 
 
