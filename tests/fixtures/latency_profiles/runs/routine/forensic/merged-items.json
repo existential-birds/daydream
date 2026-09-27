@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "description": "finding 1",
+      "file": "api.py",
+      "line": 3,
+      "confidence": "HIGH",
+      "rationale": "why (Sources: python-records item 1)",
+      "evidence": "evidence",
+      "lens": "per-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": [
+        "python:1"
+      ]
+    },
+    {
+      "id": 2,
+      "description": "finding 2",
+      "file": "App.tsx",
+      "line": 2,
+      "confidence": "HIGH",
+      "rationale": "why (Sources: alternatives item 2)",
+      "evidence": "evidence",
+      "lens": "wonder",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": [
+        "react:1"
+      ]
+    }
+  ]
+}

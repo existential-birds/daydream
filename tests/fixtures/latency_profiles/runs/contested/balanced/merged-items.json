@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "description": "finding 1",
+      "file": "db.py",
+      "line": 4,
+      "confidence": "HIGH",
+      "rationale": "why (Sources: python-records item 1, react-records item 1)",
+      "evidence": "evidence",
+      "lens": "cross-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": [
+        "python:1",
+        "react:1"
+      ]
+    },
+    {
+      "id": 2,
+      "description": "finding 2",
+      "file": "db.py",
+      "line": 9,
+      "confidence": "HIGH",
+      "rationale": "why, no citation",
+      "evidence": "evidence",
+      "lens": "wonder",
+      "severity": "medium",
+      "related_files": null,
+      "source_uids": [
+        "react:1"
+      ]
+    }
+  ]
+}

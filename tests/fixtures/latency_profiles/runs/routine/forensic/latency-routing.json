@@ -1,0 +1,39 @@
+{
+  "profile": {
+    "selected": "forensic",
+    "requested": "forensic",
+    "source": "cli",
+    "fail_safe": false,
+    "reason": null
+  },
+  "risk": {
+    "signals": {},
+    "floors": [],
+    "size_score": 0,
+    "breadth_score": 0
+  },
+  "wonder": {
+    "outcome": "run",
+    "effort": "high",
+    "reason": "profile forensic routes wonder to run at high",
+    "tier": "standard"
+  },
+  "arbiter": {
+    "sharded": false,
+    "reason": "sharded forensic path into 1 groups",
+    "groups": [
+      {
+        "group_id": "arbiter-group-0",
+        "target_uids": [
+          "python:1",
+          "react:1"
+        ],
+        "effort": "xhigh",
+        "reason": "unsharded forensic path (single arbiter call at xhigh)",
+        "reused": false
+      }
+    ],
+    "verdicts_applied": 2,
+    "failed_groups": []
+  }
+}

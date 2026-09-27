@@ -1,0 +1,16 @@
+{
+  "session_id": "routine-forensic",
+  "timing": {
+    "phase_timings": {
+      "alternatives": {
+        "wall_clock_seconds": 45.0
+      },
+      "arbiter": {
+        "wall_clock_seconds": 60.0
+      }
+    }
+  },
+  "findings": {
+    "total": 2
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "session_id": "contested-forensic",
+  "timing": {
+    "phase_timings": {
+      "alternatives": {
+        "wall_clock_seconds": 48.0
+      },
+      "arbiter": {
+        "wall_clock_seconds": 65.0
+      }
+    }
+  },
+  "findings": {
+    "total": 1
+  }
+}

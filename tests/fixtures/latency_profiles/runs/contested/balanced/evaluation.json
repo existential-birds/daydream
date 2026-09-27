@@ -1,0 +1,16 @@
+{
+  "session_id": "contested-balanced",
+  "timing": {
+    "phase_timings": {
+      "alternatives": {
+        "wall_clock_seconds": 22.0
+      },
+      "arbiter": {
+        "wall_clock_seconds": 32.0
+      }
+    }
+  },
+  "findings": {
+    "total": 2
+  }
+}

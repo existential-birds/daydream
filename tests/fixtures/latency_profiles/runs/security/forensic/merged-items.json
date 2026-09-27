@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "description": "finding 1",
+      "file": "auth.py",
+      "line": 5,
+      "confidence": "HIGH",
+      "rationale": "why (Sources: python-records item 1)",
+      "evidence": "evidence",
+      "lens": "per-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": [
+        "python:1"
+      ]
+    }
+  ]
+}

@@ -35,7 +35,7 @@ from daydream.deep.latency import (
 )
 
 
-def _rec(uid: str, file: str, line: int, severity: str = "medium") -> dict:
+def _rec(uid: str, file: str, line: int, severity: str = "medium") -> dict[str, object]:
     return {"uid": uid, "file": file, "line": line, "severity": severity}
 
 
