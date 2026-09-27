@@ -1537,7 +1537,8 @@ class TestUnwrapShellCommand:
     async def test_tool_supervisor_sees_stripped_and_unredacted_command(self) -> None:
         """The supervisor value is strip-only: no redaction, no cap (issue #1227)."""
         token = "ghp_" + "K" * 30
-        raw = '/bin/zsh -lc "cd /srv/app && deploy --token ' + token + '"'
+        command = "deploy " + "a" * 180 + " --token " + token + " tail"
+        raw = '/bin/zsh -lc "cd /srv/app && ' + command + '"'
         lines = [
             json.dumps({"type": "thread.started", "thread_id": "th_sup1227"}),
             json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": raw}}),
@@ -1572,7 +1573,8 @@ class TestUnwrapShellCommand:
             await run_agent(CodexBackend(model="fixture-model"), Path("/tmp"), "run", phase=DaydreamPhase.REVIEW)
 
         assert seen["name"] == "shell"
-        assert seen["command"] == "deploy --token " + token  # prefix stripped, secret intact
+        assert len(command) > 200
+        assert seen["command"] == command  # prefix stripped, full secret and tail intact
         assert "cd /srv/app" not in seen["command"]
         assert "[REDACTED" not in seen["command"]
 
