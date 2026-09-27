@@ -9,17 +9,10 @@ from typing import Any
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from tests.test_corpus_projection import (
     _config_for,
+    _read_jsonl,
     _write_annotations_snapshot,
     _write_bundle,
 )
-
-
-def _records(out_dir: Path) -> list[dict[str, Any]]:
-    return [
-        json.loads(line)
-        for line in (out_dir / "corpus.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
 
 
 def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any]]:
@@ -34,7 +27,7 @@ def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any]]:
 
 def test_flag_off_emits_only_outcome_finding_records(tmp_path: Path) -> None:
     out_dir, _out = _build(tmp_path)
-    records = _records(out_dir)
+    records = _read_jsonl(out_dir / "corpus.jsonl")
     assert records
     assert all(r["record_type"] == "outcome-finding" for r in records)
     summary = _out
@@ -51,7 +44,7 @@ def test_flag_off_is_the_default(tmp_path: Path) -> None:
 
 def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> None:
     out_dir, out = _build(tmp_path, emit_process_traces=True)
-    records = _records(out_dir)
+    records = _read_jsonl(out_dir / "corpus.jsonl")
     types = {r["record_type"] for r in records}
     assert "process-trace" in types
     assert "task-only" in types
@@ -77,7 +70,7 @@ def test_flag_on_records_carry_identity_lineage_and_distinct_ids(
     tmp_path: Path,
 ) -> None:
     out_dir, _out = _build(tmp_path, emit_process_traces=True)
-    records = _records(out_dir)
+    records = _read_jsonl(out_dir / "corpus.jsonl")
     derived = [
         r for r in records if r["record_type"] in ("process-trace", "task-only")
     ]
@@ -104,14 +97,10 @@ def test_flag_on_records_carry_identity_lineage_and_distinct_ids(
 
 def test_flag_on_split_files_contain_derived_records(tmp_path: Path) -> None:
     out_dir, _out = _build(tmp_path, emit_process_traces=True)
-    all_records = _records(out_dir)
+    all_records = _read_jsonl(out_dir / "corpus.jsonl")
     derived_types = {"process-trace", "task-only"}
     split_records: list[dict[str, Any]] = []
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
-        split_records.extend(
-            json.loads(line)
-            for line in (out_dir / name).read_text().splitlines()
-            if line.strip()
-        )
+        split_records.extend(_read_jsonl(out_dir / name))
     assert len(split_records) == len(all_records)
     assert any(r["record_type"] in derived_types for r in split_records)

@@ -14,7 +14,6 @@ Spec test coverage (issue #1113 "Tests"): 1, 2, 3, 4, 5, 6, 7 (review half), 8,
 from __future__ import annotations
 
 import copy
-import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,7 +49,7 @@ from tests.harness.diagram_repos import build_large_cross_module_repo, load_diag
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, git as _git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
-from tests.harness.trajectory import root_trajectory as _root_trajectory
+from tests.harness.trajectory import assert_dispatch_children, root_trajectory as _root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
@@ -224,71 +223,6 @@ def _diagram_dispatch(target: Path) -> dict[str, Any]:
     ]
     assert len(steps) == 1
     return cast(dict[str, Any], steps[0])
-
-
-def _assert_diagram_dispatch_children(
-    target: Path,
-    dispatch: dict[str, Any],
-    descriptors: list[str],
-) -> list[dict[str, Any]]:
-    """Prove one exact child document and invocation per dispatch result."""
-    assert dispatch["extra"]["planned_count"] == len(descriptors)
-    assert dispatch["extra"]["attempted_count"] == len(descriptors)
-    assert dispatch["extra"]["completed_count"] == len(descriptors)
-    root = _root_trajectory(target)
-    results = dispatch["observation"]["results"]
-    assert [result["content"] for result in results] == [
-        f"Dispatched to {descriptor}" for descriptor in descriptors
-    ]
-    assert all(len(result["subagent_trajectory_ref"]) == 1 for result in results)
-    refs = [result["subagent_trajectory_ref"][0] for result in results]
-    assert len({ref["trajectory_id"] for ref in refs}) == len(descriptors)
-    assert {ref["session_id"] for ref in refs} == {root["session_id"]}
-
-    summaries = [
-        summary
-        for summary in root["extra"]["subtrajectories"]
-        if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
-    ]
-    assert [summary["descriptor"] for summary in summaries] == descriptors
-    assert all("invocation_id" not in summary for summary in summaries)
-
-    children: list[dict[str, Any]] = []
-    identities: set[tuple[str, str]] = set()
-    for descriptor, ref, summary in zip(descriptors, refs, summaries, strict=True):
-        assert Path(ref["trajectory_path"]).name.startswith(f"{descriptor}--")
-        child = json.loads(
-            (target / ".daydream" / ref["trajectory_path"]).read_text(
-                encoding="utf-8"
-            )
-        )
-        assert child["trajectory_id"] == ref["trajectory_id"]
-        assert child["session_id"] == root["session_id"]
-        assert summary["trajectory_id"] == ref["trajectory_id"]
-        assert summary["sibling_trajectory_ref"] == ref["trajectory_path"]
-        assert summary["fork_id"] == ref["trajectory_id"]
-        assert summary["invocations"] == child["extra"]["subtrajectories"]
-        assert len(summary["invocations"]) == 1
-        invocation = summary["invocations"][0]
-        assert invocation["phase"] == "diagram"
-        assert invocation["trajectory_id"] == child["trajectory_id"]
-        assert (
-            child["extra"]["run_started_at"]
-            <= invocation["started_at"]
-            <= invocation["ended_at"]
-            <= child["extra"]["run_ended_at"]
-        )
-        identities.add((invocation["trajectory_id"], invocation["invocation_id"]))
-        children.append(child)
-
-    assert len(identities) == len(descriptors)
-    assert dispatch["timestamp"] <= min(
-        child["extra"]["run_started_at"] for child in children
-    )
-    assert dispatch["extra"]["dispatch_completed_at"] >= max(
-        child["extra"]["run_ended_at"] for child in children
-    )
-    return children
 
 
 def _diagram_calls(stub: StubBackend, kind: str) -> list[dict[str, Any]]:
@@ -563,9 +497,10 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
         "Dispatched to diagram-sequence",
         "Dispatched to diagram-sequence-repair",
     ]
-    _assert_diagram_dispatch_children(
+    assert_dispatch_children(
         target,
         dispatch,
+        "diagram",
         ["diagram-sequence", "diagram-sequence-repair"],
     )
 
@@ -1125,9 +1060,10 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     assert end["reason_code"] == "some_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "partial"
     assert dispatch["extra"]["reason_code"] == "some_children_failed"
-    _assert_diagram_dispatch_children(
+    assert_dispatch_children(
         target,
         dispatch,
+        "diagram",
         ["diagram-sequence", "diagram-flowchart"],
     )
     body = captured_post.body()
@@ -1168,9 +1104,10 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
     assert end["reason_code"] == "all_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "failed"
     assert dispatch["extra"]["reason_code"] == "all_children_failed"
-    _assert_diagram_dispatch_children(
+    assert_dispatch_children(
         target,
         dispatch,
+        "diagram",
         ["diagram-sequence", "diagram-flowchart"],
     )
 
