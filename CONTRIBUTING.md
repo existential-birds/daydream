@@ -83,7 +83,7 @@ The focused targets, all run from the repo root:
 |---|---|
 | `make lint` | Ruff over `daydream tests` (120 cols, `E F I W`, py312; `daydream/atif/**` is lint-exempt as vendored code) |
 | `make typecheck` | mypy over `daydream tests` |
-| `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under = 86` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
+| `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | Docker-pinned actionlint over `.github/workflows/*.yml` plus the packaged workflow templates; skipped with a note (exit 0) when no Docker daemon is available |

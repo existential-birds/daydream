@@ -58,9 +58,9 @@ jobs:
 
       - name: Run tests
         # The coverage flags live here (not in pyproject addopts), so targeted
-        # runs like `pytest tests/foo.py` stay plain and never trip the 87%
-        # floor even when all their tests pass (#336). Keep in sync with the
-        # local Makefile test recipe (local == CI).
+        # runs like `pytest tests/foo.py` stay plain and never trip the floor
+        # enforced by [tool.coverage.report] fail_under in pyproject.toml (#336).
+        # Keep in sync with the local Makefile test recipe (local == CI).
         run: uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage report
