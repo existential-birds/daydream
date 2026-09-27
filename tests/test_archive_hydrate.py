@@ -725,16 +725,6 @@ def _seed_admitted_runs(
         (d / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
 
 
-class _StaticResolver:
-    """Test seam for :class:`RepoLicenseResolver`: every repo resolves to MIT."""
-
-    def resolve(self, repo_slug: str, repo_commit: str | None) -> Any:  # noqa: ANN201
-
-        return license_enrich.EnrichedEvidence(
-            spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
-        )
-
-
 def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) -> None:
     """Issue #1094 task 11: the same (repo, spdx) decided via a declared
     manifest vs via enrichment must yield identical decisions and identical
@@ -747,7 +737,7 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
         ("sess-enriched", "acme/widget", None),
     ])
     evidence = license_enrich.enrich_license_evidence(
-        stage, resolver=_StaticResolver())
+        stage, resolver=_FakeLicenseResolver())
     policy, _digest = load_license_policy(
         "daydream/training/schema/license-policy-production.json")
     declared = resolve_repo_decision(
@@ -1545,15 +1535,7 @@ def _identity_for(
     derivation exactly as ``run_hydrate_hub`` does — never a reimplementation."""
     revision = "a" * 40
 
-    class FakeResolver:
-        def resolve(
-            self, repo_slug: str, repo_commit: str | None
-        ) -> license_enrich.EnrichedEvidence | None:
-            return license_enrich.EnrichedEvidence(
-                spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
-            )
-
-    license_enrich.enrich_license_evidence(stage, resolver=FakeResolver())
+    license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=revision)
     hydrate.apply_license_gate(
         stage, revision=revision, license_policy_path=policy_path,
