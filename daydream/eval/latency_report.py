@@ -41,6 +41,7 @@ from daydream.deep.latency import (
     LATENCY_PROFILES,
 )
 from daydream.severity import normalize_severity
+from daydream.trajectory import RUNS_DIRNAME
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 """Repository root, used to resolve a manifest's ``corpus_dir`` from anywhere."""
@@ -284,7 +285,7 @@ def build_report(
         for profile in profiles:
             if profile not in shipped_by_lens:
                 continue
-            run_dir = root / "runs" / name / str(profile)
+            run_dir = root / RUNS_DIRNAME / name / str(profile)
             if not run_dir.is_dir():
                 continue
             items = _load_items(run_dir / "merged-items.json")
