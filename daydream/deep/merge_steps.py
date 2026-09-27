@@ -13,6 +13,7 @@ from daydream.agent import console
 from daydream.artifact_visibility import review_output_path_for
 from daydream.backends import effective_fanout_concurrency
 from daydream.deep.arbiter import (
+    ArbiterGroup,
     contested_indices,
     partition_arbiter_targets,
     select_arbiter_targets,
@@ -720,11 +721,26 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         adjudication_complete = True
         if arbiter_targets:
             route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
-            groups = partition_arbiter_targets(
-                adjudicated,
-                arbiter_targets,
-                edges=deep_state.import_graph,
-                max_targets=route.group_max_targets,
+            # A route that does not shard never partitions: the unsharded path is
+            # today's single call over every selected target, and a non-sharding
+            # route's ``group_max_targets`` of 0 is not a valid partition bound
+            # (MH2/A6). Sharding is what the route turns on, so only a sharding
+            # route reaches ``partition_arbiter_targets``.
+            groups = (
+                partition_arbiter_targets(
+                    adjudicated,
+                    arbiter_targets,
+                    edges=deep_state.import_graph,
+                    max_targets=route.group_max_targets,
+                )
+                if route.arbiter_sharded
+                else [
+                    ArbiterGroup(
+                        "arbiter-group-0",
+                        tuple(arbiter_targets),
+                        tuple(record_uid(adjudicated[i]) for i in arbiter_targets),
+                    )
+                ]
             )
             contested = (
                 contested_indices(
