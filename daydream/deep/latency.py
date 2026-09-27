@@ -139,6 +139,38 @@ PROFILE_ROUTES: dict[LatencyProfile, LatencyRoute] = {
 
 
 @dataclass(frozen=True)
+class WonderDecision:
+    """What the wonder pass does, why, and at what effort (``None`` when it does not run)."""
+
+    outcome: str
+    effort: str | None
+    reason: str
+
+
+def wonder_decision(
+    route: LatencyRoute, summary: RiskSummary, *, folded: bool, tier: str
+) -> WonderDecision:
+    """Decide whether to run the wonder pass, purely and totally.
+
+    Rule order: a folded design lens never runs its own pass; next, the legacy
+    trivial-diff gate applies only under a route that asks for it (forensic) and
+    only when no mandatory floor forbids the skip (MH5); then the route's own
+    wonder choice; otherwise the pass runs at the route's effort, naming any
+    floor that raised it above the profile.
+    """
+    if folded:
+        return WonderDecision("folded", None, "design alternatives folded into the structural review")
+    if tier == "skip" and route.legacy_trivial_tier_gate and not summary.floors:
+        return WonderDecision("skip", None, "trivial diff (<=1 changed file)")
+    if route.wonder == "skip":
+        return WonderDecision("skip", None, f"profile {route.profile} routes wonder to skip")
+    raised = f" (raised by {', '.join(summary.floors)})" if summary.floors else ""
+    return WonderDecision(
+        "run", route.wonder, f"profile {route.profile} routes wonder to run at {route.wonder}{raised}"
+    )
+
+
+@dataclass(frozen=True)
 class ProfileResolution:
     profile: LatencyProfile
     requested: str | None

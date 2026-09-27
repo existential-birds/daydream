@@ -36,8 +36,16 @@ from daydream.deep.coverage import (
     resolve_per_stack_verdicts,
 )
 from daydream.deep.diff import _read_full_diff, _ttt_diff_text
+from daydream.deep.latency import (
+    FAIL_SAFE_LATENCY_PROFILE,
+    PROFILE_ROUTES,
+    diff_signals,
+    summarize_risk,
+    wonder_decision,
+)
 from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
+from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
@@ -344,17 +352,31 @@ def _fold_default_alternatives(ctx: FlowContext) -> bool:
 
 
 async def _wonder(ctx: FlowContext) -> None:
-    """TTT alternative-review (tier-gated) + its artifact write."""
+    """TTT alternative-review routed by the latency profile + its artifact write.
+
+    The profile's route and the diff's mandatory risk floors decide whether the
+    pass runs; the retained forensic tier gate is the only route that keeps
+    today's trivial-diff skip. Every decision is appended to the routing record
+    so a later reader can state the outcome and its cause.
+    """
     deep_state = DeepState(ctx.data)
     intent_summary = deep_state.intent_summary
+    route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
+    summary = deep_state.risk_summary or summarize_risk(diff_signals(diff="", changed_files=0, stack_count=0))
+    decision = wonder_decision(
+        route, summary, folded=_fold_default_alternatives(ctx), tier=deep_state.tier
+    )
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-    if _fold_default_alternatives(ctx):
+    if decision.outcome == "folded":
         alt_issues: list[dict[str, Any]] = []
         print_dim(console, "Design alternatives are included in the structural review")
-    elif deep_state.tier == "skip":
+    elif decision.outcome == "skip":
         alt_issues = []
-        print_dim(console, "Skipping alternatives -- trivial diff")
+        if decision.reason == "trivial diff (<=1 changed file)":
+            print_dim(console, "Skipping alternatives -- trivial diff")
+        else:
+            print_dim(console, f"Skipping alternatives -- {decision.reason}")
     else:
         async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
             try:
@@ -377,6 +399,17 @@ async def _wonder(ctx: FlowContext) -> None:
     alts_p = _alternatives_path(deep_state.dd)
     alts_p.write_text(json.dumps(alt_issues, indent=2))
     deep_state.alts_path = alts_p
+    write_routing_record(
+        deep_state.dd,
+        {
+            "wonder": {
+                "outcome": decision.outcome,
+                "effort": decision.effort,
+                "reason": decision.reason,
+                "tier": deep_state.tier,
+            }
+        },
+    )
 
 
 async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:

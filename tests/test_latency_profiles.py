@@ -20,6 +20,7 @@ from daydream.deep.latency import (
     resolve_latency_profile,
     route_for,
     summarize_risk,
+    wonder_decision,
 )
 
 
@@ -156,3 +157,20 @@ def test_unknown_profile_fails_safe_upward_and_says_so() -> None:
 def test_absent_profile_uses_the_default_without_a_fail_safe_record() -> None:
     resolved = resolve_latency_profile(None, source="default")
     assert (resolved.profile, resolved.fail_safe, resolved.source) == ("balanced", False, "default")
+
+
+def test_wonder_decision_is_pure_over_route_summary_tier_and_fold() -> None:
+    summary = summarize_risk(diff_signals(diff="+x\n", changed_files=1, stack_count=1))
+    fast = route_for("fast", summary)
+    assert wonder_decision(fast, summary, folded=True, tier="parallel").outcome == "folded"
+
+    # MH5: a mandatory floor vetoes the skip a fast route would otherwise take.
+    risky = summarize_risk(diff_signals(diff="+threading.Lock()\n", changed_files=1, stack_count=1))
+    vetoed = wonder_decision(route_for("fast", risky), risky, folded=False, tier="parallel")
+    assert (vetoed.outcome, vetoed.effort) == ("run", "high")
+    assert "concurrency_surface" in vetoed.reason
+
+    assert wonder_decision(fast, summary, folded=False, tier="parallel").outcome == "skip"
+    # A5: the legacy trivial-diff gate survives only under forensic.
+    assert wonder_decision(route_for("forensic", summary), summary, folded=False, tier="skip").outcome == "skip"
+    assert wonder_decision(route_for("balanced", summary), summary, folded=False, tier="skip").outcome == "run"
