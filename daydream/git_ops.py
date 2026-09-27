@@ -29,7 +29,7 @@ from typing import Any, Literal, Protocol, overload
 from urllib.parse import quote, urlparse
 
 from daydream.backends._subprocess import terminate_process
-from daydream.repository_paths import git_observed_path_is_confined, valid_repository_file_path
+from daydream.repository_paths import git_observed_path_is_confined, strip_dot_slash, valid_repository_file_path
 from daydream.trajectory import redact_text
 
 _logger = logging.getLogger(__name__)
@@ -3891,7 +3891,7 @@ def gh_file_at_ref(
     if not valid_repository_file_path(path):
         raise GitError("invalid repository file path")
     owner, name = owner_repo
-    relative = path[2:] if path.startswith("./") else path
+    relative = strip_dot_slash(path)
     base = f"repos/{owner}/{name}"
     where = f"{slug}@{ref}:{relative}"
     try:

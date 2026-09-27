@@ -885,6 +885,7 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
         ValueError: When the root has no ``index.db`` or no
             ``label_observations`` table — always naming the path.
     """
+    from daydream.archive.sanitize import _derivative_digest
     from daydream.trajectory import run_directory
 
     db_path = root / "index.db"
@@ -933,8 +934,6 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
             # Derivative content digest for identity linkage: the hydrated
             # index side derives the same digest over its own runs/<sid>
             # directory, so a matching pair links by session_id.
-            from daydream.archive.sanitize import _derivative_digest
-
             row["derivative_digest"] = _derivative_digest(runs_dir)
         run = runs.get(str(row["session_id"]))
         if run is not None:

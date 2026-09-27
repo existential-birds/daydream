@@ -52,7 +52,7 @@ from daydream.config import (
     DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
 )
-from daydream.deep.coverage import _path_component_matches, _strip_dot_slash
+from daydream.deep.coverage import _path_component_matches
 from daydream.deep.diagram_types import (
     CandidateRoot,
     as_dict as _as_dict,
@@ -61,7 +61,7 @@ from daydream.deep.diagram_types import (
     as_optional_str as _norm_optional_str,
 )
 from daydream.git_ops import GitError, grep_fixed_matches
-from daydream.repository_paths import path_is_confined, valid_repository_file_path
+from daydream.repository_paths import path_is_confined, strip_dot_slash, valid_repository_file_path
 from daydream.tree_sitter_index import (
     definitions_in_file,
     is_branch_line,
@@ -271,7 +271,7 @@ def _token_hits(
     """
     if not symbol:
         return []
-    pathspecs = [_strip_dot_slash(path) for path in files] if files else None
+    pathspecs = [strip_dot_slash(path) for path in files] if files else None
     try:
         matches = grep_fixed_matches(
             repo_root, [symbol], word=True, pathspecs=pathspecs
@@ -305,11 +305,11 @@ class RepoSymbols:
 
     def _indexable(self, path: str) -> bool:
         """Whether definitions can be extracted from ``path`` at all."""
-        return self._parsing_available and language_for_path(_strip_dot_slash(path)) is not None
+        return self._parsing_available and language_for_path(strip_dot_slash(path)) is not None
 
     def _file_definitions(self, path: str) -> list[dict[str, object]]:
         """Return the memoized definition records for one repo-relative path."""
-        key = _strip_dot_slash(path)
+        key = strip_dot_slash(path)
         cached = self._by_file.get(key)
         if cached is not None:
             return cached
@@ -337,7 +337,7 @@ class RepoSymbols:
         if not symbol:
             return []
         paths = (
-            [_strip_dot_slash(path) for path in files]
+            [strip_dot_slash(path) for path in files]
             if files is not None
             else sorted(self._by_file)
         )
@@ -465,7 +465,7 @@ def _was_read(read_paths: set[str], relative: str) -> bool:
     ``/repo/notapi.py`` does not cover ``api.py``).
     """
     return any(
-        _path_component_matches(_strip_dot_slash(path), relative)
+        _path_component_matches(strip_dot_slash(path), relative)
         for path in read_paths
     )
 
@@ -479,7 +479,7 @@ def _check_path(repo_root: Path, file: Any) -> tuple[str, str | None]:
     """Return ``(normalized_path, reason)`` for a cited path."""
     if not isinstance(file, str) or not file:
         return "", "FILE_MISSING"
-    normalized = _strip_dot_slash(file)
+    normalized = strip_dot_slash(file)
     if not valid_repository_file_path(normalized) or not path_is_confined(
         repo_root, normalized
     ):
@@ -629,7 +629,7 @@ def _normalize_participant(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": _norm_str(raw.get("name")),
         "kind": _norm_str(raw.get("kind")),
-        "files": [_strip_dot_slash(file) for file in files],
+        "files": [strip_dot_slash(file) for file in files],
         "service": _norm_optional_str(raw.get("service")),
     }
 
@@ -644,7 +644,7 @@ def _normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
         "kind": _norm_str(raw.get("kind")),
         "changed": bool(raw.get("changed")),
         "evidence": {
-            "file": _strip_dot_slash(_norm_str(evidence.get("file"))),
+            "file": strip_dot_slash(_norm_str(evidence.get("file"))),
             "line": _norm_line(evidence.get("line")),
             "symbol": _norm_str(evidence.get("symbol")),
         },
@@ -1115,7 +1115,7 @@ def _normalize_node(raw: dict[str, Any]) -> dict[str, Any]:
         "kind": _norm_str(raw.get("kind")),
         "label": _norm_str(raw.get("label")),
         "evidence": {
-            "file": _strip_dot_slash(_norm_str(evidence.get("file"))),
+            "file": strip_dot_slash(_norm_str(evidence.get("file"))),
             "line": _norm_line(evidence.get("line")),
             "symbol": _norm_optional_str(evidence.get("symbol")),
         },
@@ -1141,12 +1141,12 @@ def _match_candidate(
     range this pass never computed -- and without a range ``NODE_OUTSIDE_ROOT``
     is undecidable, which is the whole point of constraining the choice.
     """
-    file = _strip_dot_slash(_norm_str(root.get("file")))
+    file = strip_dot_slash(_norm_str(root.get("file")))
     name = _norm_str(root.get("name"))
     line = _norm_line(root.get("line"))
     for candidate in candidate_roots:
         if (
-            _strip_dot_slash(candidate.file) == file
+            strip_dot_slash(candidate.file) == file
             and candidate.name == name
             and candidate.line == line
         ):
@@ -1303,7 +1303,7 @@ def _rejected_root(root: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return the schema-shaped root, or None when it is not even well-formed."""
     if root is None:
         return None
-    file = _strip_dot_slash(_norm_str(root.get("file")))
+    file = strip_dot_slash(_norm_str(root.get("file")))
     name = _norm_str(root.get("name"))
     line = _norm_line(root.get("line"))
     if not file or not name or line < 1:
@@ -1357,7 +1357,7 @@ def ground_flowchart(
             rejected="ROOT_NOT_CANDIDATE",
         )
     root_range = (candidate.line, candidate.end_line)
-    root_file = _strip_dot_slash(candidate.file)
+    root_file = strip_dot_slash(candidate.file)
     root_check = ElementCheck(
         "root", root_ref, True, in_changed_hunk=True, final_index=0
     )
@@ -1524,7 +1524,7 @@ def _overlaps_hunks(
     candidate: CandidateRoot, hunk_ranges: dict[str, list[tuple[int, int]]]
 ) -> bool:
     """Whether the candidate's range overlaps a head-side changed hunk."""
-    ranges = hunk_ranges.get(_strip_dot_slash(candidate.file), [])
+    ranges = hunk_ranges.get(strip_dot_slash(candidate.file), [])
     return any(
         start <= candidate.end_line and candidate.line <= end for start, end in ranges
     )

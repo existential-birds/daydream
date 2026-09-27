@@ -19,34 +19,8 @@ from daydream.training.labeler_versions import (
     RUBRIC_SCHEMA_VERSION,
 )
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+from tests.harness.adjudication import write_sessions_index
 from tests.test_training_adjudication_publish import _final_bundle
-
-
-def _write_sessions(tmp_path: Path) -> Path:
-    """One ambiguous + one unanswered finding across two sessions, in the
-    hydrated-index shape the queue builder consumes (T1 session dicts)."""
-    sessions = [
-        {
-            "session_id": "s1", "trajectory_id": "s1-traj", "segment_id": "s1-seg",
-            "resolutions": [{
-                "fingerprint": "fp-b", "disposition": "unanswered",
-                "evidence": [{"reply_id": "r1", "body_sha256": "abc"}],
-                "evidence_digest": "d2" * 32, "profile": "pr_review", "stack": "python",
-            }],
-        },
-        {
-            "session_id": "s2", "trajectory_id": "s2-traj", "segment_id": "s2-seg",
-            "resolutions": [{
-                "fingerprint": "fp-a", "disposition": "ambiguous",
-                "evidence": [{"reply_id": "r2", "body_sha256": "abd"}],
-                "evidence_digest": "d1" * 32, "profile": "pr_review", "stack": "python",
-            }],
-        },
-    ]
-    (tmp_path / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
-    return tmp_path
 
 
 def _install_annotation_hub(
@@ -124,7 +98,7 @@ def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
 
 
 def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
-    _write_sessions(tmp_path)
+    write_sessions_index(tmp_path)
     cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                 "--state-dir", str(tmp_path / "adj")])
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
@@ -142,7 +116,7 @@ def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
 
 
 def test_adjudicate_label_unknown_record_id_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _write_sessions(tmp_path)
+    write_sessions_index(tmp_path)
     cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                 "--state-dir", str(tmp_path / "adj")])
     rc = cli._handle_corpus_command(
@@ -156,7 +130,7 @@ def test_adjudicate_label_unknown_record_id_exits_1(tmp_path: Path, capsys: pyte
 
 
 def test_adjudicate_label_batch_n_processes_unresolved_in_order(tmp_path: Path) -> None:
-    _write_sessions(tmp_path)
+    write_sessions_index(tmp_path)
     cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                 "--state-dir", str(tmp_path / "adj")])
     rc = cli._handle_corpus_command(
@@ -178,7 +152,7 @@ def test_adjudicate_label_batch_n_processes_unresolved_in_order(tmp_path: Path) 
 
 
 def test_adjudicate_show_lists_queue_and_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _write_sessions(tmp_path)
+    write_sessions_index(tmp_path)
     cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                 "--state-dir", str(tmp_path / "adj")])
     rc = cli._handle_corpus_command(["adjudicate", "show", "--state-dir", str(tmp_path / "adj")])
@@ -191,7 +165,7 @@ def _built_queue(tmp_path: Path) -> tuple[Path, Path, list[dict[str, object]]]:
     """Build the hydrated-index queue shared by the adjudication seed helpers."""
     root = tmp_path
     state = tmp_path / "adj"
-    _write_sessions(root)
+    write_sessions_index(root)
     assert cli._handle_corpus_command(
         ["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
     ) == 0
@@ -314,7 +288,7 @@ def test_adjudicate_bare_invocation_exits_2() -> None:
 
 
 def test_adjudicate_build_preserves_observations_and_is_idempotent(tmp_path: Path) -> None:
-    _write_sessions(tmp_path)
+    write_sessions_index(tmp_path)
     for _ in range(2):
         rc = cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                          "--state-dir", str(tmp_path / "adj")])

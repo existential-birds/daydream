@@ -1308,18 +1308,7 @@ def resolve_fanout_concurrency(env_var: str, default: int) -> int:
     A non-integer or non-positive value warns and falls back rather than failing
     the run: a malformed knob should not cost a review.
     """
-    raw = os.environ.get(env_var)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("%s is not a valid integer; using default %d", env_var, default)
-        return default
-    if value <= 0:
-        logger.warning("%s must be positive; using default %d", env_var, default)
-        return default
-    return value
+    return _parsed_positive_int(os.environ, env_var, default)
 
 
 def effective_fanout_concurrency(workflow_ceiling: int, backend: object) -> int:

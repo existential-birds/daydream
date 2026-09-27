@@ -10,6 +10,7 @@ from daydream.repository_paths import (
     InvalidRepositoryFilePath,
     canonicalize_repository_file_path,
     git_observed_path_is_confined,
+    strip_dot_slash,
 )
 
 FixFootprintAction = Literal[
@@ -80,7 +81,7 @@ class AuthorizedFixFootprint:
         for path in reviewed_paths or set():
             if not isinstance(path, str):
                 raise InvalidRepositoryFilePath("invalid reviewed repository path")
-            normalized = path[2:] if path.startswith("./") else path
+            normalized = strip_dot_slash(path)
             if not git_observed_path_is_confined(repo, normalized):
                 raise InvalidRepositoryFilePath("invalid reviewed repository path")
             reviewed_set.add(normalized)

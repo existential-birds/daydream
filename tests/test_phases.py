@@ -502,11 +502,20 @@ def test_test_healing_guard_reports_restoration_failure(
     assert migration.read_text() == "-- healing edit\n"
 
 
-def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(
+@pytest.mark.parametrize(
+    ("mutate", "expected_violations"),
+    [(True, ["migrations/0000_local_draft.sql"]), (False, [])],
+    ids=["edited", "untouched"],
+)
+def test_test_healing_guard_preserves_preexisting_untracked_bytes(
     tmp_path: Path,
     silence_console: Callable[..., None],
+    mutate: bool,
+    expected_violations: list[str],
 ) -> None:
-    """A healing edit to an untracked migration is restored byte-for-byte."""
+    """An edited untracked migration is restored byte-for-byte; an untouched
+    one stays byte-identical.
+    """
 
     silence_console("daydream.phases")
     init_repo(tmp_path)
@@ -520,7 +529,8 @@ def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(
     pre_untracked = {"migrations/0000_local_draft.sql"}
     pre_untracked_contents = {"migrations/0000_local_draft.sql": migration.read_bytes()}
     snapshot = git_ops.stash_create(tmp_path)
-    migration.write_bytes(b"-- forbidden healing edit\n")
+    if mutate:
+        migration.write_bytes(b"-- forbidden healing edit\n")
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path,
@@ -531,39 +541,7 @@ def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(
         allow_standalone=True,
     )
 
-    assert violations == ["migrations/0000_local_draft.sql"]
-    assert migration.read_bytes() == original
-
-
-def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(
-    tmp_path: Path,
-    silence_console: Callable[..., None],
-) -> None:
-    """An untouched untracked migration remains byte-identical."""
-
-    silence_console("daydream.phases")
-    init_repo(tmp_path)
-    (tmp_path / "README.md").write_text("# Fixture\n")
-    git(tmp_path, "add", "README.md")
-    git_commit(tmp_path, "test: initialize healing fixture")
-    migration = tmp_path / "migrations" / "0000_local_draft.sql"
-    migration.parent.mkdir()
-    original = b"-- local draft\r\n"
-    migration.write_bytes(original)
-    pre_untracked = {"migrations/0000_local_draft.sql"}
-    pre_untracked_contents = {"migrations/0000_local_draft.sql": migration.read_bytes()}
-    snapshot = git_ops.stash_create(tmp_path)
-
-    violations = _reject_test_healing_generated_file_edits(
-        tmp_path,
-        snapshot=snapshot,
-        snapshot_captured=True,
-        pre_untracked=pre_untracked,
-        pre_untracked_contents=pre_untracked_contents,
-        allow_standalone=True,
-    )
-
-    assert violations == []
+    assert violations == expected_violations
     assert migration.read_bytes() == original
 
 

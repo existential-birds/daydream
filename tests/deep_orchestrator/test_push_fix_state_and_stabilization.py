@@ -218,9 +218,11 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
     assert stale.read_bytes() == stale_bytes
 
 
-def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
-
-    repo = tmp_path / "cross-item-retarget"
+def _cross_item_fixture(
+    tmp_path: Path,
+) -> tuple[Path, list[dict[str, Any]], Any, Any]:
+    """Build a repo with two cross-related items and their fix context/state."""
+    repo = tmp_path / "cross-item"
     _init_repo(repo)
     for path in ("a.py", "b.py", "c.py"):
         (repo / path).write_text(f"# {path}\n")
@@ -232,6 +234,12 @@ def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None
     ]
     ctx = _direct_fix_context(repo, items, changed_files={"a.py", "c.py"})
     state = _direct_fix_state(ctx, items, {"a.py", "c.py"})
+    return repo, items, ctx, state
+
+
+def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
+
+    repo, items, ctx, state = _cross_item_fixture(tmp_path)
     ctx.data["iteration"] = 2
     ctx.data["fix_outcomes"] = {
         "item:a": {
@@ -257,18 +265,7 @@ def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_re
     tmp_path: Path,
 ) -> None:
 
-    repo = tmp_path / "accepted-then-rejected-retarget"
-    _init_repo(repo)
-    for path in ("a.py", "b.py", "c.py"):
-        (repo / path).write_text(f"# {path}\n")
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    items = [
-        {**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": ["b.py"]},
-        {**_merge_item(2, "c.py", "high"), "item_uid": "item:c", "related_files": []},
-    ]
-    ctx = _direct_fix_context(repo, items, changed_files={"a.py", "c.py"})
-    state = _direct_fix_state(ctx, items, {"a.py", "c.py"})
+    repo, items, ctx, state = _cross_item_fixture(tmp_path)
 
     ctx.data["iteration"] = 1
     assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py", "c.py"]

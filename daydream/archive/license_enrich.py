@@ -241,6 +241,21 @@ def _append_cache(path: Path, entries: list[dict[str, Any]]) -> None:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
+def _write_resolved(
+    derivative: Path, data: dict[str, Any], entry: dict[str, Any]
+) -> dict[str, str]:
+    """Persist *entry*'s resolved evidence into the manifest; return the payload record."""
+    spdx_id, source = str(entry["spdx_id"]), str(entry.get("source") or "")
+    data["license_evidence"] = {"spdx_id": spdx_id, "source": source}
+    (derivative / "manifest.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return {
+        "spdx_id": spdx_id,
+        "source": source,
+        "repo_commit": str(entry.get("repo_commit") or ""),
+        "origin": "enriched",
+    }
+
+
 def enrich_license_evidence(
     stage: Path, *, resolver: RepoLicenseResolver
 ) -> dict[str, dict[str, str]]:
@@ -295,24 +310,13 @@ def enrich_license_evidence(
         prior = by_session.get(sid)
         if prior is not None:
             if prior.get("status") == "resolved":
-                resolved[sid] = {
-                    "spdx_id": str(prior["spdx_id"]),
-                    "source": str(prior["source"]),
-                    "repo_commit": str(prior.get("repo_commit") or ""),
-                    "origin": "enriched",
-                }
                 # The cache records the resolution — on a same-stage-dir reuse
                 # (e.g. an idempotent re-run whose ingest re-pristined this
                 # session) the derivative's manifest has been reverted to the
                 # evidence-less form. Write the evidence back into the manifest
                 # so the gate consumes it exactly like a freshly-enriched
                 # session: the gate reads only the manifest, never the cache.
-                manifest_path = derivative / "manifest.json"
-                data["license_evidence"] = {
-                    "spdx_id": str(prior["spdx_id"]),
-                    "source": str(prior.get("source") or ""),
-                }
-                manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                resolved[sid] = _write_resolved(derivative, data, prior)
             continue
         raw_slug = _manifest_repo_slug(data)
         slug = normalize_repo_slug(raw_slug) if raw_slug else ""
@@ -347,17 +351,7 @@ def enrich_license_evidence(
                 by_repo.setdefault(slug, entry)
         fresh.append(entry)
         if entry.get("status") == "resolved":
-            resolved[sid] = {
-                "spdx_id": str(entry["spdx_id"]),
-                "source": str(entry["source"]),
-                "repo_commit": str(entry["repo_commit"]),
-                "origin": "enriched",
-            }
-            manifest_path = derivative / "manifest.json"
-            data["license_evidence"] = {
-                "spdx_id": entry["spdx_id"], "source": entry["source"],
-            }
-            manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            resolved[sid] = _write_resolved(derivative, data, entry)
     _append_cache(_cache_path(stage), fresh)
     return resolved
 

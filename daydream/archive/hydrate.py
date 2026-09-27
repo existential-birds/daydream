@@ -564,6 +564,14 @@ def _read_manifest_field(data: dict[str, Any], key: str) -> Any:
     return data.get(key)
 
 
+def _manifest_remote_fields(data: dict[str, Any]) -> tuple[bool, str | None, str | None]:
+    """Normalize ``remote_url`` to ``(has_url, slug, canonical_url)``; blank is all-None."""
+    raw_url = _read_manifest_field(data, "remote_url")
+    if isinstance(raw_url, str) and raw_url.strip():
+        return True, *normalize_remote_url(raw_url)
+    return False, None, None
+
+
 @dataclass(frozen=True)
 class IngestResult:
     """Outcome of the ingest gate for one staged session bundle (issue #982 M4/M6)."""
@@ -667,16 +675,14 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
             # (which mkdirs from the session id) never sees them.
             results.append(IngestResult(session_id, "quarantined", REASON_CODE_PATH_TRAVERSAL))
             continue
-        raw_url = _read_manifest_field(data, "remote_url")
-        if isinstance(raw_url, str) and raw_url.strip():
-            identity, _canonical = normalize_remote_url(raw_url)
-            if identity is None:
-                # Non-allowlisted host: rejected as admission data before any
-                # gate work; the raw copy stays in downloads, never indexed.
-                results.append(
-                    IngestResult(session_id, "quarantined", REASON_CODE_UNTRUSTED_REMOTE_HOST)
-                )
-                continue
+        has_url, identity, _canonical = _manifest_remote_fields(data)
+        if has_url and identity is None:
+            # Non-allowlisted host: rejected as admission data before any
+            # gate work; the raw copy stays in downloads, never indexed.
+            results.append(
+                IngestResult(session_id, "quarantined", REASON_CODE_UNTRUSTED_REMOTE_HOST)
+            )
+            continue
         gate = sanitize.import_bundle(bundle_dir, stage)
         if gate.quarantined or not gate.imported:
             results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
@@ -942,14 +948,8 @@ def rebuild_index(stage: Path) -> None:
         # index expects the executable-provenance object, so it is dropped from
         # the hydrated rebuild (never coerced into a Manifest field).
         kwargs = _manifest_index_fields(data)
-        raw_url = _read_manifest_field(data, "remote_url")
-        if isinstance(raw_url, str) and raw_url.strip():
-            slug, canonical = normalize_remote_url(raw_url)
-            kwargs["repo_slug"] = slug
-            kwargs["remote_url"] = canonical
-        else:
-            kwargs["repo_slug"] = None
-            kwargs["remote_url"] = None
+        _has_url, slug, canonical = _manifest_remote_fields(data)
+        kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
         kwargs["source_path"] = _staging_local_source_path(_read_manifest_field(data, "source_path"), stage)
         kwargs["archive_path"] = str(derivative)
         upsert_run(stage, Manifest(**kwargs))
@@ -1003,8 +1003,7 @@ def build_resolution_map(
         session_id = str(data.get("session_id") or manifest_path.parent.name)
         if session_id in indexed:
             continue
-        raw_url = _read_manifest_field(data, "remote_url")
-        slug = normalize_remote_url(raw_url)[0] if isinstance(raw_url, str) and raw_url.strip() else None
+        _has_url, slug, _canonical = _manifest_remote_fields(data)
         if slug is None and session_id not in unavailable:
             unavailable.append(session_id)
     if unavailable:
@@ -2498,12 +2497,8 @@ def verify_publication(
             raise VerificationError(redact_text(f"verify: batch {sid!r} has an unreadable manifest"))
         kwargs = _manifest_index_fields(data)
         kwargs["archive_path"] = str(batch_dir)
-        raw_url = _read_manifest_field(data, "remote_url")
-        if isinstance(raw_url, str) and raw_url.strip():
-            slug, canonical = normalize_remote_url(raw_url)
-            kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
-        else:
-            kwargs["repo_slug"], kwargs["remote_url"] = None, None
+        _has_url, slug, canonical = _manifest_remote_fields(data)
+        kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
         upsert_run(verify_dir, Manifest(**kwargs))
 
     verify_admitted = len(query_runs(verify_dir))

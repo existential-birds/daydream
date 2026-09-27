@@ -14,7 +14,6 @@ import pytest
 
 from daydream import review_profile as rp, severity
 from daydream.deep.coverage import (
-    _strip_dot_slash,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
@@ -23,6 +22,7 @@ from daydream.deep.coverage import (
     write_coverage_receipts,
 )
 from daydream.hunk_index import load_hunk_index, parse_hunks, write_hunk_index
+from daydream.repository_paths import strip_dot_slash
 
 _DIFF = (
     "diff --git a/api.py b/api.py\n"
@@ -730,12 +730,12 @@ def test_frontier_not_credited_without_any_sibling_evidence(tmp_path: Path) -> N
 
 
 def test_strip_dot_slash_normalizes_once() -> None:
-    """Issue #740: ``_strip_dot_slash`` is the single canonical ``./`` strip."""
+    """Issue #740: ``strip_dot_slash`` is the single canonical ``./`` strip."""
 
-    assert _strip_dot_slash("api.py") == "api.py"
-    assert _strip_dot_slash("./api.py") == "api.py"
-    assert _strip_dot_slash("./dir/x.py") == "dir/x.py"
-    assert _strip_dot_slash("a/b/c.py") == "a/b/c.py"
+    assert strip_dot_slash("api.py") == "api.py"
+    assert strip_dot_slash("./api.py") == "api.py"
+    assert strip_dot_slash("./dir/x.py") == "dir/x.py"
+    assert strip_dot_slash("a/b/c.py") == "a/b/c.py"
 
 
 def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
