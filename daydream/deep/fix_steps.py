@@ -65,6 +65,7 @@ from daydream.phases import (
     severity_sorted,
 )
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
+from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -208,8 +209,8 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # which compare against bare git-derived paths.
     for _item in items:
         _file = _item.get("file")
-        if isinstance(_file, str) and _file.startswith("./"):
-            _item["file"] = _file[2:]
+        if isinstance(_file, str):
+            _item["file"] = strip_dot_slash(_file)
     stamp_item_uids(items)
     if not items:
         print_success(console, "No actionable items -- done.")

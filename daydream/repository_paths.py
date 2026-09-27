@@ -85,6 +85,17 @@ def valid_repository_file_path(value: str) -> bool:
     return _valid_lexical(value, _REPOSITORY_FILE_PATH)
 
 
+def strip_dot_slash(value: str) -> str:
+    """Normalize a leading ``./`` off a repo-relative path (issue #740).
+
+    ``./x`` is a legal spelling since the grammar relaxed (#572/#573) while
+    the reviewed-diff set and the receipt lists are always bare, so stripping
+    in one canonical place keeps a ``./x`` finding matching its assigned file
+    rather than failing every path-component match and getting swept.
+    """
+    return value[2:] if value.startswith("./") else value
+
+
 def canonicalize_repository_file_path(repo: Path, value: object) -> str:
     """Validate and canonicalize one model-authored repository file path.
 
@@ -94,7 +105,7 @@ def canonicalize_repository_file_path(repo: Path, value: object) -> str:
     """
     if not isinstance(value, str) or not valid_repository_file_path(value):
         raise InvalidRepositoryFilePath("invalid repository file path")
-    canonical = value[2:] if value.startswith("./") else value
+    canonical = strip_dot_slash(value)
     if not canonical or not path_is_confined(repo, canonical):
         raise InvalidRepositoryFilePath("invalid repository file path")
     return canonical
@@ -235,10 +246,7 @@ def path_is_confined(
 
 def canonicalize_directory_scope(value: str) -> str:
     """Canonicalize the lossless scope spelling differences."""
-    stripped = value.rstrip("/")
-    if stripped.startswith("./"):
-        stripped = stripped[2:]
-    return stripped
+    return strip_dot_slash(value.rstrip("/"))
 
 
 def canonicalize_working_directory(repo: Path, value: str) -> str:

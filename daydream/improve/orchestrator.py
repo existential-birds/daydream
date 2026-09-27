@@ -87,7 +87,7 @@ from daydream.improve.render import markdown_cell, plan_slug
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.repository_paths import canonicalize_working_directory
+from daydream.repository_paths import canonicalize_working_directory, strip_dot_slash
 from daydream.run_context import resolve_run_context
 from daydream.services import (
     RepoRootPolicy,
@@ -825,7 +825,7 @@ def _evidence_paths(
         # partition/service attribution matches against git-derived roots
         # (never ``./``-prefixed). Normalize so newly-legal ``./x`` evidence is
         # not silently dropped from attribution.
-        paths.append(path[2:] if path.startswith("./") else path)
+        paths.append(strip_dot_slash(path))
     return paths
 
 

@@ -44,6 +44,7 @@ from daydream.phases import (
     _exploration_pointer,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, truncate_utf8_to_budget
+from daydream.repository_paths import strip_dot_slash
 from daydream.severity import SEVERITY_RUBRIC
 
 
@@ -134,29 +135,13 @@ def _completed_read_paths(
     return paths
 
 
-def _strip_dot_slash(path: str) -> str:
-    """Normalize a leading ``./`` off a repo-relative path (issue #740).
-
-    A leading ``./`` is a legal path spelling since the grammar relaxed
-    (#572/#573); the reviewed-diff file set and the receipt lists are always
-    bare, so stripping once in a single canonical location keeps a ``./x``
-    finding matching its assigned file rather than failing every
-    path-component match and getting swept. The findings fallback, the verdict
-    path, and the orchestrator reconciliation all route through here so a
-    future normalization change is applied in one place.
-    """
-    if path.startswith("./"):
-        return path[2:]
-    return path
-
-
 def _finding_files_from_records(findings: list[Any]) -> set[str]:
     """Normalized ``file`` fields across parsed finding records (issue #742).
 
     Shared between the findings-only fallback (:func:`_parsed_finding_files`)
     and the per-stack verdict reconciliation in the orchestrator (in-memory
     parsed records) so the ``./`` strip lives in one place
-    (:func:`_strip_dot_slash`): a leading ``./`` is a legal path spelling
+    (:func:`strip_dot_slash`): a leading ``./`` is a legal path spelling
     since the grammar relaxed (#572/#573), and the reviewed-diff file set and
     the receipt lists are always bare, so normalizing once keeps a ``./x``
     finding matching its assigned file rather than failing every
@@ -166,7 +151,7 @@ def _finding_files_from_records(findings: list[Any]) -> set[str]:
     for finding in findings:
         if isinstance(finding, dict) and isinstance(finding.get("file"), str):
             file = finding["file"]
-            files.add(_strip_dot_slash(file))
+            files.add(strip_dot_slash(file))
     return files
 
 
@@ -229,7 +214,7 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
                     continue
                 if entry.get("verdict") not in {"clean", "has_findings"}:
                     continue  # not_reviewed (or any other) never credits
-                path = _strip_dot_slash(entry["path"])
+                path = strip_dot_slash(entry["path"])
                 covered.add(path)
             return covered
     return _parsed_finding_files(records)

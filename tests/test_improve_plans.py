@@ -913,6 +913,11 @@ def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branc
     return commit(repo, "advance head after plan fan-out")
 
 
+def _read_sidecar(root: Path) -> dict[str, Any]:
+    """Load the production plan-index sidecar written under *root*."""
+    return cast(dict[str, Any], json.loads((root / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")))
+
+
 def _write_single_plan(
     repo: Path,
     assembled: dict[str, Any],
@@ -1697,9 +1702,7 @@ def test_plan_anchor_git_timeout_blocks_plan(
     assert diagnostic["errors"] == [
         {"code": "PLANNED_AT_CHECK_FAILED", "pointer": "/"}
     ]
-    sidecar = json.loads(
-        (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(repo / "daydream_plans")
     assert [entry["host_blocked"] for entry in sidecar["plans"]] == [True]
 
 
@@ -1735,9 +1738,7 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     index = (reanchor_plans / "README.md").read_text(encoding="utf-8")
     assert "| [001](001-batch-catalog-queries.md) " in index
     assert "| TODO |" in index
-    sidecar = json.loads(
-        (reanchor_plans / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(reanchor_plans)
     assert [
         (entry["number"], entry["slug"], entry["planned_at"], entry["status"])
         for entry in sidecar["plans"]
@@ -1748,9 +1749,7 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     # the durable status points at the surviving main-index sibling, not the
     # pruned re-anchor worktree path.
     assert "landed at daydream_plans/001-batch-catalog-queries.md" in main_index
-    main_sidecar = json.loads(
-        (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    main_sidecar = _read_sidecar(repo / "daydream_plans")
     reanchored = [e for e in main_sidecar["plans"] if e["number"] == 1]
     assert len(reanchored) == 1
     assert reanchored[0]["status"].startswith("REANCHORED")
@@ -1832,9 +1831,7 @@ def test_reanchored_main_index_is_written_before_finish(
     assert outcome.status == "written"
 
     # crash-window invariant: main sidecar already indexes the re-anchor
-    sidecar = json.loads(
-        (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(repo / "daydream_plans")
     reanchored = [e for e in sidecar["plans"] if e["number"] == 1]
     assert len(reanchored) == 1
     assert reanchored[0]["status"].startswith("REANCHORED")
@@ -2297,9 +2294,7 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(
     index = index_path.read_text()
     assert index.count("fingerprint:fp-fix-n-plus-one") == 1
     assert f"| {status} |" in index
-    sidecar = json.loads(
-        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(plans_dir)
     assert [
         (entry["number"], entry["fingerprint"], entry["slug"], entry["status"])
         for entry in sidecar["plans"]
@@ -2334,9 +2329,7 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     assert result["written"] == []
     assert len(result["skipped"]) == 1
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    sidecar = json.loads(
-        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(plans_dir)
     assert [
         (entry["number"], entry["status"], entry["host_blocked"])
         for entry in sidecar["plans"]
@@ -2358,9 +2351,7 @@ def test_deleted_sidecar_is_rebuilt_from_the_rendered_index(repo: Path, head_sha
 
     assert result["written"] == []
     assert len(result["skipped"]) == 3
-    sidecar = json.loads(
-        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(plans_dir)
     assert [
         (entry["number"], entry["fingerprint"], entry["slug"], entry["status"])
         for entry in sidecar["plans"]
@@ -2389,9 +2380,7 @@ def test_rendered_index_recovers_escaped_pipes_during_reconciliation(
     result = _write_plans(plans_dir, [selection], planned_at=head_sha)
 
     assert result["written"] == []
-    sidecar = json.loads(
-        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-    )
+    sidecar = _read_sidecar(plans_dir)
     assert [
         (entry["number"], entry["title"], entry["status"])
         for entry in sidecar["plans"]
@@ -3990,7 +3979,7 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(
         planned_at=head_sha,
     )
 
-    sidecar = json.loads((plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8"))
+    sidecar = _read_sidecar(plans_dir)
     entry = sidecar["plans"][0]
     assert entry["package_fingerprint"] == "pkg-parser-cleanup"
     assert entry["member_fingerprints"] == [
