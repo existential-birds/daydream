@@ -7,7 +7,10 @@ declaration already owns.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -86,3 +89,26 @@ def test_pr_checklist_does_not_claim_the_rl_gate_runs_under_make_check() -> None
 
     assert "RL" not in gate_line, gate_line
     assert any("`make rl-check`" in line for line in checklist), checklist
+
+
+def test_actionlint_cannot_be_skipped_silently_when_required(tmp_path: Path) -> None:
+    """`ACTIONLINT_REQUIRE_DOCKER` turns the missing-daemon skip into a failure."""
+    make = shutil.which("make")
+    assert make is not None
+    env = {key: value for key, value in os.environ.items() if key != "ACTIONLINT_REQUIRE_DOCKER"}
+    env["PATH"] = str(tmp_path)  # no docker on PATH
+
+    optional = subprocess.run(
+        [make, "actionlint"], cwd=_ROOT, env=env, capture_output=True, text=True, input=""
+    )
+    required = subprocess.run(
+        [make, "actionlint"],
+        cwd=_ROOT,
+        env={**env, "ACTIONLINT_REQUIRE_DOCKER": "1"},
+        capture_output=True,
+        text=True,
+        input="",
+    )
+
+    assert optional.returncode == 0 and "skipped" in optional.stdout
+    assert required.returncode != 0, required.stdout + required.stderr
