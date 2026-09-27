@@ -77,7 +77,10 @@ from tests.harness.improve_backend import (
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import force_interactive as _force_interactive
-from tests.harness.trajectory import root_trajectory as _root_run_trajectory
+from tests.harness.trajectory import (
+    assert_dispatch_children,
+    root_trajectory as _root_run_trajectory,
+)
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -1041,68 +1044,8 @@ def _assert_complete_phase_dispatch(
 ) -> None:
     """Prove dispatch enclosure and one real invocation per exact child ref."""
     dispatch = _dispatch_for_phase(trajectory, phase)
-    expected_count = len(descriptors)
     assert dispatch["extra"]["dispatch_status"] == "succeeded"
-    assert dispatch["extra"]["planned_count"] == expected_count
-    assert dispatch["extra"]["attempted_count"] == expected_count
-    assert dispatch["extra"]["completed_count"] == expected_count
-
-    results = dispatch["observation"]["results"]
-    assert [result["content"] for result in results] == [
-        f"Dispatched to {descriptor}" for descriptor in descriptors
-    ]
-    assert all(len(result["subagent_trajectory_ref"]) == 1 for result in results)
-    refs = [result["subagent_trajectory_ref"][0] for result in results]
-    assert len({ref["trajectory_id"] for ref in refs}) == expected_count
-    assert {ref["session_id"] for ref in refs} == {trajectory["session_id"]}
-
-    summaries = [
-        summary
-        for summary in trajectory["extra"]["subtrajectories"]
-        if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
-    ]
-    assert [summary["descriptor"] for summary in summaries] == descriptors
-    assert all("invocation_id" not in summary for summary in summaries)
-
-    children: list[dict[str, Any]] = []
-    identities: set[tuple[str, str]] = set()
-    for descriptor, ref, summary in zip(descriptors, refs, summaries, strict=True):
-        assert Path(ref["trajectory_path"]).name.startswith(f"{descriptor}--")
-        child = cast(
-            dict[str, Any],
-            json.loads(
-                (repo / ".daydream" / ref["trajectory_path"]).read_text(
-                    encoding="utf-8"
-                )
-            ),
-        )
-        assert child["trajectory_id"] == ref["trajectory_id"]
-        assert child["session_id"] == trajectory["session_id"]
-        assert summary["trajectory_id"] == ref["trajectory_id"]
-        assert summary["sibling_trajectory_ref"] == ref["trajectory_path"]
-        assert summary["fork_id"] == ref["trajectory_id"]
-        assert summary["phase"] == phase
-        assert summary["invocations"] == child["extra"]["subtrajectories"]
-        assert len(summary["invocations"]) == 1
-        invocation = summary["invocations"][0]
-        assert invocation["phase"] == phase
-        assert invocation["trajectory_id"] == child["trajectory_id"]
-        assert (
-            child["extra"]["run_started_at"]
-            <= invocation["started_at"]
-            <= invocation["ended_at"]
-            <= child["extra"]["run_ended_at"]
-        )
-        identities.add((invocation["trajectory_id"], invocation["invocation_id"]))
-        children.append(child)
-
-    assert len(identities) == expected_count
-    assert dispatch["timestamp"] <= min(
-        child["extra"]["run_started_at"] for child in children
-    )
-    assert dispatch["extra"]["dispatch_completed_at"] >= max(
-        child["extra"]["run_ended_at"] for child in children
-    )
+    assert_dispatch_children(repo, dispatch, phase, descriptors)
 
 
 def _improve_observable_texts(repo: Path) -> list[str]:

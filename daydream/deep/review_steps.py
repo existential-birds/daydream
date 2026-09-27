@@ -336,7 +336,7 @@ async def _step_intent(ctx: FlowContext) -> None:
 def _fold_default_alternatives(ctx: FlowContext) -> bool:
     """Use the scheduled run's builder for every alternatives scheduling decision."""
     stacks = DeepState(ctx.data).stacks
-    return any(stack.stack_name == "structure" for stack in stacks) and fold_default_alternatives(
+    return fold_default_alternatives(
         stacks, ctx.strategy("alternatives"), structural_prompt_builder=ctx.registry.prompt("structural"),
     )
 
