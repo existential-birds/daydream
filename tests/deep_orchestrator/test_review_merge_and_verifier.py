@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import anyio
 import pytest
@@ -25,6 +25,7 @@ from daydream.deep.prompts import build_merge_prompt
 from daydream.runner import RunConfig, _resolve_backend
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
+    _install_post_recorder,
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.test_deep_orchestrator import (
@@ -41,10 +42,6 @@ from tests.test_deep_orchestrator import (
     _write_plugin_registry,
 )
 from tests.test_finite_delegation_parse import _mark_delegated_artifacts
-
-if TYPE_CHECKING:
-    from daydream.pr_review import ReviewRenderers
-    from daydream.run_context import RunContext
 
 
 def _install_merge_captures(
@@ -529,24 +526,7 @@ async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: p
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     post_calls: list[dict[str, Any]] = []
-
-    async def _spy(
-        target_dir: Path,
-        merged_items_path: Path,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: ReviewRenderers,
-        post: bool = False,
-        approve_on_clean: bool = False,
-        pr_number: int | None = None,
-        diagram_blocks: str | None = None,
-        run_context: RunContext | None = None,
-        auth: Any,
-    ) -> None:
-        post_calls.append({"target_dir": target_dir, "report_path": merged_items_path})
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _spy)
+    _install_post_recorder(monkeypatch, post_calls)
 
     # Prime the fix-resume artifacts: the verifier and fix gate both read the
     # canonical merged-items.json, so prime it alongside the markdown report.
