@@ -12,6 +12,9 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
+
+from tests.test_workflow_templates import job_steps, load_workflow
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -112,3 +115,144 @@ def test_actionlint_cannot_be_skipped_silently_when_required(tmp_path: Path) -> 
 
     assert optional.returncode == 0 and "skipped" in optional.stdout
     assert required.returncode != 0, required.stdout + required.stderr
+
+
+_CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
+_CHECK_JOB = "check"
+
+# CI check-job steps that are deliberately not local gate steps: step name ->
+# the one-line reason. Keep this list small and reasoned; a step that is
+# neither declared here nor a gate invocation fails the guard.
+_CI_ONLY_STEPS: dict[str, str] = {
+    "Run vulture": (
+        "root project only — the standalone RL scan runs in the separate rl-check job, "
+        "so the local gate's wider dead-code scope is not restated here"
+    ),
+}
+
+_MAKE_INVOCATION_RE = re.compile(r"^make\s+([A-Za-z0-9_.-]+)\s*$")
+_ACTIONLINT_DIGEST_RE = re.compile(r"rhysd/actionlint:[\w.]+@sha256:[0-9a-f]{64}")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _recipe_commands(recipe: str) -> list[str]:
+    """The individual shell commands a dry-run recipe printed."""
+    lines = [line for line in recipe.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    joined = "\n".join(lines).replace("\\\n", " ")
+    commands: list[str] = []
+    for chunk in re.split(r"&&|;|\n", joined):
+        command = chunk.strip().lstrip("@").strip()
+        if command and command not in {"then", "else", "fi"}:
+            commands.append(_WHITESPACE_RE.sub(" ", command))
+    return commands
+
+
+def _observed_gate_commands() -> dict[str, str]:
+    """Map each gate step's command text to the target that owns it.
+
+    Observed by dry-running the real Makefile (`make -n` prints a recipe without
+    executing it), so the recovery needs no Docker daemon and no network.
+    `MAKEFLAGS` is scrubbed because make prints `Entering directory` lines on
+    stdout under it, which would be parsed as commands.
+    """
+    env = {key: value for key, value in os.environ.items() if key not in ("MAKEFLAGS", "MFLAGS")}
+    owners: dict[str, str] = {}
+    for target in _gate_steps():
+        proc = subprocess.run(
+            ["make", "-n", target], cwd=_ROOT, env=env, capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, f"`make -n {target}` failed: {proc.stderr}"
+        for command in _recipe_commands(proc.stdout):
+            owners.setdefault(command, target)
+    return owners
+
+
+def _gate_violations(
+    steps: list[dict[str, Any]],
+    gate_steps: set[str],
+    owners: dict[str, str],
+    exemptions: dict[str, str],
+) -> list[str]:
+    """Every reason a check job's steps are not represented by the local gate."""
+    violations: list[str] = []
+    for step in steps:
+        run = step.get("run")
+        if not isinstance(run, str):
+            continue  # setup / artifact steps carry no command
+        name = str(step.get("name", "<unnamed step>"))
+        invocation = _MAKE_INVOCATION_RE.match(run.strip())
+        if invocation:
+            target = invocation.group(1)
+            if target not in gate_steps:
+                violations.append(f"{name}: runs `make {target}`, which is not a declared gate step")
+            continue
+        if name in exemptions:
+            if not exemptions[name].strip():
+                violations.append(f"{name}: declared CI-only step carries no reason")
+            continue
+        owner = owners.get(_WHITESPACE_RE.sub(" ", run.strip()))
+        if owner is not None:
+            violations.append(
+                f"{name}: restates `{run.strip()}`, the command owned by the `{owner}` gate step; "
+                f"run `make {owner}` instead"
+            )
+        else:
+            violations.append(
+                f"{name}: neither an invocation of a declared gate step nor a declared CI-only step"
+            )
+    return violations
+
+
+def test_ci_check_job_is_represented_by_the_declared_gate() -> None:
+    """The real check job invokes declared gate steps, plus stated CI-only ones."""
+    steps = job_steps(load_workflow(_CI_WORKFLOW), _CHECK_JOB)
+
+    violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), _CI_ONLY_STEPS)
+
+    assert violations == [], "\n".join(violations)
+
+
+def test_guard_rejects_a_restated_gate_command() -> None:
+    """An inlined gate command is caught, and names the step that owns it."""
+    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests"}]
+
+    violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
+
+    assert violations and "lint" in violations[0], violations
+
+
+def test_guard_rejects_an_unrepresented_step() -> None:
+    """A check-job command that matches no gate step and no exemption fails."""
+    steps = [{"name": "Inline gate", "run": "bash scripts/inline-gate.sh"}]
+
+    violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
+
+    assert violations and "neither an invocation" in violations[0], violations
+
+
+def test_guard_rejects_a_ci_only_step_without_a_reason() -> None:
+    """Declaring a step CI-only is not enough; it must state why."""
+    steps = [{"name": "Run vulture", "run": "uv run vulture --config pyproject.toml daydream tests"}]
+    owners = _observed_gate_commands()
+
+    allowed = _gate_violations(steps, set(_gate_steps()), owners, {"Run vulture": "root only"})
+    rejected = _gate_violations(steps, set(_gate_steps()), owners, {"Run vulture": "  "})
+
+    assert allowed == []
+    assert rejected and "no reason" in rejected[0], rejected
+
+
+def test_guard_accepts_a_new_gate_step() -> None:
+    """The guard reads the declared gate, so adding or reordering a step stays green."""
+    steps = [{"name": "New gate step", "run": "make newcheck"}]
+
+    assert _gate_violations(steps, {"lint", "newcheck"}, {}, {}) == []
+
+
+def test_pinned_actionlint_image_has_one_owner() -> None:
+    """Only the gate's actionlint step declares the workflow-lint image digest."""
+    owners = [
+        rel for rel in _GATE_FILES if _ACTIONLINT_DIGEST_RE.search((_ROOT / rel).read_text(encoding="utf-8"))
+    ]
+
+    assert owners == ["Makefile"], owners

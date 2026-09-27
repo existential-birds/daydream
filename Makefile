@@ -22,8 +22,8 @@ deadcode:
 # Coverage flags live here (not in global addopts) so targeted runs like
 # `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by
 # [tool.coverage.report] fail_under in pyproject.toml (#336).
-# These mirror the CI check job's Run tests step (local == CI), and keep
-# xdist parallelism via -n auto. No --no-cov-on-fail so coverage.xml survives
+# CI reaches these flags through `make test`; xdist parallelism stays via
+# -n auto. No --no-cov-on-fail so coverage.xml survives
 # a failed run for the coverage-report / CI artifact upload.
 test:
 	uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
