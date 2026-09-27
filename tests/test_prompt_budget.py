@@ -1,15 +1,19 @@
 """Tests for the dependency-neutral prompt-size policy."""
 
+import os
 from pathlib import Path
 
 import pytest
 
+from daydream.backends.pi import PiBackend
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
     PreparedSanctionedInput,
     PreparedSanctionedInputs,
     SanctionedInputTransport,
+    SanctionedInputUnavailable,
     fits_inline_diff_budget,
+    prepare_sanctioned_inputs,
 )
 
 
@@ -36,9 +40,6 @@ def test_exact_phase_artifacts_do_not_restrict_scoped_repository_reads(tmp_path:
 
 
 def test_pi_diff_reference_has_separate_admission_and_no_finalization_capture(tmp_path: Path) -> None:
-    from daydream.backends.pi import PiBackend
-    from daydream.prompt_budget import prepare_sanctioned_inputs
-
     diff = tmp_path / "diff.patch"
     diff.write_text("UNIQUE_DIFF_SENTINEL\n" + "x" * 3_690_129)
     intent = tmp_path / "intent.md"
@@ -57,11 +58,6 @@ def test_pi_diff_reference_has_separate_admission_and_no_finalization_capture(tm
 @pytest.mark.parametrize("change", ["mutation", "same_stat", "replace", "symlink", "missing", "utf8",
                                     "backend", "cwd", "mode"])
 def test_pi_diff_reference_rejects_changed_content_identity_or_binding(tmp_path: Path, change: str) -> None:
-    import os
-
-    from daydream.backends.pi import PiBackend
-    from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
-
     diff = tmp_path / "diff.patch"
     diff.write_text("before")
     backend = PiBackend(model="fixture")
@@ -103,9 +99,6 @@ def test_pi_diff_reference_rejects_changed_content_identity_or_binding(tmp_path:
 def test_diff_reference_policy_preserves_other_input_limits(
     tmp_path: Path, pi: bool, inline: bool, label: str,
 ) -> None:
-    from daydream.backends.pi import PiBackend
-    from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
-
     class IsolatedPi(PiBackend):
         sandbox = True
 

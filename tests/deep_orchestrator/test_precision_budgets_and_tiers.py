@@ -123,13 +123,13 @@ async def test_deep_flow_forwards_approve_on_clean(
     """The deep flow forwards the default or opted-in approval flag to posting."""
     _silence(monkeypatch)
     _install_model_capturing_stubs(monkeypatch, multi_stack_target)
-    received: list[bool] = []
+    received: list[dict[str, Any]] = []
     _install_post_recorder(monkeypatch, received)
     exit_code = (
         await _run_deep(multi_stack_target, approve_on_clean=True) if enabled else await _run_deep(multi_stack_target)
     )
     assert exit_code == 0
-    assert received == [enabled]
+    assert [call["approve_on_clean"] for call in received] == [enabled]
 
 
 TABLED_OPT_IN_FLAGS = ("precision_mode", "approve_on_clean", "scope_issue_filing")

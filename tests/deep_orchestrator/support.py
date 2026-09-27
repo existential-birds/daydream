@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import pytest
 
@@ -33,9 +33,6 @@ from tests.test_deep_orchestrator import (
     _silence,
     _StubBackend,
 )
-
-if TYPE_CHECKING:
-    from daydream.pr_review import ReviewRenderers
 
 
 def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,23 +67,11 @@ def _merged_item_descriptions(target: Path) -> list[str]:
     return [it.get("description", "") for it in _merged_items(target / ".daydream" / "deep")]
 
 
-def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[bool]) -> None:
-    """Stub the PR-posting boundary, recording the ``approve_on_clean`` kwarg."""
+def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[dict[str, Any]]) -> None:
+    """Stub the PR-posting boundary, recording each call's keyword arguments."""
 
-    async def _record_post(
-        target_dir: Any,
-        merged_items_path: Any,
-        *,
-        console: Any,
-        run_info: str,
-        renderers: ReviewRenderers,
-        post: Any,
-        approve_on_clean: Any = False,
-        diagram_blocks: Any = None,
-        run_context: Any = None,
-        auth: Any,
-    ) -> None:
-        received.append(approve_on_clean)
+    async def _record_post(*_args: Any, **kwargs: Any) -> None:
+        received.append(kwargs)
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
 

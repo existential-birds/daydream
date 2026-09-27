@@ -12,6 +12,7 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
+from daydream.backends.claude import ClaudeAgentError
 from daydream.findings import (
     FINDINGS_SCHEMA_VERSION,
     MAX_ARTIFACT_BYTES,
@@ -206,8 +207,6 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
     way the fixed ClaudeBackend does on ``ResultMessage.is_error``) and the
     GitHub lookups are mocked.
     """
-    from daydream.backends.claude import ClaudeAgentError
-
     out = tmp_path / "findings.json"
 
     backend = ScriptedBackend(

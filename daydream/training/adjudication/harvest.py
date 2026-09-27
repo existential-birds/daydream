@@ -3,7 +3,7 @@
 Verifies the preview ledger's per-finding evidence digests against a freshly
 built queue over the hydrated index and merges human judgments from the
 observation store under three-tier precedence. Digest drift raises
-:class:`AdjudicationDriftError` before anything is written (delta on
+:class:`AnnotationDriftError` before anything is written (delta on
 ``corpus_projection.projector.build_frozen_corpus``'s digest-pinned snapshot flow:
 harvest verifies the *preview ledger's* digests rather than re-pinning its
 own, so preview identities and digests are stable into the export by
@@ -28,9 +28,7 @@ from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.corpus_projection.tiers import classify_tier
 
-__all__ = ["AdjudicationDriftError", "build_export_entries"]
-
-AdjudicationDriftError = AnnotationDriftError
+__all__ = ["build_export_entries"]
 
 
 def build_export_entries(
@@ -80,7 +78,7 @@ def build_export_entries(
         if str(fresh["evidence_digest"]) != str(ledger_item["evidence_digest"]):
             drifted.append(record_id)
     if drifted:
-        raise AdjudicationDriftError(
+        raise AnnotationDriftError(
             f"evidence digests drifted from the preview ledger for "
             f"{len(drifted)} finding(s); re-run `corpus adjudicate preview` and re-adjudicate. "
             f"Requeued record_ids: {drifted}",

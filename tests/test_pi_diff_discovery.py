@@ -1,15 +1,27 @@
 """Pi discovery uses admitted diff references even for small changes."""
 
+import hashlib
 import json
+import os
+import re
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.artifact_visibility import artifact_session_active
+from daydream.backends import AgentEvent, BackendExecutionInput, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.runner import run
+from tests.deep_orchestrator.support import _uncovered_sweep_target
+from tests.harness.git_helpers import git
+from tests.harness.protocol_cli import install_protocol_cli
+from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.stub_backend import StubBackend
 
 
 async def test_small_pi_review_keeps_structural_dispatch_and_empty_inline_receipts(
@@ -60,20 +72,6 @@ async def test_runner_pi_diff_reference_reaches_sweep_and_preserves_coverage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any,
     diff_bytes: int, source_read: bool,
 ) -> None:
-    import hashlib
-    import os
-    import re
-    from collections.abc import AsyncGenerator
-
-    from daydream.artifact_visibility import artifact_session_active
-    from daydream.backends import AgentEvent, BackendExecutionInput, ResultEvent, ToolResultEvent, ToolStartEvent
-    from daydream.runner import run
-    from tests.deep_orchestrator.support import _uncovered_sweep_target
-    from tests.harness.git_helpers import git
-    from tests.harness.protocol_cli import install_protocol_cli
-    from tests.harness.review_profile import independent_alternatives_profile
-    from tests.harness.stub_backend import StubBackend
-
     target = _uncovered_sweep_target(tmp_path)
     sentinel = "DIFF_CONTENT_1321_SENTINEL"
     notes = target / "notes.txt"
@@ -175,11 +173,6 @@ async def test_runner_pi_diff_reference_reaches_sweep_and_preserves_coverage(
 async def test_non_pi_sweep_keeps_bounded_file_context_and_existing_access_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any,
 ) -> None:
-    from daydream.runner import run
-    from tests.deep_orchestrator.support import _uncovered_sweep_target
-    from tests.harness.git_helpers import git
-    from tests.harness.stub_backend import StubBackend
-
     target = _uncovered_sweep_target(tmp_path)
     (target / "notes.txt").write_text("NON_PI_EXCERPT\n" + "line\n" * 5 + "x" * 20_000 + "\n")
     git(target, "add", "notes.txt")

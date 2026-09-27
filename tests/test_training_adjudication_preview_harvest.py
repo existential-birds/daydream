@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from daydream.archive.hydrate import HydrationError, MovingBranchError
-from daydream.training.adjudication.harvest import AdjudicationDriftError, build_export_entries
+from daydream.training.adjudication.canonical import AnnotationDriftError
+from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.observations import append_observation
 from daydream.training.adjudication.preview import _load_sessions, run_preview
 from daydream.training.adjudication.queue import build_queue
@@ -154,7 +155,7 @@ def test_export_fails_closed_and_requeues_on_digest_drift(tmp_path: Path) -> Non
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
     drifted = _mutate_one_digest(root, tmp_path / "root2")
-    with pytest.raises(AdjudicationDriftError) as excinfo:
+    with pytest.raises(AnnotationDriftError) as excinfo:
         build_export_entries(drifted, ledger)
     assert excinfo.value.requeued_record_ids  # affected findings requeued, nothing merged
 
