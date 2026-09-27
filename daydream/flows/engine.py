@@ -112,6 +112,31 @@ class FlowContext:
             audit_workspace=self.audit_workspace,
         )
 
+    def backend_for_effort(self, phase: str, effort: str) -> Backend:
+        """Get or create ``phase``'s backend with ``effort`` overriding the resolver.
+
+        The arbiter group fan-out resolves one backend per group effort. When a
+        runner-bound factory is installed the same seam is used, so test
+        factories observe the resolution path production takes; otherwise the
+        effort override is threaded through :func:`_resolve_backend` and cached
+        under the resulting ``(backend, model, effort, audit_root)`` key.
+        """
+        if self._backend_factory is not None:
+            return self._backend_factory(
+                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
+            )
+
+        from daydream.runner import _resolve_backend
+
+        return _resolve_backend(
+            self.config,
+            phase,
+            cache=self._backend_cache,
+            cwd=self.work.repo,
+            audit_workspace=self.audit_workspace,
+            effort_override=effort,
+        )
+
     def strategy(self, stage: str) -> str:
         """Return the profile-owned strategy content for a model-bearing stage.
 

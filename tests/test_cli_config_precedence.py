@@ -18,9 +18,11 @@ from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend
 from daydream.cli import _parse_args, _parse_improve_args
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.deep.latency import DiffSignals, diff_signals, route_for, summarize_risk
 from daydream.runner import (
     RunConfig,
     _default_backend_name,
+    _explicit_reasoning_effort_pin,
     _resolve_backend,
     _resolved_backend_name,
     _resolved_latency_profile,
@@ -29,6 +31,20 @@ from daydream.runner import (
     _resolved_review_backend_name,
 )
 from daydream.test_execution import MissingTestCommandError, canonical_test_command
+
+
+def _routine_signals() -> DiffSignals:
+    """A small diff with no escalation surface (A2: size never escalates)."""
+    return diff_signals(diff="", changed_files=3, stack_count=1)
+
+
+def _sec_signals() -> DiffSignals:
+    """A diff touching a security surface, which must escalate the route."""
+    return diff_signals(
+        diff="+++ b/auth.py\n+def authenticate(password):\n+    return password\n",
+        changed_files=1,
+        stack_count=1,
+    )
 
 
 def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
@@ -318,3 +334,28 @@ def test_latency_profile_precedence_cli_over_file_over_default(tmp_path: Path) -
 def test_cli_accepts_the_profile_flag_and_it_wins(tmp_path: Path) -> None:
     args = _parse_args(["--latency-profile", "forensic", str(tmp_path)])
     assert args.latency_profile == "forensic"
+
+
+def test_profile_route_sets_wonder_and_arbiter_effort_on_codex(tmp_path: Path) -> None:
+    """The profile is a tier below the explicit user knobs (A4)."""
+    cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
+    assert _resolved_reasoning_effort(cfg, "wonder") == "high"  # table baseline
+    cfg.latency_route = route_for("balanced", summarize_risk(_routine_signals()))
+    assert _resolved_reasoning_effort(cfg, "wonder") == "medium"
+    assert _resolved_reasoning_effort(cfg, "arbiter") == "high"
+
+    cfg.reasoning_effort = "low"  # explicit pin still wins
+    assert _resolved_reasoning_effort(cfg, "wonder") == "low"
+
+
+def test_profile_route_does_not_touch_backends_absent_from_the_table(tmp_path: Path) -> None:
+    cfg = RunConfig(target=str(tmp_path), backend="claude", file_config=DaydreamFileConfig())
+    cfg.latency_route = route_for("forensic", summarize_risk(_sec_signals()))
+    assert _resolved_reasoning_effort(cfg, "wonder") is None
+
+
+def test_explicit_effort_pin_is_visible_to_the_arbiter_fan_out(tmp_path: Path) -> None:
+    cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
+    assert _explicit_reasoning_effort_pin(cfg, "arbiter") is None
+    cfg.reasoning_effort = "medium"
+    assert _explicit_reasoning_effort_pin(cfg, "arbiter") == "medium"

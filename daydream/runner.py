@@ -61,6 +61,7 @@ from daydream.backends import (
     create_backend,
 )
 from daydream.config import (
+    DEEP_PHASE_DEFAULT_EFFORT,
     DEFAULT_PI_MODEL,
     EFFORT_TIERS,
     PHASE_DEFAULT_EFFORT,
@@ -703,27 +704,60 @@ def _resolved_latency_profile(config: RunConfig) -> ProfileResolution:
     return resolve_latency_profile(None, source="default")
 
 
+def _explicit_reasoning_effort_pin(config: RunConfig, phase: str) -> str | None:
+    """Return the user-pinned effort for ``phase``, or ``None`` when unpinned.
+
+    Covers only the three explicit tiers (global ``--reasoning-effort``,
+    file-config phase override, file-config global) — never the latency-route
+    tier and never the built-in table. The arbiter group fan-out uses this to
+    honour a deliberate pin (A4) rather than a profile-derived effort.
+    """
+    file_config = _file_config_or_empty(config)
+    return (
+        config.reasoning_effort
+        or file_config.phase_reasoning_effort(phase)
+        or file_config.reasoning_effort
+    )
+
+
+def _profile_phase_effort(config: RunConfig, backend_name: str, phase: str) -> str | None:
+    """Return the latency route's effort for ``wonder``/``arbiter``, else ``None``.
+
+    The route tier sits below the explicit user knobs and above the built-in
+    table. Only phases the route speaks to resolve here, and only on backends
+    the deep effort table contains (today: Codex) — a route can never move a
+    backend whose historical effort Daydream deliberately left untouched.
+    ``wonder == "skip"`` is not an effort, so it falls through to the table.
+    """
+    if phase not in ("wonder", "arbiter") or backend_name not in DEEP_PHASE_DEFAULT_EFFORT:
+        return None
+    route = config.latency_route
+    if route is None:
+        return None
+    if phase == "wonder":
+        return None if route.wonder == "skip" else route.wonder
+    return route.arbiter_effort
+
+
 def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
     """Resolve the reasoning effort for ``phase`` across all precedence tiers.
 
     Order (highest first): global ``config.reasoning_effort``
     (``--reasoning-effort``), file-config phase override, file-config global,
-    then ``PHASE_DEFAULT_EFFORT[backend][phase]``. There is no per-phase
-    RunConfig field. ``None`` means no source supplied one and the backend
-    applies its own ambient default (e.g. Codex reads
-    ``model_reasoning_effort`` from ``~/.codex/config.toml`` when daydream
-    passes nothing).
+    the run's latency route for ``wonder``/``arbiter``, then
+    ``PHASE_DEFAULT_EFFORT[backend][phase]``. There is no per-phase RunConfig
+    field. ``None`` means no source supplied one and the backend applies its
+    own ambient default (e.g. Codex reads ``model_reasoning_effort`` from
+    ``~/.codex/config.toml`` when daydream passes nothing).
 
     Like :func:`_resolved_model`, the default-table lookup keys off the backend
     kind resolved by :func:`_resolved_backend_name`. All three backends consume
     the resolved value through their own native knob.
     """
-    file_config = _file_config_or_empty(config)
     backend_name = _resolved_backend_name(config, phase)
     return (
-        config.reasoning_effort
-        or file_config.phase_reasoning_effort(phase)
-        or file_config.reasoning_effort
+        _explicit_reasoning_effort_pin(config, phase)
+        or _profile_phase_effort(config, backend_name, phase)
         or PHASE_DEFAULT_EFFORT.get(backend_name, {}).get(phase)
     )
 
@@ -736,11 +770,20 @@ def _resolve_backend(
     cwd: Path | None = None,
     audit_workspace: AuditWorkspace | None = None,
     execution_input: BackendExecutionInput | None = None,
+    effort_override: str | None = None,
 ) -> Backend:
-    """Resolve one phase backend from CLI, file, and built-in defaults, reusing the optional cache."""
+    """Resolve one phase backend from CLI, file, and built-in defaults, reusing the optional cache.
+
+    ``effort_override`` replaces the resolver's value for this one resolution;
+    it is the arbiter group fan-out's per-group effort. Because the cache key
+    already includes the resolved effort, an override never collides with the
+    phase default.
+    """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
-    resolved_effort = _resolved_reasoning_effort(config, phase)
+    resolved_effort = (
+        effort_override if effort_override is not None else _resolved_reasoning_effort(config, phase)
+    )
     audit_root = (
         audit_workspace.repo.resolve(strict=True)
         if audit_workspace is not None
