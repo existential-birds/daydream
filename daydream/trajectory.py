@@ -3188,12 +3188,16 @@ class DispatchHandle:
         self._closed = True
 
 
+def partial_or_failed_terminal(has_success: object) -> tuple[LifecycleStatus, LifecycleReasonCode]:
+    """Derive the PARTIAL/SOME_CHILDREN_FAILED-or-FAILED/ALL_CHILDREN_FAILED terminal pair."""
+    if has_success:
+        return LifecycleStatus.PARTIAL, LifecycleReasonCode.SOME_CHILDREN_FAILED
+    return LifecycleStatus.FAILED, LifecycleReasonCode.ALL_CHILDREN_FAILED
+
+
 def finish_partial_or_failed(dispatch: DispatchHandle, has_results: object) -> None:
     """Close *dispatch* PARTIAL when some child succeeded, else FAILED."""
-    dispatch.finish(
-        LifecycleStatus.PARTIAL if has_results else LifecycleStatus.FAILED,
-        LifecycleReasonCode.SOME_CHILDREN_FAILED if has_results else LifecycleReasonCode.ALL_CHILDREN_FAILED,
-    )
+    dispatch.finish(*partial_or_failed_terminal(has_results))
 
 
 @asynccontextmanager

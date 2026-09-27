@@ -66,6 +66,7 @@ from daydream.trajectory import (
     dispatch_scope,
     get_current_recorder,
     maybe_fork,
+    partial_or_failed_terminal,
     phase_scope,
 )
 from daydream.ui import print_error, print_info, print_success, print_warning
@@ -862,19 +863,8 @@ async def _run_diagram_step(
                 result is not None and result.get("status") == "failed"
                 for result in results.values()
             )
-            if returned_failures:
-                status = (
-                    LifecycleStatus.FAILED
-                    if returned_failures == len(kinds)
-                    else LifecycleStatus.PARTIAL
-                )
-                reason = (
-                    LifecycleReasonCode.ALL_CHILDREN_FAILED
-                    if returned_failures == len(kinds)
-                    else LifecycleReasonCode.SOME_CHILDREN_FAILED
-                )
-                if dispatch is not None:
-                    dispatch.finish(status, reason)
+            if returned_failures and dispatch is not None:
+                dispatch.finish(*partial_or_failed_terminal(returned_failures < len(kinds)))
 
     for kind, result in results.items():
         if result is not None and result.get("status") == "failed":
@@ -896,13 +886,7 @@ async def _run_diagram_step(
     if not kinds:
         phase.finish(LifecycleStatus.SKIPPED, LifecycleReasonCode.NO_ELIGIBLE_WORK)
     elif failures:
-        all_failed = len(failures) == len(kinds)
-        phase.finish(
-            LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL,
-            LifecycleReasonCode.ALL_CHILDREN_FAILED
-            if all_failed
-            else LifecycleReasonCode.SOME_CHILDREN_FAILED,
-        )
+        phase.finish(*partial_or_failed_terminal(len(failures) < len(kinds)))
 
     consequence = "the run fails" if mode == "diagram" else "the review continues"
     for kind, detail in sorted(failures.items()):

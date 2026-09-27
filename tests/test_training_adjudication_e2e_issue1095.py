@@ -16,6 +16,7 @@ from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.preview import run_preview
+from daydream.training.adjudication.queue import build_queue
 from tests.harness.trajectory import make_manifest
 from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
@@ -138,22 +139,15 @@ def test_hydrated_to_canonical_harvest_end_to_end(tmp_path: Path) -> None:
     # materialized record carries the neutralized disposition (one disposition
     # in the bundle, never gold) while the operator queue enumerates it
     # (issue #336 item 7).
-    from daydream.training.adjudication.queue import build_queue
-
-    snapshot_records = {
-        json.loads(line)["fingerprint"]: json.loads(line)
+    rows = [
+        json.loads(line)
         for line in (tmp_path / "snapshot" / "sessions.jsonl").read_text().splitlines()
         if line
-    }
+    ]
+    snapshot_records = {row["fingerprint"]: row for row in rows}
     assert snapshot_records["fp-conf"]["conflicting"] is True
     assert snapshot_records["fp-conf"]["disposition"] == "ambiguous"
-    queue = build_queue(
-        [
-            json.loads(line)
-            for line in (tmp_path / "snapshot" / "sessions.jsonl").read_text().splitlines()
-            if line
-        ]
-    )
+    queue = build_queue(rows)
     assert snapshot_records["fp-conf"]["record_id"] in {
         str(item["record_id"]) for item in queue
     }

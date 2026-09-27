@@ -105,6 +105,7 @@ from daydream.trajectory import (
     dispatch_scope,
     get_current_recorder,
     maybe_fork,
+    partial_or_failed_terminal,
     phase_scope,
     redact_text,
 )
@@ -1049,13 +1050,7 @@ def _finish_fanout(
     total: int,
 ) -> None:
     """Record one terminal fan-out decision from its failed-child count."""
-    all_failed = failed == total
-    status = LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL
-    reason = (
-        LifecycleReasonCode.ALL_CHILDREN_FAILED
-        if all_failed
-        else LifecycleReasonCode.SOME_CHILDREN_FAILED
-    )
+    status, reason = partial_or_failed_terminal(failed < total)
     if dispatch is not None:
         dispatch.finish(status, reason)
     phase.finish(status, reason)

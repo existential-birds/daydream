@@ -54,10 +54,7 @@ def _load_workspace_privacy(workspace: Path) -> dict[str, Any]:
     rather than rejected wholesale as corrupt. A malformed/missing manifest
     raises the project's existing ``WorkspaceCorrupt`` — never a silent default.
     """
-    try:
-        raw = storage.load_yaml_strict(workspace / "benchmark.yaml")
-    except storage.WorkspaceCorrupt:
-        raise
+    raw = storage.load_yaml_strict(workspace / "benchmark.yaml")
     privacy = raw.get("privacy")
     if not isinstance(privacy, dict):
         raise storage.WorkspaceCorrupt(

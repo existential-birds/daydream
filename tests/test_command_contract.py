@@ -56,24 +56,6 @@ def test_schema_patterns_are_lookaround_free(pattern: str) -> None:
     assert re.search(r"\(\?[=!<]", pattern) is None
 
 
-PATH_ACCEPTS = [
-    "src/main.rs",
-    "a/b/c",
-    ".github/workflows/ci.yml",
-    "foo.bar",
-    "foo..bar",
-    # issues #572/#573: legal filenames the over-tight grammar rejected
-    "foo bar.py",
-    "Café.md",
-    "file#1.py",
-    "a%file.txt",
-    "(x).py",
-    "a&b.py",
-    "~/.bashrc",
-    "./foo.py",
-    "space name.py",
-]
-
 LEGAL_FILENAMES = [
     "foo bar.py",
     "Café.md",
@@ -83,6 +65,17 @@ LEGAL_FILENAMES = [
     "a&b.py",
     "~/.bashrc",
     "space name.py",
+]
+
+PATH_ACCEPTS = [
+    "src/main.rs",
+    "a/b/c",
+    ".github/workflows/ci.yml",
+    "foo.bar",
+    "foo..bar",
+    # issues #572/#573: legal filenames the over-tight grammar rejected
+    *LEGAL_FILENAMES,
+    "./foo.py",
 ]
 
 MULTI_DOT_PATHS = [

@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import AbstractSet, Any, Literal, NamedTuple, overload
+from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -752,20 +752,16 @@ def freeze_one(
     resolved_base: str | None = None
 
     def unreplayable(reason: str, detail: str) -> tuple[dict[str, Any], None]:
-        return ({
-            "status": "unreplayable",
-            "policy": policy,
-            "requested_head": requested_head,
-            "original_base_sha": resolved_base,
-            "requested_base_sha": base_tip,
-            "original_head_sha": head_sha,
-            "base_tree_sha": None,
-            "head_tree_sha": None,
-            "diff_sha256": None,
-            "bundle_file": None,
-            "bundle_sha256": None,
-            "error": {"reason": reason, "detail": detail},
-        }, None)
+        record = schema.SnapshotUnreplayable(
+            status="unreplayable",
+            policy=cast(Literal["final_pr_head", "explicit_head"], policy),
+            requested_head=requested_head,
+            original_base_sha=resolved_base,
+            requested_base_sha=base_tip,
+            original_head_sha=head_sha,
+            error=schema._SnapshotError.model_validate({"reason": reason, "detail": detail}),
+        )
+        return record.model_dump(), None
 
     # 1) establish the shared bare mirror (local-only, no network). A failure
     #    here is a base-side (environment) problem: no ref on either side can be
