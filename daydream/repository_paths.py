@@ -144,15 +144,6 @@ def valid_directory_scope_lexical(value: str) -> bool:
     return _valid_lexical(value, _DIRECTORY_SCOPE)
 
 
-def _strip_prefix(
-    parts: tuple[str, ...], base: tuple[str, ...]
-) -> tuple[str, ...] | None:
-    """Return ``parts`` with a leading ``base`` removed, else None."""
-    if parts[: len(base)] == base:
-        return parts[len(base) :]
-    return None
-
-
 def _repo_relative_parts(
     parts: tuple[str, ...], repo: Path, root: Path
 ) -> tuple[str, ...] | None:
@@ -163,9 +154,8 @@ def _repo_relative_parts(
     prefixes ``parts``.
     """
     for base in (PurePosixPath(repo).parts, PurePosixPath(str(root)).parts):
-        remainder = _strip_prefix(parts, base)
-        if remainder is not None:
-            return remainder
+        if parts[: len(base)] == base:
+            return parts[len(base) :]
     return None
 
 

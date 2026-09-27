@@ -165,10 +165,7 @@ def assert_dispatch_children(
         children.append(child)
 
     assert len(identities) == expected_count
-    assert dispatch["timestamp"] <= min(child["extra"]["run_started_at"] for child in children)
-    assert dispatch["extra"]["dispatch_completed_at"] >= max(
-        child["extra"]["run_ended_at"] for child in children
-    )
+    assert dispatch_encloses_children(dispatch, target_dir)
     return children
 
 

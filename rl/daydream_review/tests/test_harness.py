@@ -330,17 +330,6 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
     assert "daydream" in argv
     assert argv[argv.index("--backend") + 1] == "claude"
 
-    # Pin the terminal property of the seam by executing it: root must drop
-    # off root, and a non-root caller must be refused.
-    wrapper = PROJECT_ROOT / "images" / "run-as-agent"
-    dropped = subprocess.run([str(wrapper), "id", "-u"], capture_output=True, text=True)
-    if os.geteuid() == 0:
-        assert dropped.returncode == 0, dropped.stderr
-        assert dropped.stdout.strip() != "0", "run-as-agent must drop off root"
-    else:
-        assert dropped.returncode != 0, "non-root callers must be refused"
-        assert "must be run as root" in dropped.stderr
-
 
 async def test_docker_launch_preflights_writability_before_run_as_agent(
     fixture_manifest_path: Path

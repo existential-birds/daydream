@@ -23,16 +23,10 @@ def _load_repo_slugs(path: Path) -> frozenset[str]:
 
     Blank lines and lines whose stripped form starts with ``#`` are skipped.
     """
-    slugs: set[str] = set()
     with path.open("r", encoding="utf-8") as fh:
-        for raw_line in fh:
-            stripped = raw_line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                continue
-            slugs.add(stripped)
-    return frozenset(slugs)
+        return frozenset(
+            line for raw in fh if (line := raw.strip()) and not line.startswith("#")
+        )
 
 
 def load_exclusion_list() -> frozenset[str]:
