@@ -5,6 +5,8 @@ Covers ``daydream.deep.detection.detect_stacks`` and its routing contracts.
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from daydream.config import (
     DEFAULT_DEEP_SHARD_MAX_BYTES,
     DEFAULT_DEEP_SHARD_MAX_FILES,
@@ -106,12 +108,20 @@ def test_equal_depth_fallthrough() -> None:
     assert "shared.sql" in generic.files
 
 
-def test_config_default_generic() -> None:
-    """D-13a: .yaml / .toml route to generic by default."""
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        pytest.param(["config.yaml"], {"generic"}, id="D-13a-config-default-generic"),
+        pytest.param(["pyproject.toml"], {"generic"}, id="D-13c-no-static-promotion"),
+        pytest.param(["src/lib.rs"], {"rust"}, id="M3-never-degrades-to-generic"),
+    ],
+)
+def test_language_classification(files: list[str], expected: set[str]) -> None:
+    """D-13a/D-13c/M3: config paths default to generic; a detected language never degrades."""
 
-    result = detect_stacks(["config.yaml"])
+    result = detect_stacks(files)
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
-    assert language_names == {"generic"}
+    assert language_names == expected
 
 
 def test_config_promotion_pyproject() -> None:
@@ -120,15 +130,6 @@ def test_config_promotion_pyproject() -> None:
     result = detect_stacks(["pyproject.toml", "src/main.py"])
     python = next(a for a in result if a.stack_name == "python")
     assert "pyproject.toml" in python.files
-
-
-def test_no_static_promotion_without_cochange() -> None:
-    """D-13c: static paths alone do not promote config to a stack."""
-
-    # pyproject.toml alone (no .py in diff) stays generic
-    result = detect_stacks(["pyproject.toml"])
-    language_names = {a.stack_name for a in result if a.stack_name != "structure"}
-    assert language_names == {"generic"}
 
 
 def test_md_pinned_to_generic() -> None:
@@ -147,14 +148,6 @@ def test_no_files_dropped() -> None:
     result = detect_stacks(files)
     routed = {f for a in result for f in a.files}
     assert routed == set(files)
-
-
-def test_detected_stack_never_degrades_to_generic() -> None:
-    """M3: D-16 removed — a detected stack never degrades to generic without a skill."""
-
-    result = detect_stacks(["src/lib.rs"])
-    language_names = {a.stack_name for a in result if a.stack_name != "structure"}
-    assert language_names == {"rust"}
 
 
 def test_structure_stack_emitted_for_code_diff() -> None:
