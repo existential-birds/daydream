@@ -1867,19 +1867,27 @@ async def test_prompt_attachment_generator_close(
 async def test_concurrent_prompt_attachments_survive_until_cancelled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The fixture walks its cwd before publishing an observation. Keep its
+    # concurrently renamed observation files outside that walk.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     fixture = install_protocol_cli(tmp_path / "fixture", "pi", response_mode="block")
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
     backend = PiBackend(model="fixture")
 
     async def consume(prompt: str) -> None:
-        async for _ in backend.execute(tmp_path, prompt):
+        async for _ in backend.execute(workspace, prompt):
             pass
 
     tasks = [asyncio.create_task(consume(prompt)) for prompt in ("first invocation", "second invocation")]
     try:
         async with asyncio.timeout(5):
             while len(fixture.read_observations()) < 2:
+                for task in tasks:
+                    if task.done():
+                        task.result()
+                        pytest.fail("Pi fixture exited before both invocations became ready")
                 await asyncio.sleep(0.01)
         paths = [Path(item["prompt_attachment"]) for item in fixture.read_observations()]
         assert len(set(paths)) == 2
