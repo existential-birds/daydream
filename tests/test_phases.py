@@ -332,6 +332,23 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(git_ops, "restore_index", lambda *args, **kwargs: None)
 
 
+def _seed_healing_repo(
+    tmp_path: Path,
+    path: str,
+    contents: str = "-- original\n",
+    message: str = "initial migration",
+) -> tuple[Path, str | None]:
+    """Commit one seeded file and return it with the pre-fix stash snapshot."""
+
+    init_repo(tmp_path)
+    file_path = tmp_path / path
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(contents)
+    git(tmp_path, "add", path)
+    git_commit(tmp_path, message)
+    return file_path, git_ops.stash_create(tmp_path)
+
+
 def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(
     tmp_path: Path,
     silence_console: Callable[..., None],
@@ -339,14 +356,7 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
     """The per-healing guard protects historical migrations after a fix agent runs."""
 
     silence_console("daydream.phases")
-    init_repo(tmp_path)
-    migration = tmp_path / "migrations" / "0001_init.sql"
-    migration.parent.mkdir()
-    migration.write_text("-- original\n")
-    git(tmp_path, "add", "migrations/0001_init.sql")
-    git_commit(tmp_path, "initial migration")
-
-    snapshot = git_ops.stash_create(tmp_path)
+    migration, snapshot = _seed_healing_repo(tmp_path, "migrations/0001_init.sql")
     migration.write_text("-- forbidden rewrite\n")
     new_migration = tmp_path / "migrations" / "0002_add_users.sql"
     new_migration.write_text("-- allowed new migration\n")
@@ -371,13 +381,9 @@ def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
     """A healing edit cannot remove a marker and thereby evade the guard."""
 
     silence_console("daydream.phases")
-    init_repo(tmp_path)
-    generated = tmp_path / "client.py"
-    generated.write_text("# @generated\nORIGINAL = True\n")
-    git(tmp_path, "add", "client.py")
-    git_commit(tmp_path, "generated client")
-
-    snapshot = git_ops.stash_create(tmp_path)
+    generated, snapshot = _seed_healing_repo(
+        tmp_path, "client.py", "# @generated\nORIGINAL = True\n", "generated client"
+    )
     generated.write_text("MANUAL = True\n")
 
     violations = _reject_test_healing_generated_file_edits(
@@ -396,12 +402,7 @@ def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(
     """Without a pre-fix snapshot, recovery must not fall back to HEAD."""
 
     silence_console("daydream.phases")
-    init_repo(tmp_path)
-    migration = tmp_path / "migrations" / "0001_init.sql"
-    migration.parent.mkdir()
-    migration.write_text("-- original\n")
-    git(tmp_path, "add", "migrations/0001_init.sql")
-    git_commit(tmp_path, "initial migration")
+    migration, _ = _seed_healing_repo(tmp_path, "migrations/0001_init.sql")
     migration.write_text("-- user edit\n")
 
     violations = _reject_test_healing_generated_file_edits(
@@ -450,13 +451,7 @@ def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
     """An unknown changed-path set cannot safely drive destructive recovery."""
 
     silence_console("daydream.phases")
-    init_repo(tmp_path)
-    migration = tmp_path / "migrations" / "0001_init.sql"
-    migration.parent.mkdir()
-    migration.write_text("-- original\n")
-    git(tmp_path, "add", "migrations/0001_init.sql")
-    git_commit(tmp_path, "initial migration")
-    snapshot = git_ops.stash_create(tmp_path)
+    migration, snapshot = _seed_healing_repo(tmp_path, "migrations/0001_init.sql")
     migration.write_text("-- healing edit\n")
     monkeypatch.setattr(
         "daydream.phases.git_ops.changed_files_against",
@@ -480,13 +475,9 @@ def test_test_healing_guard_reports_restoration_failure(
     """A forbidden edit remains unsafe when Git cannot restore its baseline."""
 
     silence_console("daydream.phases")
-    init_repo(tmp_path)
-    migration = tmp_path / "migrations" / "0001_init.sql"
-    migration.parent.mkdir()
-    migration.write_text("-- original\n")
-    git(tmp_path, "add", "migrations/0001_init.sql")
-    git_commit(tmp_path, "test: initialize migration fixture")
-    snapshot = git_ops.stash_create(tmp_path)
+    migration, snapshot = _seed_healing_repo(
+        tmp_path, "migrations/0001_init.sql", message="test: initialize migration fixture"
+    )
     migration.write_text("-- healing edit\n")
     monkeypatch.setattr(
         "daydream.phases.git_ops.restore_paths_from_ref",

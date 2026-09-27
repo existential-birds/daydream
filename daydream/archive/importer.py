@@ -427,16 +427,15 @@ def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, An
     for inventory in inventories:
         for row in inventory:
             human = row.get("source", "auto") != "auto"
+            digest = canonical_payload_digest(row, include_observed_at=human)
             key = _dedup_tuple(row)
             if human:
                 # Human rows are never auto-deduped by the writer: only
                 # byte-identical rows (including observed_at) collapse, and
                 # distinct stamps are legitimate generations — never
                 # content conflicts.
-                key = (*key, canonical_payload_digest(row, include_observed_at=True))
-            groups.setdefault(key, []).append(
-                (row, canonical_payload_digest(row, include_observed_at=human))
-            )
+                key = (*key, digest)
+            groups.setdefault(key, []).append((row, digest))
 
     rows: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
