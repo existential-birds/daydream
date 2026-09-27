@@ -99,28 +99,24 @@ PATH_REJECTS = [
 ]
 
 
+PATH_SCHEMAS = [
+    pytest.param(REPOSITORY_FILE_PATH_SCHEMA, id="file"),
+    pytest.param(DIRECTORY_SCOPE_SCHEMA, id="directory"),
+]
+
+
+@pytest.mark.parametrize("schema", PATH_SCHEMAS)
 @pytest.mark.parametrize("value", PATH_ACCEPTS)
-def test_file_path_schema_accepts(value: str) -> None:
-    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(value)
-    assert re.compile(REPOSITORY_FILE_PATH_SCHEMA["pattern"]).match(value)
+def test_path_schema_accepts(schema: dict[str, Any], value: str) -> None:
+    assert Draft202012Validator(schema).is_valid(value)
+    assert re.compile(schema["pattern"]).match(value)
 
 
+@pytest.mark.parametrize("schema", PATH_SCHEMAS)
 @pytest.mark.parametrize("value", PATH_REJECTS)
-def test_file_path_schema_rejects(value: str) -> None:
-    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(value)
-    assert not re.compile(REPOSITORY_FILE_PATH_SCHEMA["pattern"]).match(value)
-
-
-@pytest.mark.parametrize("value", PATH_ACCEPTS)
-def test_directory_scope_schema_accepts(value: str) -> None:
-    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid(value)
-    assert re.compile(DIRECTORY_SCOPE_SCHEMA["pattern"]).match(value)
-
-
-@pytest.mark.parametrize("value", PATH_REJECTS)
-def test_directory_scope_schema_rejects(value: str) -> None:
-    assert not Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid(value)
-    assert not re.compile(DIRECTORY_SCOPE_SCHEMA["pattern"]).match(value)
+def test_path_schema_rejects(schema: dict[str, Any], value: str) -> None:
+    assert not Draft202012Validator(schema).is_valid(value)
+    assert not re.compile(schema["pattern"]).match(value)
 
 
 def test_file_path_empty_and_length_bounds() -> None:
