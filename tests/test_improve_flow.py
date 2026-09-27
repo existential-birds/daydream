@@ -636,14 +636,9 @@ async def test_audit_dispatch_interval_cancelling_two_blocked_auditors(
     assert dispatch["extra"]["dispatch_status"] == "cancelled"
     assert dispatch["extra"]["reason_code"] == "cancelled"
     assert dispatch["extra"]["attempted_count"] == 2
-    ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["event"] == "phase_end" and event["phase"] == "audit"
-    ]
-    assert len(ends) == 1
-    assert ends[0]["status"] == "cancelled"
-    assert ends[0]["reason_code"] == "cancelled"
+    end = _phase_end(trajectory, "audit")
+    assert end["status"] == "cancelled"
+    assert end["reason_code"] == "cancelled"
 
 
 @pytest.mark.anyio
@@ -1034,6 +1029,16 @@ def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any
     ]
     assert len(steps) == 1
     return cast(dict[str, Any], steps[0])
+
+
+def _phase_end(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:
+    ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["event"] == "phase_end" and event["phase"] == phase
+    ]
+    assert len(ends) == 1
+    return cast(dict[str, Any], ends[0])
 
 
 def _assert_complete_phase_dispatch(
@@ -1434,14 +1439,9 @@ async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
     dispatch = _dispatch_for_phase(trajectory, "audit")
     assert dispatch["extra"]["dispatch_status"] == "failed"
     assert dispatch["extra"]["reason_code"] == "all_children_failed"
-    ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["event"] == "phase_end" and event["phase"] == "audit"
-    ]
-    assert len(ends) == 1
-    assert ends[0]["status"] == "failed"
-    assert ends[0]["reason_code"] == "all_children_failed"
+    end = _phase_end(trajectory, "audit")
+    assert end["status"] == "failed"
+    assert end["reason_code"] == "all_children_failed"
 
 
 @pytest.mark.anyio
@@ -1646,14 +1646,9 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     dispatch = _dispatch_for_phase(trajectory, "vet")
     assert dispatch["extra"]["dispatch_status"] == "partial"
     assert dispatch["extra"]["reason_code"] == "some_children_failed"
-    ends = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["event"] == "phase_end" and event["phase"] == "vet"
-    ]
-    assert len(ends) == 1
-    assert ends[0]["status"] == "partial"
-    assert ends[0]["reason_code"] == "some_children_failed"
+    end = _phase_end(trajectory, "vet")
+    assert end["status"] == "partial"
+    assert end["reason_code"] == "some_children_failed"
 
 
 @pytest.mark.anyio

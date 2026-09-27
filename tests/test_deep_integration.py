@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import daydream.phases as phases_mod
-from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
+from daydream.backends import CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
 from daydream.deep import detection as _detection
 from daydream.deep.detection import StackAssignment
@@ -45,26 +44,14 @@ class _DeepMockBackend(ScriptedBackend):
 
     def __init__(
         self,
-        target_dir: Path,
         *,
         cost_usd: float | None = 0.01,
         raise_on_agents: bool = False,
     ) -> None:
         super().__init__(model="mock-model", cost_usd=cost_usd, responder=self._dispatch)
-        self.target_dir = target_dir
         self.cost_usd = cost_usd
         self.raise_on_agents = raise_on_agents
         self.stages: list[str] = []
-
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
 
     def _dispatch(
         self,
@@ -209,10 +196,10 @@ class _DeepMockBackend(ScriptedBackend):
         """The review-file path the delivered prompt names.
 
         The prompt names the session's live artifact tree. Writing there rather
-        than reconstructing a path under ``target_dir`` matches the sanctioned
-        adapter contract: the public ``.daydream`` tree is detached for the
-        run's duration, so a mid-run write to a reconstructed public path trips
-        the model-cwd artifact gate and fails the run.
+        than reconstructing the public path matches the sanctioned adapter
+        contract: the public ``.daydream`` tree is detached for the run's
+        duration, so a mid-run write to a reconstructed public path trips the
+        model-cwd artifact gate and fails the run.
         """
         m = re.search(r"Write your full review to (\S+\.md)\.", prompt)
         return Path(m.group(1)) if m else None
@@ -275,7 +262,7 @@ async def _run_deep(
 
 async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes end-to-end on a Claude-shaped backend (cost_usd populated)."""
-    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
+    backend = _DeepMockBackend(cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
 
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
@@ -295,7 +282,7 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes on Codex-shape (cost_usd=None, no agents= ever passed)."""
-    backend = _DeepMockBackend(multi_stack_target, cost_usd=None, raise_on_agents=True)
+    backend = _DeepMockBackend(cost_usd=None, raise_on_agents=True)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
 
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
@@ -352,7 +339,7 @@ async def test_deep_default_backend_line_is_phase_agnostic(
 ) -> None:
     """#647: the 'Default backend' status line never shows a review override."""
 
-    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
+    backend = _DeepMockBackend(cost_usd=0.0123)
     _wire_mocks(monkeypatch, backend)
     # Capture orchestrator print_info messages (override the _silence_ui noop).
     captured: list[str] = []
@@ -405,7 +392,7 @@ async def test_structural_meta_stack_flows_end_to_end(
     # ``detect_stacks`` is imported into the orchestrator namespace; patch there.
     monkeypatch.setattr("daydream.deep.orchestrator.detect_stacks", _spy_detect)
 
-    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
+    backend = _DeepMockBackend(cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
 
@@ -456,7 +443,7 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     all three gate assignments are exercised in a single real run.
     """
 
-    backend = _DeepMockBackend(multi_stack_target, cost_usd=0.0123)
+    backend = _DeepMockBackend(cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
 
@@ -540,7 +527,7 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
     per-stack and generic-fallback prompts both reach the backend seam.
     """
 
-    backend = _DeepMockBackend(rust_wire_target, cost_usd=0.0123)
+    backend = _DeepMockBackend(cost_usd=0.0123)
     exit_code = await _run_deep(
         rust_wire_target, backend, monkeypatch, shallow_fanout_threshold=0
     )
