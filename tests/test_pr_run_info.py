@@ -182,11 +182,14 @@ class _SnapshotSource:
 
 def _source_with_snapshots(
     tmp_path: Path,
-    snapshots: tuple[TrajectoryDocumentSnapshot, ...],
+    snapshots: tuple[TrajectoryDocumentSnapshot, ...] = (),
+    *,
+    error: Exception | None = None,
+    recorder: TrajectoryRecorder | None = None,
 ) -> LiveRunInfoSource:
     return LiveRunInfoSource(
-        recorder=_recorder(tmp_path),
-        artifacts=cast(ArtifactSession, _SnapshotSource(snapshots)),
+        recorder=recorder or _recorder(tmp_path),
+        artifacts=cast(ArtifactSession, _SnapshotSource(snapshots, error=error)),
     )
 
 
@@ -194,10 +197,7 @@ def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(
     tmp_path: Path,
 ) -> None:
     secret = "private/session/path/and-bad-json"
-    source = LiveRunInfoSource(
-        recorder=_recorder(tmp_path),
-        artifacts=cast(ArtifactSession, _SnapshotSource(error=RuntimeError(secret))),
-    )
+    source = _source_with_snapshots(tmp_path, error=RuntimeError(secret))
 
     result = render_live_run_info(source)
 
@@ -210,12 +210,7 @@ def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(
 def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> None:
     recorder = _recorder(tmp_path)
     recorder._trajectory_id = "child-recorder"
-    result = render_live_run_info(
-        LiveRunInfoSource(
-            recorder=recorder,
-            artifacts=cast(ArtifactSession, _SnapshotSource()),
-        )
-    )
+    result = render_live_run_info(_source_with_snapshots(tmp_path, recorder=recorder))
 
     assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: trajectory identity invalid"
@@ -231,12 +226,7 @@ def test_parent_build_failure_returns_unavailable(
         raise RuntimeError("private parent contents")
 
     monkeypatch.setattr(recorder, "build_trajectory", fail)
-    result = render_live_run_info(
-        LiveRunInfoSource(
-            recorder=recorder,
-            artifacts=cast(ArtifactSession, _SnapshotSource()),
-        )
-    )
+    result = render_live_run_info(_source_with_snapshots(tmp_path, recorder=recorder))
 
     assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: parent trajectory unavailable"
@@ -308,10 +298,7 @@ def test_pricing_or_render_failure_returns_unavailable(
         raise RuntimeError("secret renderer failure")
 
     monkeypatch.setattr(provider, "render_run_info", fail)
-    source = LiveRunInfoSource(
-        recorder=_recorder(tmp_path),
-        artifacts=cast(ArtifactSession, _SnapshotSource()),
-    )
+    source = _source_with_snapshots(tmp_path)
 
     result = render_live_run_info(source)
 
@@ -329,10 +316,7 @@ def test_price_lookup_failure_returns_unavailable(
         raise RuntimeError("private prices path")
 
     monkeypatch.setattr(provider, "load_user_prices", fail)
-    source = LiveRunInfoSource(
-        recorder=_recorder(tmp_path),
-        artifacts=cast(ArtifactSession, _SnapshotSource()),
-    )
+    source = _source_with_snapshots(tmp_path)
 
     result = render_live_run_info(source)
 
@@ -355,14 +339,14 @@ def test_live_provider_honors_user_price_overrides(
         encoding="utf-8",
     )
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
-    source = LiveRunInfoSource(
+    source = _source_with_snapshots(
+        tmp_path,
         recorder=_recorder(
             tmp_path,
             model=custom_model,
             prompt_tokens=1_000_000,
             cost_usd=None,
         ),
-        artifacts=cast(ArtifactSession, _SnapshotSource()),
     )
 
     result = render_live_run_info(source)

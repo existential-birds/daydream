@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -95,23 +95,37 @@ def _prime_merge_resume_records(target: Path, *, python_severity: str | None) ->
     )
 
 
-def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
-    """Collect ``step["extra"][key]`` across every trajectory JSON written for a run.
+def _iter_run_payloads(run_root: Path, traj: Path) -> Iterator[dict[str, Any]]:
+    """Yield every parsed JSON object under *run_root* plus the *traj* file.
 
-    An aborted/forked turn writes sibling trajectory files under the per-run dir, so
-    scan all ``*.json`` beneath ``run_root`` plus the top-level ``traj`` path. Non-dict
-    or unparseable files are skipped. Returns only truthy values, in discovery order.
+    Non-dict or unparseable files are skipped.
     """
-    values: list[str] = []
     for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
         try:
             payload = json.loads(tf.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        if not isinstance(payload, dict):
-            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
+def _scan_trajectory_extra(
+    run_root: Path, traj: Path, key: str, *, phase: str | None = None
+) -> list[str]:
+    """Collect ``step["extra"][key]`` across every trajectory JSON written for a run.
+
+    An aborted/forked turn writes sibling trajectory files under the per-run dir, so
+    scan all ``*.json`` beneath ``run_root`` plus the top-level ``traj`` path. When
+    *phase* is set, only steps whose ``daydream_phase`` matches are considered.
+    Returns only truthy values, in discovery order.
+    """
+    values: list[str] = []
+    for payload in _iter_run_payloads(run_root, traj):
         for step in payload.get("steps", []):
-            value = (step.get("extra") or {}).get(key)
+            extra = step.get("extra") or {}
+            if phase is not None and extra.get("daydream_phase") != phase:
+                continue
+            value = extra.get(key)
             if value:
                 values.append(value)
     return values
@@ -125,13 +139,7 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
     every ``*.json`` beneath ``run_root`` plus the top-level ``traj``.
     """
     found: list[dict[str, Any]] = []
-    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
-        try:
-            payload = json.loads(tf.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(payload, dict):
-            continue
+    for payload in _iter_run_payloads(run_root, traj):
         for ev in (payload.get("extra") or {}).get("phase_events", []):
             if isinstance(ev, dict) and ev.get("event") == event:
                 found.append(ev)

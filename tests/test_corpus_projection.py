@@ -102,6 +102,20 @@ def _write_ann_sumsums(
     )
 
 
+def _repin_annotation_bundle(bundle_dir: Path) -> None:
+    """Re-harvest the annotation bundle's linkage pin against the new bundle bytes.
+
+    A change to the curation bundle's file-set digest must be followed by
+    updating the sibling annotation bundle's ``batch_fileset_digest`` (otherwise
+    the two-bundle gate refuses on staleness rather than the intended cause).
+    """
+    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
+    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
+    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
+    _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
+
+
 _SEED_REPO_SLUGS = {"sess-a": "owner/repo-a"}
 
 
@@ -918,11 +932,7 @@ def _inject_admitted_repo_slug(
     # The manifest edit changes the bundle's file-set digest, so re-harvest
     # the annotation bundle's linkage pin against the new bundle bytes
     # (otherwise the two-bundle gate would refuse on staleness, not license).
-    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
-    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
-    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
-    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
-    _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
+    _repin_annotation_bundle(bundle_dir)
 
 
 def test_projection_rejects_c5_repo_and_refuses_success(
@@ -1122,11 +1132,7 @@ def _admit_second_batch(bundle_dir: Path, slug: str, *, spdx_id: str = "Apache-2
         ],
     }) + "\n")
     _write_sumsums(bundle_dir)
-    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
-    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
-    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
-    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
-    _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
+    _repin_annotation_bundle(bundle_dir)
 
 
 def test_end_to_end_mixed_repo_publication_gated(

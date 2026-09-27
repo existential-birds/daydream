@@ -57,12 +57,6 @@ _PROTOCOL_PARAMS = (
 _HARNESS_DIR = Path(__file__).resolve().parent
 _TESTS_ROOT = _HARNESS_DIR.parent
 
-# Ratchet: the protocol-shaped execute() declarations measured outside tests/harness/
-# at 0030596a (58 entries; the plan's 60 predates the #1247 dead-code sweep). Every
-# migration task deletes its own entries; the guard fails on a stale entry as well as
-# an unmigrated one, so this set must end up exactly empty.
-_ALLOWED: frozenset[str] = frozenset()
-
 
 def _protocol_shaped_declarations() -> set[str]:
     """Every class outside tests/harness/ whose execute() re-types >=5 protocol parameters."""
@@ -85,12 +79,9 @@ def test_no_module_outside_the_harness_declares_the_protocol_execute() -> None:
     """The acceptance criterion: one declaration of the protocol signature, in the harness."""
     violations = _protocol_shaped_declarations()
 
-    assert violations - _ALLOWED == set(), (
+    assert violations == set(), (
         "these declarations re-type the Backend protocol's execute() outside tests/harness/ — "
-        f"migrate them or narrow them to a forwarding override: {sorted(violations - _ALLOWED)}"
-    )
-    assert _ALLOWED - violations == set(), (
-        f"stale ratchet allowlist entries (already migrated) — delete them: {sorted(_ALLOWED - violations)}"
+        f"migrate them or narrow them to a forwarding override: {sorted(violations)}"
     )
 
 

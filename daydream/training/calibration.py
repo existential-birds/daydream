@@ -627,13 +627,14 @@ def _write_outputs(
     corpus_digest: str,
     bundle: dict[str, Any],
     version_stamps: dict[str, str],
-) -> None:
+) -> dict[str, Any]:
     """Build the artifact + report from already-computed numbers and write both
     with ``calibration.json`` published last: both payloads are staged to temps
     before either destination is replaced, so a failure while writing either
     one leaves the previously recorded artifact — and its run identity — in
     place, and a same-run re-run overwrites both and self-heals the directory.
-    Each rename is atomic and no temp is left behind on any path."""
+    Each rename is atomic and no temp is left behind on any path. Returns the
+    rounded artifact payload, which is authoritative over any parallel summary."""
     warnings: list[str] = []
     if stage0_analysis["status"] != "ok":
         warnings.append("stage-0 score file not supplied; marginal analysis unavailable")
@@ -663,7 +664,7 @@ def _write_outputs(
         "stage0_analysis": stage0_analysis,
         "warnings": warnings,
     }
-    rounded = _round4(artifact)
+    rounded: dict[str, Any] = _round4(artifact)
     artifact_payload = json.dumps(rounded, sort_keys=True, indent=2) + "\n"
     report_payload = _render_report(rounded, record_count, metrics["class_balance"])
 
@@ -674,6 +675,7 @@ def _write_outputs(
         dir_fsync=False,
         mode=umask_derived_mode(),
     )
+    return rounded
 
 
 def _check_out_dir_collision(config: CalibrationConfig) -> None:
@@ -782,7 +784,7 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     gold, breakdowns = _load_inputs(config, record_ids)
     metrics = _compute_metrics(records, gold, breakdowns, config)
     stage0_analysis = _stage0_analysis(config, record_ids, splits, gold, breakdowns)
-    _write_outputs(
+    return _write_outputs(
         config,
         len(records),
         splits,
@@ -793,15 +795,3 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
         bundle,
         version_stamps,
     )
-
-    return {
-        "run_id": config.run_id,
-        "record_count": len(records),
-        "schema_version": ARTIFACT_SCHEMA_VERSION,
-        "tool_version": TOOL_VERSION,
-        "resampling_seed": config.seed,
-        "corpus_digest": corpus_digest,
-        "split_digest": _split_digest(splits),
-        "metrics": metrics,
-        "stage0_analysis": stage0_analysis,
-    }

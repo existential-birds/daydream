@@ -29,6 +29,7 @@ from daydream.prompt_budget import (
     SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES,
     SANCTIONED_EXACT_INPUT_MAX_FILES,
     SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
+    PreparedSanctionedInputs,
     SanctionedInputTransport,
     SanctionedInputUnavailable,
     prepare_sanctioned_inputs,
@@ -61,6 +62,31 @@ def _count_prompt_budget_reads(monkeypatch: pytest.MonkeyPatch) -> Callable[[], 
         return chunk
 
     monkeypatch.setattr("daydream.prompt_budget.os.read", counted_read)
+    return lambda: total
+
+
+def _captured_artifact(
+    tmp_path: Path,
+) -> tuple[Path, ScriptedBackend, PreparedSanctionedInputs]:
+    """A captured exact input file with its backend and prepared input set."""
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    backend = ScriptedBackend()
+    prepared = prepare_sanctioned_inputs(backend, tmp_path, {"artifact": artifact}, read_only=False)
+    return artifact, backend, prepared
+
+
+def _count_capture_calls(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
+    """Count how often ``prompt_budget`` captures (re-reads/hashes) an input."""
+    total = 0
+    real_capture = prompt_budget._capture_input
+
+    def counted_capture(*args: object, **kwargs: object) -> object:
+        nonlocal total
+        total += 1
+        return real_capture(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(prompt_budget, "_capture_input", counted_capture)
     return lambda: total
 
 
@@ -310,39 +336,25 @@ def test_revalidate_skips_rehash_when_identity_unchanged(
     must not re-read or re-hash the payload (#1162 efficiency item).
     """
 
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-    backend = ScriptedBackend()
-    prepared = prepare_sanctioned_inputs(
-        backend, tmp_path, {"artifact": artifact}, read_only=False
-    )
-
-    capture_calls = 0
-    real_capture = prompt_budget._capture_input
-
-    def counted_capture(*args: object, **kwargs: object) -> object:
-        nonlocal capture_calls
-        capture_calls += 1
-        return real_capture(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(prompt_budget, "_capture_input", counted_capture)
+    artifact, backend, prepared = _captured_artifact(tmp_path)
+    capture_calls = _count_capture_calls(monkeypatch)
 
     # Unchanged file: identity matches, so no re-read/re-hash happens.
     prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls == 0
+    assert capture_calls() == 0
 
     # Touched file (size changed): the full capture runs and fails closed.
     artifact.write_text("captured but longer now", encoding="utf-8")
     with pytest.raises(SanctionedInputUnavailable, match="changed"):
         prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls == 1
+    assert capture_calls() == 1
 
     # Same-length rewrite keeps size but advances mtime: still re-captured.
-    capture_calls = 0
+    baseline = capture_calls()
     os.utime(artifact, ns=(1_000_000_000, 1_000_000_000))
     with pytest.raises(SanctionedInputUnavailable, match="changed"):
         prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls == 1
+    assert capture_calls() == baseline + 1
 
 
 def test_revalidate_fails_closed_when_captured_file_vanishes(
@@ -351,27 +363,14 @@ def test_revalidate_fails_closed_when_captured_file_vanishes(
 ) -> None:
     """A missing captured input is re-captured and surfaces the real error."""
 
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-    backend = ScriptedBackend()
-    prepared = prepare_sanctioned_inputs(
-        backend, tmp_path, {"artifact": artifact}, read_only=False
-    )
+    artifact, backend, prepared = _captured_artifact(tmp_path)
     artifact.unlink()
 
-    capture_calls = 0
-    real_capture = prompt_budget._capture_input
-
-    def counted_capture(*args: object, **kwargs: object) -> object:
-        nonlocal capture_calls
-        capture_calls += 1
-        return real_capture(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(prompt_budget, "_capture_input", counted_capture)
+    capture_calls = _count_capture_calls(monkeypatch)
 
     with pytest.raises(SanctionedInputUnavailable, match="unavailable"):
         prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls == 1
+    assert capture_calls() == 1
 
 
 def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
@@ -385,13 +384,7 @@ def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
     like an over-budget fresh capture would, without re-reading the file.
     """
 
-
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-    backend = ScriptedBackend()
-    prepared = prepare_sanctioned_inputs(
-        backend, tmp_path, {"artifact": artifact}, read_only=False
-    )
+    artifact, backend, prepared = _captured_artifact(tmp_path)
     captured = prepared.inputs[0]
 
     def failing_capture(*args: object, **kwargs: object) -> object:
@@ -433,12 +426,7 @@ def test_prepare_sanctioned_inputs_rejects_invalid_utf8_and_symlinks(tmp_path: P
 async def test_run_agent_revalidates_sanctioned_inputs_before_backend_entry(
     tmp_path: Path,
 ) -> None:
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-    backend = ScriptedBackend()
-    prepared = prepare_sanctioned_inputs(
-        backend, tmp_path, {"artifact": artifact}, read_only=False
-    )
+    artifact, backend, prepared = _captured_artifact(tmp_path)
     artifact.write_text("mutated", encoding="utf-8")
 
     with pytest.raises(SanctionedInputUnavailable, match="changed"):

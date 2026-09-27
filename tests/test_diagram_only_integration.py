@@ -137,6 +137,24 @@ def _diagram_phase_end(target: Path) -> dict[str, Any]:
     return end
 
 
+async def _render_flowchart_artifact(
+    diagram_run: Callable[..., Any], tmp_path: Path, fake_gh: FakeGh
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Run Phase A once; return *target*, the findings path, and its artifact."""
+    target = dr.build_branch_heavy_repo(tmp_path)
+    fake_gh.serve_open_pr(target)
+    artifact_path = tmp_path / "findings.json"
+    exit_code, _ = await diagram_run(
+        target,
+        diagram="flowchart",
+        specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path),
+        pr_number=7,
+    )
+    assert exit_code == 0
+    return target, artifact_path, json.loads(artifact_path.read_text(encoding="utf-8"))
+
+
 # --- Spec test 12: end to end, per kind -------------------------------------
 
 
@@ -311,22 +329,10 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phase A writes ``kind == "diagram"``; Phase B re-renders identical mermaid."""
-    target = dr.build_branch_heavy_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
-    artifact_path = tmp_path / "findings.json"
+    target, artifact_path, artifact = await _render_flowchart_artifact(diagram_run, tmp_path, fake_gh)
 
-    exit_code, _ = await diagram_run(
-        target,
-        diagram="flowchart",
-        specs={"flowchart": [dr.flowchart_spec()]},
-        findings_out=str(artifact_path),
-        pr_number=7,
-    )
-
-    assert exit_code == 0
     # Phase A stops before any GitHub write.
     assert _issue_comments(fake_gh) == []
-    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["kind"] == "diagram"
     assert artifact["findings"] == []
     results = artifact["diagrams"]["results"]
@@ -356,21 +362,9 @@ async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     Phase B runs from a directory that is not a repository at all, so head
     evidence for every citation comes from the contents API at the same SHA.
     """
-    target = dr.build_branch_heavy_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
-    artifact_path = tmp_path / "findings.json"
+    target, artifact_path, artifact = await _render_flowchart_artifact(diagram_run, tmp_path, fake_gh)
 
-    exit_code, _ = await diagram_run(
-        target,
-        diagram="flowchart",
-        specs={"flowchart": [dr.flowchart_spec()]},
-        findings_out=str(artifact_path),
-        pr_number=7,
-    )
-
-    assert exit_code == 0
     expected = _artifact(target)["results"]["flowchart"]["mermaid"]
-    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     head_sha = artifact["head_sha"]
     fake_gh.set_response(
         "GET",
@@ -405,20 +399,8 @@ async def test_phase_b_rejects_diagram_evidence_missing_from_the_immutable_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phase B must not trust a structurally valid, artifact-supplied citation."""
-    target = dr.build_branch_heavy_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
-    artifact_path = tmp_path / "findings.json"
+    target, artifact_path, artifact = await _render_flowchart_artifact(diagram_run, tmp_path, fake_gh)
 
-    exit_code, _ = await diagram_run(
-        target,
-        diagram="flowchart",
-        specs={"flowchart": [dr.flowchart_spec()]},
-        findings_out=str(artifact_path),
-        pr_number=7,
-    )
-
-    assert exit_code == 0
-    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     spec_final = artifact["diagrams"]["results"]["flowchart"]["spec_final"]
     spec_final["root"]["file"] = "untrusted.py"
     for node in spec_final["nodes"]:

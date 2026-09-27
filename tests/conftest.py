@@ -81,6 +81,28 @@ def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
     return repo
 
 
+def _feature_repo(
+    tmp_path: Path, name: str, initial: dict[str, str], changed: dict[str, str]
+) -> Path:
+    """Build a repo with an ``init`` commit on main and a ``change`` commit on
+    a ``feature`` branch from *initial*/*changed* path-to-content maps.
+    """
+    repo = tmp_path / name
+    for path, content in initial.items():
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    _init_repo(repo)
+    _git(repo, "add", ".")
+    _commit(repo, "init")
+    _git(repo, "checkout", "-b", "feature")
+    for path, content in changed.items():
+        (repo / path).write_text(content)
+    _git(repo, "add", ".")
+    _commit(repo, "change")
+    return repo
+
+
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     """Initialize a fresh git repo at tmp_path with one initial commit on `main`."""
@@ -276,21 +298,15 @@ def multi_stack_target(tmp_path: Path) -> Path:
     on ``main`` and a ``change`` commit on a ``feature`` branch that modifies
     one file per stack (``api.py``, ``App.tsx``, ``README.md``).
     """
-    project = tmp_path / "multi_stack"
-    project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'world'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
-    (project / "README.md").write_text("# Project\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
-    (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
+    return _feature_repo(tmp_path, "multi_stack", {
+        "api.py": "def hello():\n    return 'world'\n",
+        "App.tsx": "export const App = () => <div>hello</div>;\n",
+        "README.md": "# Project\n",
+    }, {
+        "api.py": "def hello():\n    return 'universe'\n",
+        "App.tsx": "export const App = () => <div>universe</div>;\n",
+        "README.md": "# Project\n\nUpdated.\n",
+    })
 
 
 @pytest.fixture
@@ -301,21 +317,11 @@ def shard_many_python_target(tmp_path: Path) -> Path:
     stack several files so the sharder can split it with a small ``max_files``
     bound -- the real-path precondition for issue #731's sharding tests.
     """
-    project = tmp_path / "shard_many"
-    project.mkdir()
-    for i in range(3):
-        (project / f"mod{i}.py").write_text(f"def f{i}():\n    return {i}\n")
-    (project / "README.md").write_text("# Project\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    for i in range(3):
-        (project / f"mod{i}.py").write_text(f"def f{i}():\n    return 'x{i}'\n")
-    (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
+    before = {f"mod{i}.py": f"def f{i}():\n    return {i}\n" for i in range(3)}
+    before["README.md"] = "# Project\n"
+    after = {f"mod{i}.py": f"def f{i}():\n    return 'x{i}'\n" for i in range(3)}
+    after["README.md"] = "# Project\n\nUpdated.\n"
+    return _feature_repo(tmp_path, "shard_many", before, after)
 
 
 @pytest.fixture
@@ -329,35 +335,20 @@ def sibling_frontier_target(tmp_path: Path) -> Path:
     file carries a real tree-sitter-parseable cross-file import edge, and
     ``mod5.py`` gets 7 lines changed so the fail-open sweep can fire on it.
     """
-    project = tmp_path / "canary"
-    project.mkdir()
-    (project / "core.py").write_text("def core_helper():\n    return 1\n")
-    for i in range(12):
-        (project / f"mod{i}.py").write_text(
-            "from core import core_helper\n"
-            f"def mod{i}_fn(): return core_helper() + {i}\n"
+    before = {
+        f"mod{i}.py": f"from core import core_helper\ndef mod{i}_fn(): return core_helper() + {i}\n"
+        for i in range(12)
+    }
+    before["core.py"] = "def core_helper():\n    return 1\n"
+    after = {
+        f"mod{i}.py": (
+            f"from core import core_helper\ndef mod{i}_fn() -> int: return core_helper() + {i}\n# v2\n"
+            + ("# extra0\n# extra1\n# extra2\n# extra3\n# extra4\n# extra5\n" if i == 5 else "")
         )
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    # Rewrite every file changed on the feature branch. mod5.py gets 7 added
-    # lines so its hunk exceeds min_hunk_lines and the sweep can fire on it.
-    (project / "core.py").write_text(
-        "def core_helper():\n    return 1\n# v2\n"
-    )
-    for i in range(12):
-        content = (
-            "from core import core_helper\n"
-            f"def mod{i}_fn() -> int: return core_helper() + {i}\n"
-            "# v2\n"
-        )
-        if i == 5:
-            content += "# extra0\n# extra1\n# extra2\n# extra3\n# extra4\n# extra5\n"
-        (project / f"mod{i}.py").write_text(content)
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
+        for i in range(12)
+    }
+    after["core.py"] = "def core_helper():\n    return 1\n# v2\n"
+    return _feature_repo(tmp_path, "canary", before, after)
 
 
 @pytest.fixture
@@ -369,24 +360,13 @@ def rust_wire_target(tmp_path: Path) -> Path:
     ``README.md`` to the generic-fallback bucket, so a single run exercises
     both wire-contract instruction constants on the delivered prompts.
     """
-    project = tmp_path / "rust_wire"
-    project.mkdir()
-    (project / "src").mkdir()
-    (project / "src" / "main.rs").write_text(
-        "fn main() {\n    println!(\"hi\");\n}\n"
-    )
-    (project / "README.md").write_text("# Project\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    (project / "src" / "main.rs").write_text(
-        "fn main() {\n    println!(\"hello from wire\");\n}\n"
-    )
-    (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
+    return _feature_repo(tmp_path, "rust_wire", {
+        "src/main.rs": "fn main() {\n    println!(\"hi\");\n}\n",
+        "README.md": "# Project\n",
+    }, {
+        "src/main.rs": "fn main() {\n    println!(\"hello from wire\");\n}\n",
+        "README.md": "# Project\n\nUpdated.\n",
+    })
 
 
 @pytest.fixture
@@ -398,19 +378,13 @@ def tiny_diff_target(tmp_path: Path) -> Path:
     language stacks collapse into one combined generic-fallback assignment and
     the merge agent + arbiter are skipped. Used by AC2 / AC5 real-path tests.
     """
-    project = tmp_path / "tiny_diff"
-    project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'world'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
+    return _feature_repo(tmp_path, "tiny_diff", {
+        "api.py": "def hello():\n    return 'world'\n",
+        "App.tsx": "export const App = () => <div>hello</div>;\n",
+    }, {
+        "api.py": "def hello():\n    return 'universe'\n",
+        "App.tsx": "export const App = () => <div>universe</div>;\n",
+    })
 
 
 @pytest.fixture

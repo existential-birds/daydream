@@ -247,8 +247,7 @@ class PullRequestEntry(BaseModel):
         if self.import_state == "fetched":
             if self.import_file is None or self.import_sha256 is None:
                 raise ValueError("fetched import requires import_file and import_sha256")
-            if not _HEX64.fullmatch(self.import_sha256):
-                raise ValueError(f"import_sha256 must be 64-hex, got {self.import_sha256!r}")
+            _hex64(self.import_sha256)
             if self.error is not None:
                 raise ValueError("fetched import must not carry an error")
         elif self.import_state == "fetch_failed":
@@ -875,16 +874,9 @@ class PrioritizationFacts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     extraction_version: int
-    head_sha: str
+    head_sha: Sha40
     candidates: dict[str, PrioritizationCandidate] = {}
     non_candidates: dict[str, PrioritizationCandidate] = {}
-
-    @field_validator("head_sha")
-    @classmethod
-    def _hex40(cls, v: str) -> str:
-        if not _HEX40.fullmatch(v):
-            raise ValueError(f"head_sha must be 40-hex, got {v!r}")
-        return v
 
 
 class Curation(BaseModel):
@@ -1029,7 +1021,7 @@ def derive_gold_status(curation: Curation) -> str | None:
     """Yes: findings (>=1 finding), clean (0 findings + attested), else draft none."""
     if curation.findings:
         return "findings"
-    if not curation.findings and curation.clean_attested:
+    if curation.clean_attested:
         return "clean"
     return None
 
