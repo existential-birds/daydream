@@ -298,7 +298,6 @@ class OspreyBackend:
         llm_rpm: int | None = None,
         effort: str | None = None,
         ultracode: bool = False,
-        tool_search_mode: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,
         osprey_home: Path | None = None,
@@ -314,8 +313,6 @@ class OspreyBackend:
                 "the current CLI resolves custom endpoints from Osprey "
                 "configuration/environment; it has no base-url flag",
             )
-        if tool_search_mode is not None and tool_search_mode not in {"auto", "on", "off"}:
-            raise OspreyUnsupportedOption("tool_search_mode", f"invalid mode {tool_search_mode!r}")
 
         self._model_override = model
         # Osprey may resolve an omitted model from its own config and model
@@ -356,7 +353,6 @@ class OspreyBackend:
         self.llm_rpm = llm_rpm
         self.effort = effort
         self.ultracode = ultracode
-        self.tool_search_mode = tool_search_mode
         self.osprey_home = osprey_home
         self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4)
         self._transports: list[CliTransport] = []
@@ -373,8 +369,7 @@ class OspreyBackend:
         tool_search_mode: str | None = None,
     ) -> list[str]:
         """Build only flags verified against the current Osprey CLI source."""
-        selected_tool_search = tool_search_mode if tool_search_mode is not None else self.tool_search_mode
-        if selected_tool_search is not None:
+        if tool_search_mode is not None:
             raise OspreyUnsupportedOption(
                 "tool_search_mode",
                 "Osprey resolves [agent].tool_search from its config; the "

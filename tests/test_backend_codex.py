@@ -69,6 +69,14 @@ from tests.harness.protocol_cli import install_protocol_cli
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
+def _stage_executable(path: Path) -> Path:
+    """Create a real 0o755 shell stub at *path*, creating parent dirs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 @pytest.mark.asyncio
 async def test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -2025,10 +2033,7 @@ class TestResolveRealGitDir:
 
         # Validation requires a real executable file, so stage one on disk.
         git_bin = tmp_path / "usr" / "bin"
-        git_bin.mkdir(parents=True)
-        git_file = git_bin / "git"
-        git_file.write_text("#!/bin/sh\n")
-        git_file.chmod(0o755)
+        git_file = _stage_executable(git_bin / "git")
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
@@ -2041,10 +2046,7 @@ class TestResolveRealGitDir:
     ) -> None:
 
         git_bin = tmp_path / "real" / "usr" / "bin"
-        git_bin.mkdir(parents=True)
-        git_file = git_bin / "git"
-        git_file.write_text("#!/bin/sh\n")
-        git_file.chmod(0o755)
+        git_file = _stage_executable(git_bin / "git")
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         calls: list[int] = []
@@ -2074,10 +2076,7 @@ class TestResolveRealGitDir:
         """
 
         git_bin = tmp_path / "real" / "usr" / "bin"
-        git_bin.mkdir(parents=True)
-        git_file = git_bin / "git"
-        git_file.write_text("#!/bin/sh\n")
-        git_file.chmod(0o755)
+        git_file = _stage_executable(git_bin / "git")
 
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         calls: list[int] = []
@@ -2159,9 +2158,7 @@ class TestIsolatedChildEnvDarwinPath:
         git_dir = root / label / "real-git-bin"
         bin_dir.mkdir(parents=True)
         git_dir.mkdir(parents=True)
-        git = git_dir / "git"
-        git.write_text("#!/bin/sh\n", encoding="utf-8")
-        git.chmod(0o755)
+        git = _stage_executable(git_dir / "git")
         log = root / f"{label}-probe.jsonl"
         xcrun = bin_dir / "xcrun"
         xcrun.write_text(

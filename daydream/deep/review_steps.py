@@ -60,6 +60,7 @@ from daydream.trajectory import (
     dispatch_scope,
     get_current_recorder,
     maybe_fork,
+    partial_or_failed_terminal,
     phase_scope,
 )
 from daydream.ui import (
@@ -962,19 +963,8 @@ async def _run_uncovered_sweep(
                             sweep_failures[file] = f"{type(exc).__name__}: {exc}"
 
                 tg.start_soon(_sweep_one)
-        if sweep_failures:
-            status = (
-                LifecycleStatus.PARTIAL
-                if completed_reviews
-                else LifecycleStatus.FAILED
-            )
-            reason = (
-                LifecycleReasonCode.SOME_CHILDREN_FAILED
-                if completed_reviews
-                else LifecycleReasonCode.ALL_CHILDREN_FAILED
-            )
-            if dispatch is not None:
-                dispatch.finish(status, reason)
+        if sweep_failures and dispatch is not None:
+            dispatch.finish(*partial_or_failed_terminal(completed_reviews))
 
     # Recompute coverage AFTER the sweep so the report shows the ratio the
     # sweep actually achieved (the ``deep-uncovered-*`` forks' completed reads
@@ -1032,14 +1022,7 @@ async def _run_uncovered_sweep(
             per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
     stats_p.write_text(json.dumps(stats, indent=2))
     if sweep_failures and phase is not None:
-        phase.finish(
-            LifecycleStatus.PARTIAL
-            if completed_reviews
-            else LifecycleStatus.FAILED,
-            LifecycleReasonCode.SOME_CHILDREN_FAILED
-            if completed_reviews
-            else LifecycleReasonCode.ALL_CHILDREN_FAILED,
-        )
+        phase.finish(*partial_or_failed_terminal(completed_reviews))
 
 
 def _warn_prior_merge_failure(loaded: dict[str, Any]) -> None:
