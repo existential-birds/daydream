@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -39,11 +40,7 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends.claude import ClaudeBackend
 from daydream.pr_comment_renderer import render_run_info_block
-from daydream.trajectory import (
-    DaydreamPhase,
-    DaydreamRunFlow,
-    TrajectoryRecorder,
-)
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -52,6 +49,9 @@ from tests.harness.claude_sdk import (
     scripted_client,
 )
 from tests.harness.trajectory import make_recorder
+
+# Mirror runner.py: ``agent_model_name`` is stamped per-step, not at recorder init.
+_make_recorder = partial(make_recorder, run_flow=DaydreamRunFlow.TTT, agent_model_name="claude")
 
 
 @pytest.fixture
@@ -62,15 +62,6 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
         patch_claude_sdk(monkeypatch, scripted_client(messages))
 
     return _patch
-
-
-def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
-    """Mirror runner.py: ``agent_model_name`` is stamped per-step, not at recorder init."""
-    return make_recorder(
-        tmp_path, run_flow=DaydreamRunFlow.TTT,
-        path=tmp_path / ".daydream" / "trajectory.json",
-        agent_model_name="claude", session_id="test",
-    )
 
 
 def _line(markdown: str, prefix: str) -> str:
