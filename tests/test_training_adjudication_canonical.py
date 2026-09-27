@@ -48,12 +48,13 @@ def _index(tmp_path: Path, digest: str = "d" * 32) -> Path:
     return root
 
 
-def _seed_archive(archive_dir: Path) -> None:
+def _seed_archive(archive_dir: Path, session_id: str = "s1") -> None:
     # Real-path seeding: the project's own schema (index.db), one run row.
     conn = _get_connection(archive_dir)
     conn.execute(
         "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+        "VALUES (?, '2026-01-01T00:00:00+00:00', 'deep', ?)",
+        (session_id, f"archive/{session_id}"),
     )
     conn.commit()
     conn.close()
@@ -195,14 +196,8 @@ def _seed_decisive_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     seed_index_dispositions(root)
     archive = tmp_path / "archive"
     _seed_archive(archive)
-    conn = _get_connection(archive)
     for n in (2, 3):
-        conn.execute(
-            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-            f"VALUES ('s{n}', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s{n}')"
-        )
-    conn.commit()
-    conn.close()
+        _seed_archive(archive, session_id=f"s{n}")
     mat = tmp_path / "mat"
     run_materialize(root, mat, pin=_PIN)
     return root, archive, mat
@@ -263,13 +258,7 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     root = _index(tmp_path)
     archive = tmp_path / "archive"
     _seed_archive(archive)
-    conn = _get_connection(archive)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s2', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s2')"
-    )
-    conn.commit()
-    conn.close()
+    _seed_archive(archive, session_id="s2")
     run_materialize(root, tmp_path / "mat", pin=_PIN)
     _harvest(root, archive, tmp_path / "mat", None)
     # Second index whose evidence carries a created_at after the pin
@@ -480,34 +469,23 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     verdict is re-derived from the fresh sessions at harvest time, never
     trusted from the materialized snapshot's flags (issue #336 item 2)."""
 
-    root = tmp_path / "hydrated"
-    conn = _get_connection(root)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    root = make_hydrated_sqlite_index(
+        tmp_path,
+        [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64,
+          "980-rubric-r2", "accepted")],
     )
-    rubric = {"posterior_source": "pr_review",
-              "per_finding_resolutions": [{
-                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
-                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-                  "evidence_digest": "d" * 32}]}
-    rubric_json = json.dumps(rubric)
-    conn.execute(
-        "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
-        "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
-        "VALUES ('s1', '2026-01-02T00:00:00+00:00', '[\"finding-accepted\"]', 'v1', "
-        "'e' * 64, ?, 0, 'auto', '980-rubric-r2')",
-        (rubric_json,),
-    )
-    conn.commit()
-    conn.close()
-    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
     mat = tmp_path / "mat"
     run_materialize(root, mat, pin=_PIN)
     record = json.loads((tmp_path / "mat" / "sessions.jsonl").read_text().splitlines()[0])
     assert record.get("conflicting") is None  # not conflicting at materialize time
     # Step-3b import: an older disagreeing generation lands in the same
     # index.db -- the winning row (and its evidence digest) is unchanged.
+    rubric_json = json.dumps({
+        "posterior_source": "pr_review",
+        "per_finding_resolutions": [{
+            "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
+            "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+            "evidence_digest": "d" * 32}]})
     conn = _get_connection(root)
     conn.execute(
         "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
