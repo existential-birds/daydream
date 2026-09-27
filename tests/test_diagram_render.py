@@ -30,7 +30,7 @@ from daydream.deep.diagram_render import (
     render_sequence_mermaid,
     sanitize_label,
 )
-from daydream.deep.render import insert_diagrams_section, render_report
+from daydream.deep.render import render_report
 
 FIXTURES = Path(__file__).parent / "fixtures" / "deep"
 
@@ -623,40 +623,12 @@ def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
     )
 
 
-# render_report / insert_diagrams_section (deep/render.py)
+# render_report (deep/render.py); the text surgery is pinned in tests/test_deep_render.py
 
 
 def _items() -> list[dict[str, Any]]:
     return [{"id": 1, "lens": "per-stack", "file": "a.py", "line": 9, "description": "bug"},
             {"id": 2, "lens": "cross-stack", "file": "b.py", "line": 2, "description": "drift"}]
-
-
-def test_render_report_inserts_the_diagrams_section_directly_after_the_review_heading() -> None:
-    blocks = render_diagram_blocks(_both_rendered())
-    report = render_report(_items(), diagram_blocks=blocks)
-    lines = report.split("\n")
-    assert lines[0] == "# Review"
-    assert lines[1] == ""
-    assert lines[2] == "## Diagrams"
-    assert lines[3] == "<details><summary><h3>Sequence Diagram</h3></summary>"
-    assert report.index("## Diagrams") < report.index("## Issues") < report.index("## Cross-Stack Issues")
-    assert report.endswith("\n")
-    # One code path: the kwarg and the textual re-apply produce identical bytes.
-    assert report == insert_diagrams_section(render_report(_items()), blocks)
-
-
-def test_insert_diagrams_section_is_idempotent_and_replaces_an_existing_section() -> None:
-    blocks = render_diagram_blocks(_both_rendered())
-    once = insert_diagrams_section(render_report(_items()), blocks)
-    assert insert_diagrams_section(once, blocks) == once
-    assert once.count("## Diagrams") == 1
-    replaced = insert_diagrams_section(once, "<details>NEW</details>")
-    assert "Sequence Diagram" not in replaced
-    assert "<details>NEW</details>" in replaced
-    assert replaced == insert_diagrams_section(render_report(_items()), "<details>NEW</details>")
-    # Empty blocks remove a stale section and restore the plain report.
-    assert insert_diagrams_section(once, "") == render_report(_items())
-    assert insert_diagrams_section(once, "   \n\n ") == render_report(_items())
 
 
 def test_diagram_section_survives_a_round_trip_through_the_report_and_back() -> None:
