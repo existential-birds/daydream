@@ -96,13 +96,17 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
         )
-    rows = _query_runs_readonly(index_root / "index.db")
+    rows = _readonly_query(index_root / "index.db", "SELECT * FROM runs")
     if not rows:
         raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
     sessions: list[dict[str, Any]] = []
     for row in rows:
         session_id = str(row["session_id"])
-        observations = _label_observations_readonly(index_root / "index.db", session_id)
+        observations = _readonly_query(
+            index_root / "index.db",
+            "SELECT * FROM label_observations WHERE session_id = ?",
+            (session_id,),
+        )
         conflicting = False
         resolutions = _semantic_resolutions_readonly(index_root, row)
         session: dict[str, Any]
@@ -271,18 +275,6 @@ def _readonly_query(
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
-
-
-def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
-    return _readonly_query(db_path, "SELECT * FROM runs")
-
-
-def _label_observations_readonly(db_path: Path, session_id: str) -> list[dict[str, Any]]:
-    return _readonly_query(
-        db_path,
-        "SELECT * FROM label_observations WHERE session_id = ?",
-        (session_id,),
-    )
 
 
 def _winning_observation(
