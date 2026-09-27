@@ -409,13 +409,11 @@ def _handle_gh(argv: list[str], stdin_text: str, state: Path) -> tuple[int, str,
         # invalid invocations so tests cannot hide the production wiring bugs
         # this fix replaces.
         op = argv[2] if len(argv) > 2 else None
+        _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
         if op not in ("get", "store", "erase"):
-            _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
             return 1, "", "fake gh: git-credential requires an operation and protocol/host on stdin\n"
         if op in ("get", "store") and not ("protocol=" in stdin_text and "host=" in stdin_text):
-            _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
             return 1, "", "fake gh: git-credential requires an operation and protocol/host on stdin\n"
-        _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
         return 0, _GIT_CREDENTIAL_HELPER, ""
     if not argv or argv[0] != "api":
         return 1, "", f"fake gh: unsupported invocation: {argv!r}\n"
