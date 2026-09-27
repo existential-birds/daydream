@@ -23,7 +23,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from daydream.archive._console import warn as _warn
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest_from_snapshot
@@ -307,21 +306,13 @@ def finalize_archive_run(
         if config.dump_artifacts:
             if dump_path is None:
                 raise ArchiveFinalizationError("dump finalization path is missing")
-            from daydream.archive import scan
+            from daydream.archive.dump import publish_dump
 
-            scan_result = scan.scan_run_dir(assembly_dir)
-            if scan_result.blocking:
-                raise ArchiveFinalizationError(
-                    f"dump artifact secret scan refused publication ({scan_result.summary()})"
-                )
-            if scan_result.findings:
-                _warn(
-                    "Publishing the dump for "
-                    f"{recorder_provenance.session_id} with advisory secret-scan findings "
-                    f"({scan_result.summary()})"
-                )
+            # A scan refusal withholds only the optional dump. Raw frozen
+            # evidence and completed review outputs remain intact. Mark copying
+            # started first so publication I/O failures still clean the stage.
             dump_started = True
-            shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
+            dump_started = publish_dump(assembly_dir, dump_path, session_id)
         _validate_frozen_artifacts(artifacts)
         os.replace(assembly_dir, run_dir)
         assembly_created = False
