@@ -703,23 +703,53 @@ async def _assert_target_is_reusable(target: Path) -> None:
     assert exit_code == 0
 
 
-async def test_dump_artifacts_refuses_token_canary_in_diff(
+@pytest.mark.parametrize(
+    ("filename", "content", "canary", "expected_rule"),
+    [
+        pytest.param(
+            "creds.py",
+            'GITHUB_TOKEN = "ghp_canaryfake123"\n',
+            "ghp_canaryfake123",
+            "api_key",
+            id="token-canary",
+        ),
+        pytest.param(
+            "deploy_key.pem",
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIFAKEKEYMATERIALFORTESTSONLY\n"
+            "MIIFAKEKEYMATERIALFORTESTSONLY\n"
+            "-----END PRIVATE KEY-----\n",
+            "MIIFAKEKEYMATERIALFORTESTSONLY",
+            "pem_key",
+            id="multiline-pem",
+        ),
+    ],
+)
+async def test_dump_artifacts_refuses_credentials_in_diff(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
+    filename: str,
+    content: str,
+    canary: str,
+    expected_rule: str,
 ) -> None:
-    """#1170: a real token prefix in the diff still refuses every egress path.
+    """#1170: real credential material in the diff refuses every egress path.
 
     The blocking tier keeps PR #1161's disposition exactly: no dump, no archive
-    row, exit 1 — and the console now names the file and rule that refused,
-    without echoing the credential.
+    row, exit 1 — and the console names the file and rule that refused, without
+    echoing the credential.
+
+    ``diff.patch`` is scanned line by line and ``_PEM_KEY_PATTERN`` spans
+    BEGIN..END, so the token-canary and multi-line-PEM cases stay separate on
+    purpose. A bundle carrying both would block on the canary alone, letting a
+    combined test pass with the multi-line pass unimplemented.
     """
 
-    canary = "ghp_canaryfake123"
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    _commit_scanned_file(multi_stack_target, "creds.py", f'GITHUB_TOKEN = "{canary}"\n')
+    _commit_scanned_file(multi_stack_target, filename, content)
 
     dump_dir = tmp_path / "uploaded-artifacts"
 
@@ -736,53 +766,8 @@ async def test_dump_artifacts_refuses_token_canary_in_diff(
     out = "".join(capfd.readouterr())
     assert canary not in out
     assert "diff.patch" in out
-    assert "api_key" in out
+    assert expected_rule in out
     # #1171: the scan refusal is the message, not the rollback's own failure.
-    assert "dump destination projection is malformed" not in out
-
-    await _assert_target_is_reusable(multi_stack_target)
-
-
-async def test_dump_artifacts_refuses_multiline_pem_in_diff(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-    tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """#1170 D4: multi-line key armor in ``diff.patch`` blocks the dump.
-
-    ``diff.patch`` is scanned line by line, and ``_PEM_KEY_PATTERN`` spans
-    BEGIN..END, so real key material in a patch was invisible to the gate while
-    the same key inside a JSON string leaf was caught. Separate from the token
-    canary on purpose: a bundle carrying both blocks on the canary alone, so a
-    combined test passes with the multi-line pass unimplemented.
-    """
-
-    canary = "MIIFAKEKEYMATERIALFORTESTSONLY"
-    _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    _commit_scanned_file(
-        multi_stack_target,
-        "deploy_key.pem",
-        "-----BEGIN PRIVATE KEY-----\n" f"{canary}\n{canary}\n" "-----END PRIVATE KEY-----\n",
-    )
-
-    dump_dir = tmp_path / "uploaded-artifacts"
-
-    exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            dump_artifacts=str(dump_dir),
-        )
-    )
-    assert exit_code == 1
-    assert not dump_dir.exists()
-    assert query_runs(archive_dir) == []
-
-    out = "".join(capfd.readouterr())
-    assert canary not in out
-    assert "diff.patch" in out
-    assert "pem_key" in out
     assert "dump destination projection is malformed" not in out
 
     await _assert_target_is_reusable(multi_stack_target)

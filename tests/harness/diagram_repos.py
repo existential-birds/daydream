@@ -183,10 +183,13 @@ def build_both_signals_repo(root: Path) -> Path:
     """Cross-module AND branch-heavy: both kinds are eligible in one run.
 
     Same three files and the same import edge as the cross-module fixture, with
-    the branch-heavy ``run`` function added to ``pkg_b/client.py`` so a single
-    run exercises the two-kind fan-out.
+    the branch-heavy ``run`` function (:data:`PIPELINE_PY`) added to
+    ``pkg_b/client.py`` so a single run exercises the two-kind fan-out. Offset
+    by ``CLIENT_PY`` plus the two-newline join, ``run`` starts on line 11 with
+    branch statements on lines 12, 14, 16 and 17; ``fast_path`` is defined on
+    line 22.
     """
-    return _build_cross_module_variant(root, "both_signals", CLIENT_PY + "\n\n" + BOTH_RUN_PY)
+    return _build_cross_module_variant(root, "both_signals", CLIENT_PY + "\n\n" + PIPELINE_PY)
 
 
 def build_cross_service_repo(root: Path) -> Path:
@@ -267,27 +270,10 @@ CLIENT_PY = (
 )
 
 #: ``app/pipeline.py`` at head. ``run`` spans lines 1-9 with branch statements
-#: on lines 2, 4, 6 and 7; ``fast_path`` is defined on line 12.
+#: on lines 2, 4, 6 and 7; ``fast_path`` is defined on line 12. Reused by the
+#: both-signals fixture (see :func:`build_both_signals_repo`), where the same
+#: body is offset by the ``CLIENT_PY`` prefix.
 PIPELINE_PY = (
-    "def run(payload):\n"
-    "    if payload is None:\n"
-    '        return "empty"\n'
-    '    if payload.get("mode") == "fast":\n'
-    "        return fast_path(payload)\n"
-    '    for item in payload["items"]:\n'
-    "        if item:\n"
-    "            return item\n"
-    '    return "none"\n'
-    "\n"
-    "\n"
-    "def fast_path(payload):\n"
-    '    return payload["items"]\n'
-)
-
-#: Appended to ``CLIENT_PY`` in the both-signals fixture. ``run`` starts on
-#: line 11 (``CLIENT_PY`` is 8 lines plus the two-newline join) with branch
-#: statements on lines 12, 14, 16 and 17; ``fast_path`` is defined on line 22.
-BOTH_RUN_PY = (
     "def run(payload):\n"
     "    if payload is None:\n"
     '        return "empty"\n'

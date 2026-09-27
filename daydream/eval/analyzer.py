@@ -812,40 +812,6 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
 _EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
 
 
-def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
-    """Attribute findings across the wonder / per-stack / uncovered / structure lenses.
-
-    ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
-    artifact); the existing ``stack-*-records.json`` glob buckets into
-    per-stack / uncovered / structure by stack name. These lens counts are raw,
-    pre-merge attribution -- they are *not* derived from the shipped
-    ``merged-items.json`` set, so they need not sum to, or relate to, the
-    shipped ``total`` reported by ``_shipped_counts``. The distinction is
-    deliberate and documented: reconciling a lens to the shipped set would hide
-    how many items survived merge/dedup, so report readers should treat the
-    lens as raw attribution rather than a partition of the shipped set.
-    """
-    per_lens = dict(_EMPTY_PER_LENS)
-    alts_path = deep_dir / "alternatives.json"
-    if alts_path.exists():
-        try:
-            alternatives = json.loads(alts_path.read_text())
-        except json.JSONDecodeError:
-            # A present-but-malformed alternatives.json must not take down
-            # analyze_findings / analyze_session; leave wonder attribution at 0.
-            alternatives = None
-        if isinstance(alternatives, list):
-            per_lens["wonder"] = len(alternatives)
-    for stack_name, records in _iter_stack_records(deep_dir):
-        if stack_name == "uncovered":
-            per_lens["uncovered"] += len(records)
-        elif stack_name == "structure":
-            per_lens["structure"] += len(records)
-        else:
-            per_lens["per-stack"] += len(records)
-    return per_lens
-
-
 def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
     """Load the shipped review set from ``merged-items.json``, or ``None`` when absent.
 
@@ -948,11 +914,35 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
     all_findings: list[dict[str, Any]] = []
     stacks: list[dict[str, Any]] = []
+    per_lens = dict(_EMPTY_PER_LENS)
 
-    per_lens = _bucketed_lens_counts(deep_dir)
+    # ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
+    # artifact); the ``stack-*-records.json`` walk below buckets each stack into
+    # per-stack / uncovered / structure by name. These lens counts are raw,
+    # *pre-merge* attribution -- they are not derived from the shipped
+    # ``merged-items.json`` set, so they need not sum to, or relate to, the
+    # shipped ``total`` reported by ``_shipped_counts``. Reconciling a lens to
+    # the shipped set would hide how many items survived merge/dedup, so report
+    # readers should treat the lens as raw attribution rather than a partition.
+    alts_path = deep_dir / "alternatives.json"
+    if alts_path.exists():
+        try:
+            alternatives = json.loads(alts_path.read_text())
+        except json.JSONDecodeError:
+            # A present-but-malformed alternatives.json must not take down
+            # analyze_findings / analyze_session; leave wonder attribution at 0.
+            alternatives = None
+        if isinstance(alternatives, list):
+            per_lens["wonder"] = len(alternatives)
 
     for stack_name, records in _iter_stack_records(deep_dir):
         stacks.append({"name": stack_name, "finding_count": len(records)})
+        if stack_name == "uncovered":
+            per_lens["uncovered"] += len(records)
+        elif stack_name == "structure":
+            per_lens["structure"] += len(records)
+        else:
+            per_lens["per-stack"] += len(records)
         for r in records:
             r["_stack"] = stack_name
             all_findings.append(r)
