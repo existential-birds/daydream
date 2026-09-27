@@ -42,3 +42,47 @@ def test_coverage_floor_is_declared_once_numerically() -> None:
     ]
 
     assert restatements == [], f"files still restating the coverage floor: {restatements}"
+
+
+def _gate_steps() -> list[str]:
+    """The ordered gate steps the Makefile declares (the single authority)."""
+    makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
+    for line in makefile.splitlines():
+        match = re.match(r"^check:\s*(\S.*)$", line)
+        if match:
+            return match.group(1).split()
+    raise AssertionError("the Makefile declares no `check:` gate target")
+
+
+def _documented_gate_steps() -> dict[str, list[str]]:
+    """The gate steps each contributor-facing enumeration claims, in order."""
+    claude = (_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    claude_line = next(
+        line for line in claude.splitlines() if line.startswith("make check") and "#" in line
+    )
+    contributing = (_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    contributing_block = (
+        contributing.split("which runs, in order:", 1)[1].split("```text\n", 1)[1].split("\n```", 1)[0]
+    )
+    return {
+        "CLAUDE.md": [step.strip() for step in claude_line.split("#", 1)[1].split(" (the gate)")[0].split("+")],
+        "CONTRIBUTING.md": contributing_block.split(),
+    }
+
+
+def test_gate_prose_enumerations_match_the_declared_gate() -> None:
+    """Every prose enumeration lists the gate's steps, in the declared order."""
+    declared = _gate_steps()
+
+    for rel, listed in _documented_gate_steps().items():
+        assert listed == declared, f"{rel} enumerates {listed}, the gate declares {declared}"
+
+
+def test_pr_checklist_does_not_claim_the_rl_gate_runs_under_make_check() -> None:
+    """The checklist's `make check` line covers root + workflow checks only."""
+    template = (_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+    checklist = [line for line in template.splitlines() if line.startswith("- [ ]")]
+    gate_line = next(line for line in checklist if "`make check`" in line)
+
+    assert "RL" not in gate_line, gate_line
+    assert any("`make rl-check`" in line for line in checklist), checklist

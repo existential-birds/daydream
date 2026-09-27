@@ -26,7 +26,7 @@ make deadcode   # whole-project dead-code detection (vulture)
 make test       # pytest -n auto
 make actionlint # actionlint over live + packaged workflows (Docker)
 make rl-check   # standalone RL lockcheck + ruff + mypy + pytest (run by hand when you change rl/)
-make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + coverage-report (the gate)
+make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + coverage-report + check-naming (the gate)
 ```
 
 ```bash
@@ -303,7 +303,7 @@ Full contract: `docs/extensions.md`.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
   `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`.
+- **`make check`** = root `uv lock --check` + install + ruff over `daydream tests` + vulture dead-code scan over `daydream tests` and the RL package + mypy over `daydream tests` + pytest + actionlint (Docker) + coverage-report existence check + naming-convention check; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
   4-space Python, 2-space YAML, 4-space TOML, Makefile tabs, `*.md` trailing-whitespace

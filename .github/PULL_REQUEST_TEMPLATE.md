@@ -34,7 +34,8 @@
 
 <!-- Verify before requesting review. -->
 
-- [ ] Root, workflow, and standalone RL checks pass locally via `make check` (requires Docker daemon for actionlint)
+- [ ] Root and workflow checks pass locally via `make check` (requires Docker daemon for actionlint)
+- [ ] Standalone RL checks pass via `make rl-check` when changing `rl/daydream_review` (deliberately outside `make check`)
 - [ ] Documentation updated (if applicable)
 
 ## Additional Context
